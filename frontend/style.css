@@ -13,43 +13,65 @@
 html,
 body {
   height: 100%;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: "Segoe UI", "Trebuchet MS", sans-serif;
+}
+
+:root {
+  --panel-bg: #0f1115;
+  --panel-border: #242832;
+  --text-main: #f2f2f0;
+  --text-muted: #a9adb6;
+  --text-soft: #7f8592;
+  --gold: #c9a24f;
+  --gold-strong: #b78c35;
+  --gold-soft: rgba(201, 162, 79, 0.18);
 }
 
 .app-shell {
-  display: flex;
+  display: grid;
+  grid-template-columns: 320px 1fr;
   height: 100vh;
   overflow: hidden;
+  transition: grid-template-columns 0.24s ease;
+}
+
+.app-shell.sidebar-collapsed {
+  grid-template-columns: 0 1fr;
 }
 
 .sidebar {
   width: 320px;
-  min-width: 320px;
-  background: #0f172a;
-  color: #f1f5f9;
+  background: var(--panel-bg);
+  color: var(--text-main);
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  border-right: 1px solid #1e293b;
+  border-right: 1px solid var(--panel-border);
+  transition: opacity 0.2s ease;
+}
+
+.app-shell.sidebar-collapsed .sidebar {
+  opacity: 0;
+  pointer-events: none;
 }
 
 .sidebar-header {
   padding: 20px 20px 12px;
-  border-bottom: 1px solid #1e293b;
+  border-bottom: 1px solid var(--panel-border);
 }
 
 .eyebrow {
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.08em;
-  color: #6366f1;
+  color: var(--gold);
   text-transform: uppercase;
 }
 
 h1 {
   font-size: 18px;
   font-weight: 700;
-  color: #f1f5f9;
+  color: var(--text-main);
   margin-top: 2px;
 }
 
@@ -59,62 +81,21 @@ h1 {
 
 .sidebar-copy {
   font-size: 13px;
-  color: #94a3b8;
+  color: var(--text-muted);
   line-height: 1.5;
 }
 
 .sidebar-note {
   font-size: 12px;
-  color: #64748b;
+  color: var(--text-soft);
   margin-top: 6px;
-}
-
-.status-list {
-  list-style: none;
-  margin-top: 10px;
-  display: grid;
-  gap: 8px;
-}
-
-.status-list li {
-  font-size: 12px;
-  color: #cbd5e1;
-  line-height: 1.35;
-}
-
-.status-done,
-.status-live,
-.status-note {
-  display: inline-block;
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  padding: 2px 6px;
-  border-radius: 999px;
-  margin-right: 6px;
-}
-
-.status-done {
-  background: rgba(34, 197, 94, 0.2);
-  color: #86efac;
-}
-
-.status-live {
-  background: rgba(99, 102, 241, 0.2);
-  color: #a5b4fc;
-}
-
-.status-note {
-  background: rgba(249, 115, 22, 0.22);
-  color: #fdba74;
 }
 
 .sidebar-label {
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.06em;
-  color: #64748b;
+  color: var(--text-soft);
   text-transform: uppercase;
   margin-bottom: 8px;
   display: block;
@@ -127,8 +108,8 @@ h1 {
 .spinner {
   width: 18px;
   height: 18px;
-  border: 2px solid #334155;
-  border-top-color: #6366f1;
+  border: 2px solid #343944;
+  border-top-color: var(--gold);
   border-radius: 50%;
   animation: spin 0.7s linear infinite;
   margin-bottom: 10px;
@@ -160,14 +141,14 @@ h1 {
 
 .count-label {
   font-size: 13px;
-  color: #cbd5e1;
+  color: #d3d6dd;
   flex: 1;
 }
 
 .count-val {
   font-size: 13px;
   font-weight: 600;
-  color: #f1f5f9;
+  color: var(--text-main);
 }
 
 .sidebar-actions {
@@ -179,8 +160,8 @@ h1 {
 .btn-primary {
   flex: 1;
   padding: 8px 12px;
-  background: #6366f1;
-  color: #fff;
+  background: var(--gold);
+  color: #111217;
   border: none;
   border-radius: 6px;
   font-size: 13px;
@@ -189,13 +170,13 @@ h1 {
 }
 
 .btn-primary:hover {
-  background: #4f46e5;
+  background: var(--gold-strong);
 }
 
 .btn-secondary {
   padding: 8px 12px;
-  background: #1e293b;
-  color: #94a3b8;
+  background: #232834;
+  color: #c6c9d1;
   border: none;
   border-radius: 6px;
   font-size: 13px;
@@ -203,7 +184,7 @@ h1 {
 }
 
 .btn-secondary:hover {
-  background: #334155;
+  background: #2d3340;
 }
 
 .parcel-list {
@@ -215,20 +196,21 @@ h1 {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 8px 0;
-  border-bottom: 1px solid #1e293b;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--panel-border);
   cursor: pointer;
+  transition: background 0.14s ease;
 }
 
 .parcel-row:hover {
-  background: #1e293b;
+  background: var(--gold-soft);
   margin: 0 -20px;
-  padding: 8px 20px;
+  padding: 9px 20px;
 }
 
 .parcel-addr {
   font-size: 12px;
-  color: #cbd5e1;
+  color: #d5d8df;
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -238,7 +220,7 @@ h1 {
 .parcel-pct {
   font-size: 12px;
   font-weight: 700;
-  color: #6366f1;
+  color: var(--gold);
   margin-left: 8px;
   flex-shrink: 0;
 }
@@ -246,6 +228,40 @@ h1 {
 .map-panel {
   flex: 1;
   position: relative;
+}
+
+.sidebar-toggle {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  z-index: 900;
+  border: 1px solid #2f343f;
+  background: rgba(17, 19, 25, 0.92);
+  color: var(--gold);
+  border-radius: 8px;
+  padding: 7px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  backdrop-filter: blur(4px);
+}
+
+.sidebar-toggle:hover {
+  border-color: #3a414d;
+  color: #dcb867;
+}
+
+.draw-helper {
+  position: absolute;
+  top: 54px;
+  left: 14px;
+  z-index: 900;
+  background: rgba(17, 19, 25, 0.92);
+  color: #e1e4eb;
+  border: 1px solid #2f343f;
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
 }
 
 #map {

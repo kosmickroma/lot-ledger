@@ -16,21 +16,14 @@
 </head>
 <body>
   <div class="app-shell">
-    <aside class="sidebar">
+    <aside class="sidebar" id="sidebar">
       <div class="sidebar-header">
         <p class="eyebrow">LotLedger</p>
         <h1>Parcel Analysis</h1>
       </div>
       <div id="sidebar-instructions" class="sidebar-section">
-        <p class="sidebar-copy">Current build checkpoint:</p>
-        <ul class="status-list">
-          <li><span class="status-done">Done</span> Phase 1 scaffold + map</li>
-          <li><span class="status-done">Done</span> Phase 2 schema + DB health check</li>
-          <li><span class="status-done">Done</span> Phase 3 DCAD load script</li>
-          <li><span class="status-live">Live</span> Phase 4 endpoints + Phase 5 UI wiring</li>
-          <li><span class="status-note">Now</span> Migrating data backend from Supabase free tier to Google Cloud</li>
-        </ul>
-        <p class="sidebar-note">Draw a polygon to run parcel analysis in the current environment.</p>
+        <p class="sidebar-copy">Draw a polygon around a target pocket to analyze parcels instantly.</p>
+        <p class="sidebar-note">Shortcuts: Enter or right-click to finish. Esc to cancel.</p>
       </div>
       <div id="sidebar-loading" class="sidebar-section hidden">
         <div class="spinner"></div>
@@ -47,6 +40,10 @@
       </div>
     </aside>
     <main class="map-panel">
+      <button id="sidebar-toggle" class="sidebar-toggle" aria-expanded="true" aria-controls="sidebar">
+        Hide Panel
+      </button>
+      <div id="draw-helper" class="draw-helper hidden">Enter/right-click to finish, Esc to cancel</div>
       <div id="map" aria-label="Dallas parcel map"></div>
     </main>
   </div>

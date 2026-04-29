@@ -11,11 +11,13 @@
 
 from __future__ import annotations
 
+import json
 import struct
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from psycopg2.extras import execute_values
 
 from api.config import get_conn, release_conn
 
@@ -128,7 +130,7 @@ def _read_parcel_dbf(dbf_path: Path) -> tuple[list[str] | None, int, int, int]:
 
 
 def _load_parcel_geometry(target_keys: set[str]) -> dict[str, dict[str, object]]:
-    """Load centroid per parcel key from PARCEL_GEOM shapefile (bounding box midpoint only)."""
+    """Load centroid and exterior polygon ring per parcel key from PARCEL_GEOM shapefile."""
     shp_path = PARCEL_GEOM_DIR / "PARCEL_GEOM.shp"
     dbf_path = PARCEL_GEOM_DIR / "PARCEL_GEOM.dbf"
 
@@ -144,7 +146,7 @@ def _load_parcel_geometry(target_keys: set[str]) -> dict[str, dict[str, object]]
 
     centroid_x: list[float] = []
     centroid_y: list[float] = []
-    centroid_accts: list[str] = []
+    centroid_records: list[dict[str, object]] = []
 
     with shp_path.open("rb") as shp_file:
         shp_file.seek(100)
@@ -169,21 +171,75 @@ def _load_parcel_geometry(target_keys: set[str]) -> dict[str, dict[str, object]]
             xmin, ymin, xmax, ymax = struct.unpack("<4d", content[4:36])
             centroid_x.append((xmin + xmax) / 2)
             centroid_y.append((ymin + ymax) / 2)
-            centroid_accts.append(index_to_acct[record_index])
+
+            polygon_geojson = None
+            if len(content) >= 44:
+                num_parts = struct.unpack("<i", content[36:40])[0]
+                num_points = struct.unpack("<i", content[40:44])[0]
+                if num_parts > 0 and num_points >= 3:
+                    parts_start = 44
+                    parts_end = parts_start + (num_parts * 4)
+                    points_start = parts_end
+                    points_end = points_start + (num_points * 16)
+
+                    if len(content) >= points_end:
+                        parts = [
+                            struct.unpack("<i", content[parts_start + (idx * 4) : parts_start + ((idx + 1) * 4)])[0]
+                            for idx in range(num_parts)
+                        ]
+
+                        xs: list[float] = []
+                        ys: list[float] = []
+                        for idx in range(num_points):
+                            offset = points_start + (idx * 16)
+                            x, y = struct.unpack("<2d", content[offset : offset + 16])
+                            xs.append(x)
+                            ys.append(y)
+
+                        ring_start = parts[0]
+                        ring_end = parts[1] if len(parts) > 1 else num_points
+                        if 0 <= ring_start < ring_end <= num_points:
+                            ring_x = np.array(xs[ring_start:ring_end])
+                            ring_y = np.array(ys[ring_start:ring_end])
+
+                            if len(ring_x) >= 3:
+                                ring_lat, ring_lng = _lcc_batch(ring_x, ring_y)
+                                ring_coords = [
+                                    [float(ring_lng[i]), float(ring_lat[i])] for i in range(len(ring_lat))
+                                ]
+
+                                if ring_coords[0] != ring_coords[-1]:
+                                    ring_coords.append(ring_coords[0])
+
+                                polygon_geojson = {
+                                    "type": "Polygon",
+                                    "coordinates": [ring_coords],
+                                }
+
+            if polygon_geojson is None:
+                polygon_geojson = {"type": "Polygon", "coordinates": []}
+
+            acct = index_to_acct[record_index]
+            centroid_records.append({
+                "account": acct,
+                "polygon_geojson": polygon_geojson,
+            })
 
             if (record_index + 1) % 50000 == 0:
                 print(f"Read {record_index + 1:,} shapefile records...")
 
-    if not centroid_accts:
+    if not centroid_records:
         return {}
 
     centroid_lat, centroid_lng = _lcc_batch(np.array(centroid_x), np.array(centroid_y))
 
     geometry_map: dict[str, dict[str, object]] = {}
-    for idx, acct in enumerate(centroid_accts):
+    for idx, record_meta in enumerate(centroid_records):
+        acct = record_meta["account"]
         geometry_map[acct] = {
             "lat": float(centroid_lat[idx]),
             "lng": float(centroid_lng[idx]),
+            "polygon_geojson": record_meta["polygon_geojson"],
         }
 
     print(f"Loaded centroids for {len(geometry_map):,} parcels")
@@ -198,24 +254,25 @@ def _upsert_rows(table_name: str, rows: list[dict[str, object]], on_conflict_col
     conn = get_conn()
     try:
         cols = list(rows[0].keys())
-        placeholders = ", ".join(["%s"] * len(cols))
         col_names = ", ".join(cols)
 
         if update_cols:
             updates = ", ".join(f"{col} = EXCLUDED.{col}" for col in update_cols)
             sql = (
-                f"INSERT INTO {table_name} ({col_names}) VALUES ({placeholders}) "
+                f"INSERT INTO {table_name} ({col_names}) VALUES %s "
                 f"ON CONFLICT ({on_conflict_col}) DO UPDATE SET {updates}"
             )
             batch = [tuple(row[col] for col in cols) for row in rows]
         else:
-            sql = f"INSERT INTO exempt_accounts (account_num) VALUES (%s) ON CONFLICT DO NOTHING"
+            sql = f"INSERT INTO exempt_accounts (account_num) VALUES %s ON CONFLICT DO NOTHING"
             batch = [(row["account_num"],) for row in rows]
 
         with conn.cursor() as cur:
-            cur.executemany(sql, batch)
+            for i in range(0, len(batch), 10000):
+                execute_values(cur, sql, batch[i : i + 10000], page_size=1000)
+                print(f"  {table_name}: {min(i + 10000, len(batch)):,} / {len(batch):,} rows...")
         conn.commit()
-        print(f"{table_name}: {len(rows):,} rows upserted")
+        print(f"{table_name}: done — {len(rows):,} rows upserted")
     except Exception:
         conn.rollback()
         raise
@@ -271,8 +328,10 @@ def _build_parcels_table() -> list[dict[str, object]]:
         centroid = None
         if geom:
             centroid = f"SRID=4326;POINT({geom['lng']} {geom['lat']})"
+            polygon_geojson = json.dumps(geom.get("polygon_geojson"))
         else:
             missing_geometry += 1
+            polygon_geojson = None
 
         rows.append(
             {
@@ -297,6 +356,7 @@ def _build_parcels_table() -> list[dict[str, object]]:
                 "legal4": _clean_text(getattr(row, "LEGAL4", None)),
                 "legal5": _clean_text(getattr(row, "LEGAL5", None)),
                 "centroid": centroid,
+                "polygon_geojson": polygon_geojson,
             }
         )
 

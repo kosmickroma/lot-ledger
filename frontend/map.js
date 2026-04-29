@@ -42,7 +42,7 @@ L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
 
 const drawControl = new L.Control.Draw({
   draw: {
-    polygon: { shapeOptions: { color: "#6366f1", weight: 2 } },
+    polygon: { shapeOptions: { color: "#6366f1", weight: 2, fill: false } },
     rectangle: false,
     circle: false,
     circlemarker: false,
@@ -56,6 +56,30 @@ map.addControl(drawControl);
 let markerLayer = L.layerGroup().addTo(map);
 let drawLayer = L.layerGroup().addTo(map);
 let currentJobId = null;
+const appShell = document.querySelector(".app-shell");
+const sidebarToggleBtn = document.getElementById("sidebar-toggle");
+const drawHelper = document.getElementById("draw-helper");
+
+function getPolygonDrawHandler() {
+  return drawControl?._toolbars?.draw?._modes?.polygon?.handler || null;
+}
+
+function isDrawInputTarget(target) {
+  if (!target) return false;
+  const tag = (target.tagName || "").toLowerCase();
+  return tag === "input" || tag === "textarea" || target.isContentEditable;
+}
+
+function setSidebarCollapsed(collapsed) {
+  appShell.classList.toggle("sidebar-collapsed", collapsed);
+  sidebarToggleBtn.setAttribute("aria-expanded", String(!collapsed));
+  sidebarToggleBtn.textContent = collapsed ? "Show Panel" : "Hide Panel";
+}
+
+sidebarToggleBtn.addEventListener("click", () => {
+  const collapsed = appShell.classList.contains("sidebar-collapsed");
+  setSidebarCollapsed(!collapsed);
+});
 
 function getColor(feature) {
   if (feature.properties.on_redfin) return COLORS.active;
@@ -94,16 +118,31 @@ function renderFeatures(geojson) {
     const p = feature.properties;
     const color = getColor(feature);
     if (p.lat == null || p.lng == null) return;
-    const marker = L.circleMarker([p.lat, p.lng], {
-      radius: 6,
-      fillColor: color,
-      color: "#fff",
-      weight: 1,
-      opacity: 1,
-      fillOpacity: 0.85,
-    }).bindPopup(makePopupHtml(p), { maxWidth: 280 });
-    marker.addTo(markerLayer);
-    markers[p.addr] = { marker, feature };
+
+    let layer;
+    if (feature.geometry?.type === "Polygon") {
+      layer = L.geoJSON(feature, {
+        style: {
+          color,
+          fillColor: color,
+          fillOpacity: 0.6,
+          weight: 1,
+        },
+      }).bindPopup(makePopupHtml(p), { maxWidth: 280 });
+      layer.addTo(markerLayer);
+    } else {
+      layer = L.circleMarker([p.lat, p.lng], {
+        radius: 6,
+        fillColor: color,
+        color: "#fff",
+        weight: 1,
+        opacity: 1,
+        fillOpacity: 0.85,
+      }).bindPopup(makePopupHtml(p), { maxWidth: 280 });
+      layer.addTo(markerLayer);
+    }
+
+    markers[p.addr] = { layer, feature };
   });
   return markers;
 }
@@ -157,7 +196,7 @@ function renderSidebar(counts, markers) {
       const entry = markers[el.dataset.addr];
       if (entry) {
         map.flyTo([entry.feature.properties.lat, entry.feature.properties.lng], 18);
-        entry.marker.openPopup();
+        entry.layer.openPopup();
       }
     });
   });
@@ -192,6 +231,38 @@ map.on("draw:created", async (e) => {
     document.getElementById("sidebar-loading").classList.add("hidden");
     document.getElementById("sidebar-instructions").classList.remove("hidden");
     alert("Analysis failed: " + err.message);
+  }
+});
+
+map.on("draw:drawstart", () => {
+  drawHelper.classList.remove("hidden");
+});
+
+map.on("draw:drawstop", () => {
+  drawHelper.classList.add("hidden");
+});
+
+map.on("contextmenu", () => {
+  const handler = getPolygonDrawHandler();
+  if (handler && handler.enabled()) {
+    handler.completeShape();
+  }
+});
+
+document.addEventListener("keydown", (event) => {
+  if (isDrawInputTarget(event.target)) return;
+  const handler = getPolygonDrawHandler();
+  if (!handler || !handler.enabled()) return;
+
+  if (event.key === "Enter") {
+    event.preventDefault();
+    handler.completeShape();
+  }
+
+  if (event.key === "Escape") {
+    event.preventDefault();
+    handler.disable();
+    drawHelper.classList.add("hidden");
   }
 });
 
