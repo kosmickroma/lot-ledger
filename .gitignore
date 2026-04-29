@@ -1,0 +1,43 @@
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# Data — never commit DCAD files
+data/
+*.db
+*.sqlite
+
+# Docs — internal notes, not for repo
+docs/
+
+# Render / deployment artifacts
+.render/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Text files — passwords, notes, scratch files
+*.txt
+!requirements.txt

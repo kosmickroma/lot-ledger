@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LotLedger</title>
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin=""
+  >
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css"
+    crossorigin=""
+  >
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div>
+        <p class="eyebrow">LotLedger</p>
+        <h1>Parcel Review</h1>
+      </div>
+      <p class="sidebar-copy">
+        Phase 1 scaffold: health check is live and the base Leaflet map is ready for the next layer of parcel intelligence.
+      </p>
+      <div class="sidebar-card">
+        <p class="sidebar-label">Current status</p>
+        <p class="sidebar-value">Map ready</p>
+        <p class="sidebar-note">Draw tools and parcel analysis are added in later phases.</p>
+      </div>
+    </aside>
+    <main class="map-panel">
+      <div id="map" aria-label="Dallas map"></div>
+    </main>
+  </div>
+
+  <script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+    crossorigin=""
+  ></script>
+  <script
+    src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"
+    crossorigin=""
+  ></script>
+  <script src="/map.js"></script>
+</body>
+</html>
