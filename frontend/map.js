@@ -114,10 +114,7 @@ function makePopupHtml(p) {
   const pseudoFeature = { properties: p };
   const statusColor = getColor(pseudoFeature);
   const statusText = getStatusLabel(pseudoFeature);
-  const row = (label, val) =>
-    val && val !== "N/A"
-      ? `<tr><td class="popup-label">${label}</td><td class="popup-val">${val}</td></tr>`
-      : "";
+  const row = (label, val) => `<tr><td class="popup-label">${label}</td><td class="popup-val">${val || "N/A"}</td></tr>`;
   return `
       <div class="popup">
         <div class="popup-addr">${p.addr || "Unknown address"}</div>
@@ -126,15 +123,15 @@ function makePopupHtml(p) {
           ${row("Owner", p.owner)}
           ${row("Land Value", p.land_val)}
           ${row("Total Value", p.tot_val)}
-          ${row("Land %", p.land_pct)}
+          ${row("Land % of Total", p.land_pct)}
           ${row("Lot Size", p.lot_acres)}
           ${row("Frontage", p.frontage)}
           ${row("Depth", p.depth)}
-          ${row("Year Built", p.yr_built)}
-          ${row("Living Area", p.sqft ? p.sqft + " sq ft" : null)}
-          ${row("Type", p.state_code)}
+          ${row("State Code", p.state_code)}
           ${row("Zoning", p.zoning)}
-          ${row("School", p.school)}
+          ${row("School District", p.school)}
+          ${row("Year Built", p.yr_built)}
+          ${row("Sq Ft", p.sqft && p.sqft !== "N/A" ? p.sqft : "N/A")}
         </table>
       </div>`;
 }

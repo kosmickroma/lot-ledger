@@ -59,23 +59,23 @@ body {
 }
 
 .sidebar-header {
-  padding: 20px 20px 12px;
+  padding: 18px 20px 12px;
   border-bottom: 1px solid var(--panel-border);
 }
 
 .eyebrow {
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
   color: var(--gold);
-  text-transform: uppercase;
+  text-transform: none;
 }
 
 h1 {
-  font-size: 18px;
-  font-weight: 700;
-  color: var(--text-main);
-  margin-top: 2px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-top: 4px;
 }
 
 .sidebar-section {
