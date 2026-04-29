@@ -1,3 +1,13 @@
+/* frontend/style.css
+   Layout and visual styles for the app shell, sidebar, map panel,
+   legend, and loading states. All class names referenced in map.js
+   must be defined here.
+
+   Connects to:
+     frontend/index.html — linked in <head>
+     frontend/map.js     — dynamically adds/removes classes during UI state changes
+*/
+
 :root {
   color-scheme: light;
   --bg: #f3efe4;

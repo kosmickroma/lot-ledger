@@ -18,6 +18,7 @@ env/
 
 # Data — never commit DCAD files
 data/
+assets/
 *.db
 *.sqlite
 
