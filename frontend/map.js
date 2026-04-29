@@ -73,7 +73,6 @@ function isDrawInputTarget(target) {
 function setSidebarCollapsed(collapsed) {
   appShell.classList.toggle("sidebar-collapsed", collapsed);
   sidebarToggleBtn.setAttribute("aria-expanded", String(!collapsed));
-  sidebarToggleBtn.textContent = collapsed ? "Show Panel" : "Hide Panel";
 }
 
 sidebarToggleBtn.addEventListener("click", () => {
@@ -202,6 +201,36 @@ function renderSidebar(counts, markers) {
   });
 }
 
+function makeDefaultCsvName() {
+  const now = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  const stamp = [
+    now.getFullYear(),
+    pad(now.getMonth() + 1),
+    pad(now.getDate()),
+    "_",
+    pad(now.getHours()),
+    pad(now.getMinutes()),
+  ].join("");
+  return `lotledger_${stamp}.csv`;
+}
+
+function normalizeCsvFilename(rawName) {
+  const fallback = makeDefaultCsvName();
+  if (!rawName) return fallback;
+  const cleaned = rawName
+    .trim()
+    .replace(/[\\/]/g, " ")
+    .replace(/[^a-zA-Z0-9._-]+/g, "_")
+    .replace(/^[._\s]+|[._\s]+$/g, "");
+
+  if (!cleaned) return fallback;
+
+  const stem = cleaned.toLowerCase().endsWith(".csv") ? cleaned.slice(0, -4) : cleaned;
+  const safeStem = (stem || "parcels").slice(0, 96).replace(/[._\s]+$/g, "") || "parcels";
+  return `${safeStem}.csv`;
+}
+
 map.on("draw:created", async (e) => {
   drawLayer.clearLayers();
   markerLayer.clearLayers();
@@ -267,7 +296,12 @@ document.addEventListener("keydown", (event) => {
 });
 
 document.getElementById("btn-download").addEventListener("click", () => {
-  if (currentJobId) window.location.href = `/api/download/${currentJobId}`;
+  if (!currentJobId) return;
+  const suggested = makeDefaultCsvName();
+  const entered = window.prompt("Name this CSV export:", suggested);
+  if (entered === null) return;
+  const filename = normalizeCsvFilename(entered);
+  window.location.href = `/api/download/${currentJobId}?filename=${encodeURIComponent(filename)}`;
 });
 
 document.getElementById("btn-clear").addEventListener("click", () => {

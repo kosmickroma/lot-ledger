@@ -234,24 +234,31 @@ h1 {
 }
 
 .sidebar-toggle {
-  position: absolute;
-  top: 14px;
-  left: 14px;
+  position: fixed;
+  left: 320px;
+  top: 50%;
+  transform: translateY(-50%);
   z-index: 1001;
-  border: 1px solid #1a5a42;
-  background: rgba(15, 61, 47, 0.96);
+  border: none;
+  background: var(--panel-bg);
   color: var(--gold);
-  border-radius: 8px;
-  padding: 7px 10px;
-  font-size: 12px;
-  font-weight: 600;
+  border-radius: 4px;
+  padding: 8px;
   cursor: pointer;
-  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.24s ease;
 }
 
 .sidebar-toggle:hover {
-  border-color: #28714f;
   color: #dcb867;
+  background: rgba(26, 90, 66, 0.8);
+}
+
+.app-shell.sidebar-collapsed .sidebar-toggle {
+  left: 0;
+  transform: translateY(-50%) rotateY(180deg);
 }
 
 .draw-helper {

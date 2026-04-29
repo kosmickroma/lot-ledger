@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import io
+import re
 import uuid
 from pathlib import Path
 from typing import Any
@@ -34,10 +35,32 @@ from api.redfin import pull_grid
 BASE_DIR = Path(__file__).resolve().parent.parent
 FRONTEND_DIR = BASE_DIR / "frontend"
 _job_store: dict[str, list[dict[str, Any]]] = {}
+_FILENAME_SAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
 class AnalyzeRequest(BaseModel):
     polygon: list[list[float]]
+
+
+def _normalize_csv_filename(raw: str | None) -> str:
+    if not raw:
+        return "parcels.csv"
+
+    base = raw.strip().replace("/", " ").replace("\\", " ")
+    base = _FILENAME_SAFE_RE.sub("_", base).strip("._ ")
+    if not base:
+        return "parcels.csv"
+
+    if base.lower().endswith(".csv"):
+        stem = base[:-4].rstrip("._ ")
+    else:
+        stem = base
+
+    if not stem:
+        stem = "parcels"
+
+    stem = stem[:96]
+    return f"{stem}.csv"
 
 # Validate required runtime settings at startup.
 get_settings()
@@ -95,8 +118,6 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
         direct_match = parcel_key == account_num if parcel_key else True
         on_redfin = str(row.get("property_address", "") or "") in redfin_addresses and direct_match
         prop_type = classify_parcel(row, exempt_set)
-        if prop_type == "exempt" and not on_redfin:
-            continue
         try:
             feature = build_feature(row, prop_type, on_redfin)
             features.append(feature)
@@ -117,10 +138,12 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
 
 
 @app.get("/api/download/{job_id}")
-async def download(job_id: str) -> StreamingResponse:
+async def download(job_id: str, filename: str | None = None) -> StreamingResponse:
     rows = _job_store.get(job_id)
     if rows is None:
         raise HTTPException(status_code=404, detail="Job not found")
+
+    download_name = _normalize_csv_filename(filename)
 
     def generate_csv():
         buffer = io.StringIO()
@@ -188,7 +211,7 @@ async def download(job_id: str) -> StreamingResponse:
     return StreamingResponse(
         generate_csv(),
         media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=parcels.csv"},
+        headers={"Content-Disposition": f'attachment; filename="{download_name}"'},
     )
 
 
