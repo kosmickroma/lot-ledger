@@ -35,3 +35,7 @@ curl http://localhost:8000/health
 
 ## Deployment
 Configured for Render web service deployment via `render.yaml`.
+
+**Live URL:** https://lot-ledger.onrender.com
+
+Deploys automatically on every push to `master`.

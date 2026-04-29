@@ -1,13 +1,13 @@
 # api/config.py
 #
-# Environment and Supabase client setup. Single source of truth for all
-# credentials and runtime settings. Raises clearly at startup if anything
-# is missing — never fails silently mid-request.
+# Database connection setup using psycopg2 (Cloud SQL / PostgreSQL).
+# Single source of truth for all credentials and runtime settings.
+# Raises clearly at startup if anything is missing — never fails silently.
 #
 # Connects to:
-#   api/main.py    — imports get_settings() (startup validation) and supabase client
-#   api/dcad.py    — imports supabase client for all parcel queries  (Phase 4)
-#   scripts/build_db.py — imports supabase client to write DCAD data  (Phase 3)
+#   api/main.py        — imports get_settings() and get_conn()
+#   api/dcad.py        — imports get_conn() for all parcel queries
+#   scripts/build_db.py — imports get_conn() to write DCAD data
 
 from __future__ import annotations
 
@@ -15,8 +15,9 @@ import os
 from dataclasses import dataclass
 from functools import lru_cache
 
+import psycopg2
+import psycopg2.pool
 from dotenv import load_dotenv
-from supabase import Client, create_client
 
 
 load_dotenv()
@@ -24,43 +25,64 @@ load_dotenv()
 
 @dataclass(frozen=True)
 class Settings:
-    supabase_url: str
-    supabase_key: str
+    db_host: str
+    db_port: int
+    db_name: str
+    db_user: str
+    db_password: str
     port: int
 
 
 @lru_cache
 def get_settings() -> Settings:
-    supabase_url = os.getenv("SUPABASE_URL", "").strip()
-    supabase_key = os.getenv("SUPABASE_KEY", "").strip()
+    db_host = os.getenv("DB_HOST", "").strip()
+    db_name = os.getenv("DB_NAME", "").strip()
+    db_user = os.getenv("DB_USER", "").strip()
+    db_password = os.getenv("DB_PASSWORD", "").strip()
+    db_port_raw = os.getenv("DB_PORT", "5432").strip() or "5432"
     port_raw = os.getenv("PORT", "8000").strip() or "8000"
 
-    missing_vars = []
-    if not supabase_url:
-        missing_vars.append("SUPABASE_URL")
-    if not supabase_key:
-        missing_vars.append("SUPABASE_KEY")
+    missing = [k for k, v in [
+        ("DB_HOST", db_host), ("DB_NAME", db_name),
+        ("DB_USER", db_user), ("DB_PASSWORD", db_password),
+    ] if not v]
 
-    if missing_vars:
-        missing_list = ", ".join(missing_vars)
-        raise ValueError(f"Missing required environment variables: {missing_list}")
-
-    try:
-        port = int(port_raw)
-    except ValueError as exc:
-        raise ValueError("PORT must be an integer") from exc
+    if missing:
+        raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
 
     return Settings(
-        supabase_url=supabase_url,
-        supabase_key=supabase_key,
-        port=port,
+        db_host=db_host,
+        db_port=int(db_port_raw),
+        db_name=db_name,
+        db_user=db_user,
+        db_password=db_password,
+        port=int(port_raw),
     )
 
 
-@lru_cache
-def get_supabase_client() -> Client:
-    settings = get_settings()
-    return create_client(settings.supabase_url, settings.supabase_key)
+_pool: psycopg2.pool.ThreadedConnectionPool | None = None
 
 
-supabase = get_supabase_client()
+def get_pool() -> psycopg2.pool.ThreadedConnectionPool:
+    global _pool
+    if _pool is None:
+        s = get_settings()
+        _pool = psycopg2.pool.ThreadedConnectionPool(
+            minconn=1,
+            maxconn=10,
+            host=s.db_host,
+            port=s.db_port,
+            dbname=s.db_name,
+            user=s.db_user,
+            password=s.db_password,
+            connect_timeout=10,
+        )
+    return _pool
+
+
+def get_conn() -> psycopg2.extensions.connection:
+    return get_pool().getconn()
+
+
+def release_conn(conn: psycopg2.extensions.connection) -> None:
+    get_pool().putconn(conn)

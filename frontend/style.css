@@ -1,169 +1,282 @@
 /* frontend/style.css
-   Layout and visual styles for the app shell, sidebar, map panel,
-   legend, and loading states. All class names referenced in map.js
-   must be defined here.
-
-   Connects to:
-     frontend/index.html — linked in <head>
-     frontend/map.js     — dynamically adds/removes classes during UI state changes
+   Layout and component styles for LotLedger.
+   Connects to: frontend/index.html, frontend/map.js
 */
-
-:root {
-  color-scheme: light;
-  --bg: #f3efe4;
-  --panel: #0f2d4c;
-  --panel-deep: #091b32;
-  --panel-highlight: rgba(214, 174, 79, 0.18);
-  --panel-border: rgba(214, 174, 79, 0.28);
-  --text: #1d2428;
-  --muted: rgba(255, 255, 255, 0.82);
-  --accent: #ddb85d;
-  --panel-text: #f7fbff;
-  --shadow: 0 22px 48px rgba(6, 15, 30, 0.3);
-}
-
-* {
+*,
+*::before,
+*::after {
   box-sizing: border-box;
+  margin: 0;
+  padding: 0;
 }
 
 html,
 body {
   height: 100%;
-  margin: 0;
-}
-
-body {
-  font-family: Georgia, "Times New Roman", serif;
-  color: var(--text);
-  background:
-    radial-gradient(circle at top left, rgba(220, 160, 118, 0.22), transparent 28%),
-    linear-gradient(135deg, #f6f1e8 0%, #ede6d7 45%, #e9e1d0 100%);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
 .app-shell {
-  display: grid;
-  grid-template-columns: minmax(280px, 360px) 1fr;
-  min-height: 100vh;
-  gap: 0;
+  display: flex;
+  height: 100vh;
+  overflow: hidden;
 }
 
 .sidebar {
+  width: 320px;
+  min-width: 320px;
+  background: #0f172a;
+  color: #f1f5f9;
   display: flex;
   flex-direction: column;
-  justify-content: space-between;
-  padding: 38px 32px;
-  background: linear-gradient(160deg, var(--panel) 0%, var(--panel-deep) 100%);
-  color: var(--panel-text);
-  border-right: 1px solid var(--panel-border);
-  box-shadow: var(--shadow);
-  position: relative;
-  z-index: 1;
+  overflow: hidden;
+  border-right: 1px solid #1e293b;
 }
 
-.sidebar::before {
-  content: "";
-  position: absolute;
-  inset: 16px 16px auto;
-  height: 1px;
-  background: linear-gradient(90deg, rgba(221, 184, 93, 0.7), rgba(221, 184, 93, 0));
-}
-
-.sidebar::after {
-  content: none;
+.sidebar-header {
+  padding: 20px 20px 12px;
+  border-bottom: 1px solid #1e293b;
 }
 
 .eyebrow {
-  margin: 0 0 12px;
-  color: var(--accent);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: #6366f1;
   text-transform: uppercase;
-  letter-spacing: 0.14em;
-  font-size: 1rem;
+}
+
+h1 {
+  font-size: 18px;
   font-weight: 700;
+  color: #f1f5f9;
+  margin-top: 2px;
 }
 
-.sidebar h1 {
-  margin: 0;
-  font-size: clamp(2.1rem, 4vw, 3.2rem);
-  line-height: 0.92;
-  color: var(--panel-text);
-  max-width: 10rem;
-}
-
-.sidebar-copy,
-.sidebar-note,
-.sidebar-label {
-  font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+.sidebar-section {
+  padding: 16px 20px;
 }
 
 .sidebar-copy {
-  margin: 22px 0 0;
-  color: var(--muted);
-  line-height: 1.6;
-  max-width: 24rem;
-  font-size: 1rem;
-}
-
-.sidebar-card {
-  margin-top: 32px;
-  padding: 20px 22px;
-  border: 1px solid var(--panel-border);
-  border-radius: 20px;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.06));
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
-  backdrop-filter: blur(8px);
-}
-
-.sidebar-label {
-  margin: 0 0 10px;
-  color: rgba(221, 184, 93, 0.92);
-  font-size: 0.78rem;
-  text-transform: uppercase;
-  letter-spacing: 0.12em;
-}
-
-.sidebar-value {
-  margin: 0 0 8px;
-  font-size: 1.5rem;
-  font-weight: 700;
-  color: var(--panel-text);
-}
-
-.sidebar-note {
-  margin: 0;
-  color: var(--muted);
+  font-size: 13px;
+  color: #94a3b8;
   line-height: 1.5;
 }
 
+.sidebar-note {
+  font-size: 12px;
+  color: #64748b;
+  margin-top: 6px;
+}
+
+.status-list {
+  list-style: none;
+  margin-top: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.status-list li {
+  font-size: 12px;
+  color: #cbd5e1;
+  line-height: 1.35;
+}
+
+.status-done,
+.status-live,
+.status-note {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 2px 6px;
+  border-radius: 999px;
+  margin-right: 6px;
+}
+
+.status-done {
+  background: rgba(34, 197, 94, 0.2);
+  color: #86efac;
+}
+
+.status-live {
+  background: rgba(99, 102, 241, 0.2);
+  color: #a5b4fc;
+}
+
+.status-note {
+  background: rgba(249, 115, 22, 0.22);
+  color: #fdba74;
+}
+
+.sidebar-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: #64748b;
+  text-transform: uppercase;
+  margin-bottom: 8px;
+  display: block;
+}
+
+.hidden {
+  display: none !important;
+}
+
+.spinner {
+  width: 18px;
+  height: 18px;
+  border: 2px solid #334155;
+  border-top-color: #6366f1;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  margin-bottom: 10px;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.counts-panel {
+  margin-bottom: 12px;
+}
+
+.count-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.count-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.count-label {
+  font-size: 13px;
+  color: #cbd5e1;
+  flex: 1;
+}
+
+.count-val {
+  font-size: 13px;
+  font-weight: 600;
+  color: #f1f5f9;
+}
+
+.sidebar-actions {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.btn-primary {
+  flex: 1;
+  padding: 8px 12px;
+  background: #6366f1;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.btn-primary:hover {
+  background: #4f46e5;
+}
+
+.btn-secondary {
+  padding: 8px 12px;
+  background: #1e293b;
+  color: #94a3b8;
+  border: none;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.btn-secondary:hover {
+  background: #334155;
+}
+
+.parcel-list {
+  overflow-y: auto;
+  flex: 1;
+}
+
+.parcel-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid #1e293b;
+  cursor: pointer;
+}
+
+.parcel-row:hover {
+  background: #1e293b;
+  margin: 0 -20px;
+  padding: 8px 20px;
+}
+
+.parcel-addr {
+  font-size: 12px;
+  color: #cbd5e1;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.parcel-pct {
+  font-size: 12px;
+  font-weight: 700;
+  color: #6366f1;
+  margin-left: 8px;
+  flex-shrink: 0;
+}
+
 .map-panel {
+  flex: 1;
   position: relative;
-  min-height: 100vh;
 }
 
 #map {
-  height: 100vh;
   width: 100%;
+  height: 100%;
 }
 
-.leaflet-control-attribution {
-  font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+.popup {
+  min-width: 200px;
 }
 
-@media (max-width: 900px) {
-  .app-shell {
-    grid-template-columns: 1fr;
-    grid-template-rows: auto 1fr;
-  }
+.popup-addr {
+  font-weight: 700;
+  font-size: 13px;
+  margin-bottom: 8px;
+  color: #0f172a;
+}
 
-  .sidebar {
-    border-right: 0;
-    border-bottom: 1px solid var(--panel-border);
-    box-shadow: none;
-  }
+.popup-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
 
-  .map-panel,
-  #map {
-    min-height: 60vh;
-    height: 60vh;
-  }
+.popup-label {
+  color: #64748b;
+  padding: 2px 8px 2px 0;
+  white-space: nowrap;
+}
+
+.popup-val {
+  color: #0f172a;
+  font-weight: 500;
 }

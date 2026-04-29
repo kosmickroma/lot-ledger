@@ -42,3 +42,6 @@ Thumbs.db
 # Text files — passwords, notes, scratch files
 *.txt
 !requirements.txt
+
+# Build script checkpoint — local resume state, not for repo
+.build_checkpoint.json
