@@ -148,8 +148,7 @@ def _spatial_bbox_filter(min_lat: float, min_lng: float, max_lat: float, max_lng
                            street_num, full_street_name, property_address, property_zip,
                            division_cd, sptd_code, nbhd_cd, legal1, legal2, legal3,
                            legal4, legal5,
-                           ST_AsGeoJSON(centroid)::json AS centroid,
-                           polygon_geojson
+                           ST_AsGeoJSON(centroid)::json AS centroid
                     FROM parcels
                     WHERE division_cd IN ('RES', 'COM')
                       AND ST_Within(centroid, ST_MakeEnvelope(%s, %s, %s, %s, 4326))

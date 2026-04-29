@@ -21,7 +21,6 @@ from api.config import get_conn, release_conn
 
 
 BATCH_SIZE = 500
-PARCELS_BATCH_SIZE = 150  # smaller — each row carries polygon_geojson payload
 DIVISION_CODES = {"RES", "COM"}
 
 
