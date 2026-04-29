@@ -14,12 +14,23 @@ const DALLAS_CENTER = [32.78, -96.8];
 const DEFAULT_ZOOM = 13;
 
 const COLORS = {
-  single_family: "#3b82f6",
-  vacant: "#22c55e",
-  multifamily: "#a855f7",
-  commercial: "#f97316",
-  exempt: "#9ca3af",
-  active: "#ef4444",
+  single_family: "#2980b9",
+  off_market: "#2980b9",
+  vacant: "#27ae60",
+  multifamily: "#8e44ad",
+  commercial: "#e67e22",
+  exempt: "#95a5a6",
+  active: "#e74c3c",
+};
+
+const BORDER_COLORS = {
+  single_family: "#1a6a9a",
+  off_market: "#1a6a9a",
+  vacant: "#1e8449",
+  multifamily: "#6c3483",
+  commercial: "#d35400",
+  exempt: "#7f8c8d",
+  active: "#c0392b",
 };
 
 const TYPE_LABELS = {
@@ -42,7 +53,7 @@ L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
 
 const drawControl = new L.Control.Draw({
   draw: {
-    polygon: { shapeOptions: { color: "#6366f1", weight: 2, fill: false } },
+    polygon: { shapeOptions: { color: "#1a5a42", weight: 2, fill: false } },
     rectangle: false,
     circle: false,
     circlemarker: false,
@@ -85,7 +96,24 @@ function getColor(feature) {
   return COLORS[feature.properties.prop_type] || COLORS.exempt;
 }
 
+function getBorderColor(feature) {
+  if (feature.properties.on_redfin) return BORDER_COLORS.active;
+  return BORDER_COLORS[feature.properties.prop_type] || BORDER_COLORS.exempt;
+}
+
+function getStatusLabel(feature) {
+  if (feature.properties.on_redfin) return "ACTIVE LISTING";
+  if (feature.properties.prop_type === "multifamily") return "MULTIFAMILY";
+  if (feature.properties.prop_type === "vacant") return "VACANT LOT";
+  if (feature.properties.prop_type === "commercial") return "COMMERCIAL";
+  if (feature.properties.prop_type === "exempt") return "EXEMPT (church/school/nonprofit)";
+  return "OFF MARKET";
+}
+
 function makePopupHtml(p) {
+  const pseudoFeature = { properties: p };
+  const statusColor = getColor(pseudoFeature);
+  const statusText = getStatusLabel(pseudoFeature);
   const row = (label, val) =>
     val && val !== "N/A"
       ? `<tr><td class="popup-label">${label}</td><td class="popup-val">${val}</td></tr>`
@@ -93,6 +121,7 @@ function makePopupHtml(p) {
   return `
       <div class="popup">
         <div class="popup-addr">${p.addr || "Unknown address"}</div>
+        <div class="popup-status" style="color:${statusColor};">${statusText}</div>
         <table class="popup-table">
           ${row("Owner", p.owner)}
           ${row("Land Value", p.land_val)}
@@ -116,27 +145,38 @@ function renderFeatures(geojson) {
   geojson.features.forEach((feature) => {
     const p = feature.properties;
     const color = getColor(feature);
+    const borderColor = getBorderColor(feature);
     if (p.lat == null || p.lng == null) return;
 
     let layer;
     if (feature.geometry?.type === "Polygon") {
       layer = L.geoJSON(feature, {
         style: {
-          color,
+          color: borderColor,
           fillColor: color,
-          fillOpacity: 0.6,
-          weight: 1,
+          fillOpacity: 0.12,
+          weight: 1.5,
+          opacity: 0.85,
         },
       }).bindPopup(makePopupHtml(p), { maxWidth: 280 });
       layer.addTo(markerLayer);
-    } else {
-      layer = L.circleMarker([p.lat, p.lng], {
-        radius: 6,
+
+      L.circleMarker([p.lat, p.lng], {
+        radius: p.on_redfin ? 5 : 3,
         fillColor: color,
-        color: "#fff",
+        color: borderColor,
         weight: 1,
         opacity: 1,
-        fillOpacity: 0.85,
+        fillOpacity: 0.95,
+      }).bindPopup(makePopupHtml(p), { maxWidth: 280 }).addTo(markerLayer);
+    } else {
+      layer = L.circleMarker([p.lat, p.lng], {
+        radius: p.on_redfin ? 7 : 5,
+        fillColor: color,
+        color: borderColor,
+        weight: 1.5,
+        opacity: 1,
+        fillOpacity: 0.9,
       }).bindPopup(makePopupHtml(p), { maxWidth: 280 });
       layer.addTo(markerLayer);
     }

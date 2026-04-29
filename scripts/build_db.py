@@ -40,6 +40,16 @@ def _clean_text(value: object) -> str | None:
     return text if text else None
 
 
+def _normalize_key(value: object) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip().upper()
+    if text.endswith(".0"):
+        text = text[:-2]
+    text = text.replace(" ", "").replace("-", "")
+    return text
+
+
 def _to_float(value: object) -> float | None:
     if value is None or pd.isna(value):
         return None
@@ -129,7 +139,7 @@ def _read_parcel_dbf(dbf_path: Path) -> tuple[list[str] | None, int, int, int]:
     return accounts, num_records, header_size, record_size
 
 
-def _load_parcel_geometry(target_keys: set[str]) -> dict[str, dict[str, object]]:
+def _load_parcel_geometry(target_keys_norm: set[str]) -> dict[str, dict[str, object]]:
     """Load centroid and exterior polygon ring per parcel key from PARCEL_GEOM shapefile."""
     shp_path = PARCEL_GEOM_DIR / "PARCEL_GEOM.shp"
     dbf_path = PARCEL_GEOM_DIR / "PARCEL_GEOM.dbf"
@@ -141,7 +151,11 @@ def _load_parcel_geometry(target_keys: set[str]) -> dict[str, dict[str, object]]
     if accts is None:
         raise RuntimeError("Could not read ACCT field from PARCEL_GEOM.dbf")
 
-    index_to_acct = {index: acct for index, acct in enumerate(accts) if acct in target_keys}
+    index_to_acct = {
+        index: acct
+        for index, acct in enumerate(accts)
+        if _normalize_key(acct) in target_keys_norm
+    }
     print(f"Target shapefile records: {len(index_to_acct):,} of {num_records:,}")
 
     centroid_x: list[float] = []
@@ -298,10 +312,15 @@ def _build_parcels_table() -> list[dict[str, object]]:
 
     account_nums = account_df["ACCOUNT_NUM"].astype(str).str.strip()
     gis_ids = account_df["GIS_PARCEL_ID"].astype(str).str.strip() if "GIS_PARCEL_ID" in account_df.columns else pd.Series([], dtype=str)
-    target_keys = set(account_nums[account_nums != ""]) | set(gis_ids[gis_ids != ""])
+    target_keys_norm = {
+        _normalize_key(value)
+        for value in pd.concat([account_nums, gis_ids], ignore_index=True).tolist()
+        if _normalize_key(value)
+    }
 
     print(f"ACCOUNT_INFO rows (RES/COM): {len(account_df):,}")
-    geometry_map = _load_parcel_geometry(target_keys)
+    geometry_map = _load_parcel_geometry(target_keys_norm)
+    geometry_by_norm = {_normalize_key(key): value for key, value in geometry_map.items() if _normalize_key(key)}
 
     rows: list[dict[str, object]] = []
     missing_geometry = 0
@@ -317,14 +336,18 @@ def _build_parcels_table() -> list[dict[str, object]]:
 
         gis_parcel_id = _clean_text(getattr(row, "GIS_PARCEL_ID", None))
 
-        if account_num in geometry_map:
+        account_norm = _normalize_key(account_num)
+        gis_norm = _normalize_key(gis_parcel_id)
+
+        if account_norm and account_norm in geometry_by_norm:
             parcel_key = account_num
-        elif gis_parcel_id and gis_parcel_id in geometry_map:
+            geom = geometry_by_norm.get(account_norm)
+        elif gis_norm and gis_norm in geometry_by_norm:
             parcel_key = gis_parcel_id
+            geom = geometry_by_norm.get(gis_norm)
         else:
             parcel_key = gis_parcel_id or account_num
-
-        geom = geometry_map.get(parcel_key)
+            geom = geometry_by_norm.get(_normalize_key(parcel_key))
         centroid = None
         if geom:
             centroid = f"SRID=4326;POINT({geom['lng']} {geom['lat']})"

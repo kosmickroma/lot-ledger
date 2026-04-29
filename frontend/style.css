@@ -290,6 +290,13 @@ h1 {
   color: #0f172a;
 }
 
+.popup-status {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  margin-bottom: 8px;
+}
+
 .popup-table {
   width: 100%;
   border-collapse: collapse;

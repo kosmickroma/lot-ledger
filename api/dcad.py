@@ -17,7 +17,7 @@ from typing import Any
 import pandas as pd
 
 from api.config import get_conn, release_conn
-from api.geo import point_in_polygon, polygon_bbox
+from api.geo import polygon_bbox
 
 
 DIVISION_CODES = ["RES", "COM"]
@@ -150,8 +150,8 @@ def _spatial_bbox_filter(min_lat: float, min_lng: float, max_lat: float, max_lng
                               legal4, legal5, polygon_geojson,
                            ST_AsGeoJSON(centroid)::json AS centroid
                     FROM parcels
-                    WHERE division_cd IN ('RES', 'COM')
-                      AND ST_Within(centroid, ST_MakeEnvelope(%s, %s, %s, %s, 4326))
+                                        WHERE division_cd IN ('RES', 'COM')
+                                            AND ST_Intersects(centroid, ST_MakeEnvelope(%s, %s, %s, %s, 4326))
                 """,
                 (min_lng, min_lat, max_lng, max_lat),
             )
@@ -197,7 +197,7 @@ def _fetch_exempt_accounts(account_nums: list[str]) -> set[str]:
 
 def query_parcels(polygon: list[list[float]]) -> ParcelQueryResult:
     """
-    Query candidate parcels by bbox, then exact filter by polygon in Python.
+    Query candidate parcels by bbox (POC parity behavior).
 
     Returns merged parcel rows along with the exempt account-number set.
     """
@@ -209,10 +209,9 @@ def query_parcels(polygon: list[list[float]]) -> ParcelQueryResult:
         lat, lng = _extract_centroid(row.get("centroid"))
         if lat is None or lng is None:
             continue
-        if point_in_polygon(lat, lng, polygon):
-            row["lat"] = lat
-            row["lng"] = lng
-            exact_rows.append(row)
+        row["lat"] = lat
+        row["lng"] = lng
+        exact_rows.append(row)
 
     account_nums = sorted({_clean_text(row.get("account_num")) for row in exact_rows if _clean_text(row.get("account_num"))})
 
@@ -315,7 +314,7 @@ def classify_parcel(row: dict[str, Any], exempt_set: set[str]) -> str:
 
     if account_num in exempt_set or sptd == "X11" or non_target_owner or is_nominal:
         return "exempt"
-    if sptd in {"B11", "B12"}:
+    if sptd in {"B11", "B12", "A14"}:
         return "multifamily"
     if sptd == "C11":
         return "vacant"
