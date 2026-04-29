@@ -219,7 +219,7 @@ function renderSidebar(counts, markers) {
   list.innerHTML =
     sorted.length === 0
       ? "<p class='sidebar-note'>No off-market SFR parcels found.</p>"
-      : "<p class='sidebar-label'>Teardown Candidates (by Land %)</p>" +
+      : "<p class='sidebar-label'>Off-Market SFR Sorted by Land %</p>" +
         sorted
           .map(
             (f) => `
