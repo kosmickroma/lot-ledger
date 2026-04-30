@@ -90,6 +90,7 @@ let targetBadgeLayer = L.layerGroup().addTo(map);
 let hoaLayer = null;
 let hoaVisible = false;
 let currentJobId = null;
+let lastPolygon = null;
 const verificationByAccount = new Map();
 const potentialTargetByAccount = new Map();
 const verificationBadgeMarkers = new Map();
@@ -698,6 +699,64 @@ function normalizeCsvFilename(rawName) {
   return `${safeStem}.csv`;
 }
 
+async function refreshExpiredJob() {
+  if (!lastPolygon || lastPolygon.length < 3) return false;
+  try {
+    const resp = await fetch("/api/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ polygon: lastPolygon }),
+    });
+    if (!resp.ok) return false;
+    const data = await resp.json();
+    currentJobId = data.job_id || null;
+    return Boolean(currentJobId);
+  } catch {
+    return false;
+  }
+}
+
+async function persistTagStateForExport() {
+  if (!currentJobId) return false;
+
+  const payload = {};
+  verificationByAccount.forEach((value, accountNum) => {
+    payload[accountNum] = String(value || "").toLowerCase();
+  });
+  const targetPayload = {};
+  potentialTargetByAccount.forEach((value, accountNum) => {
+    targetPayload[accountNum] = String(value || "").toLowerCase();
+  });
+
+  let resp;
+  try {
+    resp = await fetch(`/api/job/${currentJobId}/verification`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ verifications: payload, potential_targets: targetPayload }),
+    });
+  } catch {
+    return false;
+  }
+
+  if (resp.ok) return true;
+  if (resp.status !== 404) return false;
+
+  const refreshed = await refreshExpiredJob();
+  if (!refreshed) return false;
+
+  try {
+    const retry = await fetch(`/api/job/${currentJobId}/verification`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ verifications: payload, potential_targets: targetPayload }),
+    });
+    return retry.ok;
+  } catch {
+    return false;
+  }
+}
+
 map.on("draw:created", async (e) => {
   drawLayer.clearLayers();
   markerLayer.clearLayers();
@@ -721,6 +780,7 @@ map.on("draw:created", async (e) => {
   drawLayer.addLayer(e.layer);
 
   const polygon = e.layer.getLatLngs()[0].map((ll) => [ll.lng, ll.lat]);
+  lastPolygon = polygon;
 
   try {
     const resp = await fetch("/api/analyze", {
@@ -791,22 +851,10 @@ document.getElementById("btn-download").addEventListener("click", () => {
   (async () => {
     if (!currentJobId) return;
 
-    try {
-      const payload = {};
-      verificationByAccount.forEach((value, accountNum) => {
-        payload[accountNum] = String(value || "").toLowerCase();
-      });
-      const targetPayload = {};
-      potentialTargetByAccount.forEach((value, accountNum) => {
-        targetPayload[accountNum] = String(value || "").toLowerCase();
-      });
-      await fetch(`/api/job/${currentJobId}/verification`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ verifications: payload, potential_targets: targetPayload }),
-      });
-    } catch (err) {
-      console.error("Unable to persist verification status before export", err);
+    const persisted = await persistTagStateForExport();
+    if (!persisted) {
+      alert("Your analysis session expired. Please re-run the draw/analyze step, then export again.");
+      return;
     }
 
     const suggested = makeDefaultCsvName();
@@ -823,6 +871,7 @@ document.getElementById("btn-clear").addEventListener("click", () => {
   verificationBadgeLayer.clearLayers();
   targetBadgeLayer.clearLayers();
   currentJobId = null;
+  lastPolygon = null;
   verificationByAccount.clear();
   potentialTargetByAccount.clear();
   verificationBadgeMarkers.clear();
