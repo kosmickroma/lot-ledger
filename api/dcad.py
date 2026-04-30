@@ -386,7 +386,7 @@ def classify_parcel(row: dict[str, Any], exempt_set: set[str]) -> str:
     return "single_family"
 
 
-def build_feature(row: dict[str, Any], prop_type: str, on_redfin: bool) -> dict[str, Any]:
+def build_feature(row: dict[str, Any], prop_type: str, on_redfin: bool, redfin_listing: dict | None = None) -> dict[str, Any]:
     """Build a GeoJSON feature + frontend popup payload for one parcel row."""
     lat = _safe_float(row.get("lat"))
     lng = _safe_float(row.get("lng"))
@@ -415,6 +415,8 @@ def build_feature(row: dict[str, Any], prop_type: str, on_redfin: bool) -> dict[
         "sqft": f"{int(float(row['tot_living_area'])):,}" if _safe_float(row.get("tot_living_area")) not in (None, 0.0) else "N/A",
         "verified_vacant": _clean_text(row.get("verified_vacant")),
         "potential_target": _clean_text(row.get("potential_target")),
+        "redfin_price": f"${redfin_listing['price']:,}" if redfin_listing and redfin_listing.get("price") else None,
+        "redfin_url": redfin_listing.get("url") if redfin_listing else None,
         "lat": lat,
         "lng": lng,
     }
@@ -432,7 +434,7 @@ def build_feature(row: dict[str, Any], prop_type: str, on_redfin: bool) -> dict[
     }
 
 
-def summarize_counts(rows: list[dict[str, Any]], exempt_set: set[str], on_redfin_addresses: set[str]) -> dict[str, int]:
+def summarize_counts(rows: list[dict[str, Any]], exempt_set: set[str], on_redfin_addresses: dict | set) -> dict[str, int]:
     """Return aggregate counts by listing/category for legend and API response."""
     active = 0
     multifamily = 0

@@ -20,7 +20,7 @@
       <div class="sidebar-header">
         <p class="eyebrow">Lot Ledger</p>
         <h1>Parcel Analysis</h1>
-        <p id="brush-status" class="sidebar-chip hidden">Active Brush: None</p>
+        <p id="brush-status" class="sidebar-chip hidden">Active Tool: None</p>
       </div>
       <div id="sidebar-instructions" class="sidebar-section">
         <p class="sidebar-copy">Draw a polygon around a target pocket to analyze parcels instantly.</p>
@@ -33,6 +33,13 @@
       </div>
       <div id="sidebar-results" class="sidebar-section hidden">
         <div id="counts-panel" class="counts-panel"></div>
+        <div id="layer-toggles" class="layer-toggles hidden">
+          <p class="sidebar-label">Sources</p>
+          <label class="layer-toggle-row">
+            <input type="checkbox" id="toggle-redfin" checked>
+            <span>Redfin Listings</span>
+          </label>
+        </div>
         <div class="sidebar-actions">
           <button id="btn-download" class="btn-primary">Download CSV</button>
           <button id="btn-clear" class="btn-secondary">Clear</button>

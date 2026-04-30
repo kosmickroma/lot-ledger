@@ -85,6 +85,11 @@ def _google_maps_link(row: dict[str, Any]) -> str:
     query = query.replace("++", "+")
     return f"https://maps.google.com/?q={query}"
 
+
+def _normalize_addr_key(raw: str) -> str:
+    """Normalize a property address for Redfin dict lookup (uppercase, no unit suffix)."""
+    return str(raw or "").upper().strip().split("#")[0].strip()
+
 # Validate required runtime settings at startup.
 get_settings()
 
@@ -154,9 +159,9 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
 
     min_lat, min_lng, max_lat, max_lng = polygon_bbox(polygon)
 
-    redfin_addresses: set[str] = set()
+    redfin_data: dict[str, dict] = {}
     try:
-        parcel_result, redfin_addresses = await asyncio.gather(
+        parcel_result, redfin_data = await asyncio.gather(
             asyncio.to_thread(query_parcels, polygon),
             pull_grid(min_lng, min_lat, max_lng, max_lat),
         )
@@ -174,10 +179,12 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
         parcel_key = str(row.get("parcel_key", "") or "")
         account_num = str(row.get("account_num", "") or "")
         direct_match = parcel_key == account_num if parcel_key else True
-        on_redfin = str(row.get("property_address", "") or "") in redfin_addresses and direct_match
+        addr_key = _normalize_addr_key(str(row.get("property_address", "") or ""))
+        on_redfin = addr_key in redfin_data and direct_match
+        redfin_listing = redfin_data.get(addr_key) if on_redfin else None
         prop_type = classify_parcel(row, exempt_set)
         try:
-            feature = build_feature(row, prop_type, on_redfin)
+            feature = build_feature(row, prop_type, on_redfin, redfin_listing)
             features.append(feature)
         except ValueError:
             continue
@@ -185,16 +192,16 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
     job_id = str(uuid.uuid4())
     _job_store[job_id] = {
         "rows": rows,
-        "redfin_addresses": redfin_addresses,
+        "redfin_data": redfin_data,
     }
-    counts = summarize_counts(rows, exempt_set, redfin_addresses)
+    counts = summarize_counts(rows, exempt_set, redfin_data)
 
     return {
         "type": "FeatureCollection",
         "features": features,
         "counts": counts,
         "job_id": job_id,
-        "redfin_ok": len(redfin_addresses) > 0,
+        "redfin_ok": len(redfin_data) > 0,
     }
 
 
@@ -239,7 +246,7 @@ async def download(job_id: str, filename: str | None = None) -> StreamingRespons
         raise HTTPException(status_code=404, detail="Job not found")
 
     rows = job.get("rows", [])
-    redfin_addresses = job.get("redfin_addresses", set())
+    redfin_data: dict[str, dict] = job.get("redfin_data", {})
 
     download_name = _normalize_csv_filename(filename)
 
@@ -258,6 +265,7 @@ async def download(job_id: str, filename: str | None = None) -> StreamingRespons
                 "Land Value",
                 "Improvement Value",
                 "Total Value",
+                "Redfin List Price",
                 "Land % of Total",
                 "Year Built",
                 "Living Area (sq ft)",
@@ -291,7 +299,9 @@ async def download(job_id: str, filename: str | None = None) -> StreamingRespons
             parcel_key = str(row.get("parcel_key", "") or "")
             account_num = str(row.get("account_num", "") or "")
             direct_match = parcel_key == account_num if parcel_key else True
-            on_redfin = str(row.get("property_address", "") or "") in redfin_addresses and direct_match
+            addr_key = _normalize_addr_key(str(row.get("property_address", "") or ""))
+            on_redfin = addr_key in redfin_data and direct_match
+            redfin_listing = redfin_data.get(addr_key) if on_redfin else None
 
             land_val = row.get("land_val")
             impr_val = row.get("impr_val")
@@ -324,6 +334,7 @@ async def download(job_id: str, filename: str | None = None) -> StreamingRespons
                     round(_safe_float(land_val), 0) if _safe_float(land_val) is not None else "",
                     round(_safe_float(impr_val), 0) if _safe_float(impr_val) is not None else "",
                     round(_safe_float(tot_val), 0) if _safe_float(tot_val) is not None else "",
+                    f"${redfin_listing['price']:,}" if redfin_listing and redfin_listing.get("price") else "",
                     round(_safe_float(land_pct), 1) if _safe_float(land_pct) is not None else "",
                     int(yr_built) if _safe_float(yr_built) not in (None, 0.0) else "",
                     int(_safe_float(living_area)) if _safe_float(living_area) not in (None, 0.0) else "",

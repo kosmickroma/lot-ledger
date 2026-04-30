@@ -1,17 +1,18 @@
 # api/redfin.py
 #
 # Async Redfin listing pull for a bounding box using grid-cell requests.
-# Collects active listing addresses and normalizes them for DCAD matching.
+# Returns a dict mapping normalized address → listing metadata (price, url, beds,
+# baths, sqft, days_on_market) for DCAD matching and popup/CSV enrichment.
 #
 # Connects to:
-#   api/main.py  - called by analyze endpoint (Phase 4)
-#   api/dcad.py  - no direct import; output addresses are used with ON_REDFIN logic via main
+#   api/main.py  - called by analyze endpoint; returns dict[str, dict]
+#   api/dcad.py  - no direct import; listing dict passed via main.py to build_feature
 
 from __future__ import annotations
 
 import asyncio
 import io
-from typing import Iterable
+from typing import Any, Iterable
 
 import httpx
 import numpy as np
@@ -23,6 +24,16 @@ REDFIN_GIS_CSV_URL = "https://www.redfin.com/stingray/api/gis-csv"
 DEFAULT_CELL_SIZE = 0.003
 DEFAULT_TIMEOUT = 20.0
 DEFAULT_CONCURRENCY = 20
+
+
+def _to_int(val: Any) -> int | None:
+    """Convert a CSV value to int, returning None for blanks or non-numeric literals."""
+    try:
+        v = str(val or "").replace(",", "").strip()
+        return int(float(v)) if v and v.lower() not in ("nan", "none", "") else None
+    except (ValueError, TypeError):
+        return None
+
 
 REDFIN_HEADERS = {
     "User-Agent": (
@@ -44,22 +55,32 @@ def _build_cell_polygon(min_lng: float, min_lat: float, max_lng: float, max_lat:
     )
 
 
-def _normalize_addresses(df: pd.DataFrame) -> set[str]:
+def _normalize_addresses(df: pd.DataFrame) -> dict[str, dict]:
+    """Return a mapping of normalized address → listing metadata dict."""
     address_col = "ADDRESS" if "ADDRESS" in df.columns else "Address" if "Address" in df.columns else None
     if not address_col:
-        return set()
+        return {}
 
-    normalized = (
-        df[address_col]
-        .dropna()
-        .astype(str)
-        .str.upper()
-        .str.strip()
-        .str.split("#")
-        .str[0]
-        .str.strip()
-    )
-    return set(normalized[normalized != ""])
+    # URL column header includes a long parenthetical — match by prefix.
+    url_col = next((c for c in df.columns if c.startswith("URL")), None)
+
+    result: dict[str, dict] = {}
+    for _, row in df.iterrows():
+        raw_addr = str(row.get(address_col) or "").strip()
+        if not raw_addr or raw_addr.upper() in ("NAN", ""):
+            continue
+        normalized = raw_addr.upper().split("#")[0].strip()
+        if not normalized:
+            continue
+        result[normalized] = {
+            "price": _to_int(row.get("PRICE")),
+            "url": str(row.get(url_col) or "").strip() or None if url_col else None,
+            "beds": _to_int(row.get("BEDS")),
+            "baths": _to_int(row.get("BATHS")),
+            "sqft": _to_int(row.get("SQUARE FEET")),
+            "dom": _to_int(row.get("DAYS ON MARKET")),
+        }
+    return result
 
 
 async def _fetch_cell(
@@ -69,7 +90,7 @@ async def _fetch_cell(
     min_lat: float,
     max_lng: float,
     max_lat: float,
-) -> set[str]:
+) -> dict[str, dict]:
     params = {
         "al": "1",
         "market": "dallas",
@@ -87,11 +108,11 @@ async def _fetch_cell(
         response = await client.get(REDFIN_GIS_CSV_URL, params=params)
 
     if response.status_code != 200 or len(response.text) <= 200:
-        return set()
+        return {}
 
     dataframe = pd.read_csv(io.StringIO(response.text))
     if dataframe.empty:
-        return set()
+        return {}
 
     return _normalize_addresses(dataframe)
 
@@ -103,7 +124,7 @@ async def pull_grid(
     max_lat: float,
     cell_size: float = DEFAULT_CELL_SIZE,
     concurrency: int = DEFAULT_CONCURRENCY,
-) -> set[str]:
+) -> dict[str, dict]:
     """Fetch active Redfin listing addresses for all cells in the supplied bounding box."""
     lngs = np.arange(min_lng, max_lng, cell_size)
     lats = np.arange(min_lat, max_lat, cell_size)
@@ -118,7 +139,7 @@ async def pull_grid(
         except httpx.HTTPError:
             pass
 
-        tasks: list[asyncio.Task[set[str]]] = []
+        tasks: list[asyncio.Task[dict[str, dict]]] = []
         for lng in lngs:
             for lat in lats:
                 cell_max_lng = min(float(lng + cell_size), max_lng)
@@ -137,11 +158,11 @@ async def pull_grid(
                 )
 
         if not tasks:
-            return set()
+            return {}
 
-        results: Iterable[set[str]] = await asyncio.gather(*tasks, return_exceptions=False)
+        results: Iterable[dict[str, dict]] = await asyncio.gather(*tasks, return_exceptions=False)
 
-    combined: set[str] = set()
-    for address_set in results:
-        combined.update(address_set)
+    combined: dict[str, dict] = {}
+    for addr_dict in results:
+        combined.update(addr_dict)
     return combined

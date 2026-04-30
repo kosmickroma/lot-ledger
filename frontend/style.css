@@ -153,6 +153,31 @@ h1 {
   margin-bottom: 12px;
 }
 
+.layer-toggles {
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+}
+
+.layer-toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #d3d6dd;
+  cursor: pointer;
+  user-select: none;
+}
+
+.layer-toggle-row input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--gold);
+  cursor: pointer;
+}
+
 .count-row {
   display: flex;
   align-items: center;

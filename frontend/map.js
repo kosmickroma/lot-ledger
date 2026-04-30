@@ -9,6 +9,7 @@
 //   frontend/style.css    — classes referenced here must exist there
 //   POST /api/analyze     — sends polygon, receives GeoJSON + counts
 //   GET  /api/download/:id — triggers CSV file download
+//   GET  /api/job/:id/verification — persists verify/target tags
 
 const DALLAS_CENTER = [32.78, -96.8];
 const DEFAULT_ZOOM = 13;
@@ -84,6 +85,8 @@ const drawControl = new L.Control.Draw({
 map.addControl(drawControl);
 
 let markerLayer = L.layerGroup().addTo(map);
+let redfinLayer = L.layerGroup().addTo(map);
+let redfinLayerVisible = true;
 let drawLayer = L.layerGroup().addTo(map);
 let verificationBadgeLayer = L.layerGroup().addTo(map);
 let targetBadgeLayer = L.layerGroup().addTo(map);
@@ -441,6 +444,28 @@ function makePopupHtml(p) {
   );
   const potentialTarget = String(potentialTargetByAccount.get(p.account_num) || p.potential_target || "").trim();
   const row = (label, val) => `<tr><td class="popup-label">${label}</td><td class="popup-val">${val || "N/A"}</td></tr>`;
+
+  // Redfin price row + delta (active parcels only)
+  let redfinPriceRow = "";
+  if (p.on_redfin && p.redfin_price) {
+    const urlWrap = p.redfin_url
+      ? `<a href="${p.redfin_url}" target="_blank" rel="noopener noreferrer">${p.redfin_price}</a>`
+      : p.redfin_price;
+    redfinPriceRow = row("Redfin List Price", urlWrap);
+
+    // Numeric delta: parse both values
+    const rfNum = parseInt(String(p.redfin_price).replace(/[^0-9]/g, ""), 10);
+    const dcadRaw = String(p.tot_val || "").replace(/[^0-9]/g, "");
+    const dcadNum = dcadRaw ? parseInt(dcadRaw, 10) : NaN;
+    if (!isNaN(rfNum) && !isNaN(dcadNum) && dcadNum > 0) {
+      const delta = rfNum - dcadNum;
+      const pct = ((delta / dcadNum) * 100).toFixed(1);
+      const sign = delta >= 0 ? "+" : "";
+      const color = delta >= 0 ? "#27ae60" : "#e74c3c";
+      redfinPriceRow += `<tr><td class="popup-label">vs DCAD Value</td><td class="popup-val" style="color:${color}">${sign}$${Math.abs(delta).toLocaleString()} (${sign}${pct}%)</td></tr>`;
+    }
+  }
+
   return `
       <div class="popup">
         <div class="popup-addr">${p.addr || "Unknown address"}</div>
@@ -449,6 +474,7 @@ function makePopupHtml(p) {
           ${row("Owner", p.owner)}
           ${row("Land Value", p.land_val)}
           ${row("Total Value", p.tot_val)}
+          ${redfinPriceRow}
           ${row("Land % of Total", p.land_pct)}
           ${row("Lot Size", p.lot_acres)}
           ${row("Frontage", p.frontage)}
@@ -466,6 +492,7 @@ function makePopupHtml(p) {
 
 function renderFeatures(geojson) {
   markerLayer.clearLayers();
+  redfinLayer.clearLayers();
   verificationBadgeLayer.clearLayers();
   targetBadgeLayer.clearLayers();
   verificationBadgeMarkers.clear();
@@ -519,6 +546,9 @@ function renderFeatures(geojson) {
       renderTargetBadge(p.account_num, p.lat, p.lng);
     }
 
+    // Active Redfin listings go to a separate toggleable layer; everything else to markerLayer.
+    const targetLayer = p.on_redfin ? redfinLayer : markerLayer;
+
     let layer;
     if (renderCondoOutline) {
       L.geoJSON(feature, {
@@ -543,7 +573,7 @@ function renderFeatures(geojson) {
         },
       }).bindPopup(() => makePopupHtml(p), { maxWidth: 280 });
       layer.on("click", applyBrush);
-      layer.addTo(markerLayer);
+      layer.addTo(targetLayer);
 
       L.circleMarker([p.lat, p.lng], {
         radius: p.on_redfin ? 5 : 3,
@@ -555,7 +585,7 @@ function renderFeatures(geojson) {
       })
         .bindPopup(() => makePopupHtml(p), { maxWidth: 280 })
         .on("click", applyBrush)
-        .addTo(markerLayer);
+        .addTo(targetLayer);
     } else {
       layer = L.circleMarker([p.lat, p.lng], {
         radius: p.on_redfin ? 7 : 5,
@@ -566,7 +596,7 @@ function renderFeatures(geojson) {
         fillOpacity: 0.9,
       }).bindPopup(() => makePopupHtml(p), { maxWidth: 280 });
       layer.on("click", applyBrush);
-      layer.addTo(markerLayer);
+      layer.addTo(targetLayer);
     }
 
     markers[p.addr] = { layer, feature };
@@ -760,6 +790,7 @@ async function persistTagStateForExport() {
 map.on("draw:created", async (e) => {
   drawLayer.clearLayers();
   markerLayer.clearLayers();
+  redfinLayer.clearLayers();
   verificationBadgeLayer.clearLayers();
   targetBadgeLayer.clearLayers();
   verificationByAccount.clear();
@@ -804,6 +835,12 @@ map.on("draw:created", async (e) => {
     document.getElementById("redfin-status").textContent = data.redfin_ok
       ? `${data.counts.active} active listing${data.counts.active !== 1 ? "s" : ""} found`
       : "Active listings unavailable";
+    // Show source toggles and reset Redfin checkbox to checked state.
+    const layerToggles = document.getElementById("layer-toggles");
+    if (layerToggles) layerToggles.classList.remove("hidden");
+    const toggleRedfin = document.getElementById("toggle-redfin");
+    if (toggleRedfin) toggleRedfin.checked = true;
+    if (!redfinLayerVisible) { redfinLayer.addTo(map); redfinLayerVisible = true; }
     const markers = renderFeatures(data);
     renderSidebar(data.counts, markers);
   } catch (err) {
@@ -867,6 +904,7 @@ document.getElementById("btn-download").addEventListener("click", () => {
 
 document.getElementById("btn-clear").addEventListener("click", () => {
   markerLayer.clearLayers();
+  redfinLayer.clearLayers();
   drawLayer.clearLayers();
   verificationBadgeLayer.clearLayers();
   targetBadgeLayer.clearLayers();
@@ -883,7 +921,18 @@ document.getElementById("btn-clear").addEventListener("click", () => {
   updateBrushStatus(null);
   document.getElementById("verify-brush-menu")?.classList.add("hidden");
   document.getElementById("target-brush-menu")?.classList.add("hidden");
+  document.getElementById("layer-toggles")?.classList.add("hidden");
   document.getElementById("sidebar-results").classList.add("hidden");
   document.getElementById("sidebar-loading").classList.add("hidden");
   document.getElementById("sidebar-instructions").classList.remove("hidden");
+});
+
+// Redfin layer toggle — wired to the Sources checkbox in the sidebar.
+document.getElementById("toggle-redfin")?.addEventListener("change", (e) => {
+  redfinLayerVisible = e.target.checked;
+  if (redfinLayerVisible) {
+    redfinLayer.addTo(map);
+  } else {
+    map.removeLayer(redfinLayer);
+  }
 });
