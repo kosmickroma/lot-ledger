@@ -45,11 +45,40 @@ const TYPE_LABELS = {
 
 const map = L.map("map", { zoomControl: true }).setView(DALLAS_CENTER, DEFAULT_ZOOM);
 
-L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
+const streetLayer = L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
   attribution: "&copy; OpenStreetMap contributors &copy; CARTO",
   subdomains: "abcd",
   maxZoom: 20,
-}).addTo(map);
+});
+
+const satelliteLayer = L.tileLayer(
+  "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+  {
+    attribution: "Tiles &copy; Esri",
+    maxZoom: 20,
+  }
+);
+
+streetLayer.addTo(map);
+let activeBasemap = "street";
+
+function toggleBasemap() {
+  const btn = document.getElementById("btn-basemap");
+  if (activeBasemap === "street") {
+    map.removeLayer(streetLayer);
+    satelliteLayer.addTo(map);
+    activeBasemap = "satellite";
+    btn.classList.add("active");
+    btn.title = "Switch to street view";
+    return;
+  }
+
+  map.removeLayer(satelliteLayer);
+  streetLayer.addTo(map);
+  activeBasemap = "street";
+  btn.classList.remove("active");
+  btn.title = "Switch to satellite view";
+}
 
 const drawControl = new L.Control.Draw({
   draw: {
@@ -147,6 +176,16 @@ const MapToolbar = L.Control.extend({
     L.DomEvent.on(hoaBtn, "click", (e) => {
       L.DomEvent.preventDefault(e);
       toggleHoaLayer();
+    });
+
+    const basemapBtn = L.DomUtil.create("a", "", container);
+    basemapBtn.id = "btn-basemap";
+    basemapBtn.href = "#";
+    basemapBtn.title = "Switch to satellite view";
+    basemapBtn.textContent = "SAT";
+    L.DomEvent.on(basemapBtn, "click", (e) => {
+      L.DomEvent.preventDefault(e);
+      toggleBasemap();
     });
 
     return container;

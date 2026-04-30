@@ -294,7 +294,7 @@ h1 {
 
 .draw-helper {
   position: absolute;
-  top: 54px;
+  top: 124px;
   left: 14px;
   z-index: 1000;
   background: rgba(17, 19, 25, 0.92);
