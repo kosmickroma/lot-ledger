@@ -42,6 +42,10 @@ class AnalyzeRequest(BaseModel):
     polygon: list[list[float]]
 
 
+class VerificationRequest(BaseModel):
+    verifications: dict[str, str]
+
+
 def _normalize_csv_filename(raw: str | None) -> str:
     if not raw:
         return "parcels.csv"
@@ -193,6 +197,33 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
     }
 
 
+@app.post("/api/job/{job_id}/verification")
+async def save_verification(job_id: str, request: VerificationRequest) -> dict[str, Any]:
+    job = _job_store.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    rows = job.get("rows", [])
+    verifications = request.verifications or {}
+    updates = 0
+
+    for row in rows:
+        account_num = str(row.get("account_num", "") or "").strip()
+        raw_value = str(verifications.get(account_num, "") or "").strip().lower()
+        if raw_value == "yes":
+            normalized = "Yes"
+        elif raw_value == "no":
+            normalized = "No"
+        else:
+            normalized = ""
+
+        if row.get("verified_vacant") != normalized:
+            row["verified_vacant"] = normalized
+            updates += 1
+
+    return {"ok": True, "updated": updates}
+
+
 @app.get("/api/download/{job_id}")
 async def download(job_id: str, filename: str | None = None) -> StreamingResponse:
     job = _job_store.get(job_id)
@@ -236,6 +267,7 @@ async def download(job_id: str, filename: str | None = None) -> StreamingRespons
                 "Latitude",
                 "Longitude",
                 "Google Maps Link",
+                "Verified Vacant",
                 "HOA",
                 "HOA URL",
             ]
@@ -300,6 +332,7 @@ async def download(job_id: str, filename: str | None = None) -> StreamingRespons
                     row.get("lat", "") or "",
                     row.get("lng", "") or "",
                     _google_maps_link(row),
+                    row.get("verified_vacant", "") or "",
                     row.get("hoa_name", "") or "",
                     row.get("hoa_url", "") or "",
                 ]

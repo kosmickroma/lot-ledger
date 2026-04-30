@@ -399,6 +399,7 @@ def build_feature(row: dict[str, Any], prop_type: str, on_redfin: bool) -> dict[
     props = {
         "on_redfin": bool(on_redfin),
         "prop_type": prop_type,
+        "account_num": _clean_text(row.get("account_num")),
         "addr": _clean_text(row.get("property_address")),
         "owner": _clean_text(row.get("owner_name")),
         "land_val": f"${row['land_val']:,.0f}" if _safe_float(row.get("land_val")) is not None else "N/A",
@@ -412,6 +413,7 @@ def build_feature(row: dict[str, Any], prop_type: str, on_redfin: bool) -> dict[
         "school": _clean_text(row.get("isd_desc")) or "N/A",
         "yr_built": str(row.get("yr_built")) if row.get("yr_built") else "N/A",
         "sqft": f"{int(float(row['tot_living_area'])):,}" if _safe_float(row.get("tot_living_area")) not in (None, 0.0) else "N/A",
+        "verified_vacant": _clean_text(row.get("verified_vacant")),
         "lat": lat,
         "lng": lng,
     }

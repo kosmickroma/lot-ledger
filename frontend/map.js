@@ -88,6 +88,7 @@ let drawLayer = L.layerGroup().addTo(map);
 let hoaLayer = null;
 let hoaVisible = false;
 let currentJobId = null;
+const verificationByAccount = new Map();
 
 const HOA_COLOR = "#b8860b";
 
@@ -255,10 +256,25 @@ function getStatusLabel(feature) {
   return "OFF MARKET";
 }
 
+function normalizeVerificationValue(value) {
+  const text = String(value || "").trim().toLowerCase();
+  if (text === "yes") return "Yes";
+  if (text === "no") return "No";
+  return "";
+}
+
+function verificationDisplay(value) {
+  const normalized = normalizeVerificationValue(value);
+  return normalized || "Unverified";
+}
+
 function makePopupHtml(p) {
   const pseudoFeature = { properties: p };
   const statusColor = getColor(pseudoFeature);
   const statusText = getStatusLabel(pseudoFeature);
+  const verifiedVacant = normalizeVerificationValue(
+    verificationByAccount.get(p.account_num) || p.verified_vacant
+  );
   const row = (label, val) => `<tr><td class="popup-label">${label}</td><td class="popup-val">${val || "N/A"}</td></tr>`;
   return `
       <div class="popup">
@@ -277,7 +293,13 @@ function makePopupHtml(p) {
           ${row("School District", p.school)}
           ${row("Year Built", p.yr_built)}
           ${row("Sq Ft", p.sqft && p.sqft !== "N/A" ? p.sqft : "N/A")}
+          ${row("Verified Vacant", verificationDisplay(verifiedVacant))}
         </table>
+        <div class="verify-actions" data-account="${p.account_num || ""}">
+          <button type="button" class="verify-btn${verifiedVacant === "Yes" ? " active" : ""}" data-account="${p.account_num || ""}" data-value="yes">Yes</button>
+          <button type="button" class="verify-btn${verifiedVacant === "No" ? " active" : ""}" data-account="${p.account_num || ""}" data-value="no">No</button>
+          <button type="button" class="verify-btn${verifiedVacant === "" ? " active" : ""}" data-account="${p.account_num || ""}" data-value="">Clear</button>
+        </div>
       </div>`;
 }
 
@@ -416,6 +438,7 @@ function normalizeCsvFilename(rawName) {
 map.on("draw:created", async (e) => {
   drawLayer.clearLayers();
   markerLayer.clearLayers();
+  verificationByAccount.clear();
   document.getElementById("sidebar-instructions").classList.add("hidden");
   document.getElementById("sidebar-results").classList.add("hidden");
   document.getElementById("sidebar-loading").classList.remove("hidden");
@@ -433,6 +456,13 @@ map.on("draw:created", async (e) => {
     if (!resp.ok) throw new Error(`Server error: ${resp.status}`);
     const data = await resp.json();
     currentJobId = data.job_id;
+    data.features.forEach((feature) => {
+      const p = feature.properties || {};
+      if (!p.account_num) return;
+      const normalized = normalizeVerificationValue(p.verified_vacant);
+      verificationByAccount.set(p.account_num, normalized);
+      p.verified_vacant = normalized;
+    });
     document.getElementById("redfin-status").textContent = data.redfin_ok
       ? `${data.counts.active} active listing${data.counts.active !== 1 ? "s" : ""} found`
       : "Active listings unavailable";
@@ -480,19 +510,60 @@ document.addEventListener("keydown", (event) => {
 });
 
 document.getElementById("btn-download").addEventListener("click", () => {
-  if (!currentJobId) return;
-  const suggested = makeDefaultCsvName();
-  const entered = window.prompt("Name this CSV export:", suggested);
-  if (entered === null) return;
-  const filename = normalizeCsvFilename(entered);
-  window.location.href = `/api/download/${currentJobId}?filename=${encodeURIComponent(filename)}`;
+  (async () => {
+    if (!currentJobId) return;
+
+    try {
+      const payload = {};
+      verificationByAccount.forEach((value, accountNum) => {
+        payload[accountNum] = String(value || "").toLowerCase();
+      });
+      await fetch(`/api/job/${currentJobId}/verification`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ verifications: payload }),
+      });
+    } catch (err) {
+      console.error("Unable to persist verification status before export", err);
+    }
+
+    const suggested = makeDefaultCsvName();
+    const entered = window.prompt("Name this CSV export:", suggested);
+    if (entered === null) return;
+    const filename = normalizeCsvFilename(entered);
+    window.location.href = `/api/download/${currentJobId}?filename=${encodeURIComponent(filename)}`;
+  })();
 });
 
 document.getElementById("btn-clear").addEventListener("click", () => {
   markerLayer.clearLayers();
   drawLayer.clearLayers();
   currentJobId = null;
+  verificationByAccount.clear();
   document.getElementById("sidebar-results").classList.add("hidden");
   document.getElementById("sidebar-loading").classList.add("hidden");
   document.getElementById("sidebar-instructions").classList.remove("hidden");
+});
+
+document.addEventListener("click", (event) => {
+  const btn = event.target.closest(".verify-btn");
+  if (!btn) return;
+
+  const accountNum = btn.dataset.account || "";
+  if (!accountNum) return;
+
+  const nextValue = normalizeVerificationValue(btn.dataset.value || "");
+  verificationByAccount.set(accountNum, nextValue);
+
+  const popup = btn.closest(".popup");
+  if (!popup) return;
+
+  popup.querySelectorAll(".verify-btn").forEach((node) => {
+    node.classList.toggle("active", node === btn);
+  });
+
+  const valueCell = popup.querySelector(".popup-table tr:last-child .popup-val");
+  if (valueCell) {
+    valueCell.textContent = verificationDisplay(nextValue);
+  }
 });

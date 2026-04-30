@@ -321,6 +321,34 @@ h1 {
   color: #111;
 }
 
+.verify-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.verify-btn {
+  border: 1px solid #d5d8de;
+  background: #ffffff;
+  color: #3e4653;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 9px;
+  cursor: pointer;
+}
+
+.verify-btn:hover {
+  border-color: #1a5a42;
+  color: #1a5a42;
+}
+
+.verify-btn.active {
+  background: #1a5a42;
+  border-color: #1a5a42;
+  color: #ffffff;
+}
+
 .basemap-btn.active {
   background: #1a5a42;
   color: #fff;
