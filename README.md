@@ -72,37 +72,37 @@ Core flow:
 
 Main app view with polygon analysis, parcel color classification, and sidebar results.
 
-![LotLedger full workflow view](assets/full_shot.png)
+<img src="assets/full_shot.png" alt="LotLedger full workflow view" width="1100">
 
 ### Redfin Price Comparison
 
 Active listing popup showing the Redfin List Price and the dollar/percent delta versus DCAD appraised value.
 
-![Redfin list price versus DCAD value popup](assets/redfin_diff.png)
+<img src="assets/redfin_diff.png" alt="Redfin list price versus DCAD value popup" width="1100">
 
 ### HOA Overlay
 
 HOA boundary polygons displayed on the map for quick association context.
 
-![HOA overlay on map](assets/hoa.png)
+<img src="assets/hoa.png" alt="HOA overlay on map" width="900">
 
 ### Satellite View
 
 Satellite basemap mode for quick roof/lot visual verification.
 
-![Satellite basemap view](assets/sat_view.png)
+<img src="assets/sat_view.png" alt="Satellite basemap view" width="1000">
 
 ### Export Prompt
 
 CSV export naming prompt shown before generating the download.
 
-![Export filename prompt](assets/export_csv.png)
+<img src="assets/export_csv.png" alt="Export filename prompt" width="420">
 
 ### Exported Spreadsheet
 
 Full-screen CSV output review in spreadsheet format.
 
-![CSV spreadsheet output](assets/spreadsheet.png)
+<img src="assets/spreadsheet.png" alt="CSV spreadsheet output" width="1100">
 
 ## Stack
 
