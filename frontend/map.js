@@ -378,6 +378,11 @@ function verificationDisplay(value) {
   return normalized || "Unverified";
 }
 
+function isCondoParcel(properties) {
+  const stateCode = String(properties?.state_code || "").toLowerCase();
+  return stateCode.includes("condominium");
+}
+
 function toggleVerifyMenu() {
   const menu = document.getElementById("verify-brush-menu");
   if (!menu) return;
@@ -461,6 +466,8 @@ function renderFeatures(geojson) {
     const color = getColor(feature);
     const borderColor = getBorderColor(feature);
     if (p.lat == null || p.lng == null) return;
+    const hasPolygonGeometry = feature.geometry?.type === "Polygon";
+    const renderPolygon = hasPolygonGeometry && !isCondoParcel(p);
 
     const applyBrush = () => {
       if (!activeBrush || !p.account_num) return;
@@ -496,7 +503,7 @@ function renderFeatures(geojson) {
     }
 
     let layer;
-    if (feature.geometry?.type === "Polygon") {
+    if (renderPolygon) {
       layer = L.geoJSON(feature, {
         style: {
           color: borderColor,
