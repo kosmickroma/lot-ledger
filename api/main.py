@@ -43,7 +43,8 @@ class AnalyzeRequest(BaseModel):
 
 
 class VerificationRequest(BaseModel):
-    verifications: dict[str, str]
+    verifications: dict[str, str] = {}
+    potential_targets: dict[str, str] = {}
 
 
 def _normalize_csv_filename(raw: str | None) -> str:
@@ -205,6 +206,7 @@ async def save_verification(job_id: str, request: VerificationRequest) -> dict[s
 
     rows = job.get("rows", [])
     verifications = request.verifications or {}
+    potential_targets = request.potential_targets or {}
     updates = 0
 
     for row in rows:
@@ -219,6 +221,12 @@ async def save_verification(job_id: str, request: VerificationRequest) -> dict[s
 
         if row.get("verified_vacant") != normalized:
             row["verified_vacant"] = normalized
+            updates += 1
+
+        potential_raw = str(potential_targets.get(account_num, "") or "").strip().lower()
+        potential_value = "Yes" if potential_raw in {"1", "true", "yes", "y"} else ""
+        if row.get("potential_target") != potential_value:
+            row["potential_target"] = potential_value
             updates += 1
 
     return {"ok": True, "updated": updates}
@@ -268,6 +276,7 @@ async def download(job_id: str, filename: str | None = None) -> StreamingRespons
                 "Longitude",
                 "Google Maps Link",
                 "Verified Vacant",
+                "Potential Target",
                 "HOA",
                 "HOA URL",
             ]
@@ -333,6 +342,7 @@ async def download(job_id: str, filename: str | None = None) -> StreamingRespons
                     row.get("lng", "") or "",
                     _google_maps_link(row),
                     row.get("verified_vacant", "") or "",
+                    row.get("potential_target", "") or "",
                     row.get("hoa_name", "") or "",
                     row.get("hoa_url", "") or "",
                 ]

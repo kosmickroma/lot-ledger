@@ -86,10 +86,14 @@ map.addControl(drawControl);
 let markerLayer = L.layerGroup().addTo(map);
 let drawLayer = L.layerGroup().addTo(map);
 let verificationBadgeLayer = L.layerGroup().addTo(map);
+let targetBadgeLayer = L.layerGroup().addTo(map);
 let hoaLayer = null;
 let hoaVisible = false;
 let currentJobId = null;
 const verificationByAccount = new Map();
+const potentialTargetByAccount = new Map();
+const verificationBadgeMarkers = new Map();
+const targetBadgeMarkers = new Map();
 let activeBrush = null;
 
 const HOA_COLOR = "#b8860b";
@@ -174,11 +178,21 @@ const MapToolbar = L.Control.extend({
     const verifyBtn = L.DomUtil.create("a", "", container);
     verifyBtn.id = "btn-verify-toggle";
     verifyBtn.href = "#";
-    verifyBtn.title = "Verify parcel status";
+    verifyBtn.title = "Verification brushes: Vacant, Not Vacant, Remove";
     verifyBtn.textContent = "✓";
     L.DomEvent.on(verifyBtn, "click", (e) => {
       L.DomEvent.preventDefault(e);
       toggleVerifyMenu();
+    });
+
+    const targetBtn = L.DomUtil.create("a", "", container);
+    targetBtn.id = "btn-target-toggle";
+    targetBtn.href = "#";
+    targetBtn.title = "Target brushes: Interested, Unselect";
+    targetBtn.textContent = "★";
+    L.DomEvent.on(targetBtn, "click", (e) => {
+      L.DomEvent.preventDefault(e);
+      toggleTargetMenu();
     });
 
     return container;
@@ -195,20 +209,55 @@ const VerifyBrushMenu = L.Control.extend({
 
     const vacant = L.DomUtil.create("button", "verify-brush-option", container);
     vacant.type = "button";
-    vacant.dataset.brush = "Yes";
+    vacant.dataset.brush = "verify_yes";
     vacant.textContent = "✓ Vacant";
-    L.DomEvent.on(vacant, "click", () => selectBrush("Yes"));
+    vacant.title = "Mark parcel as verified vacant";
+    L.DomEvent.on(vacant, "click", () => selectBrush("verify_yes"));
 
     const notVacant = L.DomUtil.create("button", "verify-brush-option", container);
     notVacant.type = "button";
-    notVacant.dataset.brush = "No";
+    notVacant.dataset.brush = "verify_no";
     notVacant.textContent = "✗ Not Vacant";
-    L.DomEvent.on(notVacant, "click", () => selectBrush("No"));
+    notVacant.title = "Mark parcel as verified not vacant";
+    L.DomEvent.on(notVacant, "click", () => selectBrush("verify_no"));
+
+    const clearVerify = L.DomUtil.create("button", "verify-brush-option", container);
+    clearVerify.type = "button";
+    clearVerify.dataset.brush = "verify_clear";
+    clearVerify.textContent = "○ Remove Verify";
+    clearVerify.title = "Remove vacant/not-vacant verification";
+    L.DomEvent.on(clearVerify, "click", () => selectBrush("verify_clear"));
 
     return container;
   },
 });
 new VerifyBrushMenu().addTo(map);
+
+const TargetBrushMenu = L.Control.extend({
+  options: { position: "topleft" },
+  onAdd() {
+    const container = L.DomUtil.create("div", "leaflet-bar target-brush-menu hidden");
+    container.id = "target-brush-menu";
+    L.DomEvent.disableClickPropagation(container);
+
+    const interested = L.DomUtil.create("button", "verify-brush-option", container);
+    interested.type = "button";
+    interested.dataset.brush = "target_on";
+    interested.textContent = "★ Interested";
+    interested.title = "Mark parcel as potential target";
+    L.DomEvent.on(interested, "click", () => selectBrush("target_on"));
+
+    const clearTarget = L.DomUtil.create("button", "verify-brush-option", container);
+    clearTarget.type = "button";
+    clearTarget.dataset.brush = "target_off";
+    clearTarget.textContent = "☆ Unselect";
+    clearTarget.title = "Remove potential target mark";
+    L.DomEvent.on(clearTarget, "click", () => selectBrush("target_off"));
+
+    return container;
+  },
+});
+new TargetBrushMenu().addTo(map);
 
 // Google Maps-style basemap switcher — bottom-left pill
 const BasemapSwitcher = L.Control.extend({
@@ -252,6 +301,15 @@ new BasemapSwitcher().addTo(map);
 const appShell = document.querySelector(".app-shell");
 const sidebarToggleBtn = document.getElementById("sidebar-toggle");
 const drawHelper = document.getElementById("draw-helper");
+const brushStatus = document.getElementById("brush-status");
+
+const BRUSH_LABELS = {
+  verify_yes: "Verified Vacant",
+  verify_no: "Verified Not Vacant",
+  verify_clear: "Remove Verification",
+  target_on: "Target: Interested",
+  target_off: "Target: Unselect",
+};
 
 function getPolygonDrawHandler() {
   return drawControl?._toolbars?.draw?._modes?.polygon?.handler || null;
@@ -266,6 +324,22 @@ function isDrawInputTarget(target) {
 function setSidebarCollapsed(collapsed) {
   appShell.classList.toggle("sidebar-collapsed", collapsed);
   sidebarToggleBtn.setAttribute("aria-expanded", String(!collapsed));
+}
+
+function updateBrushStatus(brush) {
+  if (!brushStatus) return;
+  if (!brush) {
+    brushStatus.classList.add("hidden");
+    brushStatus.classList.remove("verify", "target");
+    brushStatus.textContent = "Active Brush: None";
+    return;
+  }
+
+  const label = BRUSH_LABELS[brush] || brush;
+  brushStatus.classList.remove("hidden");
+  brushStatus.classList.toggle("verify", brush.startsWith("verify_"));
+  brushStatus.classList.toggle("target", brush.startsWith("target_"));
+  brushStatus.textContent = `Active Brush: ${label}`;
 }
 
 sidebarToggleBtn.addEventListener("click", () => {
@@ -307,17 +381,39 @@ function verificationDisplay(value) {
 function toggleVerifyMenu() {
   const menu = document.getElementById("verify-brush-menu");
   if (!menu) return;
+  document.getElementById("target-brush-menu")?.classList.add("hidden");
+  menu.classList.toggle("hidden");
+}
+
+function toggleTargetMenu() {
+  const menu = document.getElementById("target-brush-menu");
+  if (!menu) return;
+  document.getElementById("verify-brush-menu")?.classList.add("hidden");
   menu.classList.toggle("hidden");
 }
 
 function selectBrush(brush) {
-  activeBrush = brush === "Yes" || brush === "No" ? brush : null;
-  document.getElementById("btn-verify-toggle")?.classList.toggle("active", activeBrush !== null);
-  const menu = document.getElementById("verify-brush-menu");
-  if (menu) {
-    menu.querySelectorAll(".verify-brush-option").forEach((btn) => {
+  activeBrush = brush || null;
+  const verifyActive = activeBrush && activeBrush.startsWith("verify_");
+  const targetActive = activeBrush && activeBrush.startsWith("target_");
+  document.getElementById("btn-verify-toggle")?.classList.toggle("active", Boolean(verifyActive));
+  document.getElementById("btn-target-toggle")?.classList.toggle("active", Boolean(targetActive));
+  document.getElementById("btn-target-toggle")?.classList.toggle("target-active", Boolean(targetActive));
+  map.getContainer().classList.toggle("brush-active", activeBrush !== null);
+  updateBrushStatus(activeBrush);
+  const verifyMenu = document.getElementById("verify-brush-menu");
+  if (verifyMenu) {
+    verifyMenu.querySelectorAll(".verify-brush-option").forEach((btn) => {
       btn.classList.toggle("active", btn.dataset.brush === activeBrush);
     });
+    verifyMenu.classList.add("hidden");
+  }
+  const targetMenu = document.getElementById("target-brush-menu");
+  if (targetMenu) {
+    targetMenu.querySelectorAll(".verify-brush-option").forEach((btn) => {
+      btn.classList.toggle("active", btn.dataset.brush === activeBrush);
+    });
+    targetMenu.classList.add("hidden");
   }
 }
 
@@ -328,6 +424,7 @@ function makePopupHtml(p) {
   const verifiedVacant = normalizeVerificationValue(
     verificationByAccount.get(p.account_num) || p.verified_vacant
   );
+  const potentialTarget = String(potentialTargetByAccount.get(p.account_num) || p.potential_target || "").trim();
   const row = (label, val) => `<tr><td class="popup-label">${label}</td><td class="popup-val">${val || "N/A"}</td></tr>`;
   return `
       <div class="popup">
@@ -347,6 +444,7 @@ function makePopupHtml(p) {
           ${row("Year Built", p.yr_built)}
           ${row("Sq Ft", p.sqft && p.sqft !== "N/A" ? p.sqft : "N/A")}
           ${row("Verified Vacant", verificationDisplay(verifiedVacant))}
+          ${row("Potential Target", potentialTarget || "No")}
         </table>
       </div>`;
 }
@@ -354,6 +452,9 @@ function makePopupHtml(p) {
 function renderFeatures(geojson) {
   markerLayer.clearLayers();
   verificationBadgeLayer.clearLayers();
+  targetBadgeLayer.clearLayers();
+  verificationBadgeMarkers.clear();
+  targetBadgeMarkers.clear();
   const markers = {};
   geojson.features.forEach((feature) => {
     const p = feature.properties;
@@ -363,14 +464,35 @@ function renderFeatures(geojson) {
 
     const applyBrush = () => {
       if (!activeBrush || !p.account_num) return;
-      verificationByAccount.set(p.account_num, activeBrush);
-      p.verified_vacant = activeBrush;
-      renderVerificationBadge(p.lat, p.lng, activeBrush);
+      if (activeBrush === "verify_yes") {
+        verificationByAccount.set(p.account_num, "Yes");
+        p.verified_vacant = "Yes";
+        renderVerificationBadge(p.account_num, p.lat, p.lng, "Yes");
+      } else if (activeBrush === "verify_no") {
+        verificationByAccount.set(p.account_num, "No");
+        p.verified_vacant = "No";
+        renderVerificationBadge(p.account_num, p.lat, p.lng, "No");
+      } else if (activeBrush === "verify_clear") {
+        verificationByAccount.set(p.account_num, "");
+        p.verified_vacant = "";
+        clearVerificationBadge(p.account_num);
+      } else if (activeBrush === "target_on") {
+        potentialTargetByAccount.set(p.account_num, "Yes");
+        p.potential_target = "Yes";
+        renderTargetBadge(p.account_num, p.lat, p.lng);
+      } else if (activeBrush === "target_off") {
+        potentialTargetByAccount.set(p.account_num, "");
+        p.potential_target = "";
+        clearTargetBadge(p.account_num);
+      }
     };
 
     // Render verification badge if already tagged
     if (p.verified_vacant && p.verified_vacant !== "") {
-      renderVerificationBadge(p.lat, p.lng, p.verified_vacant);
+      renderVerificationBadge(p.account_num, p.lat, p.lng, p.verified_vacant);
+    }
+    if (String(p.potential_target || "").trim().toLowerCase() === "yes") {
+      renderTargetBadge(p.account_num, p.lat, p.lng);
     }
 
     let layer;
@@ -416,13 +538,44 @@ function renderFeatures(geojson) {
   return markers;
 }
 
-function renderVerificationBadge(lat, lng, status) {
+function renderVerificationBadge(accountNum, lat, lng, status) {
+  if (!accountNum) return;
+  clearVerificationBadge(accountNum);
+  if (!status) return;
+
   const badgeIcon = L.divIcon({
     className: `verify-badge verify-badge-${status === "Yes" ? "vacant" : "not-vacant"}`,
     html: status === "Yes" ? "✓" : "✗",
     iconSize: [24, 24],
   });
-  L.marker([lat, lng], { icon: badgeIcon }).addTo(verificationBadgeLayer);
+  const marker = L.marker([lat, lng], { icon: badgeIcon }).addTo(verificationBadgeLayer);
+  verificationBadgeMarkers.set(accountNum, marker);
+}
+
+function clearVerificationBadge(accountNum) {
+  const marker = verificationBadgeMarkers.get(accountNum);
+  if (!marker) return;
+  verificationBadgeLayer.removeLayer(marker);
+  verificationBadgeMarkers.delete(accountNum);
+}
+
+function renderTargetBadge(accountNum, lat, lng) {
+  if (!accountNum) return;
+  clearTargetBadge(accountNum);
+  const badgeIcon = L.divIcon({
+    className: "verify-badge verify-badge-target",
+    html: "★",
+    iconSize: [24, 24],
+  });
+  const marker = L.marker([lat, lng], { icon: badgeIcon }).addTo(targetBadgeLayer);
+  targetBadgeMarkers.set(accountNum, marker);
+}
+
+function clearTargetBadge(accountNum) {
+  const marker = targetBadgeMarkers.get(accountNum);
+  if (!marker) return;
+  targetBadgeLayer.removeLayer(marker);
+  targetBadgeMarkers.delete(accountNum);
 }
 
 function renderSidebar(counts, markers) {
@@ -514,11 +667,18 @@ map.on("draw:created", async (e) => {
   drawLayer.clearLayers();
   markerLayer.clearLayers();
   verificationBadgeLayer.clearLayers();
+  targetBadgeLayer.clearLayers();
   verificationByAccount.clear();
+  potentialTargetByAccount.clear();
+  verificationBadgeMarkers.clear();
+  targetBadgeMarkers.clear();
   activeBrush = null;
   document.getElementById("btn-verify-toggle")?.classList.remove("active");
-  const menu = document.getElementById("verify-brush-menu");
-  if (menu) menu.classList.add("hidden");
+  document.getElementById("btn-target-toggle")?.classList.remove("active", "target-active");
+  map.getContainer().classList.remove("brush-active");
+  updateBrushStatus(null);
+  document.getElementById("verify-brush-menu")?.classList.add("hidden");
+  document.getElementById("target-brush-menu")?.classList.add("hidden");
   document.getElementById("sidebar-instructions").classList.add("hidden");
   document.getElementById("sidebar-results").classList.add("hidden");
   document.getElementById("sidebar-loading").classList.remove("hidden");
@@ -542,6 +702,9 @@ map.on("draw:created", async (e) => {
       const normalized = normalizeVerificationValue(p.verified_vacant);
       verificationByAccount.set(p.account_num, normalized);
       p.verified_vacant = normalized;
+      const potential = String(p.potential_target || "").trim().toLowerCase() === "yes" ? "Yes" : "";
+      potentialTargetByAccount.set(p.account_num, potential);
+      p.potential_target = potential;
     });
     document.getElementById("redfin-status").textContent = data.redfin_ok
       ? `${data.counts.active} active listing${data.counts.active !== 1 ? "s" : ""} found`
@@ -598,10 +761,14 @@ document.getElementById("btn-download").addEventListener("click", () => {
       verificationByAccount.forEach((value, accountNum) => {
         payload[accountNum] = String(value || "").toLowerCase();
       });
+      const targetPayload = {};
+      potentialTargetByAccount.forEach((value, accountNum) => {
+        targetPayload[accountNum] = String(value || "").toLowerCase();
+      });
       await fetch(`/api/job/${currentJobId}/verification`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ verifications: payload }),
+        body: JSON.stringify({ verifications: payload, potential_targets: targetPayload }),
       });
     } catch (err) {
       console.error("Unable to persist verification status before export", err);
@@ -619,12 +786,19 @@ document.getElementById("btn-clear").addEventListener("click", () => {
   markerLayer.clearLayers();
   drawLayer.clearLayers();
   verificationBadgeLayer.clearLayers();
+  targetBadgeLayer.clearLayers();
   currentJobId = null;
   verificationByAccount.clear();
+  potentialTargetByAccount.clear();
+  verificationBadgeMarkers.clear();
+  targetBadgeMarkers.clear();
   activeBrush = null;
   document.getElementById("btn-verify-toggle")?.classList.remove("active");
-  const menu = document.getElementById("verify-brush-menu");
-  if (menu) menu.classList.add("hidden");
+  document.getElementById("btn-target-toggle")?.classList.remove("active", "target-active");
+  map.getContainer().classList.remove("brush-active");
+  updateBrushStatus(null);
+  document.getElementById("verify-brush-menu")?.classList.add("hidden");
+  document.getElementById("target-brush-menu")?.classList.add("hidden");
   document.getElementById("sidebar-results").classList.add("hidden");
   document.getElementById("sidebar-loading").classList.add("hidden");
   document.getElementById("sidebar-instructions").classList.remove("hidden");

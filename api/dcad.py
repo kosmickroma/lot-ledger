@@ -414,6 +414,7 @@ def build_feature(row: dict[str, Any], prop_type: str, on_redfin: bool) -> dict[
         "yr_built": str(row.get("yr_built")) if row.get("yr_built") else "N/A",
         "sqft": f"{int(float(row['tot_living_area'])):,}" if _safe_float(row.get("tot_living_area")) not in (None, 0.0) else "N/A",
         "verified_vacant": _clean_text(row.get("verified_vacant")),
+        "potential_target": _clean_text(row.get("potential_target")),
         "lat": lat,
         "lng": lng,
     }

@@ -1,74 +1,107 @@
 # LotLedger
 
-LotLedger is a Dallas property analysis web app for acquisition teams.
+LotLedger is a Dallas parcel analysis web app for acquisition teams.
 
-Draw an area on the map and get every parcel in that area with:
-- ownership and mailing info
-- DCAD values and lot metrics
-- property classification colors
-- live active listing overlay (best effort)
-- one-click CSV export for spreadsheet workflows
+Core flow:
+1. Draw an area on the map.
+2. Review parcel intelligence and overlays.
+3. Export clean CSV for spreadsheet workflows.
 
-The product goal is speed: turn a manual multi-tab research process into one map action and one export.
+## What It Is
+
+- Internal analyst tool for fast parcel triage.
+- County-data-first platform (DCAD-backed).
+- Map + export workflow, not a consumer home search app.
 
 ## What It Is Not
 
-- Not a consumer home search app
-- Not a CRM
-- Not an automated investment model
+- Not a CRM.
+- Not a consumer listing portal.
+- Not an automated valuation model.
 
-It is an internal team tool for fast parcel triage.
+## Live Feature Set
 
-## How It Works
-
-1. User draws a polygon on the Dallas map.
-2. Backend queries DCAD parcel records from PostGIS in Google Cloud SQL.
-3. Backend pulls Redfin active listing addresses concurrently.
-4. Parcels render by type on the map with popup details.
-5. Sidebar shows off-market SFR rows sorted by land percent.
-6. User exports CSV for Excel analysis.
+- Polygon-based parcel analysis.
+- Exact drawn-boundary filtering.
+- Parcel type color classification.
+- Best-effort active listing overlay.
+- HOA boundaries overlay with HOA URL context.
+- Street/Satellite basemap switcher (with labels on satellite).
+- Verification brushes:
+  - Verify Vacant
+  - Verify Not Vacant
+- CSV export including Verified Vacant, HOA, and HOA URL columns.
 
 ## Color Meaning
 
 - Red: active listing
 - Blue: off-market single family
+- Green: vacant lot
 - Purple: multifamily
-- Green: vacant residential lot
 - Orange: commercial
 - Gray: exempt
 
 ## Stack
 
-- Backend: FastAPI, Python 3.11+
-- Database: Google Cloud SQL (PostgreSQL + PostGIS)
-- DB driver: psycopg2-binary
-- Frontend: vanilla JavaScript, Leaflet, Leaflet.draw
-- Hosting: Render
+### Backend
+- Python 3.11+
+- FastAPI
+- asyncio
+- psycopg2-binary
+
+### Database
+- Google Cloud SQL (PostgreSQL + PostGIS)
+- Spatial functions: ST_Intersects, ST_Within, ST_MakeEnvelope, ST_AsGeoJSON
+- GIST indexes for geometry performance
+
+### Frontend
+- Vanilla JavaScript
+- Leaflet.js
+- Leaflet.draw
+- Custom Leaflet controls for toolbox and basemap switching
+- Custom badge rendering for verification marks
+
+### Hosting
+- Render (service + auto deploy)
+
+## Data Sources
+
+- DCAD appraisal/account/land/residential/exemption exports
+- DCAD parcel geometry shapefile
+- City of Dallas HOA boundaries GeoJSON
+- Redfin listing grid endpoint (best-effort)
 
 ## Project Layout
 
-- api/main.py: API routes, analyze/download flow, in-memory job store
-- api/dcad.py: parcel query, classification, counts, feature build
-- api/redfin.py: async Redfin grid pull
+- api/main.py: API routes, analyze/download, job-scoped data
+- api/dcad.py: parcel query, joins, classification, feature build
+- api/redfin.py: Redfin pull logic
 - api/geo.py: geometry helpers
-- api/config.py: environment + DB pool
-- scripts/build_db.py: one-time and repeatable DCAD loader
+- api/config.py: environment and database pool
+- scripts/build_db.py: DCAD loader/build pipeline
+- scripts/load_hoa.py: HOA boundary loader
 - frontend/index.html: app shell
-- frontend/map.js: map logic, draw flow, sidebar, export trigger
-- frontend/style.css: app styling
+- frontend/map.js: map behavior, tools, verification brushes, export trigger
+- frontend/style.css: styling
+- docs/BRIEFING.md: current-state stakeholder briefing
+- docs/ROADMAP.md: prioritized roadmap
 
 ## Local Setup
 
 1. Create and activate virtual environment.
 2. Install dependencies.
 
+```bash
 pip install -r requirements.txt
+```
 
-3. Create environment file from template.
+3. Create environment file.
 
+```bash
 cp .env.example .env
+```
 
-4. Fill DB values in .env:
+4. Fill required env vars:
 - DB_HOST
 - DB_PORT
 - DB_NAME
@@ -76,73 +109,58 @@ cp .env.example .env
 - DB_PASSWORD
 - PORT
 
-5. Start app.
+5. Start API.
 
+```bash
 uvicorn api.main:app --reload
+```
 
 6. Open:
+- http://localhost:8000
 
-http://localhost:8000
+## Build or Refresh DCAD Database
 
-## Build Or Refresh DCAD Database
-
-Run this when loading fresh county data or after build-script changes:
-
+```bash
 python -m scripts.build_db
+```
 
-The loader uses upserts, so reruns update existing rows instead of duplicating tables.
+The loader uses upserts so reruns update existing records.
+
+## Refresh HOA Boundaries
+
+```bash
+python -m scripts.load_hoa
+```
 
 ## Health Endpoints
 
 - /health
 - /health/db
 
-## CSV Export
+## CSV Export Notes
 
-- Export is generated on demand from analyzed rows.
-- File is downloaded through the browser to the user machine.
-- User can name the file at export time.
+- Generated on demand from the latest analysis job.
+- Downloaded in-browser.
+- Filename is user-editable at export time.
 
-## Deployment
+## Operational Notes
 
-Configured for Render via render.yaml.
-
-Live URL:
-https://lot-ledger.onrender.com
-
-## Known Operational Notes
-
-- Redfin overlay is best effort and can be slower than DCAD parcel response.
+- Redfin overlay can be unavailable; core parcel analysis still works.
 - First request after Render idle can be slower.
-- County data quality has edge cases; map coverage depends on centroid availability.
+- County data can have lag/parity edge cases (for example parcel split behavior).
 
-## External Data Sources
+## Troubleshooting
 
-### HOA Boundaries (City of Dallas)
+If map is empty:
+1. Check /health
+2. Check /health/db
+3. Verify env vars
 
-GeoJSON API:
-https://services2.arcgis.com/rwnOSbfKSwyTBcwN/arcgis/rest/services/HomeownerAssociations/FeatureServer/0/query?outFields=*&where=1%3D1&f=geojson
+If parcel geometry looks wrong:
+1. Confirm latest build completed
+2. Verify source PARCEL_GEOM files
+3. Rebuild database
 
-- 177 confirmed+unconfirmed HOA polygons covering Dallas
-- Fields: ASSO_NAME (HOA name), Asso_WEB (HOA website URL), Status (Confirmed / UnConfirmed)
-- No HOA fees data exists in any public source; fees require each HOA's own documentation
-- Source: City of Dallas GIS open data portal (egisdata-dallasgis.hub.arcgis.com)
-- To refresh: re-run the HOA loader script against this same URL; the city updates boundaries periodically
-
-Planned integration: load into hoa_boundaries PostGIS table, spatial join at query time,
-add HOA Name and HOA Website columns to CSV export.
-
-## Quick Troubleshooting
-
-If map coverage looks off:
-- Confirm build completed successfully.
-- Check centroid coverage in SQL.
-- Verify PARCEL_GEOM source files are complete and current.
-
-If app is up but map is empty:
-- Check /health and /health/db.
-- Verify DB env vars in Render and local .env.
-
-If CSV looks wrong:
-- Run a known polygon and compare row-level output with reference POC.
-- Confirm MLS status and land percent values on sample rows.
+If export looks wrong:
+1. Re-run a known test polygon
+2. Spot-check rows against source records
