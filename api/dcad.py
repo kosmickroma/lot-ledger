@@ -17,7 +17,7 @@ from typing import Any
 import pandas as pd
 
 from api.config import get_conn, release_conn
-from api.geo import polygon_bbox
+from api.geo import point_in_polygon, polygon_bbox
 
 
 DIVISION_CODES = ["RES", "COM"]
@@ -249,7 +249,7 @@ def _fetch_hoa_lookup(parcels: list[dict[str, Any]]) -> dict[str, dict[str, str]
 
 def query_parcels(polygon: list[list[float]]) -> ParcelQueryResult:
     """
-    Query candidate parcels by bbox (POC parity behavior).
+    Query candidate parcels by bbox, then apply exact polygon filtering.
 
     Returns merged parcel rows along with the exempt account-number set.
     """
@@ -260,6 +260,8 @@ def query_parcels(polygon: list[list[float]]) -> ParcelQueryResult:
     for row in candidate_rows:
         lat, lng = _extract_centroid(row.get("centroid"))
         if lat is None or lng is None:
+            continue
+        if not point_in_polygon(lat, lng, polygon):
             continue
         row["lat"] = lat
         row["lng"] = lng
