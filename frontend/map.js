@@ -66,7 +66,93 @@ map.addControl(drawControl);
 
 let markerLayer = L.layerGroup().addTo(map);
 let drawLayer = L.layerGroup().addTo(map);
+let hoaLayer = null;
+let hoaVisible = false;
 let currentJobId = null;
+
+const HOA_COLOR = "#b8860b";
+
+async function toggleHoaLayer() {
+  const btn = document.getElementById("btn-hoa-toggle");
+  if (hoaVisible && hoaLayer) {
+    map.removeLayer(hoaLayer);
+    hoaVisible = false;
+    btn.classList.remove("active");
+    return;
+  }
+  if (hoaLayer) {
+    hoaLayer.addTo(map);
+    hoaVisible = true;
+    btn.classList.add("active");
+    return;
+  }
+  // First load — fetch from API
+  btn.textContent = "Loading...";
+  try {
+    const res = await fetch("/api/hoa");
+    const geojson = await res.json();
+    hoaLayer = L.geoJSON(geojson, {
+      style: {
+        color: HOA_COLOR,
+        weight: 2,
+        fillColor: HOA_COLOR,
+        fillOpacity: 0.08,
+        dashArray: "5 4",
+      },
+      onEachFeature(feature, layer) {
+        const p = feature.properties;
+        const urlLine = p.url ? `<br><a href="http://${p.url}" target="_blank" rel="noopener noreferrer">${p.url}</a>` : "";
+        layer.bindTooltip(`<strong>${p.name}</strong>${urlLine}`, {
+          sticky: true,
+          opacity: 0.95,
+        });
+      },
+    }).addTo(map);
+    hoaVisible = true;
+    btn.textContent = "HOA";
+    btn.classList.add("active");
+  } catch (e) {
+    btn.textContent = "HOA";
+    console.error("HOA layer load failed", e);
+  }
+}
+
+const MapToolbar = L.Control.extend({
+  options: { position: "topleft" },
+  onAdd() {
+    const container = L.DomUtil.create("div", "leaflet-bar map-toolbar");
+    L.DomEvent.disableClickPropagation(container);
+
+    const drawBtn = L.DomUtil.create("a", "", container);
+    drawBtn.id = "btn-draw";
+    drawBtn.href = "#";
+    drawBtn.title = "Draw area to analyze";
+    drawBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="16 3 21 8 8 21 3 21 3 16 16 3"></polygon></svg>';
+    L.DomEvent.on(drawBtn, "click", (e) => {
+      L.DomEvent.preventDefault(e);
+      const handler = getPolygonDrawHandler();
+      if (!handler) return;
+      if (handler.enabled()) {
+        handler.disable();
+      } else {
+        handler.enable();
+      }
+    });
+
+    const hoaBtn = L.DomUtil.create("a", "", container);
+    hoaBtn.id = "btn-hoa-toggle";
+    hoaBtn.href = "#";
+    hoaBtn.title = "Toggle HOA zone boundaries";
+    hoaBtn.textContent = "HOA";
+    L.DomEvent.on(hoaBtn, "click", (e) => {
+      L.DomEvent.preventDefault(e);
+      toggleHoaLayer();
+    });
+
+    return container;
+  },
+});
+new MapToolbar().addTo(map);
 const appShell = document.querySelector(".app-shell");
 const sidebarToggleBtn = document.getElementById("sidebar-toggle");
 const drawHelper = document.getElementById("draw-helper");
@@ -302,10 +388,12 @@ map.on("draw:created", async (e) => {
 
 map.on("draw:drawstart", () => {
   drawHelper.classList.remove("hidden");
+  document.getElementById("btn-draw")?.classList.add("active");
 });
 
 map.on("draw:drawstop", () => {
   drawHelper.classList.add("hidden");
+  document.getElementById("btn-draw")?.classList.remove("active");
 });
 
 map.on("contextmenu", () => {

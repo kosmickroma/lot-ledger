@@ -116,6 +116,22 @@ https://lot-ledger.onrender.com
 - First request after Render idle can be slower.
 - County data quality has edge cases; map coverage depends on centroid availability.
 
+## External Data Sources
+
+### HOA Boundaries (City of Dallas)
+
+GeoJSON API:
+https://services2.arcgis.com/rwnOSbfKSwyTBcwN/arcgis/rest/services/HomeownerAssociations/FeatureServer/0/query?outFields=*&where=1%3D1&f=geojson
+
+- 177 confirmed+unconfirmed HOA polygons covering Dallas
+- Fields: ASSO_NAME (HOA name), Asso_WEB (HOA website URL), Status (Confirmed / UnConfirmed)
+- No HOA fees data exists in any public source; fees require each HOA's own documentation
+- Source: City of Dallas GIS open data portal (egisdata-dallasgis.hub.arcgis.com)
+- To refresh: re-run the HOA loader script against this same URL; the city updates boundaries periodically
+
+Planned integration: load into hoa_boundaries PostGIS table, spatial join at query time,
+add HOA Name and HOA Website columns to CSV export.
+
 ## Quick Troubleshooting
 
 If map coverage looks off:

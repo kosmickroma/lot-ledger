@@ -195,6 +195,58 @@ def _fetch_exempt_accounts(account_nums: list[str]) -> set[str]:
         release_conn(conn)
 
 
+def _fetch_hoa_lookup(parcels: list[dict[str, Any]]) -> dict[str, dict[str, str]]:
+    """
+    Batch spatial join: returns {account_num: {hoa_name, hoa_url}} for any
+    parcel centroid that falls inside an HOA boundary polygon.
+    Returns an empty dict gracefully if the hoa_boundaries table does not exist.
+    """
+    candidates = [
+        (r["account_num"], r["lng"], r["lat"])
+        for r in parcels
+        if r.get("lat") is not None and r.get("lng") is not None and r.get("account_num")
+    ]
+    if not candidates:
+        return {}
+
+    account_nums = [c[0] for c in candidates]
+    lngs = [c[1] for c in candidates]
+    lats = [c[2] for c in candidates]
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT ON (p.account_num)
+                       p.account_num,
+                       h.asso_name,
+                       h.asso_web
+                FROM (
+                    SELECT unnest(%s::varchar[]) AS account_num,
+                           unnest(%s::float8[])  AS lng,
+                           unnest(%s::float8[])  AS lat
+                ) p
+                LEFT JOIN hoa_boundaries h
+                       ON ST_Within(
+                              ST_SetSRID(ST_MakePoint(p.lng, p.lat), 4326),
+                              h.geom
+                          )
+                WHERE h.objectid IS NOT NULL
+                """,
+                (account_nums, lngs, lats),
+            )
+            return {
+                row[0]: {"hoa_name": row[1] or "", "hoa_url": row[2] or ""}
+                for row in cur.fetchall()
+            }
+    except Exception:
+        # Table may not exist yet (load_hoa.py not run); degrade gracefully.
+        return {}
+    finally:
+        release_conn(conn)
+
+
 def query_parcels(polygon: list[list[float]]) -> ParcelQueryResult:
     """
     Query candidate parcels by bbox (POC parity behavior).
@@ -292,8 +344,17 @@ def query_parcels(polygon: list[list[float]]) -> ParcelQueryResult:
                 "area_uom": _clean_text(land_detail.get("area_uom")),
                 "state_code": SPTD_LABELS.get(sptd_code, sptd_code),
                 "land_pct": round((land_val / tot_val) * 100, 1) if land_val is not None and tot_val not in (None, 0) else None,
+                "hoa_name": "",
+                "hoa_url": "",
             }
         )
+
+    hoa_lookup = _fetch_hoa_lookup(merged_rows)
+    for row in merged_rows:
+        hoa = hoa_lookup.get(row["account_num"])
+        if hoa:
+            row["hoa_name"] = hoa["hoa_name"]
+            row["hoa_url"] = hoa["hoa_url"]
 
     return ParcelQueryResult(parcels=merged_rows, exempt_accounts=exempt_accounts)
 

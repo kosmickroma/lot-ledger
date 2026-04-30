@@ -261,6 +261,37 @@ h1 {
   transform: translateY(-50%) rotateY(180deg);
 }
 
+/* Hide Leaflet.draw's default toolbar — replaced by our custom MapToolbar control */
+.leaflet-draw {
+  display: none;
+}
+
+.map-toolbar a {
+  width: 34px !important;
+  height: 34px !important;
+  display: flex !important;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  color: #333 !important;
+  text-decoration: none !important;
+  background: #fff;
+  border-bottom: 1px solid #ccc;
+  transition: background 0.15s, color 0.15s;
+}
+.map-toolbar a:last-child {
+  border-bottom: none;
+}
+.map-toolbar a:hover {
+  background: #f0f0f0;
+  color: #111 !important;
+}
+.map-toolbar a.active {
+  background: #1a5a42;
+  color: #fff !important;
+}
+
 .draw-helper {
   position: absolute;
   top: 54px;

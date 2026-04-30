@@ -91,6 +91,41 @@ async def health_check() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/api/hoa")
+async def hoa_boundaries() -> dict:
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT objectid, asso_name, asso_web, status,
+                       ST_AsGeoJSON(geom)::json AS geometry
+                FROM hoa_boundaries
+                ORDER BY asso_name
+                """
+            )
+            cols = [desc[0] for desc in cur.description]
+            rows = [dict(zip(cols, row)) for row in cur.fetchall()]
+    finally:
+        release_conn(conn)
+
+    features = []
+    for row in rows:
+        geom = row.pop("geometry", None)
+        if geom is None:
+            continue
+        features.append({
+            "type": "Feature",
+            "geometry": geom,
+            "properties": {
+                "name": row.get("asso_name") or "",
+                "url": row.get("asso_web") or "",
+                "status": row.get("status") or "",
+            },
+        })
+    return {"type": "FeatureCollection", "features": features}
+
+
 @app.get("/health/db")
 async def health_db_check() -> dict[str, str]:
     conn = None
@@ -201,6 +236,8 @@ async def download(job_id: str, filename: str | None = None) -> StreamingRespons
                 "Latitude",
                 "Longitude",
                 "Google Maps Link",
+                "HOA",
+                "HOA URL",
             ]
         )
         buffer.seek(0)
@@ -263,6 +300,8 @@ async def download(job_id: str, filename: str | None = None) -> StreamingRespons
                     row.get("lat", "") or "",
                     row.get("lng", "") or "",
                     _google_maps_link(row),
+                    row.get("hoa_name", "") or "",
+                    row.get("hoa_url", "") or "",
                 ]
             )
             buffer.seek(0)
