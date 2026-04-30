@@ -25,6 +25,75 @@ DEFAULT_CELL_SIZE = 0.003
 DEFAULT_TIMEOUT = 20.0
 DEFAULT_CONCURRENCY = 20
 
+# USPS suffix abbreviation table — maps abbreviated tokens to canonical full forms.
+# Applied to every address token so e.g. "MEADOW CRST" expands to "MEADOW CREST".
+_SUFFIX_MAP: dict[str, str] = {
+    "ALY": "ALLEY",
+    "AVE": "AVENUE",
+    "BND": "BEND",
+    "BLVD": "BOULEVARD",
+    "CIR": "CIRCLE",
+    "CMN": "COMMON",
+    "CRES": "CRESCENT",
+    "CRST": "CREST",
+    "CT": "COURT",
+    "CV": "COVE",
+    "DR": "DRIVE",
+    "ESTS": "ESTATES",
+    "EXPY": "EXPRESSWAY",
+    "FLDS": "FIELDS",
+    "FWY": "FREEWAY",
+    "GLN": "GLEN",
+    "GRV": "GROVE",
+    "HOLW": "HOLLOW",
+    "HTS": "HEIGHTS",
+    "HWY": "HIGHWAY",
+    "KNL": "KNOLL",
+    "KNLS": "KNOLLS",
+    "LN": "LANE",
+    "MDW": "MEADOW",
+    "MDWS": "MEADOWS",
+    "MNR": "MANOR",
+    "PKWY": "PARKWAY",
+    "PL": "PLACE",
+    "RD": "ROAD",
+    "RDG": "RIDGE",
+    "SQ": "SQUARE",
+    "ST": "STREET",
+    "TER": "TERRACE",
+    "TERR": "TERRACE",
+    "TRL": "TRAIL",
+    "VLY": "VALLEY",
+    "VW": "VIEW",
+    "XING": "CROSSING",
+}
+
+# After expanding abbreviations, strip the trailing token when it is a pure
+# transport suffix (DRIVE, LANE, etc.) so that addresses like "MEADOW CREST DR"
+# (DCAD) and "MEADOW CRST" (Redfin, no trailing type) resolve to the same key.
+_STRIP_SUFFIXES: frozenset[str] = frozenset({
+    "ALLEY", "AVENUE", "BOULEVARD", "CIRCLE", "COMMON", "COURT", "COVE",
+    "CROSSING", "DRIVE", "EXPRESSWAY", "FREEWAY", "HIGHWAY", "LANE",
+    "PARKWAY", "PLACE", "ROAD", "SQUARE", "STREET", "TERRACE", "TRAIL", "WAY",
+})
+
+
+def normalize_addr_key(raw: str) -> str:
+    """Normalize a property address for cross-source (DCAD ↔ Redfin) matching.
+
+    Steps: uppercase → strip unit suffix (#N) → expand each token via the USPS
+    abbreviation table → drop trailing transport-type token (DRIVE, LANE …) so
+    that "6006 MEADOW CREST DR" and "6006 MEADOW CRST" both resolve to the
+    same key: "6006 MEADOW CREST".
+    """
+    text = str(raw or "").upper().strip().split("#")[0].strip()
+    if not text:
+        return ""
+    tokens = [_SUFFIX_MAP.get(t, t) for t in text.split()]
+    if tokens and tokens[-1] in _STRIP_SUFFIXES:
+        tokens = tokens[:-1]
+    return " ".join(tokens)
+
 
 def _to_int(val: Any) -> int | None:
     """Convert a CSV value to int, returning None for blanks or non-numeric literals."""
@@ -69,7 +138,7 @@ def _normalize_addresses(df: pd.DataFrame) -> dict[str, dict]:
         raw_addr = str(row.get(address_col) or "").strip()
         if not raw_addr or raw_addr.upper() in ("NAN", ""):
             continue
-        normalized = raw_addr.upper().split("#")[0].strip()
+        normalized = normalize_addr_key(raw_addr)
         if not normalized:
             continue
         result[normalized] = {

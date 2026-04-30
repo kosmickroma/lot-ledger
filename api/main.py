@@ -29,7 +29,7 @@ from pydantic import BaseModel
 from api.config import get_conn, get_settings, release_conn
 from api.dcad import build_feature, classify_parcel, query_parcels, summarize_counts
 from api.geo import polygon_bbox
-from api.redfin import pull_grid
+from api.redfin import normalize_addr_key, pull_grid
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -85,10 +85,6 @@ def _google_maps_link(row: dict[str, Any]) -> str:
     query = query.replace("++", "+")
     return f"https://maps.google.com/?q={query}"
 
-
-def _normalize_addr_key(raw: str) -> str:
-    """Normalize a property address for Redfin dict lookup (uppercase, no unit suffix)."""
-    return str(raw or "").upper().strip().split("#")[0].strip()
 
 # Validate required runtime settings at startup.
 get_settings()
@@ -179,7 +175,7 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
         parcel_key = str(row.get("parcel_key", "") or "")
         account_num = str(row.get("account_num", "") or "")
         direct_match = parcel_key == account_num if parcel_key else True
-        addr_key = _normalize_addr_key(str(row.get("property_address", "") or ""))
+        addr_key = normalize_addr_key(str(row.get("property_address", "") or ""))
         on_redfin = addr_key in redfin_data and direct_match
         redfin_listing = redfin_data.get(addr_key) if on_redfin else None
         prop_type = classify_parcel(row, exempt_set)
@@ -299,7 +295,7 @@ async def download(job_id: str, filename: str | None = None) -> StreamingRespons
             parcel_key = str(row.get("parcel_key", "") or "")
             account_num = str(row.get("account_num", "") or "")
             direct_match = parcel_key == account_num if parcel_key else True
-            addr_key = _normalize_addr_key(str(row.get("property_address", "") or ""))
+            addr_key = normalize_addr_key(str(row.get("property_address", "") or ""))
             on_redfin = addr_key in redfin_data and direct_match
             redfin_listing = redfin_data.get(addr_key) if on_redfin else None
 
@@ -334,7 +330,7 @@ async def download(job_id: str, filename: str | None = None) -> StreamingRespons
                     round(_safe_float(land_val), 0) if _safe_float(land_val) is not None else "",
                     round(_safe_float(impr_val), 0) if _safe_float(impr_val) is not None else "",
                     round(_safe_float(tot_val), 0) if _safe_float(tot_val) is not None else "",
-                    f"${redfin_listing['price']:,}" if redfin_listing and redfin_listing.get("price") else "",
+                    redfin_listing["price"] if redfin_listing and redfin_listing.get("price") else "",
                     round(_safe_float(land_pct), 1) if _safe_float(land_pct) is not None else "",
                     int(yr_built) if _safe_float(yr_built) not in (None, 0.0) else "",
                     int(_safe_float(living_area)) if _safe_float(living_area) not in (None, 0.0) else "",
