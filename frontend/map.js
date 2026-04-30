@@ -178,7 +178,7 @@ const MapToolbar = L.Control.extend({
     const verifyBtn = L.DomUtil.create("a", "", container);
     verifyBtn.id = "btn-verify-toggle";
     verifyBtn.href = "#";
-    verifyBtn.title = "Verification brushes: Vacant, Not Vacant, Remove";
+    verifyBtn.title = "Verification tools: Vacant, Not Vacant, Remove";
     verifyBtn.textContent = "✓";
     L.DomEvent.on(verifyBtn, "click", (e) => {
       L.DomEvent.preventDefault(e);
@@ -188,7 +188,7 @@ const MapToolbar = L.Control.extend({
     const targetBtn = L.DomUtil.create("a", "", container);
     targetBtn.id = "btn-target-toggle";
     targetBtn.href = "#";
-    targetBtn.title = "Target brushes: Interested, Unselect";
+    targetBtn.title = "Target tools: Interested, Unselect";
     targetBtn.textContent = "★";
     L.DomEvent.on(targetBtn, "click", (e) => {
       L.DomEvent.preventDefault(e);
@@ -331,7 +331,7 @@ function updateBrushStatus(brush) {
   if (!brush) {
     brushStatus.classList.add("hidden");
     brushStatus.classList.remove("verify", "target");
-    brushStatus.textContent = "Active Brush: None";
+    brushStatus.textContent = "Active Tool: None";
     return;
   }
 
@@ -339,7 +339,7 @@ function updateBrushStatus(brush) {
   brushStatus.classList.remove("hidden");
   brushStatus.classList.toggle("verify", brush.startsWith("verify_"));
   brushStatus.classList.toggle("target", brush.startsWith("target_"));
-  brushStatus.textContent = `Active Brush: ${label}`;
+  brushStatus.textContent = `Active Tool: ${label}`;
 }
 
 sidebarToggleBtn.addEventListener("click", () => {

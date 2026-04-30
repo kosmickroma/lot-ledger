@@ -27,10 +27,16 @@ Core flow:
 - Best-effort active listing overlay.
 - HOA boundaries overlay with HOA URL context.
 - Street/Satellite basemap switcher (with labels on satellite).
-- Verification brushes:
+- Verification tools:
   - Verify Vacant
   - Verify Not Vacant
-- CSV export including Verified Vacant, HOA, and HOA URL columns.
+  - Remove Verify
+- Target tools:
+  - Interested
+  - Unselect
+- Active Tool status chip in sidebar.
+- Condo rendering safeguard (condo records render as points to avoid stacked polygon overfill).
+- CSV export including Verified Vacant, Potential Target, HOA, and HOA URL columns.
 
 ## Color Meaning
 
@@ -59,7 +65,7 @@ Core flow:
 - Leaflet.js
 - Leaflet.draw
 - Custom Leaflet controls for toolbox and basemap switching
-- Custom badge rendering for verification marks
+- Custom badge rendering for verification and target marks
 
 ### Hosting
 - Render (service + auto deploy)
@@ -142,12 +148,18 @@ python -m scripts.load_hoa
 - Generated on demand from the latest analysis job.
 - Downloaded in-browser.
 - Filename is user-editable at export time.
+- Analyst tags are included:
+  - Verified Vacant
+  - Potential Target
 
 ## Operational Notes
 
 - Redfin overlay can be unavailable; core parcel analysis still works.
 - First request after Render idle can be slower.
 - County data can have lag/parity edge cases (for example parcel split behavior).
+- Satellite imagery freshness can vary tile-by-tile.
+  - In Dallas, imagery is often recent but not guaranteed current everywhere.
+  - Treat imagery-only conclusions as medium confidence unless capture date is verified for that parcel.
 
 ## Troubleshooting
 
