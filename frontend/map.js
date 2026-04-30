@@ -383,6 +383,15 @@ function isCondoParcel(properties) {
   return stateCode.includes("condominium");
 }
 
+function geometryKey(geometry) {
+  if (!geometry) return "";
+  try {
+    return JSON.stringify(geometry);
+  } catch {
+    return "";
+  }
+}
+
 function toggleVerifyMenu() {
   const menu = document.getElementById("verify-brush-menu");
   if (!menu) return;
@@ -460,6 +469,7 @@ function renderFeatures(geojson) {
   targetBadgeLayer.clearLayers();
   verificationBadgeMarkers.clear();
   targetBadgeMarkers.clear();
+  const condoOutlineSeen = new Set();
   const markers = {};
   geojson.features.forEach((feature) => {
     const p = feature.properties;
@@ -467,7 +477,13 @@ function renderFeatures(geojson) {
     const borderColor = getBorderColor(feature);
     if (p.lat == null || p.lng == null) return;
     const hasPolygonGeometry = feature.geometry?.type === "Polygon";
-    const renderPolygon = hasPolygonGeometry && !isCondoParcel(p);
+    const isCondo = isCondoParcel(p);
+    const renderPolygon = hasPolygonGeometry && !isCondo;
+    const condoKey = isCondo && hasPolygonGeometry ? geometryKey(feature.geometry) : "";
+    const renderCondoOutline = Boolean(condoKey) && !condoOutlineSeen.has(condoKey);
+    if (renderCondoOutline) {
+      condoOutlineSeen.add(condoKey);
+    }
 
     const applyBrush = () => {
       if (!activeBrush || !p.account_num) return;
@@ -503,6 +519,18 @@ function renderFeatures(geojson) {
     }
 
     let layer;
+    if (renderCondoOutline) {
+      L.geoJSON(feature, {
+        style: {
+          color: borderColor,
+          fill: false,
+          weight: 1.2,
+          opacity: 0.75,
+        },
+        interactive: false,
+      }).addTo(markerLayer);
+    }
+
     if (renderPolygon) {
       layer = L.geoJSON(feature, {
         style: {
