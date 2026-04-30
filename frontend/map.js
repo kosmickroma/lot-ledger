@@ -94,6 +94,8 @@ let hoaLayer = null;
 let hoaVisible = false;
 let currentJobId = null;
 let lastPolygon = null;
+let lastAnalysisGeojson = null;
+let lastAnalysisCounts = null;
 const verificationByAccount = new Map();
 const potentialTargetByAccount = new Map();
 const verificationBadgeMarkers = new Map();
@@ -351,18 +353,22 @@ sidebarToggleBtn.addEventListener("click", () => {
   setSidebarCollapsed(!collapsed);
 });
 
+function isRedfinVisualActive(feature) {
+  return Boolean(feature?.properties?.on_redfin && redfinLayerVisible);
+}
+
 function getColor(feature) {
-  if (feature.properties.on_redfin) return COLORS.active;
+  if (isRedfinVisualActive(feature)) return COLORS.active;
   return COLORS[feature.properties.prop_type] || COLORS.exempt;
 }
 
 function getBorderColor(feature) {
-  if (feature.properties.on_redfin) return BORDER_COLORS.active;
+  if (isRedfinVisualActive(feature)) return BORDER_COLORS.active;
   return BORDER_COLORS[feature.properties.prop_type] || BORDER_COLORS.exempt;
 }
 
 function getStatusLabel(feature) {
-  if (feature.properties.on_redfin) return "ACTIVE LISTING";
+  if (isRedfinVisualActive(feature)) return "ACTIVE LISTING";
   if (feature.properties.prop_type === "multifamily") return "MULTIFAMILY";
   if (feature.properties.prop_type === "vacant") return "VACANT LOT";
   if (feature.properties.prop_type === "commercial") return "COMMERCIAL";
@@ -546,9 +552,9 @@ function renderFeatures(geojson) {
       renderTargetBadge(p.account_num, p.lat, p.lng);
     }
 
-    // Polygon outlines always stay in markerLayer (persist on toggle off).
-    // Circle markers for Redfin go to redfinLayer (disappear on toggle off).
-    const circleLayer = p.on_redfin ? redfinLayer : markerLayer;
+    // Polygon outlines always stay in markerLayer. Redfin centroid markers are
+    // shown on redfinLayer only when the source toggle is enabled.
+    const circleLayer = p.on_redfin && redfinLayerVisible ? redfinLayer : markerLayer;
 
     let layer;
     if (renderCondoOutline) {
@@ -836,12 +842,17 @@ map.on("draw:created", async (e) => {
     document.getElementById("redfin-status").textContent = data.redfin_ok
       ? `${data.counts.active} active listing${data.counts.active !== 1 ? "s" : ""} found`
       : "Active listings unavailable";
-    // Show source toggles and reset Redfin checkbox to checked state.
+    // Only show source toggles when Redfin data actually came back.
     const layerToggles = document.getElementById("layer-toggles");
-    if (layerToggles) layerToggles.classList.remove("hidden");
+    if (layerToggles) layerToggles.classList.toggle("hidden", !data.redfin_ok);
     const toggleRedfin = document.getElementById("toggle-redfin");
     if (toggleRedfin) toggleRedfin.checked = true;
-    if (!redfinLayerVisible) { redfinLayer.addTo(map); redfinLayerVisible = true; }
+    if (!redfinLayerVisible) {
+      redfinLayer.addTo(map);
+      redfinLayerVisible = true;
+    }
+    lastAnalysisGeojson = data;
+    lastAnalysisCounts = data.counts;
     const markers = renderFeatures(data);
     renderSidebar(data.counts, markers);
   } catch (err) {
@@ -911,6 +922,8 @@ document.getElementById("btn-clear").addEventListener("click", () => {
   targetBadgeLayer.clearLayers();
   currentJobId = null;
   lastPolygon = null;
+  lastAnalysisGeojson = null;
+  lastAnalysisCounts = null;
   verificationByAccount.clear();
   potentialTargetByAccount.clear();
   verificationBadgeMarkers.clear();
@@ -928,12 +941,20 @@ document.getElementById("btn-clear").addEventListener("click", () => {
   document.getElementById("sidebar-instructions").classList.remove("hidden");
 });
 
-// Redfin layer toggle — wired to the Sources checkbox in the sidebar.
+// Redfin source toggle: hides/shows Redfin-specific visual styling and markers.
 document.getElementById("toggle-redfin")?.addEventListener("change", (e) => {
   redfinLayerVisible = e.target.checked;
   if (redfinLayerVisible) {
     redfinLayer.addTo(map);
   } else {
     map.removeLayer(redfinLayer);
+  }
+
+  // Re-render so active listings fall back to DCAD default styling when hidden.
+  if (lastAnalysisGeojson) {
+    const markers = renderFeatures(lastAnalysisGeojson);
+    if (lastAnalysisCounts) {
+      renderSidebar(lastAnalysisCounts, markers);
+    }
   }
 });
