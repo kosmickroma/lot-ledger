@@ -1,11 +1,12 @@
 # LotLedger
 
-LotLedger is a Dallas parcel analysis web app for acquisition teams.
+LotLedger is a Dallas parcel intelligence web app for acquisition teams.
 
 Core flow:
-1. Draw an area on the map.
-2. Review parcel intelligence and overlays.
-3. Export clean CSV for spreadsheet workflows.
+1. Draw a polygon on the map.
+2. Review parcel classifications, active listing overlay, and HOA boundaries.
+3. Tag parcels with verification and target marks.
+4. Export a clean, analyst-ready CSV.
 
 ## What It Is
 
@@ -21,22 +22,40 @@ Core flow:
 
 ## Live Feature Set
 
-- Polygon-based parcel analysis.
-- Exact drawn-boundary filtering.
-- Parcel type color classification.
-- Best-effort active listing overlay.
-- HOA boundaries overlay with HOA URL context.
-- Street/Satellite basemap switcher (with labels on satellite).
-- Verification tools:
-  - Verify Vacant
-  - Verify Not Vacant
-  - Remove Verify
-- Target tools:
-  - Interested
-  - Unselect
-- Active Tool status chip in sidebar.
-- Condo rendering safeguard (condo records render as points to avoid stacked polygon overfill).
-- CSV export including Verified Vacant, Potential Target, HOA, and HOA URL columns.
+**Parcel analysis**
+- Polygon-based analysis — draw any shape, get everything inside.
+- Exact drawn-boundary filtering (ray-cast point-in-polygon, not just bbox).
+- Parcel type color classification (see Color Meaning below).
+- Sidebar shortlist of off-market SFR sorted by land % of total value.
+
+**Redfin active listing overlay**
+- Async grid-cell pull from Redfin covering the drawn polygon bbox.
+- Active parcels highlighted red with circle centroid markers.
+- Popup shows Redfin List Price (linked to listing) and delta vs DCAD appraised value.
+- Delta line is color-coded green (listing above DCAD) or red (below).
+- Source toggle in sidebar — uncheck Redfin Listings to hide the overlay; DCAD parcel outlines stay visible.
+- Address matching uses USPS suffix canonicalization so abbreviations like `CRST`→`CREST` and `DR`→`DRIVE` resolve correctly across both sources.
+- Redfin failure degrades gracefully — core DCAD analysis is unaffected.
+
+**Overlays and basemaps**
+- HOA boundaries overlay (177 Dallas HOA polygons) with name/URL tooltip.
+- Street/Satellite basemap switcher (with label overlay on satellite).
+
+**Verification and target tools**
+- Verify Vacant / Verify Not Vacant — drop a badge on the parcel.
+- Remove Verify — clears the badge.
+- Interested / Unselect — star badge for potential targets.
+- Active Tool status chip always visible in sidebar header.
+- All tags persist in export.
+
+**Export**
+- On-demand CSV download from the active analysis job.
+- Filename is user-editable at export time with a timestamped default.
+- 32 columns including: address, MLS status, owner info, land/improvement/total value, Redfin List Price, land %, lot dimensions, year built, sq ft, zoning, school district, legal description, lat/lng, Google Maps link, Verified Vacant, Potential Target, HOA, HOA URL.
+
+**Rendering safeguards**
+- Condo parcels render as circle markers (no stacked polygon overfill).
+- Redfin circle markers route to a separate layer group; polygon outlines always stay on the base layer.
 
 ## Color Meaning
 
@@ -79,18 +98,18 @@ Core flow:
 
 ## Project Layout
 
-- api/main.py: API routes, analyze/download, job-scoped data
-- api/dcad.py: parcel query, joins, classification, feature build
-- api/redfin.py: Redfin pull logic
-- api/geo.py: geometry helpers
-- api/config.py: environment and database pool
-- scripts/build_db.py: DCAD loader/build pipeline
-- scripts/load_hoa.py: HOA boundary loader
-- frontend/index.html: app shell
-- frontend/map.js: map behavior, tools, verification brushes, export trigger
-- frontend/style.css: styling
-- docs/BRIEFING.md: current-state stakeholder briefing
-- docs/ROADMAP.md: prioritized roadmap
+- `api/main.py` — FastAPI routes: `/api/analyze`, `/api/download/:id`, `/api/job/:id/verification`, `/api/hoa`, `/health`, `/health/db`
+- `api/dcad.py` — parcel bbox query, exact polygon filter, multi-table join (appraisal/res/land), classification logic, GeoJSON feature builder
+- `api/redfin.py` — async Redfin grid pull, USPS address normalization, listing metadata dict
+- `api/geo.py` — `polygon_bbox()` and ray-cast `point_in_polygon()`
+- `api/config.py` — environment validation and psycopg2 connection pool
+- `scripts/build_db.py` — DCAD CSV→Postgres loader (upsert-safe)
+- `scripts/load_hoa.py` — HOA boundary shapefile→PostGIS loader
+- `frontend/index.html` — app shell (Leaflet 1.9.4 + Leaflet.draw 1.0.4 from CDN)
+- `frontend/map.js` — all client logic: map init, draw handler, feature renderer, verification/target brushes, popup builder, export trigger
+- `frontend/style.css` — dark-panel sidebar, map toolbar, popup/badge styles
+- `docs/BRIEFING.md` — owner-facing current-state briefing
+- `docs/ROADMAP.md` — prioritized backlog
 
 ## Local Setup
 
@@ -145,21 +164,20 @@ python -m scripts.load_hoa
 
 ## CSV Export Notes
 
-- Generated on demand from the latest analysis job.
-- Downloaded in-browser.
-- Filename is user-editable at export time.
-- Analyst tags are included:
-  - Verified Vacant
-  - Potential Target
+- Generated on demand from the latest in-memory analysis job.
+- 32 columns: Property Address, MLS Status, Owner Name, Owner Mailing Address, Owner City, Owner State, Owner Zip, Land Value, Improvement Value, Total Value, **Redfin List Price**, Land % of Total, Year Built, Living Area (sq ft), Total Structure Area (sq ft), State Code, Zoning, Lot Size (sq ft), Lot Size (acres), Frontage (ft), Depth (ft), School District, Neighborhood Code, Subdivision, Legal Description, Latitude, Longitude, Google Maps Link, Verified Vacant, Potential Target, HOA, HOA URL.
+- MLS Status: `Active` for parcels matched to a Redfin listing, `Off Market` otherwise.
+- Redfin List Price: blank when no listing match; plain integer (no currency symbol) so it right-aligns alongside appraised value columns.
+- Filename defaults to `lotledger_YYYYMMDD_HHmm.csv`; user can override at export time.
+- Analyst tags (Verified Vacant, Potential Target) reflect final click state before export.
 
 ## Operational Notes
 
-- Redfin overlay can be unavailable; core parcel analysis still works.
-- First request after Render idle can be slower.
-- County data can have lag/parity edge cases (for example parcel split behavior).
-- Satellite imagery freshness can vary tile-by-tile.
-  - In Dallas, imagery is often recent but not guaranteed current everywhere.
-  - Treat imagery-only conclusions as medium confidence unless capture date is verified for that parcel.
+- Redfin overlay degrades gracefully; core DCAD analysis is never blocked by it.
+- Address matching normalizes USPS abbreviations (`CRST`→`CREST`, `DR`→`DRIVE`, etc.) and strips trailing street-type tokens so both sources resolve to the same key.
+- First request after Render idle-sleep can be slower (cold start).
+- County records can lag reality — parcel-split and data-timing patterns are known.
+- Satellite imagery age varies by tile; treat visual occupancy checks as strong signal, not absolute proof.
 
 ## Troubleshooting
 

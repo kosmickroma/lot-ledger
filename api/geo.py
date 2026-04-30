@@ -5,7 +5,7 @@
 #
 # Connects to:
 #   api/dcad.py  - used for bounding-box derivation and exact polygon filtering
-#   api/main.py  - no direct import in current phase (via dcad in Phase 4)
+#   api/main.py  - polygon_bbox imported directly for Redfin grid bounds
 
 from __future__ import annotations
 

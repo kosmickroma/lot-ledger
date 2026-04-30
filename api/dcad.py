@@ -18,11 +18,10 @@ import pandas as pd
 
 from api.config import get_conn, release_conn
 from api.geo import point_in_polygon, polygon_bbox
+from api.redfin import normalize_addr_key
 
 
 DIVISION_CODES = ["RES", "COM"]
-ACCOUNT_CHUNK_SIZE = 500
-
 GOV_KEYWORDS = [
     "CITY OF DALLAS",
     "DALLAS COUNTY",
@@ -77,11 +76,6 @@ SPTD_LABELS = {
 class ParcelQueryResult:
     parcels: list[dict[str, Any]]
     exempt_accounts: set[str]
-
-
-def _chunked(values: list[str], chunk_size: int = ACCOUNT_CHUNK_SIZE):
-    for index in range(0, len(values), chunk_size):
-        yield values[index : index + chunk_size]
 
 
 def _safe_float(value: Any) -> float | None:
@@ -446,7 +440,8 @@ def summarize_counts(rows: list[dict[str, Any]], exempt_set: set[str], on_redfin
         parcel_key = _clean_text(row.get("parcel_key"))
         account_num = _clean_text(row.get("account_num"))
         direct_match = parcel_key == account_num if parcel_key else True
-        on_redfin = _clean_text(row.get("property_address")).upper() in on_redfin_addresses and direct_match
+        addr_key = normalize_addr_key(_clean_text(row.get("property_address")))
+        on_redfin = addr_key in on_redfin_addresses and direct_match
         if on_redfin:
             active += 1
             continue
