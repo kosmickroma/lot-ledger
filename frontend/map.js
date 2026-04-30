@@ -85,12 +85,12 @@ map.addControl(drawControl);
 
 let markerLayer = L.layerGroup().addTo(map);
 let drawLayer = L.layerGroup().addTo(map);
+let verificationBadgeLayer = L.layerGroup().addTo(map);
 let hoaLayer = null;
 let hoaVisible = false;
 let currentJobId = null;
 const verificationByAccount = new Map();
-let verificationMode = false;
-let verificationSelection = "Yes";
+let activeBrush = null;
 
 const HOA_COLOR = "#b8860b";
 
@@ -174,11 +174,11 @@ const MapToolbar = L.Control.extend({
     const verifyBtn = L.DomUtil.create("a", "", container);
     verifyBtn.id = "btn-verify-toggle";
     verifyBtn.href = "#";
-    verifyBtn.title = "Toggle verification mode";
-    verifyBtn.textContent = "V";
+    verifyBtn.title = "Verify parcel status";
+    verifyBtn.textContent = "✓";
     L.DomEvent.on(verifyBtn, "click", (e) => {
       L.DomEvent.preventDefault(e);
-      setVerificationMode(!verificationMode);
+      toggleVerifyMenu();
     });
 
     return container;
@@ -186,41 +186,29 @@ const MapToolbar = L.Control.extend({
 });
 new MapToolbar().addTo(map);
 
-const VerificationTool = L.Control.extend({
+const VerifyBrushMenu = L.Control.extend({
   options: { position: "topleft" },
   onAdd() {
-    const container = L.DomUtil.create("div", "leaflet-bar verify-tool hidden");
-    container.id = "verify-tool";
+    const container = L.DomUtil.create("div", "leaflet-bar verify-brush-menu hidden");
+    container.id = "verify-brush-menu";
     L.DomEvent.disableClickPropagation(container);
 
-    const title = L.DomUtil.create("div", "verify-tool-title", container);
-    title.textContent = "Verify Vacant";
+    const vacant = L.DomUtil.create("button", "verify-brush-option", container);
+    vacant.type = "button";
+    vacant.dataset.brush = "Yes";
+    vacant.textContent = "✓ Vacant";
+    L.DomEvent.on(vacant, "click", () => selectBrush("Yes"));
 
-    const yesBtn = L.DomUtil.create("button", "verify-tool-btn active", container);
-    yesBtn.type = "button";
-    yesBtn.dataset.value = "Yes";
-    yesBtn.textContent = "Yes";
-
-    const noBtn = L.DomUtil.create("button", "verify-tool-btn", container);
-    noBtn.type = "button";
-    noBtn.dataset.value = "No";
-    noBtn.textContent = "No";
-
-    const clearBtn = L.DomUtil.create("button", "verify-tool-btn", container);
-    clearBtn.type = "button";
-    clearBtn.dataset.value = "";
-    clearBtn.textContent = "Clear";
-
-    [yesBtn, noBtn, clearBtn].forEach((btn) => {
-      L.DomEvent.on(btn, "click", () => {
-        setVerificationSelection(btn.dataset.value || "");
-      });
-    });
+    const notVacant = L.DomUtil.create("button", "verify-brush-option", container);
+    notVacant.type = "button";
+    notVacant.dataset.brush = "No";
+    notVacant.textContent = "✗ Not Vacant";
+    L.DomEvent.on(notVacant, "click", () => selectBrush("No"));
 
     return container;
   },
 });
-new VerificationTool().addTo(map);
+new VerifyBrushMenu().addTo(map);
 
 // Google Maps-style basemap switcher — bottom-left pill
 const BasemapSwitcher = L.Control.extend({
@@ -316,21 +304,21 @@ function verificationDisplay(value) {
   return normalized || "Unverified";
 }
 
-function setVerificationSelection(value) {
-  verificationSelection = normalizeVerificationValue(value);
-  const tool = document.getElementById("verify-tool");
-  if (!tool) return;
-  tool.querySelectorAll(".verify-tool-btn").forEach((btn) => {
-    const btnValue = normalizeVerificationValue(btn.dataset.value || "");
-    btn.classList.toggle("active", btnValue === verificationSelection);
-  });
+function toggleVerifyMenu() {
+  const menu = document.getElementById("verify-brush-menu");
+  if (!menu) return;
+  menu.classList.toggle("hidden");
 }
 
-function setVerificationMode(enabled) {
-  verificationMode = Boolean(enabled);
-  document.getElementById("btn-verify-toggle")?.classList.toggle("active", verificationMode);
-  document.getElementById("verify-tool")?.classList.toggle("hidden", !verificationMode);
-  map.getContainer().classList.toggle("verify-mode", verificationMode);
+function selectBrush(brush) {
+  activeBrush = brush === "Yes" || brush === "No" ? brush : null;
+  document.getElementById("btn-verify-toggle")?.classList.toggle("active", activeBrush !== null);
+  const menu = document.getElementById("verify-brush-menu");
+  if (menu) {
+    menu.querySelectorAll(".verify-brush-option").forEach((btn) => {
+      btn.classList.toggle("active", btn.dataset.brush === activeBrush);
+    });
+  }
 }
 
 function makePopupHtml(p) {
@@ -365,6 +353,7 @@ function makePopupHtml(p) {
 
 function renderFeatures(geojson) {
   markerLayer.clearLayers();
+  verificationBadgeLayer.clearLayers();
   const markers = {};
   geojson.features.forEach((feature) => {
     const p = feature.properties;
@@ -372,11 +361,17 @@ function renderFeatures(geojson) {
     const borderColor = getBorderColor(feature);
     if (p.lat == null || p.lng == null) return;
 
-    const applyVerification = () => {
-      if (!verificationMode || !p.account_num) return;
-      verificationByAccount.set(p.account_num, verificationSelection);
-      p.verified_vacant = verificationSelection;
+    const applyBrush = () => {
+      if (!activeBrush || !p.account_num) return;
+      verificationByAccount.set(p.account_num, activeBrush);
+      p.verified_vacant = activeBrush;
+      renderVerificationBadge(p.lat, p.lng, activeBrush);
     };
+
+    // Render verification badge if already tagged
+    if (p.verified_vacant && p.verified_vacant !== "") {
+      renderVerificationBadge(p.lat, p.lng, p.verified_vacant);
+    }
 
     let layer;
     if (feature.geometry?.type === "Polygon") {
@@ -389,7 +384,7 @@ function renderFeatures(geojson) {
           opacity: 0.85,
         },
       }).bindPopup(() => makePopupHtml(p), { maxWidth: 280 });
-      layer.on("click", applyVerification);
+      layer.on("click", applyBrush);
       layer.addTo(markerLayer);
 
       L.circleMarker([p.lat, p.lng], {
@@ -401,7 +396,7 @@ function renderFeatures(geojson) {
         fillOpacity: 0.95,
       })
         .bindPopup(() => makePopupHtml(p), { maxWidth: 280 })
-        .on("click", applyVerification)
+        .on("click", applyBrush)
         .addTo(markerLayer);
     } else {
       layer = L.circleMarker([p.lat, p.lng], {
@@ -412,13 +407,22 @@ function renderFeatures(geojson) {
         opacity: 1,
         fillOpacity: 0.9,
       }).bindPopup(() => makePopupHtml(p), { maxWidth: 280 });
-      layer.on("click", applyVerification);
+      layer.on("click", applyBrush);
       layer.addTo(markerLayer);
     }
 
     markers[p.addr] = { layer, feature };
   });
   return markers;
+}
+
+function renderVerificationBadge(lat, lng, status) {
+  const badgeIcon = L.divIcon({
+    className: `verify-badge verify-badge-${status === "Yes" ? "vacant" : "not-vacant"}`,
+    html: status === "Yes" ? "✓" : "✗",
+    iconSize: [24, 24],
+  });
+  L.marker([lat, lng], { icon: badgeIcon }).addTo(verificationBadgeLayer);
 }
 
 function renderSidebar(counts, markers) {
@@ -509,9 +513,12 @@ function normalizeCsvFilename(rawName) {
 map.on("draw:created", async (e) => {
   drawLayer.clearLayers();
   markerLayer.clearLayers();
+  verificationBadgeLayer.clearLayers();
   verificationByAccount.clear();
-  setVerificationMode(false);
-  setVerificationSelection("Yes");
+  activeBrush = null;
+  document.getElementById("btn-verify-toggle")?.classList.remove("active");
+  const menu = document.getElementById("verify-brush-menu");
+  if (menu) menu.classList.add("hidden");
   document.getElementById("sidebar-instructions").classList.add("hidden");
   document.getElementById("sidebar-results").classList.add("hidden");
   document.getElementById("sidebar-loading").classList.remove("hidden");
@@ -611,10 +618,13 @@ document.getElementById("btn-download").addEventListener("click", () => {
 document.getElementById("btn-clear").addEventListener("click", () => {
   markerLayer.clearLayers();
   drawLayer.clearLayers();
+  verificationBadgeLayer.clearLayers();
   currentJobId = null;
   verificationByAccount.clear();
-  setVerificationMode(false);
-  setVerificationSelection("Yes");
+  activeBrush = null;
+  document.getElementById("btn-verify-toggle")?.classList.remove("active");
+  const menu = document.getElementById("verify-brush-menu");
+  if (menu) menu.classList.add("hidden");
   document.getElementById("sidebar-results").classList.add("hidden");
   document.getElementById("sidebar-loading").classList.add("hidden");
   document.getElementById("sidebar-instructions").classList.remove("hidden");

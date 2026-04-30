@@ -321,50 +321,63 @@ h1 {
   color: #111;
 }
 
-.verify-tool {
+.verify-brush-menu {
   display: flex;
-  gap: 6px;
-  align-items: center;
+  flex-direction: column;
+  gap: 4px;
   background: rgba(255, 255, 255, 0.97);
   border: 1px solid rgba(0, 0, 0, 0.18);
   border-radius: 8px;
-  padding: 6px 8px;
+  padding: 6px 0;
   margin-top: 118px;
   margin-left: 0;
 }
 
-.verify-tool.hidden {
+.verify-brush-menu.hidden {
   display: none;
 }
 
-.verify-tool-title {
-  font-size: 11px;
-  font-weight: 700;
-  color: #1a5a42;
-  margin-right: 2px;
-  white-space: nowrap;
-}
-
-.verify-tool-btn {
-  border: 1px solid #d5d8de;
-  background: #ffffff;
-  color: #3e4653;
-  border-radius: 999px;
+.verify-brush-option {
+  border: none;
+  background: transparent;
+  color: #555;
   font-size: 11px;
   font-weight: 600;
-  padding: 4px 9px;
+  padding: 6px 12px;
   cursor: pointer;
+  text-align: left;
+  transition: background 0.15s, color 0.15s;
 }
 
-.verify-tool-btn:hover {
-  border-color: #1a5a42;
+.verify-brush-option:hover {
+  background: #f0f0f0;
   color: #1a5a42;
 }
 
-.verify-tool-btn.active {
+.verify-brush-option.active {
   background: #1a5a42;
-  border-color: #1a5a42;
   color: #ffffff;
+}
+
+.verify-badge {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  font-weight: 700;
+  font-size: 14px;
+}
+
+.verify-badge-vacant {
+  background: #27ae60;
+  color: #ffffff;
+  border: 2px solid #1e8449;
+}
+
+.verify-badge-not-vacant {
+  background: #e74c3c;
+  color: #ffffff;
+  border: 2px solid #c0392b;
 }
 
 #map.verify-mode {
