@@ -292,6 +292,40 @@ h1 {
   color: #fff !important;
 }
 
+.basemap-switcher {
+  display: flex;
+  background: rgba(255, 255, 255, 0.97);
+  border-radius: 20px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
+  overflow: hidden;
+  margin-bottom: 8px;
+  margin-left: 8px;
+  border: 1px solid rgba(0,0,0,0.12);
+}
+
+.basemap-btn {
+  padding: 5px 14px;
+  font-size: 11px;
+  font-weight: 600;
+  border: none;
+  background: transparent;
+  color: #555;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  letter-spacing: 0.02em;
+  line-height: 1;
+}
+
+.basemap-btn:hover {
+  background: #f0f0f0;
+  color: #111;
+}
+
+.basemap-btn.active {
+  background: #1a5a42;
+  color: #fff;
+}
+
 .draw-helper {
   position: absolute;
   top: 124px;

@@ -62,23 +62,13 @@ const satelliteLayer = L.tileLayer(
 streetLayer.addTo(map);
 let activeBasemap = "street";
 
-function toggleBasemap() {
-  const btn = document.getElementById("btn-basemap");
-  if (activeBasemap === "street") {
-    map.removeLayer(streetLayer);
-    satelliteLayer.addTo(map);
-    activeBasemap = "satellite";
-    btn.classList.add("active");
-    btn.title = "Switch to street view";
-    return;
-  }
+// Transparent labels overlay — shown on top of satellite tiles
+const labelsLayer = L.tileLayer(
+  "https://{s}.basemaps.cartocdn.com/rastertiles/voyager_only_labels/{z}/{x}/{y}{r}.png",
+  { subdomains: "abcd", maxZoom: 20, opacity: 1, pane: "overlayPane" }
+);
 
-  map.removeLayer(satelliteLayer);
-  streetLayer.addTo(map);
-  activeBasemap = "street";
-  btn.classList.remove("active");
-  btn.title = "Switch to satellite view";
-}
+
 
 const drawControl = new L.Control.Draw({
   draw: {
@@ -178,20 +168,50 @@ const MapToolbar = L.Control.extend({
       toggleHoaLayer();
     });
 
-    const basemapBtn = L.DomUtil.create("a", "", container);
-    basemapBtn.id = "btn-basemap";
-    basemapBtn.href = "#";
-    basemapBtn.title = "Switch to satellite view";
-    basemapBtn.textContent = "SAT";
-    L.DomEvent.on(basemapBtn, "click", (e) => {
-      L.DomEvent.preventDefault(e);
-      toggleBasemap();
+    return container;
+  },
+});
+new MapToolbar().addTo(map);
+
+// Google Maps-style basemap switcher — bottom-left pill
+const BasemapSwitcher = L.Control.extend({
+  options: { position: "bottomleft" },
+  onAdd() {
+    const container = L.DomUtil.create("div", "basemap-switcher");
+    L.DomEvent.disableClickPropagation(container);
+
+    const mapBtn = L.DomUtil.create("button", "basemap-btn active", container);
+    mapBtn.id = "bm-map";
+    mapBtn.textContent = "Map";
+
+    const satBtn = L.DomUtil.create("button", "basemap-btn", container);
+    satBtn.id = "bm-sat";
+    satBtn.textContent = "Satellite";
+
+    L.DomEvent.on(mapBtn, "click", () => {
+      if (activeBasemap === "street") return;
+      map.removeLayer(satelliteLayer);
+      map.removeLayer(labelsLayer);
+      streetLayer.addTo(map);
+      activeBasemap = "street";
+      mapBtn.classList.add("active");
+      satBtn.classList.remove("active");
+    });
+
+    L.DomEvent.on(satBtn, "click", () => {
+      if (activeBasemap === "satellite") return;
+      map.removeLayer(streetLayer);
+      satelliteLayer.addTo(map);
+      labelsLayer.addTo(map);
+      activeBasemap = "satellite";
+      satBtn.classList.add("active");
+      mapBtn.classList.remove("active");
     });
 
     return container;
   },
 });
-new MapToolbar().addTo(map);
+new BasemapSwitcher().addTo(map);
 const appShell = document.querySelector(".app-shell");
 const sidebarToggleBtn = document.getElementById("sidebar-toggle");
 const drawHelper = document.getElementById("draw-helper");
