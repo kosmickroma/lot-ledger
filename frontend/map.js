@@ -89,6 +89,8 @@ let hoaLayer = null;
 let hoaVisible = false;
 let currentJobId = null;
 const verificationByAccount = new Map();
+let verificationMode = false;
+let verificationSelection = "Yes";
 
 const HOA_COLOR = "#b8860b";
 
@@ -169,10 +171,56 @@ const MapToolbar = L.Control.extend({
       toggleHoaLayer();
     });
 
+    const verifyBtn = L.DomUtil.create("a", "", container);
+    verifyBtn.id = "btn-verify-toggle";
+    verifyBtn.href = "#";
+    verifyBtn.title = "Toggle verification mode";
+    verifyBtn.textContent = "V";
+    L.DomEvent.on(verifyBtn, "click", (e) => {
+      L.DomEvent.preventDefault(e);
+      setVerificationMode(!verificationMode);
+    });
+
     return container;
   },
 });
 new MapToolbar().addTo(map);
+
+const VerificationTool = L.Control.extend({
+  options: { position: "topleft" },
+  onAdd() {
+    const container = L.DomUtil.create("div", "leaflet-bar verify-tool hidden");
+    container.id = "verify-tool";
+    L.DomEvent.disableClickPropagation(container);
+
+    const title = L.DomUtil.create("div", "verify-tool-title", container);
+    title.textContent = "Verify Vacant";
+
+    const yesBtn = L.DomUtil.create("button", "verify-tool-btn active", container);
+    yesBtn.type = "button";
+    yesBtn.dataset.value = "Yes";
+    yesBtn.textContent = "Yes";
+
+    const noBtn = L.DomUtil.create("button", "verify-tool-btn", container);
+    noBtn.type = "button";
+    noBtn.dataset.value = "No";
+    noBtn.textContent = "No";
+
+    const clearBtn = L.DomUtil.create("button", "verify-tool-btn", container);
+    clearBtn.type = "button";
+    clearBtn.dataset.value = "";
+    clearBtn.textContent = "Clear";
+
+    [yesBtn, noBtn, clearBtn].forEach((btn) => {
+      L.DomEvent.on(btn, "click", () => {
+        setVerificationSelection(btn.dataset.value || "");
+      });
+    });
+
+    return container;
+  },
+});
+new VerificationTool().addTo(map);
 
 // Google Maps-style basemap switcher — bottom-left pill
 const BasemapSwitcher = L.Control.extend({
@@ -268,6 +316,23 @@ function verificationDisplay(value) {
   return normalized || "Unverified";
 }
 
+function setVerificationSelection(value) {
+  verificationSelection = normalizeVerificationValue(value);
+  const tool = document.getElementById("verify-tool");
+  if (!tool) return;
+  tool.querySelectorAll(".verify-tool-btn").forEach((btn) => {
+    const btnValue = normalizeVerificationValue(btn.dataset.value || "");
+    btn.classList.toggle("active", btnValue === verificationSelection);
+  });
+}
+
+function setVerificationMode(enabled) {
+  verificationMode = Boolean(enabled);
+  document.getElementById("btn-verify-toggle")?.classList.toggle("active", verificationMode);
+  document.getElementById("verify-tool")?.classList.toggle("hidden", !verificationMode);
+  map.getContainer().classList.toggle("verify-mode", verificationMode);
+}
+
 function makePopupHtml(p) {
   const pseudoFeature = { properties: p };
   const statusColor = getColor(pseudoFeature);
@@ -295,11 +360,6 @@ function makePopupHtml(p) {
           ${row("Sq Ft", p.sqft && p.sqft !== "N/A" ? p.sqft : "N/A")}
           ${row("Verified Vacant", verificationDisplay(verifiedVacant))}
         </table>
-        <div class="verify-actions" data-account="${p.account_num || ""}">
-          <button type="button" class="verify-btn${verifiedVacant === "Yes" ? " active" : ""}" data-account="${p.account_num || ""}" data-value="yes">Yes</button>
-          <button type="button" class="verify-btn${verifiedVacant === "No" ? " active" : ""}" data-account="${p.account_num || ""}" data-value="no">No</button>
-          <button type="button" class="verify-btn${verifiedVacant === "" ? " active" : ""}" data-account="${p.account_num || ""}" data-value="">Clear</button>
-        </div>
       </div>`;
 }
 
@@ -312,6 +372,12 @@ function renderFeatures(geojson) {
     const borderColor = getBorderColor(feature);
     if (p.lat == null || p.lng == null) return;
 
+    const applyVerification = () => {
+      if (!verificationMode || !p.account_num) return;
+      verificationByAccount.set(p.account_num, verificationSelection);
+      p.verified_vacant = verificationSelection;
+    };
+
     let layer;
     if (feature.geometry?.type === "Polygon") {
       layer = L.geoJSON(feature, {
@@ -322,7 +388,8 @@ function renderFeatures(geojson) {
           weight: 1.5,
           opacity: 0.85,
         },
-      }).bindPopup(makePopupHtml(p), { maxWidth: 280 });
+      }).bindPopup(() => makePopupHtml(p), { maxWidth: 280 });
+      layer.on("click", applyVerification);
       layer.addTo(markerLayer);
 
       L.circleMarker([p.lat, p.lng], {
@@ -332,7 +399,10 @@ function renderFeatures(geojson) {
         weight: 1,
         opacity: 1,
         fillOpacity: 0.95,
-      }).bindPopup(makePopupHtml(p), { maxWidth: 280 }).addTo(markerLayer);
+      })
+        .bindPopup(() => makePopupHtml(p), { maxWidth: 280 })
+        .on("click", applyVerification)
+        .addTo(markerLayer);
     } else {
       layer = L.circleMarker([p.lat, p.lng], {
         radius: p.on_redfin ? 7 : 5,
@@ -341,7 +411,8 @@ function renderFeatures(geojson) {
         weight: 1.5,
         opacity: 1,
         fillOpacity: 0.9,
-      }).bindPopup(makePopupHtml(p), { maxWidth: 280 });
+      }).bindPopup(() => makePopupHtml(p), { maxWidth: 280 });
+      layer.on("click", applyVerification);
       layer.addTo(markerLayer);
     }
 
@@ -439,6 +510,8 @@ map.on("draw:created", async (e) => {
   drawLayer.clearLayers();
   markerLayer.clearLayers();
   verificationByAccount.clear();
+  setVerificationMode(false);
+  setVerificationSelection("Yes");
   document.getElementById("sidebar-instructions").classList.add("hidden");
   document.getElementById("sidebar-results").classList.add("hidden");
   document.getElementById("sidebar-loading").classList.remove("hidden");
@@ -540,30 +613,9 @@ document.getElementById("btn-clear").addEventListener("click", () => {
   drawLayer.clearLayers();
   currentJobId = null;
   verificationByAccount.clear();
+  setVerificationMode(false);
+  setVerificationSelection("Yes");
   document.getElementById("sidebar-results").classList.add("hidden");
   document.getElementById("sidebar-loading").classList.add("hidden");
   document.getElementById("sidebar-instructions").classList.remove("hidden");
-});
-
-document.addEventListener("click", (event) => {
-  const btn = event.target.closest(".verify-btn");
-  if (!btn) return;
-
-  const accountNum = btn.dataset.account || "";
-  if (!accountNum) return;
-
-  const nextValue = normalizeVerificationValue(btn.dataset.value || "");
-  verificationByAccount.set(accountNum, nextValue);
-
-  const popup = btn.closest(".popup");
-  if (!popup) return;
-
-  popup.querySelectorAll(".verify-btn").forEach((node) => {
-    node.classList.toggle("active", node === btn);
-  });
-
-  const valueCell = popup.querySelector(".popup-table tr:last-child .popup-val");
-  if (valueCell) {
-    valueCell.textContent = verificationDisplay(nextValue);
-  }
 });
