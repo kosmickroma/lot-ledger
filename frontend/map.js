@@ -546,8 +546,9 @@ function renderFeatures(geojson) {
       renderTargetBadge(p.account_num, p.lat, p.lng);
     }
 
-    // Active Redfin listings go to a separate toggleable layer; everything else to markerLayer.
-    const targetLayer = p.on_redfin ? redfinLayer : markerLayer;
+    // Polygon outlines always stay in markerLayer (persist on toggle off).
+    // Circle markers for Redfin go to redfinLayer (disappear on toggle off).
+    const circleLayer = p.on_redfin ? redfinLayer : markerLayer;
 
     let layer;
     if (renderCondoOutline) {
@@ -573,7 +574,7 @@ function renderFeatures(geojson) {
         },
       }).bindPopup(() => makePopupHtml(p), { maxWidth: 280 });
       layer.on("click", applyBrush);
-      layer.addTo(targetLayer);
+      layer.addTo(markerLayer);
 
       L.circleMarker([p.lat, p.lng], {
         radius: p.on_redfin ? 5 : 3,
@@ -585,7 +586,7 @@ function renderFeatures(geojson) {
       })
         .bindPopup(() => makePopupHtml(p), { maxWidth: 280 })
         .on("click", applyBrush)
-        .addTo(targetLayer);
+        .addTo(circleLayer);
     } else {
       layer = L.circleMarker([p.lat, p.lng], {
         radius: p.on_redfin ? 7 : 5,
@@ -596,7 +597,7 @@ function renderFeatures(geojson) {
         fillOpacity: 0.9,
       }).bindPopup(() => makePopupHtml(p), { maxWidth: 280 });
       layer.on("click", applyBrush);
-      layer.addTo(targetLayer);
+      layer.addTo(circleLayer);
     }
 
     markers[p.addr] = { layer, feature };
