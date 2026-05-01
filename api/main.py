@@ -443,5 +443,6 @@ async def index() -> FileResponse:
     return FileResponse(FRONTEND_DIR / "index.html")
 
 
-app.mount("/assets", StaticFiles(directory=ASSETS_DIR), name="assets")
+if ASSETS_DIR.exists():
+    app.mount("/assets", StaticFiles(directory=ASSETS_DIR), name="assets")
 app.mount("/", StaticFiles(directory=FRONTEND_DIR), name="frontend")
