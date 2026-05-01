@@ -520,9 +520,14 @@ function renderFeatures(geojson) {
     const polygonKey = hasPolygonGeometry ? geometryKey(feature.geometry) : "";
     const firstPolygonInstance = Boolean(polygonKey) && !polygonGeometrySeen.has(polygonKey);
     if (firstPolygonInstance) polygonGeometrySeen.add(polygonKey);
+    const duplicateNonCondoFootprint = hasPolygonGeometry && !isCondo && Boolean(polygonKey) && !firstPolygonInstance;
+
+    // Shared rural footprints can contain multiple rows with conflicting types.
+    // Render only the first non-condo footprint record so dot/outline/popup stay aligned.
+    if (duplicateNonCondoFootprint) return;
 
     // Any duplicated polygon geometry renders only once to avoid stacked fill blocks.
-    const renderPolygon = hasPolygonGeometry && !isCondo && firstPolygonInstance;
+    const renderPolygon = hasPolygonGeometry && !isCondo && (!polygonKey || firstPolygonInstance);
     const condoKey = isCondo && hasPolygonGeometry ? geometryKey(feature.geometry) : "";
     const renderCondoOutline = Boolean(condoKey) && !condoOutlineSeen.has(condoKey);
     if (renderCondoOutline) {
