@@ -52,6 +52,12 @@ const streetLayer = L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}
   maxZoom: 20,
 });
 
+const contrastLayer = L.tileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png", {
+  attribution: "&copy; OpenStreetMap contributors &copy; CARTO",
+  subdomains: "abcd",
+  maxZoom: 20,
+});
+
 const satelliteLayer = L.tileLayer(
   "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
   {
@@ -108,78 +114,6 @@ const targetBadgeMarkers = new Map();
 let activeBrush = null;
 
 const HOA_COLOR = "#b8860b";
-const COUNTY_PRIMARY_COLOR = "#1f2f3b";
-const COUNTY_SECONDARY_COLOR = "#4f6474";
-const NORTH_TEXAS_COUNTIES = new Set([
-  "Dallas",
-  "Tarrant",
-  "Collin",
-  "Denton",
-  "Rockwall",
-  "Ellis",
-  "Kaufman",
-  "Parker",
-  "Johnson",
-  "Wise",
-]);
-const COUNTY_HIGHLIGHT = new Set(["Dallas", "Tarrant"]);
-let countyLayer = null;
-let countyVisible = true;
-
-async function toggleCountyLayer() {
-  const btn = document.getElementById("btn-county-toggle");
-  if (countyVisible && countyLayer) {
-    map.removeLayer(countyLayer);
-    countyVisible = false;
-    btn?.classList.remove("active");
-    return;
-  }
-  if (countyLayer) {
-    countyLayer.addTo(map);
-    countyVisible = true;
-    btn?.classList.add("active");
-    return;
-  }
-
-  if (btn) btn.textContent = "...";
-  try {
-    const res = await fetch("/assets/tx_counties.geojson");
-    if (!res.ok) throw new Error(`County load failed: ${res.status}`);
-    const source = await res.json();
-    const filteredFeatures = (source.features || []).filter((feature) => {
-      const countyName = String(feature?.properties?.NAME || "");
-      return NORTH_TEXAS_COUNTIES.has(countyName);
-    });
-
-    countyLayer = L.geoJSON({ type: "FeatureCollection", features: filteredFeatures }, {
-      style(feature) {
-        const countyName = String(feature?.properties?.NAME || "");
-        const highlight = COUNTY_HIGHLIGHT.has(countyName);
-        return {
-          color: highlight ? COUNTY_PRIMARY_COLOR : COUNTY_SECONDARY_COLOR,
-          weight: highlight ? 3 : 2,
-          opacity: highlight ? 0.9 : 0.75,
-          fill: false,
-          dashArray: highlight ? null : "4 4",
-        };
-      },
-      interactive: false,
-    }).addTo(map);
-
-    countyVisible = true;
-    if (btn) {
-      btn.textContent = "CNTY";
-      btn.classList.add("active");
-    }
-  } catch (err) {
-    if (btn) {
-      btn.textContent = "CNTY";
-      btn.classList.remove("active");
-    }
-    countyVisible = false;
-    console.error("County layer load failed", err);
-  }
-}
 
 async function toggleHoaLayer() {
   const btn = document.getElementById("btn-hoa-toggle");
@@ -258,16 +192,6 @@ const MapToolbar = L.Control.extend({
       toggleHoaLayer();
     });
 
-    const countyBtn = L.DomUtil.create("a", "active", container);
-    countyBtn.id = "btn-county-toggle";
-    countyBtn.href = "#";
-    countyBtn.title = "Toggle county boundaries";
-    countyBtn.textContent = "CNTY";
-    L.DomEvent.on(countyBtn, "click", (e) => {
-      L.DomEvent.preventDefault(e);
-      toggleCountyLayer();
-    });
-
     const verifyBtn = L.DomUtil.create("a", "", container);
     verifyBtn.id = "btn-verify-toggle";
     verifyBtn.href = "#";
@@ -292,7 +216,6 @@ const MapToolbar = L.Control.extend({
   },
 });
 new MapToolbar().addTo(map);
-toggleCountyLayer();
 
 const VerifyBrushMenu = L.Control.extend({
   options: { position: "topleft" },
@@ -368,24 +291,43 @@ const BasemapSwitcher = L.Control.extend({
     satBtn.id = "bm-sat";
     satBtn.textContent = "Satellite";
 
+    const contrastBtn = L.DomUtil.create("button", "basemap-btn", container);
+    contrastBtn.id = "bm-contrast";
+    contrastBtn.textContent = "Contrast";
+
+    function activateBasemap(name) {
+      [streetLayer, contrastLayer, satelliteLayer, labelsLayer].forEach((layer) => {
+        if (map.hasLayer(layer)) map.removeLayer(layer);
+      });
+
+      if (name === "street") {
+        streetLayer.addTo(map);
+      } else if (name === "contrast") {
+        contrastLayer.addTo(map);
+      } else if (name === "satellite") {
+        satelliteLayer.addTo(map);
+        labelsLayer.addTo(map);
+      }
+
+      activeBasemap = name;
+      mapBtn.classList.toggle("active", name === "street");
+      contrastBtn.classList.toggle("active", name === "contrast");
+      satBtn.classList.toggle("active", name === "satellite");
+    }
+
     L.DomEvent.on(mapBtn, "click", () => {
       if (activeBasemap === "street") return;
-      map.removeLayer(satelliteLayer);
-      map.removeLayer(labelsLayer);
-      streetLayer.addTo(map);
-      activeBasemap = "street";
-      mapBtn.classList.add("active");
-      satBtn.classList.remove("active");
+      activateBasemap("street");
+    });
+
+    L.DomEvent.on(contrastBtn, "click", () => {
+      if (activeBasemap === "contrast") return;
+      activateBasemap("contrast");
     });
 
     L.DomEvent.on(satBtn, "click", () => {
       if (activeBasemap === "satellite") return;
-      map.removeLayer(streetLayer);
-      satelliteLayer.addTo(map);
-      labelsLayer.addTo(map);
-      activeBasemap = "satellite";
-      satBtn.classList.add("active");
-      mapBtn.classList.remove("active");
+      activateBasemap("satellite");
     });
 
     return container;

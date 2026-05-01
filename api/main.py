@@ -27,7 +27,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from api.config import get_conn, get_settings, release_conn
-from api.dcad import build_feature, classify_parcel, query_parcels, summarize_counts
+from api.dcad import build_feature, classify_parcel, query_parcels
 from api.geo import polygon_bbox
 from api.redfin import normalize_addr_key, pull_grid
 from api.tad import query_tad_parcels, _classify_tad
@@ -35,34 +35,7 @@ from api.tad import query_tad_parcels, _classify_tad
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 FRONTEND_DIR = BASE_DIR / "frontend"
-ASSETS_DIR = BASE_DIR / "assets"
 _job_store: dict[str, dict[str, Any]] = {}
-
-# Tarrant County rough bbox (lng_min, lat_min, lng_max, lat_max) in WGS84.
-# Used to decide whether to also query tad_parcels alongside DCAD.
-_TARRANT_BBOX = (-97.65, 32.52, -96.94, 33.07)
-
-
-def _bbox_overlaps_tarrant(min_lat: float, min_lng: float, max_lat: float, max_lng: float) -> bool:
-    return (
-        max_lng >= _TARRANT_BBOX[0]
-        and min_lng <= _TARRANT_BBOX[2]
-        and max_lat >= _TARRANT_BBOX[1]
-        and min_lat <= _TARRANT_BBOX[3]
-    )
-
-
-def _bbox_overlaps_dallas(min_lat: float, min_lng: float, max_lat: float, max_lng: float) -> bool:
-    """Dallas County rough bbox. If the polygon is clearly inside Tarrant only,
-    skip the DCAD query to avoid empty joins."""
-    # Dallas County: roughly -97.04 to -96.55 lng, 32.55 to 33.02 lat
-    return (
-        max_lng >= -97.04
-        and min_lng <= -96.55
-        and max_lat >= 32.55
-        and min_lat <= 33.02
-    )
-
 
 _FILENAME_SAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -186,41 +159,34 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
 
     min_lat, min_lng, max_lat, max_lng = polygon_bbox(polygon)
 
-    in_dallas = _bbox_overlaps_dallas(min_lat, min_lng, max_lat, max_lng)
-    in_tarrant = _bbox_overlaps_tarrant(min_lat, min_lng, max_lat, max_lng)
-
     redfin_data: dict[str, dict] = {}
 
-    # Build coroutines for each active data source.
-    async def _run_queries() -> tuple:
-        tasks: list = []
-        if in_dallas:
-            tasks.append(asyncio.to_thread(query_parcels, polygon))
-        if in_tarrant:
-            tasks.append(asyncio.to_thread(query_tad_parcels, polygon))
-        if include_redfin:
-            tasks.append(pull_grid(min_lng, min_lat, max_lng, max_lat))
-        return await asyncio.gather(*tasks, return_exceptions=True)
+    # Always query both counties; each adapter already does bbox + exact polygon filtering.
+    tasks = [
+        asyncio.to_thread(query_parcels, polygon),
+        asyncio.to_thread(query_tad_parcels, polygon),
+    ]
+    if include_redfin:
+        tasks.append(pull_grid(min_lng, min_lat, max_lng, max_lat))
 
-    results = await _run_queries()
+    results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    # Unpack results in the same order they were inserted.
-    idx = 0
     dcad_result = None
     tad_result = None
-    if in_dallas:
-        r = results[idx]; idx += 1
-        if not isinstance(r, Exception):
-            dcad_result = r
-    if in_tarrant:
-        r = results[idx]; idx += 1
-        if not isinstance(r, Exception):
-            tad_result = r
     redfin_fetch_ok = False
+
+    dcad_resp = results[0]
+    if not isinstance(dcad_resp, Exception):
+        dcad_result = dcad_resp
+
+    tad_resp = results[1]
+    if not isinstance(tad_resp, Exception):
+        tad_result = tad_resp
+
     if include_redfin:
-        r = results[idx]; idx += 1
-        if not isinstance(r, Exception):
-            redfin_data = r or {}
+        redfin_resp = results[2]
+        if not isinstance(redfin_resp, Exception):
+            redfin_data = redfin_resp or {}
             redfin_fetch_ok = True
 
     # Merge rows from all counties, deduplicating by (account_num, county).
@@ -237,6 +203,15 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
 
     rows = all_rows
     features: list[dict[str, Any]] = []
+    counts = {
+        "active": 0,
+        "off_market": 0,
+        "multifamily": 0,
+        "vacant": 0,
+        "commercial": 0,
+        "exempt": 0,
+        "total": len(rows),
+    }
 
     for row in rows:
         parcel_key = str(row.get("parcel_key", "") or "")
@@ -250,6 +225,20 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
             prop_type = _classify_tad(row)
         else:
             prop_type = classify_parcel(row, exempt_set)
+
+        if on_redfin:
+            counts["active"] += 1
+        elif prop_type == "multifamily":
+            counts["multifamily"] += 1
+        elif prop_type == "vacant":
+            counts["vacant"] += 1
+        elif prop_type == "commercial":
+            counts["commercial"] += 1
+        elif prop_type == "exempt":
+            counts["exempt"] += 1
+        else:
+            counts["off_market"] += 1
+
         try:
             feature = build_feature(row, prop_type, on_redfin, redfin_listing)
             features.append(feature)
@@ -261,8 +250,6 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
         "rows": rows,
         "redfin_data": redfin_data,
     }
-    counts = summarize_counts(rows, exempt_set, redfin_data)
-
     return {
         "type": "FeatureCollection",
         "features": features,
@@ -270,6 +257,10 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
         "job_id": job_id,
         "redfin_requested": include_redfin,
         "redfin_ok": redfin_fetch_ok,
+        "source_status": {
+            "dcad_ok": dcad_result is not None,
+            "tad_ok": tad_result is not None,
+        },
     }
 
 
@@ -443,6 +434,4 @@ async def index() -> FileResponse:
     return FileResponse(FRONTEND_DIR / "index.html")
 
 
-if ASSETS_DIR.exists():
-    app.mount("/assets", StaticFiles(directory=ASSETS_DIR), name="assets")
 app.mount("/", StaticFiles(directory=FRONTEND_DIR), name="frontend")
