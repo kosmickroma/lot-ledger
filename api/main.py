@@ -174,20 +174,32 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
     dcad_result = None
     tad_result = None
     redfin_fetch_ok = False
+    failed_sources: list[str] = []
 
     dcad_resp = results[0]
     if not isinstance(dcad_resp, Exception):
         dcad_result = dcad_resp
+    else:
+        failed_sources.append("DCAD")
 
     tad_resp = results[1]
     if not isinstance(tad_resp, Exception):
         tad_result = tad_resp
+    else:
+        failed_sources.append("TAD")
 
     if include_redfin:
         redfin_resp = results[2]
         if not isinstance(redfin_resp, Exception):
             redfin_data = redfin_resp or {}
             redfin_fetch_ok = True
+
+    # Never return silent partial county coverage; fail loudly instead.
+    if failed_sources:
+        raise HTTPException(
+            status_code=502,
+            detail=f"County query failed for: {', '.join(failed_sources)}. No partial results returned.",
+        )
 
     # Merge rows from all counties, deduplicating by (account_num, county).
     all_rows: list[dict[str, Any]] = []

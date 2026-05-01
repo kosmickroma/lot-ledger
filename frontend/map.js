@@ -789,6 +789,9 @@ async function refreshExpiredJob() {
     });
     if (!resp.ok) return false;
     const data = await resp.json();
+    if (data.source_status && (!data.source_status.dcad_ok || !data.source_status.tad_ok)) {
+      return false;
+    }
     currentJobId = data.job_id || null;
     return Boolean(currentJobId);
   } catch {
@@ -874,6 +877,9 @@ map.on("draw:created", async (e) => {
     });
     if (!resp.ok) throw new Error(`Server error: ${resp.status}`);
     const data = await resp.json();
+    if (data.source_status && (!data.source_status.dcad_ok || !data.source_status.tad_ok)) {
+      throw new Error("Incomplete county result set returned; analysis canceled to prevent partial export.");
+    }
     currentJobId = data.job_id;
     data.features.forEach((feature) => {
       const p = feature.properties || {};

@@ -420,7 +420,7 @@ def build_feature(row: dict[str, Any], prop_type: str, on_redfin: bool, redfin_l
     }
 
     geometry = row.get("polygon_geojson")
-    if isinstance(geometry, dict) and geometry.get("type") == "Polygon":
+    if isinstance(geometry, dict) and geometry.get("type") in {"Polygon", "MultiPolygon"}:
         feature_geometry = geometry
     else:
         feature_geometry = {"type": "Point", "coordinates": [lng, lat]}
