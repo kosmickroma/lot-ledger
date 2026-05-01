@@ -507,6 +507,7 @@ function renderFeatures(geojson) {
   targetBadgeLayer.clearLayers();
   verificationBadgeMarkers.clear();
   targetBadgeMarkers.clear();
+  const polygonGeometrySeen = new Set();
   const condoOutlineSeen = new Set();
   const markers = {};
   geojson.features.forEach((feature) => {
@@ -516,7 +517,12 @@ function renderFeatures(geojson) {
     if (p.lat == null || p.lng == null) return;
     const hasPolygonGeometry = feature.geometry?.type === "Polygon";
     const isCondo = isCondoParcel(p);
-    const renderPolygon = hasPolygonGeometry && !isCondo;
+    const polygonKey = hasPolygonGeometry ? geometryKey(feature.geometry) : "";
+    const firstPolygonInstance = Boolean(polygonKey) && !polygonGeometrySeen.has(polygonKey);
+    if (firstPolygonInstance) polygonGeometrySeen.add(polygonKey);
+
+    // Any duplicated polygon geometry renders only once to avoid stacked fill blocks.
+    const renderPolygon = hasPolygonGeometry && !isCondo && firstPolygonInstance;
     const condoKey = isCondo && hasPolygonGeometry ? geometryKey(feature.geometry) : "";
     const renderCondoOutline = Boolean(condoKey) && !condoOutlineSeen.has(condoKey);
     if (renderCondoOutline) {
@@ -658,6 +664,7 @@ function clearTargetBadge(accountNum) {
 function renderSidebar(counts, markers) {
   document.getElementById("sidebar-loading").classList.add("hidden");
   document.getElementById("sidebar-results").classList.remove("hidden");
+  document.getElementById("layer-toggles")?.classList.remove("hidden");
 
   const countsPanel = document.getElementById("counts-panel");
   countsPanel.innerHTML = Object.entries({

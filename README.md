@@ -143,6 +143,9 @@ Full-screen CSV output review in spreadsheet format.
 - `api/config.py` — environment validation and psycopg2 connection pool
 - `scripts/build_db.py` — DCAD CSV→Postgres loader (upsert-safe)
 - `scripts/load_hoa.py` — HOA boundary shapefile→PostGIS loader
+- `scripts/validate_tad_extract.py` — validates TAD folder completeness and projection status
+- `scripts/reproject_tad_parcelview.py` — reprojects TAD ParcelView to EPSG:4326 output files
+- `scripts/build_tad_db.py` — TAD ParcelView→Postgres loader (dry-run default, write mode + checkpoint resume)
 - `frontend/index.html` — app shell (Leaflet 1.9.4 + Leaflet.draw 1.0.4 from CDN)
 - `frontend/map.js` — all client logic: map init, draw handler, feature renderer, verification/target brushes, popup builder, export trigger
 - `frontend/style.css` — dark-panel sidebar, map toolbar, popup/badge styles
@@ -188,6 +191,29 @@ python -m scripts.build_db
 ```
 
 The loader uses upserts so reruns update existing records.
+
+## Build TAD Module (Tarrant)
+
+Unlike DCAD (single command), TAD uses a multi-step module flow:
+
+1. Validate extracted TAD files.
+2. Reproject ParcelView to EPSG:4326.
+3. Build/load TAD table with checkpoint resume.
+
+Run this sequence:
+
+```bash
+python3 scripts/validate_tad_extract.py
+python3 scripts/reproject_tad_parcelview.py --overwrite
+python3 scripts/build_tad_db.py --write-db --limit 100000 --fresh-start
+python3 scripts/build_tad_db.py --write-db --resume
+```
+
+Notes:
+- `--overwrite` only replaces local normalized reprojection output files. It does not write to DB.
+- `--write-db` is the database load mode.
+- `--resume` continues from the last saved checkpoint in `.build_checkpoint.json`.
+- `--fresh-start` resets checkpoint state for a clean rebuild.
 
 ## Refresh HOA Boundaries
 
