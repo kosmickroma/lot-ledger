@@ -24,32 +24,58 @@ from api.geo import point_in_polygon, polygon_bbox
 
 
 # TAD state-use code → human-readable label (mirrors SPTD_LABELS in dcad.py)
-TAD_STATE_USE_LABELS: dict[str, str] = {
-    "A1": "Single Family Residences",
-    "A2": "Townhouses",
-    "A3": "Condominiums",
-    "A4": "Mobile Homes",
-    "B1": "Multifamily (2-4 units)",
-    "B2": "Multifamily (5+ units)",
-    "C1": "Vacant Residential Lots",
-    "C2": "Vacant Commercial Lots",
-    "D1": "Qualified Agricultural Land",
-    "E1": "Rural Residential/Agricultural",
-    "F1": "Commercial Improvements",
-    "F2": "Industrial Improvements",
-    "G1": "Oil and Gas",
-    "J": "Utilities",
-    "L1": "Commercial Personal Property",
-    "X": "Totally Exempt",
+# property_class → human-readable label (mirrors SPTD_LABELS in dcad.py).
+# TAD stores a broad state_use_code ("A", "B", "C"…) AND a detailed property_class
+# ("A1", "A2", "C1", "F1"…).  property_class is what we use for both classification
+# and display labels.
+TAD_CLASS_LABELS: dict[str, str] = {
+    "A":   "Single Family Residences",
+    "A1":  "Single Family Residences",
+    "A2":  "Townhouses",
+    "A3":  "Condominiums",
+    "A4":  "Mobile Homes",
+    "B1":  "Multifamily (2–4 units)",
+    "B2":  "Multifamily (5+ units)",
+    "B3":  "Multifamily (5+ units)",
+    "B4":  "Multifamily (5+ units)",
+    "BC":  "Commercial/Mixed-Use",
+    "C1":  "Vacant Residential Lots",
+    "C1C": "Vacant Residential Lots",
+    "C2":  "Vacant Commercial Lots",
+    "C2C": "Vacant Commercial Lots",
+    "D1":  "Qualified Agricultural Land",
+    "D2":  "Timberland",
+    "E1":  "Rural Residential/Agricultural",
+    "EC":  "Rural Residential/Agricultural",
+    "F1":  "Commercial Improvements",
+    "F2":  "Industrial Improvements",
+    "G1":  "Oil and Gas",
+    "G3":  "Minerals",
+    "J1":  "Water/Gas Utilities",
+    "J2":  "Electric Utilities",
+    "J3":  "Radio/TV Cable Utilities",
+    "J4":  "Telephone Utilities",
+    "J5":  "Railroad Corridor",
+    "L1":  "Commercial Personal Property",
+    "L2":  "Industrial Personal Property",
+    "M1":  "Mobile Homes (Leased Land)",
+    "M2":  "Mobile Homes (Other)",
+    "O1":  "Residential Inventory (Vacant)",
+    "O2":  "Residential Inventory (Improved)",
+    "ROC": "Right of Way/Common Area",
+    "S":   "Special Inventory",
+    "AC":  "Agricultural Common Area",
+    "X":   "Totally Exempt",
 }
 
-# State-use codes treated as residential single-family for classification
-_SFR_CODES = {"A1", "A2", "A4"}
-_CONDO_CODES = {"A3"}
-_MF_CODES = {"B1", "B2"}
-_VACANT_CODES = {"C1"}
-_COMMERCIAL_CODES = {"C2", "F1", "F2", "L1"}
-_EXEMPT_CODES = {"D1", "X", "G1", "J"}
+# property_class sets for classification
+_SFR_CODES     = {"A", "A1", "A2", "A4", "E1", "EC"}
+_CONDO_CODES   = {"A3"}
+_MF_CODES      = {"B1", "B2", "B3", "B4", "M1", "M2"}
+_VACANT_CODES  = {"C1", "C1C", "O1"}
+_COMMERCIAL_CODES = {"C2", "C2C", "BC", "F1", "F2", "L1", "L2", "S"}
+_EXEMPT_CODES  = {"D1", "D2", "G1", "G2", "G3", "G4", "J1", "J2", "J3", "J4", "J5",
+                  "ROC", "AC", "X"}
 
 _GOV_KEYWORDS = [
     "CITY OF ", "TARRANT COUNTY", "DALLAS COUNTY", "STATE OF TEXAS",
@@ -70,7 +96,7 @@ def _tad_bbox_filter(
                        owner_name, owner_addr, owner_city,
                        situs_addr, property_class, state_use_code, legal_descr,
                        county_code, city_code, school_code,
-                       acres, land_sqft,
+                       acres, land_acres, land_sqft,
                        year_built, living_area,
                        land_value, improvement_value, total_value,
                        ST_AsGeoJSON(geom)::json  AS polygon_geojson,
@@ -104,9 +130,9 @@ def _centroid_from_geojson(centroid_json: Any) -> tuple[float | None, float | No
 
 def _classify_tad(row: dict[str, Any]) -> str:
     """TAD-specific classification → same bucket labels as dcad.classify_parcel."""
-    code = _clean_text(row.get("state_use_code")).upper()
+    code = _clean_text(row.get("sptd_code")).upper()   # sptd_code ← property_class
     owner_up = _clean_text(row.get("owner_name")).upper()
-    tot_val = _safe_float(row.get("total_value")) or 0.0
+    tot_val = _safe_float(row.get("tot_val")) or 0.0
 
     gov_match = any(kw in owner_up for kw in _GOV_KEYWORDS)
     hoa_match = any(kw in owner_up for kw in _HOA_KEYWORDS)
@@ -126,18 +152,25 @@ def _classify_tad(row: dict[str, Any]) -> str:
 
 def _normalize_tad_row(raw: dict[str, Any]) -> dict[str, Any]:
     """Map tad_parcels columns → the unified row shape dcad.build_feature expects."""
-    state_use_code = _clean_text(raw.get("state_use_code"))
+    # property_class is the detailed 2–3 char code (A1, C1, F1…); use it for
+    # both classification (stored as sptd_code) and the human-readable label.
+    property_class = _clean_text(raw.get("property_class")) or _clean_text(raw.get("state_use_code"))
     land_val = _safe_float(raw.get("land_value"))
     tot_val = _safe_float(raw.get("total_value"))
-    area_size = _safe_float(raw.get("land_sqft"))
-    if area_size is None:
+    # Best-effort area: land_sqft → land_acres*43560 → acres*43560
+    area_size = _safe_float(raw.get("land_sqft")) or None
+    if not area_size:
+        land_acres = _safe_float(raw.get("land_acres"))
+        if land_acres:
+            area_size = land_acres * 43560
+    if not area_size:
         acres = _safe_float(raw.get("acres"))
-        area_size = acres * 43560 if acres is not None else None
+        if acres:
+            area_size = acres * 43560
 
     property_address = _clean_text(raw.get("situs_addr")).upper()
 
-    # Mimic the SPTD→label lookup in dcad.py via TAD_STATE_USE_LABELS
-    state_label = TAD_STATE_USE_LABELS.get(state_use_code, state_use_code) if state_use_code else ""
+    state_label = TAD_CLASS_LABELS.get(property_class, property_class) if property_class else ""
 
     polygon_geojson = raw.get("polygon_geojson")
     if isinstance(polygon_geojson, str):
@@ -164,7 +197,7 @@ def _normalize_tad_row(raw: dict[str, Any]) -> dict[str, Any]:
         "property_zip": "",
         # classification
         "division_cd": "TAD",
-        "sptd_code": state_use_code,
+        "sptd_code": property_class,       # detailed code used for classify + label
         "nbhd_cd": "",
         "legal1": _clean_text(raw.get("legal_descr")),
         "legal2": "", "legal3": "", "legal4": "", "legal5": "",

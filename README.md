@@ -11,7 +11,7 @@ Core flow:
 ## What It Is
 
 - Internal analyst tool for fast parcel triage.
-- County-data-first platform (DCAD-backed).
+- County-data-first platform (DCAD + TAD).
 - Map + export workflow, not a consumer home search app.
 
 ## What It Is Not
@@ -25,6 +25,7 @@ Core flow:
 **Parcel analysis**
 - Polygon-based analysis — draw any shape, get everything inside.
 - Exact drawn-boundary filtering (ray-cast point-in-polygon, not just bbox).
+- Multi-county routing by drawn area (Dallas + Tarrant supported).
 - Parcel type color classification (see Color Meaning below).
 - Sidebar shortlist of off-market SFR sorted by land % of total value.
 
@@ -131,8 +132,39 @@ Full-screen CSV output review in spreadsheet format.
 
 - DCAD appraisal/account/land/residential/exemption exports
 - DCAD parcel geometry shapefile
+- TAD ParcelView shapefile (normalized to EPSG:4326 and loaded into `tad_parcels`)
 - City of Dallas HOA boundaries GeoJSON
 - Redfin listing grid endpoint (best-effort)
+
+## Tarrant County Notes (TAD)
+
+Tarrant support is now live and uses a dedicated ingest + query path separate from DCAD.
+
+How it works:
+- DCAD flow remains unchanged (`parcels` + appraisal/detail joins).
+- TAD flow uses a dedicated PostGIS table (`tad_parcels`) built from ParcelView.
+- `/api/analyze` routes by polygon bbox:
+	- Dallas overlap -> query DCAD path.
+	- Tarrant overlap -> query TAD path.
+	- Boundary overlap -> query both and merge.
+
+Classification parity with DCAD:
+- TAD classification uses `property_class` (A1/C1/F1/B2/etc.), not broad `state_use_code` letters.
+- Category output is normalized to the same frontend palette:
+	- Blue: off-market SFR
+	- Green: vacant
+	- Purple: multifamily
+	- Orange: commercial
+	- Gray: exempt
+
+Field parity and known differences:
+- Land/Improvement/Total values come directly from `tad_parcels` financial fields.
+- Lot size uses best-effort fallback: `land_sqft` -> `land_acres` -> `acres`.
+- Some TAD fields are code-based in ParcelView (for example school/city code values). Those codes are currently passed through as-is.
+- Frontage/depth and zoning may be blank in TAD where ParcelView does not provide direct equivalents.
+
+Operational note:
+- A small share of TAD parcels legitimately carry zero values (for example exemptions or appraisal conditions). Zero-valued parcels are not automatically a bug.
 
 ## Project Layout
 
@@ -249,11 +281,17 @@ If map is empty:
 1. Check /health
 2. Check /health/db
 3. Verify env vars
+4. If drawing in Tarrant, confirm `tad_parcels` is loaded and non-empty
 
 If parcel geometry looks wrong:
 1. Confirm latest build completed
 2. Verify source PARCEL_GEOM files
 3. Rebuild database
+
+If Tarrant colors or popup fields look incomplete:
+1. Confirm latest backend deploy includes `api/tad.py` and county routing in `api/main.py`
+2. Spot-check `tad_parcels.property_class` and financial fields directly in DB
+3. Re-run a known Fort Worth test polygon and compare category mix vs expected neighborhood profile
 
 If export looks wrong:
 1. Re-run a known test polygon
