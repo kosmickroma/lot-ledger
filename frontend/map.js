@@ -935,11 +935,21 @@ map.on("draw:created", async (e) => {
 map.on("draw:drawstart", () => {
   drawHelper.classList.remove("hidden");
   document.getElementById("btn-draw")?.classList.add("active");
+  // Disable clicks on rendered layers so vertices register cleanly during drawing.
+  [markerLayer, redfinLayer].forEach((lg) =>
+    lg.eachLayer((l) => { if (l.options) l.options.interactive = false; })
+  );
+  map.getContainer().classList.add("drawing-active");
 });
 
 map.on("draw:drawstop", () => {
   drawHelper.classList.add("hidden");
   document.getElementById("btn-draw")?.classList.remove("active");
+  // Restore interactivity after draw completes.
+  [markerLayer, redfinLayer].forEach((lg) =>
+    lg.eachLayer((l) => { if (l.options) l.options.interactive = true; })
+  );
+  map.getContainer().classList.remove("drawing-active");
 });
 
 map.on("contextmenu", () => {

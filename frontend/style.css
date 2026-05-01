@@ -467,6 +467,13 @@ h1 {
   cursor: crosshair;
 }
 
+/* During polygon drawing, block pointer events on rendered parcel layers so
+   vertex clicks are never swallowed by underlying circle markers. */
+#map.drawing-active .leaflet-overlay-pane,
+#map.drawing-active .leaflet-marker-pane {
+  pointer-events: none;
+}
+
 .basemap-btn.active {
   background: #1a5a42;
   color: #fff;
