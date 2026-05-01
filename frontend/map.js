@@ -621,6 +621,7 @@ function renderFeatures(geojson) {
 
     let layer;
     if (renderCondoOutline) {
+      // Interactive so clicking the building outline shows the first unit's popup.
       L.geoJSON(feature, {
         style: {
           color: borderColor,
@@ -628,8 +629,10 @@ function renderFeatures(geojson) {
           weight: 1.2,
           opacity: 0.75,
         },
-        interactive: false,
-      }).addTo(markerLayer);
+      })
+        .bindPopup(() => makePopupHtml(p), { maxWidth: 280 })
+        .on("click", applyBrush)
+        .addTo(markerLayer);
     }
 
     if (renderPolygon) {
@@ -644,18 +647,7 @@ function renderFeatures(geojson) {
       }).bindPopup(() => makePopupHtml(p), { maxWidth: 280 });
       layer.on("click", applyBrush);
       layer.addTo(markerLayer);
-
-      L.circleMarker([p.lat, p.lng], {
-        radius: p.on_redfin ? 5 : 3,
-        fillColor: color,
-        color: borderColor,
-        weight: 1,
-        opacity: 1,
-        fillOpacity: 0.95,
-      })
-        .bindPopup(() => makePopupHtml(p), { maxWidth: 280 })
-        .on("click", applyBrush)
-        .addTo(circleLayer);
+      // No circle marker rendered when polygon geometry exists — polygon fill IS the click target.
     } else {
       layer = L.circleMarker([p.lat, p.lng], {
         radius: p.on_redfin ? 7 : 5,
@@ -799,17 +791,136 @@ function normalizeCsvFilename(rawName) {
   return `${safeStem}.csv`;
 }
 
+// ---------------------------------------------------------------------------
+// Phase 2: tile splitting for large-area draws
+// ---------------------------------------------------------------------------
+const TILE_AREA_THRESHOLD = 0.003; // sq-degrees; split bbox above this area
+
+function getPolygonBbox(polygon) {
+  let minLng = Infinity, minLat = Infinity, maxLng = -Infinity, maxLat = -Infinity;
+  for (const [lng, lat] of polygon) {
+    if (lng < minLng) minLng = lng;
+    if (lat < minLat) minLat = lat;
+    if (lng > maxLng) maxLng = lng;
+    if (lat > maxLat) maxLat = lat;
+  }
+  return { minLng, minLat, maxLng, maxLat };
+}
+
+function bboxArea(bbox) {
+  return (bbox.maxLng - bbox.minLng) * (bbox.maxLat - bbox.minLat);
+}
+
+function splitBboxIntoTiles(bbox) {
+  const midLng = (bbox.minLng + bbox.maxLng) / 2;
+  const midLat = (bbox.minLat + bbox.maxLat) / 2;
+  return [
+    { minLng: bbox.minLng, minLat: bbox.minLat, maxLng: midLng,      maxLat: midLat      }, // SW
+    { minLng: midLng,      minLat: bbox.minLat, maxLng: bbox.maxLng, maxLat: midLat      }, // SE
+    { minLng: bbox.minLng, minLat: midLat,      maxLng: midLng,      maxLat: bbox.maxLat }, // NW
+    { minLng: midLng,      minLat: midLat,      maxLng: bbox.maxLng, maxLat: bbox.maxLat }, // NE
+  ];
+}
+
+function tileToPolygon(tile) {
+  return [
+    [tile.minLng, tile.minLat],
+    [tile.maxLng, tile.minLat],
+    [tile.maxLng, tile.maxLat],
+    [tile.minLng, tile.maxLat],
+    [tile.minLng, tile.minLat],
+  ];
+}
+
+async function runTiledAnalysis(polygon, includeRedfin) {
+  const bbox = getPolygonBbox(polygon);
+  const tiles = splitBboxIntoTiles(bbox);
+  const tileJobIds = [];
+  const allFeatures = [];
+  const seenParcelKeys = new Set();
+  let anyRedfinOk = false;
+  let anyRedfinSkipped = false;
+  let lastSourceStatus = null;
+
+  for (let i = 0; i < tiles.length; i++) {
+    document.getElementById("redfin-status").textContent =
+      `Loading tile ${i + 1} of ${tiles.length}...`;
+    const resp = await fetch("/api/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ polygon: tileToPolygon(tiles[i]), include_redfin: includeRedfin }),
+    });
+    if (!resp.ok) throw new Error(`Tile ${i + 1} failed: ${resp.status}`);
+    const data = await resp.json();
+    if (data.source_status && (!data.source_status.dcad_ok || !data.source_status.tad_ok)) {
+      throw new Error(`Incomplete county result on tile ${i + 1}`);
+    }
+    tileJobIds.push(data.job_id);
+    lastSourceStatus = data.source_status;
+    if (data.redfin_ok) anyRedfinOk = true;
+    if (data.redfin_skipped) anyRedfinSkipped = true;
+    for (const feature of data.features) {
+      const key = feature.properties?.parcel_key || feature.properties?.account_num;
+      if (key && seenParcelKeys.has(key)) continue;
+      if (key) seenParcelKeys.add(key);
+      allFeatures.push(feature);
+    }
+  }
+
+  // Recount from deduplicated features
+  const mergedCounts = { active: 0, off_market: 0, multifamily: 0, vacant: 0, commercial: 0, exempt: 0, total: allFeatures.length };
+  for (const feature of allFeatures) {
+    const p = feature.properties || {};
+    if (p.on_redfin) mergedCounts.active++;
+    else if (p.prop_type === "multifamily") mergedCounts.multifamily++;
+    else if (p.prop_type === "vacant") mergedCounts.vacant++;
+    else if (p.prop_type === "commercial") mergedCounts.commercial++;
+    else if (p.prop_type === "exempt") mergedCounts.exempt++;
+    else mergedCounts.off_market++;
+  }
+
+  // Merge server-side so export + verification have a single stable job_id
+  const mergeResp = await fetch("/api/merge-jobs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ job_ids: tileJobIds }),
+  });
+  if (!mergeResp.ok) throw new Error("Failed to merge tile results for export");
+  const mergeData = await mergeResp.json();
+
+  return {
+    type: "FeatureCollection",
+    features: allFeatures,
+    counts: mergedCounts,
+    job_id: mergeData.job_id,
+    redfin_requested: includeRedfin,
+    redfin_ok: anyRedfinOk,
+    redfin_skipped: anyRedfinSkipped,
+    source_status: lastSourceStatus,
+    tiled: true,
+  };
+}
+
+async function runAnalysis(polygon, includeRedfin) {
+  const bbox = getPolygonBbox(polygon);
+  if (bboxArea(bbox) > TILE_AREA_THRESHOLD) {
+    return runTiledAnalysis(polygon, includeRedfin);
+  }
+  const resp = await fetch("/api/analyze", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ polygon, include_redfin: includeRedfin }),
+  });
+  if (!resp.ok) throw new Error(`Server error: ${resp.status}`);
+  return resp.json();
+}
+// ---------------------------------------------------------------------------
+
 async function refreshExpiredJob() {
   if (!lastPolygon || lastPolygon.length < 3) return false;
   const includeRedfin = Boolean(document.getElementById("toggle-redfin")?.checked);
   try {
-    const resp = await fetch("/api/analyze", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ polygon: lastPolygon, include_redfin: includeRedfin }),
-    });
-    if (!resp.ok) return false;
-    const data = await resp.json();
+    const data = await runAnalysis(lastPolygon, includeRedfin);
     if (data.source_status && (!data.source_status.dcad_ok || !data.source_status.tad_ok)) {
       return false;
     }
@@ -891,13 +1002,7 @@ map.on("draw:created", async (e) => {
   lastPolygon = polygon;
 
   try {
-    const resp = await fetch("/api/analyze", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ polygon, include_redfin: includeRedfin }),
-    });
-    if (!resp.ok) throw new Error(`Server error: ${resp.status}`);
-    const data = await resp.json();
+    const data = await runAnalysis(polygon, includeRedfin);
     if (data.source_status && (!data.source_status.dcad_ok || !data.source_status.tad_ok)) {
       throw new Error("Incomplete county result set returned; analysis canceled to prevent partial export.");
     }
@@ -980,10 +1085,8 @@ map.on("draw:drawstart", () => {
   document.getElementById("btn-draw")?.classList.add("active");
   document.getElementById("btn-draw-cancel")?.classList.remove("hidden");
   document.getElementById("btn-draw-clear")?.classList.add("hidden");
-  // Disable clicks on rendered layers so vertices register cleanly during drawing.
-  [markerLayer, redfinLayer].forEach((lg) =>
-    lg.eachLayer((l) => { if (l.options) l.options.interactive = false; })
-  );
+  // CSS pointer-events:none (drawing-active class) blocks parcel layer clicks
+  // so vertices never get swallowed by underlying markers.
   map.getContainer().classList.add("drawing-active");
 });
 
@@ -991,10 +1094,6 @@ map.on("draw:drawstop", () => {
   drawHelper.classList.add("hidden");
   document.getElementById("btn-draw")?.classList.remove("active");
   document.getElementById("btn-draw-cancel")?.classList.add("hidden");
-  // Restore interactivity after draw completes.
-  [markerLayer, redfinLayer].forEach((lg) =>
-    lg.eachLayer((l) => { if (l.options) l.options.interactive = true; })
-  );
   map.getContainer().classList.remove("drawing-active");
 });
 

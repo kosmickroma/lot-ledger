@@ -74,6 +74,10 @@ class AnalyzeRequest(BaseModel):
     include_redfin: bool = False
 
 
+class MergeJobsRequest(BaseModel):
+    job_ids: list[str]
+
+
 class VerificationRequest(BaseModel):
     verifications: dict[str, str] = {}
     potential_targets: dict[str, str] = {}
@@ -313,6 +317,38 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
             "tad_ok": tad_result is not None,
         },
     }
+
+
+@app.post("/api/merge-jobs")
+async def merge_jobs(request: MergeJobsRequest) -> dict[str, Any]:
+    """Merge rows from multiple tile job_ids into a single exportable job."""
+    merged_rows: list[dict[str, Any]] = []
+    merged_redfin: dict[str, Any] = {}
+    seen_keys: set[str] = set()
+    for job_id in request.job_ids:
+        job = _get_job(job_id)
+        if job is None:
+            continue
+        for row in job.get("rows", []):
+            key = str(row.get("parcel_key") or row.get("account_num") or "")
+            if key and key in seen_keys:
+                continue
+            if key:
+                seen_keys.add(key)
+            merged_rows.append(row)
+        merged_redfin.update(job.get("redfin_data", {}))
+
+    if not merged_rows:
+        raise HTTPException(status_code=404, detail="No valid tile jobs found to merge")
+
+    _evict_stale_jobs()
+    new_job_id = str(uuid.uuid4())
+    _job_store[new_job_id] = {
+        "rows": merged_rows,
+        "redfin_data": merged_redfin,
+        "created_at": time.monotonic(),
+    }
+    return {"job_id": new_job_id}
 
 
 @app.post("/api/job/{job_id}/verification")
