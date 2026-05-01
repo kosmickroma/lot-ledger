@@ -17,6 +17,7 @@ import asyncio
 import csv
 import io
 import re
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -36,8 +37,36 @@ from api.tad import query_tad_parcels, _classify_tad
 BASE_DIR = Path(__file__).resolve().parent.parent
 FRONTEND_DIR = BASE_DIR / "frontend"
 _job_store: dict[str, dict[str, Any]] = {}
+_JOB_TTL_SECONDS = 1800    # 30-minute TTL per session
+_JOB_MAX = 50              # max jobs held in memory at once
+_REDFIN_ROW_THRESHOLD = 15_000  # auto-disable Redfin above this parcel count
 
 _FILENAME_SAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _evict_stale_jobs() -> None:
+    """Remove expired jobs then trim to _JOB_MAX (evict oldest first)."""
+    now = time.monotonic()
+    expired = [
+        jid for jid, job in _job_store.items()
+        if now - job.get("created_at", 0) > _JOB_TTL_SECONDS
+    ]
+    for jid in expired:
+        _job_store.pop(jid, None)
+    while len(_job_store) >= _JOB_MAX:
+        oldest = min(_job_store, key=lambda jid: _job_store[jid].get("created_at", 0))
+        _job_store.pop(oldest, None)
+
+
+def _get_job(job_id: str) -> dict[str, Any] | None:
+    """Return job if it exists and has not expired; evicts on TTL miss."""
+    job = _job_store.get(job_id)
+    if job is None:
+        return None
+    if time.monotonic() - job.get("created_at", 0) > _JOB_TTL_SECONDS:
+        _job_store.pop(job_id, None)
+        return None
+    return job
 
 
 class AnalyzeRequest(BaseModel):
@@ -183,15 +212,11 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
     except Exception:
         failed_sources.append("TAD")
 
-    if redfin_task is not None:
-        try:
-            redfin_data = await redfin_task or {}
-            redfin_fetch_ok = True
-        except Exception:
-            redfin_data = {}
-
     # Never return silent partial county coverage; fail loudly instead.
+    # Cancel any pending Redfin task before raising to avoid a dangling coroutine.
     if failed_sources:
+        if redfin_task is not None and not redfin_task.done():
+            redfin_task.cancel()
         raise HTTPException(
             status_code=502,
             detail=f"County query failed for: {', '.join(failed_sources)}. No partial results returned.",
@@ -207,7 +232,22 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
         all_rows.extend(tad_result.parcels)
 
     if not all_rows:
+        if redfin_task is not None and not redfin_task.done():
+            redfin_task.cancel()
         raise HTTPException(status_code=500, detail="Parcel query failed for all counties")
+
+    # Auto-disable Redfin for large area draws — prevents timeouts and memory pressure.
+    redfin_skipped = False
+    if redfin_task is not None and len(all_rows) > _REDFIN_ROW_THRESHOLD:
+        if not redfin_task.done():
+            redfin_task.cancel()
+        redfin_skipped = True
+    elif redfin_task is not None:
+        try:
+            redfin_data = await redfin_task or {}
+            redfin_fetch_ok = True
+        except Exception:
+            redfin_data = {}
 
     rows = all_rows
     features: list[dict[str, Any]] = []
@@ -253,10 +293,12 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
         except ValueError:
             continue
 
+    _evict_stale_jobs()
     job_id = str(uuid.uuid4())
     _job_store[job_id] = {
         "rows": rows,
         "redfin_data": redfin_data,
+        "created_at": time.monotonic(),
     }
     return {
         "type": "FeatureCollection",
@@ -265,6 +307,7 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
         "job_id": job_id,
         "redfin_requested": include_redfin,
         "redfin_ok": redfin_fetch_ok,
+        "redfin_skipped": redfin_skipped,
         "source_status": {
             "dcad_ok": dcad_result is not None,
             "tad_ok": tad_result is not None,
@@ -274,7 +317,7 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
 
 @app.post("/api/job/{job_id}/verification")
 async def save_verification(job_id: str, request: VerificationRequest) -> dict[str, Any]:
-    job = _job_store.get(job_id)
+    job = _get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
 
@@ -308,7 +351,7 @@ async def save_verification(job_id: str, request: VerificationRequest) -> dict[s
 
 @app.get("/api/download/{job_id}")
 async def download(job_id: str, filename: str | None = None) -> StreamingResponse:
-    job = _job_store.get(job_id)
+    job = _get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
 

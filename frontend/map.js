@@ -892,9 +892,11 @@ map.on("draw:created", async (e) => {
       p.potential_target = potential;
     });
     document.getElementById("redfin-status").textContent = includeRedfin
-      ? (data.redfin_ok
-          ? `${data.counts.active} active listing${data.counts.active !== 1 ? "s" : ""} found`
-          : "Redfin pull unavailable; DCAD results shown")
+      ? (data.redfin_skipped
+          ? `Redfin auto-disabled — area too large (${data.counts.total.toLocaleString()} parcels)`
+          : data.redfin_ok
+            ? `${data.counts.active} active listing${data.counts.active !== 1 ? "s" : ""} found`
+            : "Redfin pull unavailable; DCAD results shown")
       : "DCAD-only mode (Redfin disabled)";
     redfinLayerVisible = Boolean(document.getElementById("toggle-redfin")?.checked);
     if (redfinLayerVisible) {
@@ -912,6 +914,8 @@ map.on("draw:created", async (e) => {
     if (toggleStatus) {
       if (!includeRedfin) {
         toggleStatus.textContent = "";
+      } else if (data.redfin_skipped) {
+        toggleStatus.textContent = `Redfin skipped — ${data.counts.total.toLocaleString()} parcels`;
       } else if (!data.redfin_ok) {
         toggleStatus.textContent = "Redfin unavailable";
       } else if (data.counts.active === 0) {
