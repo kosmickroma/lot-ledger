@@ -925,6 +925,7 @@ map.on("draw:created", async (e) => {
       }
     }
   } catch (err) {
+    console.error("[draw:created] Analysis failed:", err);
     document.getElementById("sidebar-loading").classList.add("hidden");
     document.getElementById("sidebar-instructions").classList.remove("hidden");
     alert("Analysis failed: " + err.message);
