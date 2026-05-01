@@ -802,6 +802,7 @@ function normalizeCsvFilename(rawName) {
 // Phase 2: tile splitting for large-area draws
 // ---------------------------------------------------------------------------
 const TILE_AREA_THRESHOLD = 0.003; // sq-degrees; split bbox above this area
+const TILE_MAX_SPLIT_DEPTH = 2; // 2x2 -> 4x4 -> 8x8 worst-case per failing branch
 
 function getPolygonBbox(polygon) {
   let minLng = Infinity, minLat = Infinity, maxLng = -Infinity, maxLat = -Infinity;
@@ -839,6 +840,38 @@ function tileToPolygon(tile) {
   ];
 }
 
+async function fetchTileDataRecursive(tilePolygon, includeRedfin, depth, tileLabel) {
+  const resp = await fetch("/api/analyze", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ polygon: tilePolygon, include_redfin: includeRedfin }),
+  });
+
+  if (resp.ok) {
+    const data = await resp.json();
+    if (data.source_status && (!data.source_status.dcad_ok || !data.source_status.tad_ok)) {
+      throw new Error(`Incomplete county result on tile ${tileLabel}`);
+    }
+    return [data];
+  }
+
+  if (resp.status === 502 && depth < TILE_MAX_SPLIT_DEPTH) {
+    document.getElementById("redfin-status").textContent =
+      `Refining tile ${tileLabel} due to server load...`;
+    const subTiles = splitBboxIntoTiles(getPolygonBbox(tilePolygon));
+    const nestedResults = [];
+    for (let i = 0; i < subTiles.length; i++) {
+      const subLabel = `${tileLabel}.${i + 1}`;
+      const subPolygon = tileToPolygon(subTiles[i]);
+      const subData = await fetchTileDataRecursive(subPolygon, includeRedfin, depth + 1, subLabel);
+      nestedResults.push(...subData);
+    }
+    return nestedResults;
+  }
+
+  throw new Error(`Tile ${tileLabel} failed: ${resp.status}`);
+}
+
 async function runTiledAnalysis(polygon, includeRedfin) {
   const bbox = getPolygonBbox(polygon);
   const tiles = splitBboxIntoTiles(bbox);
@@ -852,25 +885,19 @@ async function runTiledAnalysis(polygon, includeRedfin) {
   for (let i = 0; i < tiles.length; i++) {
     document.getElementById("redfin-status").textContent =
       `Loading tile ${i + 1} of ${tiles.length}...`;
-    const resp = await fetch("/api/analyze", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ polygon: tileToPolygon(tiles[i]), include_redfin: includeRedfin }),
-    });
-    if (!resp.ok) throw new Error(`Tile ${i + 1} failed: ${resp.status}`);
-    const data = await resp.json();
-    if (data.source_status && (!data.source_status.dcad_ok || !data.source_status.tad_ok)) {
-      throw new Error(`Incomplete county result on tile ${i + 1}`);
-    }
-    tileJobIds.push(data.job_id);
-    lastSourceStatus = data.source_status;
-    if (data.redfin_ok) anyRedfinOk = true;
-    if (data.redfin_skipped) anyRedfinSkipped = true;
-    for (const feature of data.features) {
-      const key = feature.properties?.parcel_key || feature.properties?.account_num;
-      if (key && seenParcelKeys.has(key)) continue;
-      if (key) seenParcelKeys.add(key);
-      allFeatures.push(feature);
+    const tilePolygon = tileToPolygon(tiles[i]);
+    const tileDataList = await fetchTileDataRecursive(tilePolygon, includeRedfin, 0, `${i + 1}`);
+    for (const data of tileDataList) {
+      tileJobIds.push(data.job_id);
+      lastSourceStatus = data.source_status;
+      if (data.redfin_ok) anyRedfinOk = true;
+      if (data.redfin_skipped) anyRedfinSkipped = true;
+      for (const feature of data.features) {
+        const key = feature.properties?.parcel_key || feature.properties?.account_num;
+        if (key && seenParcelKeys.has(key)) continue;
+        if (key) seenParcelKeys.add(key);
+        allFeatures.push(feature);
+      }
     }
   }
 
