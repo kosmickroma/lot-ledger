@@ -257,7 +257,19 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
     if not all_rows:
         if redfin_task is not None and not redfin_task.done():
             redfin_task.cancel()
-        raise HTTPException(status_code=500, detail="Parcel query failed for all counties")
+        _evict_stale_jobs()
+        empty_job_id = str(uuid.uuid4())
+        _job_store[empty_job_id] = {"rows": [], "redfin_data": {}, "created_at": time.monotonic()}
+        return {
+            "type": "FeatureCollection",
+            "features": [],
+            "counts": {"active": 0, "off_market": 0, "multifamily": 0, "vacant": 0, "commercial": 0, "exempt": 0, "total": 0},
+            "job_id": empty_job_id,
+            "redfin_requested": include_redfin,
+            "redfin_ok": False,
+            "redfin_skipped": False,
+            "source_status": {"dcad_ok": dcad_result is not None, "tad_ok": tad_result is not None},
+        }
 
     # Auto-disable Redfin for large area draws — prevents timeouts and memory pressure.
     redfin_skipped = False

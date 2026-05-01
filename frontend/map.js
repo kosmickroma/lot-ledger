@@ -1174,19 +1174,7 @@ document.getElementById("btn-download").addEventListener("click", () => {
 });
 
 document.getElementById("btn-clear").addEventListener("click", () => {
-  markerLayer.clearLayers();
-  redfinLayer.clearLayers();
-  drawLayer.clearLayers();
-  verificationBadgeLayer.clearLayers();
-  targetBadgeLayer.clearLayers();
-  currentJobId = null;
-  lastPolygon = null;
-  lastAnalysisGeojson = null;
-  lastAnalysisCounts = null;
-  verificationByAccount.clear();
-  potentialTargetByAccount.clear();
-  verificationBadgeMarkers.clear();
-  targetBadgeMarkers.clear();
+  clearDrawResults();
   activeBrush = null;
   document.getElementById("btn-verify-toggle")?.classList.remove("active");
   document.getElementById("btn-target-toggle")?.classList.remove("active", "target-active");
@@ -1196,9 +1184,6 @@ document.getElementById("btn-clear").addEventListener("click", () => {
   document.getElementById("target-brush-menu")?.classList.add("hidden");
   document.getElementById("redfin-toggle-status").textContent = "";
   lastIncludedRedfin = false;
-  document.getElementById("sidebar-results").classList.add("hidden");
-  document.getElementById("sidebar-loading").classList.add("hidden");
-  document.getElementById("sidebar-instructions").classList.remove("hidden");
 });
 
 // Redfin toggle: if Redfin wasn't included in the last fetch, re-run analysis
@@ -1210,13 +1195,7 @@ async function rerunWithRedfin() {
   if (toggleEl) toggleEl.disabled = true;
   if (statusEl) statusEl.textContent = "Fetching Redfin\u2026";
   try {
-    const resp = await fetch("/api/analyze", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ polygon: lastPolygon, include_redfin: true }),
-    });
-    if (!resp.ok) throw new Error(`Server error: ${resp.status}`);
-    const data = await resp.json();
+    const data = await runAnalysis(lastPolygon, true);
     currentJobId = data.job_id;
     // Merge server state without overwriting in-session tag changes.
     data.features.forEach((feature) => {
