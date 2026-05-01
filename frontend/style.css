@@ -474,6 +474,20 @@ h1 {
   pointer-events: none;
 }
 
+#btn-draw-cancel {
+  color: #b94040 !important;
+}
+#btn-draw-cancel:hover {
+  background: #fff0f0 !important;
+}
+#btn-draw-clear {
+  color: #888 !important;
+}
+#btn-draw-clear:hover {
+  background: #f5f5f5 !important;
+  color: #b94040 !important;
+}
+
 .basemap-btn.active {
   background: #1a5a42;
   color: #fff;

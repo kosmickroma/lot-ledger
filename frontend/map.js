@@ -182,6 +182,27 @@ const MapToolbar = L.Control.extend({
       }
     });
 
+    const cancelBtn = L.DomUtil.create("a", "hidden", container);
+    cancelBtn.id = "btn-draw-cancel";
+    cancelBtn.href = "#";
+    cancelBtn.title = "Cancel current drawing";
+    cancelBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>';
+    L.DomEvent.on(cancelBtn, "click", (e) => {
+      L.DomEvent.preventDefault(e);
+      const handler = getPolygonDrawHandler();
+      if (handler && handler.enabled()) handler.disable();
+    });
+
+    const clearBtn = L.DomUtil.create("a", "hidden", container);
+    clearBtn.id = "btn-draw-clear";
+    clearBtn.href = "#";
+    clearBtn.title = "Clear results and draw a new area";
+    clearBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6l-1 14H6L5 6"></path><path d="M10 11v6"></path><path d="M14 11v6"></path><path d="M9 6V4h6v2"></path></svg>';
+    L.DomEvent.on(clearBtn, "click", (e) => {
+      L.DomEvent.preventDefault(e);
+      clearDrawResults();
+    });
+
     const hoaBtn = L.DomUtil.create("a", "", container);
     hoaBtn.id = "btn-hoa-toggle";
     hoaBtn.href = "#";
@@ -907,6 +928,7 @@ map.on("draw:created", async (e) => {
     lastIncludedRedfin = includeRedfin;
     lastAnalysisGeojson = data;
     lastAnalysisCounts = data.counts;
+    document.getElementById("btn-draw-clear")?.classList.remove("hidden");
     const markers = renderFeatures(data);
     renderSidebar(data.counts, markers);
     // Update the always-visible toggle status line.
@@ -928,13 +950,36 @@ map.on("draw:created", async (e) => {
     console.error("[draw:created] Analysis failed:", err);
     document.getElementById("sidebar-loading").classList.add("hidden");
     document.getElementById("sidebar-instructions").classList.remove("hidden");
+    document.getElementById("btn-draw-clear")?.classList.remove("hidden");
     alert("Analysis failed: " + err.message);
   }
 });
 
+function clearDrawResults() {
+  drawLayer.clearLayers();
+  markerLayer.clearLayers();
+  redfinLayer.clearLayers();
+  verificationBadgeLayer.clearLayers();
+  targetBadgeLayer.clearLayers();
+  verificationByAccount.clear();
+  potentialTargetByAccount.clear();
+  verificationBadgeMarkers.clear();
+  targetBadgeMarkers.clear();
+  currentJobId = null;
+  lastPolygon = null;
+  lastAnalysisGeojson = null;
+  lastAnalysisCounts = null;
+  document.getElementById("sidebar-results")?.classList.add("hidden");
+  document.getElementById("sidebar-instructions")?.classList.remove("hidden");
+  document.getElementById("sidebar-loading")?.classList.add("hidden");
+  document.getElementById("btn-draw-clear")?.classList.add("hidden");
+}
+
 map.on("draw:drawstart", () => {
   drawHelper.classList.remove("hidden");
   document.getElementById("btn-draw")?.classList.add("active");
+  document.getElementById("btn-draw-cancel")?.classList.remove("hidden");
+  document.getElementById("btn-draw-clear")?.classList.add("hidden");
   // Disable clicks on rendered layers so vertices register cleanly during drawing.
   [markerLayer, redfinLayer].forEach((lg) =>
     lg.eachLayer((l) => { if (l.options) l.options.interactive = false; })
@@ -945,6 +990,7 @@ map.on("draw:drawstart", () => {
 map.on("draw:drawstop", () => {
   drawHelper.classList.add("hidden");
   document.getElementById("btn-draw")?.classList.remove("active");
+  document.getElementById("btn-draw-cancel")?.classList.add("hidden");
   // Restore interactivity after draw completes.
   [markerLayer, redfinLayer].forEach((lg) =>
     lg.eachLayer((l) => { if (l.options) l.options.interactive = true; })
