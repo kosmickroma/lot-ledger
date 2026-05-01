@@ -84,6 +84,26 @@ _GOV_KEYWORDS = [
 _HOA_KEYWORDS = ["HOMEOWNER", "OWNERS ASSOC", " HOA", "CIVIC ASSOC", "PROPERTY OWNERS"]
 
 
+def _tad_subdivision_from_legal(legal_descr: str) -> str:
+    """Best-effort subdivision extractor from ParcelView legal description text."""
+    text = _clean_text(legal_descr)
+    if not text:
+        return ""
+
+    upper = text.upper()
+    cut_tokens = [" LOT", " BLK", " BLOCK", " TRACT", " ACRES", " AC"]
+    cut_idx = len(text)
+    for token in cut_tokens:
+        idx = upper.find(token)
+        if idx != -1:
+            cut_idx = min(cut_idx, idx)
+
+    candidate = text[:cut_idx].strip(" ,.-")
+    if not candidate:
+        return ""
+    return candidate[:64]
+
+
 def _tad_bbox_filter(
     min_lat: float, min_lng: float, max_lat: float, max_lng: float
 ) -> list[dict[str, Any]]:
@@ -169,6 +189,13 @@ def _normalize_tad_row(raw: dict[str, Any]) -> dict[str, Any]:
             area_size = acres * 43560
 
     property_address = _clean_text(raw.get("situs_addr")).upper()
+    if not property_address:
+        property_address = _clean_text(raw.get("owner_addr")).upper()
+
+    legal_descr = _clean_text(raw.get("legal_descr"))
+    subdivision = _tad_subdivision_from_legal(legal_descr)
+    school_code = _clean_text(raw.get("school_code"))
+    school_display = f"ISD {school_code}" if school_code else ""
 
     state_label = TAD_CLASS_LABELS.get(property_class, property_class) if property_class else ""
 
@@ -198,8 +225,8 @@ def _normalize_tad_row(raw: dict[str, Any]) -> dict[str, Any]:
         # classification
         "division_cd": "TAD",
         "sptd_code": property_class,       # detailed code used for classify + label
-        "nbhd_cd": "",
-        "legal1": _clean_text(raw.get("legal_descr")),
+        "nbhd_cd": subdivision,
+        "legal1": legal_descr,
         "legal2": "", "legal3": "", "legal4": "", "legal5": "",
         # spatial
         "lat": _safe_float(raw.get("_lat")),
@@ -209,7 +236,7 @@ def _normalize_tad_row(raw: dict[str, Any]) -> dict[str, Any]:
         "land_val": land_val,
         "impr_val": _safe_float(raw.get("improvement_value")),
         "tot_val": tot_val,
-        "isd_desc": _clean_text(raw.get("school_code")),
+        "isd_desc": school_display,
         # improvements
         "yr_built": _safe_int(raw.get("year_built")),
         "tot_living_area": _safe_float(raw.get("living_area")),

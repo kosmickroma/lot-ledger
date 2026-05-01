@@ -161,38 +161,34 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
 
     redfin_data: dict[str, dict] = {}
 
-    # Always query both counties; each adapter already does bbox + exact polygon filtering.
-    tasks = [
-        asyncio.to_thread(query_parcels, polygon),
-        asyncio.to_thread(query_tad_parcels, polygon),
-    ]
+    # Start Redfin task (optional) but run county DB queries sequentially.
+    # This avoids intermittent psycopg2 ThreadedConnectionPool races seen under
+    # concurrent thread execution in mixed-county pulls.
+    redfin_task = None
     if include_redfin:
-        tasks.append(pull_grid(min_lng, min_lat, max_lng, max_lat))
-
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+        redfin_task = asyncio.create_task(pull_grid(min_lng, min_lat, max_lng, max_lat))
 
     dcad_result = None
     tad_result = None
     redfin_fetch_ok = False
     failed_sources: list[str] = []
 
-    dcad_resp = results[0]
-    if not isinstance(dcad_resp, Exception):
-        dcad_result = dcad_resp
-    else:
+    try:
+        dcad_result = await asyncio.to_thread(query_parcels, polygon)
+    except Exception:
         failed_sources.append("DCAD")
 
-    tad_resp = results[1]
-    if not isinstance(tad_resp, Exception):
-        tad_result = tad_resp
-    else:
+    try:
+        tad_result = await asyncio.to_thread(query_tad_parcels, polygon)
+    except Exception:
         failed_sources.append("TAD")
 
-    if include_redfin:
-        redfin_resp = results[2]
-        if not isinstance(redfin_resp, Exception):
-            redfin_data = redfin_resp or {}
+    if redfin_task is not None:
+        try:
+            redfin_data = await redfin_task or {}
             redfin_fetch_ok = True
+        except Exception:
+            redfin_data = {}
 
     # Never return silent partial county coverage; fail loudly instead.
     if failed_sources:
@@ -425,7 +421,10 @@ async def download(job_id: str, filename: str | None = None) -> StreamingRespons
                     _google_maps_link(row),
                     row.get("verified_vacant", "") or "",
                     row.get("potential_target", "") or "",
-                    row.get("hoa_name", "") or "",
+                    (
+                        row.get("hoa_name", "")
+                        or ("N/A (Tarrant HOA not loaded)" if row.get("division_cd") == "TAD" else "")
+                    ),
                     row.get("hoa_url", "") or "",
                 ]
             )

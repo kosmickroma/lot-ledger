@@ -85,4 +85,12 @@ def get_conn() -> psycopg2.extensions.connection:
 
 
 def release_conn(conn: psycopg2.extensions.connection) -> None:
-    get_pool().putconn(conn)
+    try:
+        get_pool().putconn(conn)
+    except psycopg2.pool.PoolError:
+        # Defensive fallback for rare pool state races under threaded access.
+        # Prefer dropping the connection over crashing request handling.
+        try:
+            conn.close()
+        except Exception:
+            pass
