@@ -206,6 +206,8 @@ def _normalize_tad_row(raw: dict[str, Any]) -> dict[str, Any]:
         except Exception:
             polygon_geojson = None
 
+    owner_zip = _clean_text(raw.get("owner_zip"))
+
     return {
         # identity
         "account_num": _clean_text(raw.get("account_num")),
@@ -216,12 +218,12 @@ def _normalize_tad_row(raw: dict[str, Any]) -> dict[str, Any]:
         "owner_address": _clean_text(raw.get("owner_addr")),
         "owner_city": _clean_text(raw.get("owner_city")) or _clean_text(raw.get("owner_citystate")),
         "owner_state": "TX",
-        "owner_zip": _clean_text(raw.get("owner_zip")),
+        "owner_zip": owner_zip,
         # address
         "street_num": "",
         "full_street_name": "",
         "property_address": property_address,
-        "property_zip": "",
+        "property_zip": owner_zip,
         # classification
         "division_cd": "TAD",
         "sptd_code": property_class,       # detailed code used for classify + label

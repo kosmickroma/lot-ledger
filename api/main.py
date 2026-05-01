@@ -21,6 +21,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote_plus
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
@@ -114,12 +115,30 @@ def _safe_float(value: Any) -> float | None:
 
 
 def _google_maps_link(row: dict[str, Any]) -> str:
+    property_address = str(row.get("property_address", "") or "").strip()
     street_num = str(row.get("street_num", "") or "").strip()
     full_street_name = str(row.get("full_street_name", "") or "").strip()
-    zip_code = str(row.get("property_zip", "") or "").strip()[:5]
-    query = f"{street_num}+{full_street_name.replace(' ', '+')},+Dallas+TX+{zip_code}"
-    query = query.replace("++", "+")
-    return f"https://maps.google.com/?q={query}"
+    city = str(row.get("property_city", "") or row.get("owner_city", "") or "").strip()
+    state = str(row.get("property_state", "") or row.get("owner_state", "") or "TX").strip()
+    zip_code = str(row.get("property_zip", "") or row.get("owner_zip", "") or "").strip()[:5]
+
+    # Prefer full property address when available; otherwise fall back to
+    # street parts. Keep this county-agnostic (no hardcoded city).
+    primary_address = property_address or " ".join([street_num, full_street_name]).strip()
+    if primary_address:
+        parts = [primary_address, city, state, zip_code]
+        query_text = ", ".join(part for part in parts if part)
+        if query_text:
+            return f"https://maps.google.com/?q={quote_plus(query_text)}"
+
+    # For sparse county rows (for example personal-property records with no
+    # situs address), use centroid coordinates so link is still usable.
+    lat = _safe_float(row.get("lat"))
+    lng = _safe_float(row.get("lng"))
+    if lat is not None and lng is not None:
+        return f"https://maps.google.com/?q={lat},{lng}"
+
+    return "https://maps.google.com"
 
 
 # Validate required runtime settings at startup.
@@ -440,7 +459,16 @@ async def download(job_id: str, filename: str | None = None) -> StreamingRespons
         buffer.truncate(0)
         buffer.seek(0)
 
-        sorted_rows = sorted(rows, key=lambda r: str(r.get("property_address", "") or ""))
+        # Put sparse rows (missing property_address) at the bottom so analysts
+        # see usable address records first.
+        sorted_rows = sorted(
+            rows,
+            key=lambda r: (
+                str(r.get("property_address", "") or "").strip() == "",
+                str(r.get("property_address", "") or "").strip(),
+                str(r.get("owner_name", "") or "").strip(),
+            ),
+        )
         for row in sorted_rows:
             parcel_key = str(row.get("parcel_key", "") or "")
             account_num = str(row.get("account_num", "") or "")
@@ -468,9 +496,15 @@ async def download(job_id: str, filename: str | None = None) -> StreamingRespons
                 ]
             ).strip()
 
+            display_address = (
+                str(row.get("property_address", "") or "").strip()
+                or str(row.get("legal1", "") or "").strip()
+                or str(row.get("parcel_key", "") or "").strip()
+            )
+
             writer.writerow(
                 [
-                    row.get("property_address", ""),
+                    display_address,
                     "Active" if on_redfin else "Off Market",
                     row.get("owner_name", ""),
                     row.get("owner_address", ""),
