@@ -40,6 +40,7 @@ _FILENAME_SAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 class AnalyzeRequest(BaseModel):
     polygon: list[list[float]]
+    include_redfin: bool = False
 
 
 class VerificationRequest(BaseModel):
@@ -150,18 +151,25 @@ async def health_db_check() -> dict[str, str]:
 @app.post("/api/analyze")
 async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
     polygon = request.polygon
+    include_redfin = bool(request.include_redfin)
     if len(polygon) < 3:
         raise HTTPException(status_code=400, detail="Polygon must have at least 3 points")
 
     min_lat, min_lng, max_lat, max_lng = polygon_bbox(polygon)
 
     redfin_data: dict[str, dict] = {}
-    try:
-        parcel_result, redfin_data = await asyncio.gather(
-            asyncio.to_thread(query_parcels, polygon),
-            pull_grid(min_lng, min_lat, max_lng, max_lat),
-        )
-    except Exception:
+    if include_redfin:
+        try:
+            parcel_result, redfin_data = await asyncio.gather(
+                asyncio.to_thread(query_parcels, polygon),
+                pull_grid(min_lng, min_lat, max_lng, max_lat),
+            )
+        except Exception:
+            try:
+                parcel_result = await asyncio.to_thread(query_parcels, polygon)
+            except Exception as exc:
+                raise HTTPException(status_code=500, detail=str(exc)) from exc
+    else:
         try:
             parcel_result = await asyncio.to_thread(query_parcels, polygon)
         except Exception as exc:
@@ -197,6 +205,7 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
         "features": features,
         "counts": counts,
         "job_id": job_id,
+        "redfin_requested": include_redfin,
         "redfin_ok": len(redfin_data) > 0,
     }
 

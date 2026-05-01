@@ -291,10 +291,8 @@ def query_parcels(polygon: list[list[float]]) -> ParcelQueryResult:
         land_val = _safe_float(appraisal.get("land_val"))
         tot_val = _safe_float(appraisal.get("tot_val"))
 
+        # build_db.py already converts ACRE → sq ft before storing; read as-is.
         area_size = _safe_float(land_detail.get("area_size"))
-        area_uom = _clean_text(land_detail.get("area_uom")).upper()
-        if area_size is not None and area_uom == "ACRE":
-            area_size = area_size * 43560
 
         property_address = _clean_text(row.get("property_address"))
         if not property_address:
@@ -369,7 +367,7 @@ def classify_parcel(row: dict[str, Any], exempt_set: set[str]) -> str:
     tot_val = _safe_float(row.get("tot_val")) or 0.0
     is_nominal = tot_val <= 500 and sptd in {"C11", "C12"}
 
-    if account_num in exempt_set or sptd == "X11" or non_target_owner or is_nominal:
+    if account_num in exempt_set or sptd in {"X11", "D10"} or non_target_owner or is_nominal:
         return "exempt"
     if sptd in {"B11", "B12", "A14"}:
         return "multifamily"
@@ -389,6 +387,12 @@ def build_feature(row: dict[str, Any], prop_type: str, on_redfin: bool, redfin_l
 
     area_size = _safe_float(row.get("area_size"))
     land_pct = _safe_float(row.get("land_pct"))
+    # D10 (Qualified Agricultural Land) carries $0 in DCAD bulk exports — market
+    # value is withheld; display a label rather than misleading "$0".
+    ag_zero = (
+        _clean_text(row.get("sptd_code")) == "D10"
+        and (_safe_float(row.get("land_val")) or 0) == 0
+    )
 
     props = {
         "on_redfin": bool(on_redfin),
@@ -396,8 +400,8 @@ def build_feature(row: dict[str, Any], prop_type: str, on_redfin: bool, redfin_l
         "account_num": _clean_text(row.get("account_num")),
         "addr": _clean_text(row.get("property_address")),
         "owner": _clean_text(row.get("owner_name")),
-        "land_val": f"${row['land_val']:,.0f}" if _safe_float(row.get("land_val")) is not None else "N/A",
-        "tot_val": f"${row['tot_val']:,.0f}" if _safe_float(row.get("tot_val")) is not None else "N/A",
+        "land_val": "Ag-exempt" if ag_zero else (f"${row['land_val']:,.0f}" if _safe_float(row.get("land_val")) is not None else "N/A"),
+        "tot_val": "Ag-exempt" if ag_zero else (f"${row['tot_val']:,.0f}" if _safe_float(row.get("tot_val")) is not None else "N/A"),
         "land_pct": f"{land_pct:.1f}%" if land_pct is not None else "N/A",
         "lot_acres": f"{area_size / 43560:.2f} ac" if area_size is not None and area_size > 0 else "N/A",
         "frontage": f"{int(row['front_dim'])} ft" if _safe_float(row.get("front_dim")) not in (None, 0.0) else "N/A",

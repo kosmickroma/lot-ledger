@@ -86,7 +86,11 @@ map.addControl(drawControl);
 
 let markerLayer = L.layerGroup().addTo(map);
 let redfinLayer = L.layerGroup().addTo(map);
-let redfinLayerVisible = true;
+const redfinToggleInput = document.getElementById("toggle-redfin");
+let redfinLayerVisible = Boolean(redfinToggleInput?.checked);
+if (!redfinLayerVisible) {
+  map.removeLayer(redfinLayer);
+}
 let drawLayer = L.layerGroup().addTo(map);
 let verificationBadgeLayer = L.layerGroup().addTo(map);
 let targetBadgeLayer = L.layerGroup().addTo(map);
@@ -738,11 +742,12 @@ function normalizeCsvFilename(rawName) {
 
 async function refreshExpiredJob() {
   if (!lastPolygon || lastPolygon.length < 3) return false;
+  const includeRedfin = Boolean(document.getElementById("toggle-redfin")?.checked);
   try {
     const resp = await fetch("/api/analyze", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ polygon: lastPolygon }),
+      body: JSON.stringify({ polygon: lastPolygon, include_redfin: includeRedfin }),
     });
     if (!resp.ok) return false;
     const data = await resp.json();
@@ -814,7 +819,10 @@ map.on("draw:created", async (e) => {
   document.getElementById("sidebar-instructions").classList.add("hidden");
   document.getElementById("sidebar-results").classList.add("hidden");
   document.getElementById("sidebar-loading").classList.remove("hidden");
-  document.getElementById("redfin-status").textContent = "Pulling Redfin listings...";
+  const includeRedfin = Boolean(document.getElementById("toggle-redfin")?.checked);
+  document.getElementById("redfin-status").textContent = includeRedfin
+    ? "Pulling Redfin listings..."
+    : "Skipping Redfin pull (DCAD-only mode)...";
   drawLayer.addLayer(e.layer);
 
   const polygon = e.layer.getLatLngs()[0].map((ll) => [ll.lng, ll.lat]);
@@ -824,7 +832,7 @@ map.on("draw:created", async (e) => {
     const resp = await fetch("/api/analyze", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ polygon }),
+      body: JSON.stringify({ polygon, include_redfin: includeRedfin }),
     });
     if (!resp.ok) throw new Error(`Server error: ${resp.status}`);
     const data = await resp.json();
@@ -839,17 +847,18 @@ map.on("draw:created", async (e) => {
       potentialTargetByAccount.set(p.account_num, potential);
       p.potential_target = potential;
     });
-    document.getElementById("redfin-status").textContent = data.redfin_ok
-      ? `${data.counts.active} active listing${data.counts.active !== 1 ? "s" : ""} found`
-      : "Active listings unavailable";
-    // Only show source toggles when Redfin data actually came back.
+    document.getElementById("redfin-status").textContent = includeRedfin
+      ? (data.redfin_ok
+          ? `${data.counts.active} active listing${data.counts.active !== 1 ? "s" : ""} found`
+          : "Redfin pull unavailable; DCAD results shown")
+      : "DCAD-only mode (Redfin disabled)";
     const layerToggles = document.getElementById("layer-toggles");
-    if (layerToggles) layerToggles.classList.toggle("hidden", !data.redfin_ok);
-    const toggleRedfin = document.getElementById("toggle-redfin");
-    if (toggleRedfin) toggleRedfin.checked = true;
-    if (!redfinLayerVisible) {
+    if (layerToggles) layerToggles.classList.remove("hidden");
+    redfinLayerVisible = Boolean(document.getElementById("toggle-redfin")?.checked);
+    if (redfinLayerVisible) {
       redfinLayer.addTo(map);
-      redfinLayerVisible = true;
+    } else {
+      map.removeLayer(redfinLayer);
     }
     lastAnalysisGeojson = data;
     lastAnalysisCounts = data.counts;

@@ -449,6 +449,7 @@ def _build_land_detail_table() -> list[dict[str, object]]:
         area_uom = _clean_text(getattr(row, "AREA_UOM_DESC", None))
         if area_size is not None and area_uom and area_uom.upper() == "ACRE":
             area_size = area_size * 43560
+            area_uom = "SQUARE FEET"  # normalize label after conversion
 
         rows.append(
             {
