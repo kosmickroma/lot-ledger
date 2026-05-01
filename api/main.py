@@ -35,6 +35,7 @@ from api.tad import query_tad_parcels, _classify_tad
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 FRONTEND_DIR = BASE_DIR / "frontend"
+ASSETS_DIR = BASE_DIR / "assets"
 _job_store: dict[str, dict[str, Any]] = {}
 
 # Tarrant County rough bbox (lng_min, lat_min, lng_max, lat_max) in WGS84.
@@ -442,4 +443,5 @@ async def index() -> FileResponse:
     return FileResponse(FRONTEND_DIR / "index.html")
 
 
+app.mount("/assets", StaticFiles(directory=ASSETS_DIR), name="assets")
 app.mount("/", StaticFiles(directory=FRONTEND_DIR), name="frontend")

@@ -108,6 +108,78 @@ const targetBadgeMarkers = new Map();
 let activeBrush = null;
 
 const HOA_COLOR = "#b8860b";
+const COUNTY_PRIMARY_COLOR = "#1f2f3b";
+const COUNTY_SECONDARY_COLOR = "#4f6474";
+const NORTH_TEXAS_COUNTIES = new Set([
+  "Dallas",
+  "Tarrant",
+  "Collin",
+  "Denton",
+  "Rockwall",
+  "Ellis",
+  "Kaufman",
+  "Parker",
+  "Johnson",
+  "Wise",
+]);
+const COUNTY_HIGHLIGHT = new Set(["Dallas", "Tarrant"]);
+let countyLayer = null;
+let countyVisible = true;
+
+async function toggleCountyLayer() {
+  const btn = document.getElementById("btn-county-toggle");
+  if (countyVisible && countyLayer) {
+    map.removeLayer(countyLayer);
+    countyVisible = false;
+    btn?.classList.remove("active");
+    return;
+  }
+  if (countyLayer) {
+    countyLayer.addTo(map);
+    countyVisible = true;
+    btn?.classList.add("active");
+    return;
+  }
+
+  if (btn) btn.textContent = "...";
+  try {
+    const res = await fetch("/assets/tx_counties.geojson");
+    if (!res.ok) throw new Error(`County load failed: ${res.status}`);
+    const source = await res.json();
+    const filteredFeatures = (source.features || []).filter((feature) => {
+      const countyName = String(feature?.properties?.NAME || "");
+      return NORTH_TEXAS_COUNTIES.has(countyName);
+    });
+
+    countyLayer = L.geoJSON({ type: "FeatureCollection", features: filteredFeatures }, {
+      style(feature) {
+        const countyName = String(feature?.properties?.NAME || "");
+        const highlight = COUNTY_HIGHLIGHT.has(countyName);
+        return {
+          color: highlight ? COUNTY_PRIMARY_COLOR : COUNTY_SECONDARY_COLOR,
+          weight: highlight ? 3 : 2,
+          opacity: highlight ? 0.9 : 0.75,
+          fill: false,
+          dashArray: highlight ? null : "4 4",
+        };
+      },
+      interactive: false,
+    }).addTo(map);
+
+    countyVisible = true;
+    if (btn) {
+      btn.textContent = "CNTY";
+      btn.classList.add("active");
+    }
+  } catch (err) {
+    if (btn) {
+      btn.textContent = "CNTY";
+      btn.classList.remove("active");
+    }
+    countyVisible = false;
+    console.error("County layer load failed", err);
+  }
+}
 
 async function toggleHoaLayer() {
   const btn = document.getElementById("btn-hoa-toggle");
@@ -186,6 +258,16 @@ const MapToolbar = L.Control.extend({
       toggleHoaLayer();
     });
 
+    const countyBtn = L.DomUtil.create("a", "active", container);
+    countyBtn.id = "btn-county-toggle";
+    countyBtn.href = "#";
+    countyBtn.title = "Toggle county boundaries";
+    countyBtn.textContent = "CNTY";
+    L.DomEvent.on(countyBtn, "click", (e) => {
+      L.DomEvent.preventDefault(e);
+      toggleCountyLayer();
+    });
+
     const verifyBtn = L.DomUtil.create("a", "", container);
     verifyBtn.id = "btn-verify-toggle";
     verifyBtn.href = "#";
@@ -210,6 +292,7 @@ const MapToolbar = L.Control.extend({
   },
 });
 new MapToolbar().addTo(map);
+toggleCountyLayer();
 
 const VerifyBrushMenu = L.Control.extend({
   options: { position: "topleft" },
@@ -516,7 +599,8 @@ function renderFeatures(geojson) {
     const color = getColor(feature);
     const borderColor = getBorderColor(feature);
     if (p.lat == null || p.lng == null) return;
-    const hasPolygonGeometry = feature.geometry?.type === "Polygon";
+    const hasPolygonGeometry =
+      feature.geometry?.type === "Polygon" || feature.geometry?.type === "MultiPolygon";
     const isCondo = isCondoParcel(p);
     const polygonKey = hasPolygonGeometry ? geometryKey(feature.geometry) : "";
     const firstPolygonInstance = Boolean(polygonKey) && !polygonGeometrySeen.has(polygonKey);
