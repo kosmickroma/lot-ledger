@@ -44,6 +44,139 @@ const TYPE_LABELS = {
   off_market: "Off Market",
 };
 
+// ============================================================================
+// Tile Manager — handles large-area queries by splitting into sub-bbox tiles
+// ============================================================================
+
+const TILE_ROW_THRESHOLD = 10000;  // trigger tiling for large draws
+
+function gridSizeForZoom(zoom) {
+  if (zoom >= 13) return 2;
+  if (zoom >= 11) return 4;
+  return null;  // too zoomed out
+}
+
+function bbox_center_lat(bbox) {
+  return (bbox[0] + bbox[2]) / 2;
+}
+function bbox_center_lng(bbox) {
+  return (bbox[1] + bbox[3]) / 2;
+}
+function bbox_width_deg(bbox) {
+  return bbox[3] - bbox[1];
+}
+function bbox_height_deg(bbox) {
+  return bbox[2] - bbox[0];
+}
+
+function splitBboxIntoGrid(bbox, gridSize) {
+  // bbox = [min_lat, min_lng, max_lat, max_lng]
+  const [minLat, minLng, maxLat, maxLng] = bbox;
+  const latStep = (maxLat - minLat) / gridSize;
+  const lngStep = (maxLng - minLng) / gridSize;
+  
+  const tiles = [];
+  for (let row = 0; row < gridSize; row++) {
+    for (let col = 0; col < gridSize; col++) {
+      const tileMinLat = minLat + row * latStep;
+      const tileMaxLat = minLat + (row + 1) * latStep;
+      const tileMinLng = minLng + col * lngStep;
+      const tileMaxLng = minLng + (col + 1) * lngStep;
+      tiles.push([tileMinLat, tileMinLng, tileMaxLat, tileMaxLng]);
+    }
+  }
+  return tiles;
+}
+
+function bboxToPolygon(bbox) {
+  // bbox = [min_lat, min_lng, max_lat, max_lng]
+  // GeoJSON polygon: [[lng, lat], ...]
+  const [minLat, minLng, maxLat, maxLng] = bbox;
+  return [
+    [minLng, minLat],
+    [maxLng, minLat],
+    [maxLng, maxLat],
+    [minLng, maxLat],
+    [minLng, minLat],
+  ];
+}
+
+class TileManager {
+  constructor(bbox, gridSize, includeRedfin = false) {
+    this.bbox = bbox;
+    this.gridSize = gridSize;
+    this.includeRedfin = includeRedfin;
+    this.tiles = splitBboxIntoGrid(bbox, gridSize);
+    this.results = [];
+    this.mergedFeatures = [];
+    this.mergedCounts = {
+      active: 0, off_market: 0, multifamily: 0, vacant: 0, commercial: 0, exempt: 0, total: 0,
+    };
+    this.completedTiles = 0;
+    this.failedTiles = 0;
+    this.seenParcelKeys = new Set();
+  }
+
+  async fetchAllTiles() {
+    const promises = this.tiles.map((tile, idx) => this.fetchTile(tile, idx));
+    await Promise.allSettled(promises);
+    return this.finalizeResults();
+  }
+
+  async fetchTile(bbox, tileIdx) {
+    const polygon = bboxToPolygon(bbox);
+    try {
+      const resp = await fetch("/api/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ polygon, include_redfin: this.includeRedfin }),
+      });
+      if (!resp.ok) throw new Error(`Tile ${tileIdx}: HTTP ${resp.status}`);
+      const data = await resp.json();
+      if (data.source_status && (!data.source_status.dcad_ok || !data.source_status.tad_ok)) {
+        throw new Error(`Tile ${tileIdx}: Incomplete county coverage`);
+      }
+      this.mergeTileResults(data);
+      this.completedTiles++;
+      this.onTileComplete?.(this.completedTiles, this.tiles.length);
+    } catch (err) {
+      this.failedTiles++;
+      this.onTileFailed?.(tileIdx, err.message);
+    }
+  }
+
+  mergeTileResults(data) {
+    if (!data.features) return;
+    data.features.forEach((feature) => {
+      const key = feature.properties?.parcel_key || feature.properties?.account_num;
+      if (!key || this.seenParcelKeys.has(key)) return;
+      this.seenParcelKeys.add(key);
+      this.mergedFeatures.push(feature);
+    });
+
+    // Accumulate counts
+    if (data.counts) {
+      Object.keys(this.mergedCounts).forEach((k) => {
+        if (k !== "total") {
+          this.mergedCounts[k] += (data.counts[k] || 0);
+        }
+      });
+    }
+  }
+
+  finalizeResults() {
+    this.mergedCounts.total = this.mergedFeatures.length;
+    return {
+      type: "FeatureCollection",
+      features: this.mergedFeatures,
+      counts: this.mergedCounts,
+      tiled: true,
+      completed_tiles: this.completedTiles,
+      total_tiles: this.tiles.length,
+    };
+  }
+}
+
 const map = L.map("map", { zoomControl: true }).setView(DALLAS_CENTER, DEFAULT_ZOOM);
 
 const streetLayer = L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
@@ -115,6 +248,12 @@ let activeBrush = null;
 
 const HOA_COLOR = "#b8860b";
 
+// Browse Mode state
+let browseModeEnabled = false;
+let browseModeTileManager = null;
+let browseModeDebounceTimer = null;
+const BROWSE_MODE_DEBOUNCE_MS = 800;
+
 async function toggleHoaLayer() {
   const btn = document.getElementById("btn-hoa-toggle");
   if (hoaVisible && hoaLayer) {
@@ -160,6 +299,84 @@ async function toggleHoaLayer() {
   }
 }
 
+async function loadViewportTiled() {
+  if (!browseModeEnabled) return;
+  
+  const bounds = map.getBounds();
+  const zoom = map.getZoom();
+  const gridSize = gridSizeForZoom(zoom);
+  
+  if (gridSize === null) {
+    alert("Zoom in to at least level 11 for Browse Mode");
+    return;
+  }
+
+  const bbox = [bounds.getSouth(), bounds.getWest(), bounds.getNorth(), bounds.getEast()];
+  const includeRedfin = Boolean(document.getElementById("toggle-redfin")?.checked);
+
+  // For small viewports, use single request; for large, use tiling
+  const tilePolygon = bboxToPolygon(bbox);
+  const testResp = await fetch("/api/analyze", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ polygon: tilePolygon, include_redfin: includeRedfin }),
+  });
+  if (!testResp.ok) return;
+  const testData = await testResp.json();
+
+  // If under threshold, just render directly
+  if ((testData.counts?.total || 0) < TILE_ROW_THRESHOLD) {
+    if (testData.source_status && (!testData.source_status.dcad_ok || !testData.source_status.tad_ok)) {
+      return;
+    }
+    markerLayer.clearLayers();
+    lastAnalysisGeojson = testData;
+    renderFeatures(testData);
+    return;
+  }
+
+  // Otherwise, use tile manager
+  markerLayer.clearLayers();
+  document.getElementById("sidebar-loading").classList.remove("hidden");
+  document.getElementById("sidebar-results").classList.add("hidden");
+  document.getElementById("sidebar-loading").innerText = "Loading Browse Mode... ";
+
+  browseModeTileManager = new TileManager(bbox, gridSize, includeRedfin);
+  browseModeTileManager.onTileComplete = (completed, total) => {
+    const statusEl = document.getElementById("sidebar-loading");
+    if (statusEl) {
+      statusEl.innerText = `Loading Browse Mode... ${completed}/${total} tiles`;
+    }
+    renderFeatures(browseModeTileManager.finalizeResults());
+  };
+
+  const results = await browseModeTileManager.fetchAllTiles();
+  lastAnalysisGeojson = results;
+  renderFeatures(results);
+  document.getElementById("sidebar-loading").classList.add("hidden");
+}
+
+function toggleBrowseMode() {
+  const btn = document.getElementById("btn-browse-toggle");
+  browseModeEnabled = !browseModeEnabled;
+  btn.classList.toggle("active", browseModeEnabled);
+
+  if (browseModeEnabled) {
+    document.getElementById("sidebar-instructions").classList.add("hidden");
+    document.getElementById("sidebar-results").classList.remove("hidden");
+    loadViewportTiled();
+    map.on("moveend", () => {
+      clearTimeout(browseModeDebounceTimer);
+      browseModeDebounceTimer = setTimeout(loadViewportTiled, BROWSE_MODE_DEBOUNCE_MS);
+    });
+  } else {
+    map.off("moveend");
+    markerLayer.clearLayers();
+    document.getElementById("sidebar-instructions").classList.remove("hidden");
+    document.getElementById("sidebar-results").classList.add("hidden");
+  }
+}
+
 const MapToolbar = L.Control.extend({
   options: { position: "topleft" },
   onAdd() {
@@ -190,6 +407,16 @@ const MapToolbar = L.Control.extend({
     L.DomEvent.on(hoaBtn, "click", (e) => {
       L.DomEvent.preventDefault(e);
       toggleHoaLayer();
+    });
+
+    const browseBtn = L.DomUtil.create("a", "", container);
+    browseBtn.id = "btn-browse-toggle";
+    browseBtn.href = "#";
+    browseBtn.title = "Browse Mode: auto-load parcels as you pan";
+    browseBtn.textContent = "≋";
+    L.DomEvent.on(browseBtn, "click", (e) => {
+      L.DomEvent.preventDefault(e);
+      toggleBrowseMode();
     });
 
     const verifyBtn = L.DomUtil.create("a", "", container);
@@ -841,6 +1068,10 @@ async function persistTagStateForExport() {
 }
 
 map.on("draw:created", async (e) => {
+  browseModeEnabled = false;
+  document.getElementById("btn-browse-toggle")?.classList.remove("active");
+  map.off("moveend");
+
   drawLayer.clearLayers();
   markerLayer.clearLayers();
   redfinLayer.clearLayers();
@@ -869,14 +1100,56 @@ map.on("draw:created", async (e) => {
   const polygon = e.layer.getLatLngs()[0].map((ll) => [ll.lng, ll.lat]);
   lastPolygon = polygon;
 
+  // Estimate bbox to decide if we should tile
+  const lngs = polygon.map(p => p[0]);
+  const lats = polygon.map(p => p[1]);
+  const minLat = Math.min(...lats);
+  const maxLat = Math.max(...lats);
+  const minLng = Math.min(...lngs);
+  const maxLng = Math.max(...lngs);
+  const bbox = [minLat, minLng, maxLat, maxLng];
+  const estimatedBboxArea = bbox_width_deg(bbox) * bbox_height_deg(bbox);
+  const zoom = map.getZoom();
+  const gridSize = gridSizeForZoom(zoom);
+  const shouldTile = estimatedBboxArea > 0.06 && gridSize !== null;  // ~0.06 deg² ≈ ~3.5 sq mi
+
   try {
-    const resp = await fetch("/api/analyze", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ polygon, include_redfin: includeRedfin }),
-    });
-    if (!resp.ok) throw new Error(`Server error: ${resp.status}`);
-    const data = await resp.json();
+    let data;
+    if (shouldTile) {
+      document.getElementById("sidebar-loading").textContent = "Tiling large area...";
+      const tileManager = new TileManager(bbox, gridSize, includeRedfin);
+      tileManager.onTileComplete = (completed, total) => {
+        const statusEl = document.getElementById("sidebar-loading");
+        if (statusEl) {
+          statusEl.textContent = `Analyzing... ${completed}/${total} tiles`;
+        }
+        renderFeatures(tileManager.finalizeResults());
+      };
+      data = await tileManager.fetchAllTiles();
+      // Cache the merged tiled results on the server to get a job_id for export
+      const cacheResp = await fetch("/api/cache-job", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          rows: data.features.map(f => f.properties),
+          redfin_data: {},
+          counts: data.counts,
+        }),
+      });
+      if (cacheResp.ok) {
+        const cacheData = await cacheResp.json();
+        data.job_id = cacheData.job_id;
+      }
+    } else {
+      const resp = await fetch("/api/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ polygon, include_redfin: includeRedfin }),
+      });
+      if (!resp.ok) throw new Error(`Server error: ${resp.status}`);
+      data = await resp.json();
+    }
+
     if (data.source_status && (!data.source_status.dcad_ok || !data.source_status.tad_ok)) {
       throw new Error("Incomplete county result set returned; analysis canceled to prevent partial export.");
     }
