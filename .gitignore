@@ -46,3 +46,19 @@ Thumbs.db
 
 # Build script checkpoint — local resume state, not for repo
 .build_checkpoint.json
+
+# PMTiles build artifacts — large binary files, never commit
+*.pmtiles
+*.mbtiles
+
+# GeoJSON exports — can be multi-GB, regenerated from DB
+*.geojson
+!frontend/*.geojson
+
+# GCP credentials — never commit
+*.json
+!package.json
+!tsconfig.json
+service-account*.json
+gcp-key*.json
+cors.json
