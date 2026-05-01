@@ -79,12 +79,6 @@ class VerificationRequest(BaseModel):
     potential_targets: dict[str, str] = {}
 
 
-class CacheJobRequest(BaseModel):
-    rows: list[dict[str, Any]]
-    redfin_data: dict[str, dict[str, Any]] = {}
-    counts: dict[str, int] = {}
-
-
 def _normalize_csv_filename(raw: str | None) -> str:
     if not raw:
         return "parcels.csv"
@@ -319,19 +313,6 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
             "tad_ok": tad_result is not None,
         },
     }
-
-
-@app.post("/api/cache-job")
-async def cache_job(request: CacheJobRequest) -> dict[str, str]:
-    """Create and store a job from merged/tiled results. Returns job_id for download/export."""
-    _evict_stale_jobs()
-    job_id = str(uuid.uuid4())
-    _job_store[job_id] = {
-        "rows": request.rows,
-        "redfin_data": request.redfin_data,
-        "created_at": time.monotonic(),
-    }
-    return {"job_id": job_id}
 
 
 @app.post("/api/job/{job_id}/verification")
