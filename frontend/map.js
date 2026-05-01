@@ -556,6 +556,7 @@ function renderFeatures(geojson) {
   targetBadgeMarkers.clear();
   const polygonGeometrySeen = new Set();
   const condoOutlineSeen = new Set();
+  const accountRenderedAsPolygon = new Set(); // accounts that got a polygon fill — no dot needed
   const markers = {};
   geojson.features.forEach((feature) => {
     const p = feature.properties;
@@ -648,7 +649,13 @@ function renderFeatures(geojson) {
       layer.on("click", applyBrush);
       layer.addTo(markerLayer);
       // No circle marker rendered when polygon geometry exists — polygon fill IS the click target.
+      if (p.account_num) accountRenderedAsPolygon.add(p.account_num);
     } else {
+      // Skip dot if another row for this account already rendered a polygon fill.
+      if (p.account_num && accountRenderedAsPolygon.has(p.account_num)) {
+        markers[p.addr] = markers[p.addr] || { layer: null, feature };
+        return;
+      }
       layer = L.circleMarker([p.lat, p.lng], {
         radius: p.on_redfin ? 7 : 5,
         fillColor: color,
