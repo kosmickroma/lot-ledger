@@ -875,6 +875,19 @@ map.on("draw:created", async (e) => {
     lastAnalysisCounts = data.counts;
     const markers = renderFeatures(data);
     renderSidebar(data.counts, markers);
+    // Update the always-visible toggle status line.
+    const toggleStatus = document.getElementById("redfin-toggle-status");
+    if (toggleStatus) {
+      if (!includeRedfin) {
+        toggleStatus.textContent = "";
+      } else if (!data.redfin_ok) {
+        toggleStatus.textContent = "Redfin unavailable";
+      } else if (data.counts.active === 0) {
+        toggleStatus.textContent = "No active listings found";
+      } else {
+        toggleStatus.textContent = `${data.counts.active} active listing${data.counts.active !== 1 ? "s" : ""} found`;
+      }
+    }
   } catch (err) {
     document.getElementById("sidebar-loading").classList.add("hidden");
     document.getElementById("sidebar-instructions").classList.remove("hidden");
@@ -1005,9 +1018,15 @@ async function rerunWithRedfin() {
     redfinLayer.addTo(map);
     const markers = renderFeatures(data);
     renderSidebar(data.counts, markers);
-    if (statusEl) statusEl.textContent = data.redfin_ok
-      ? `${data.counts.active} active listing${data.counts.active !== 1 ? "s" : ""} found`
-      : "Redfin unavailable";
+    if (statusEl) {
+      if (!data.redfin_ok) {
+        statusEl.textContent = "Redfin unavailable";
+      } else if (data.counts.active === 0) {
+        statusEl.textContent = "No active listings found";
+      } else {
+        statusEl.textContent = `${data.counts.active} active listing${data.counts.active !== 1 ? "s" : ""} found`;
+      }
+    }
   } catch (err) {
     if (statusEl) statusEl.textContent = "Redfin fetch failed";
     console.error("Redfin re-fetch failed", err);

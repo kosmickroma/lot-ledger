@@ -30,11 +30,39 @@ from api.config import get_conn, get_settings, release_conn
 from api.dcad import build_feature, classify_parcel, query_parcels, summarize_counts
 from api.geo import polygon_bbox
 from api.redfin import normalize_addr_key, pull_grid
+from api.tad import query_tad_parcels, _classify_tad
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 FRONTEND_DIR = BASE_DIR / "frontend"
 _job_store: dict[str, dict[str, Any]] = {}
+
+# Tarrant County rough bbox (lng_min, lat_min, lng_max, lat_max) in WGS84.
+# Used to decide whether to also query tad_parcels alongside DCAD.
+_TARRANT_BBOX = (-97.65, 32.52, -96.94, 33.07)
+
+
+def _bbox_overlaps_tarrant(min_lat: float, min_lng: float, max_lat: float, max_lng: float) -> bool:
+    return (
+        max_lng >= _TARRANT_BBOX[0]
+        and min_lng <= _TARRANT_BBOX[2]
+        and max_lat >= _TARRANT_BBOX[1]
+        and min_lat <= _TARRANT_BBOX[3]
+    )
+
+
+def _bbox_overlaps_dallas(min_lat: float, min_lng: float, max_lat: float, max_lng: float) -> bool:
+    """Dallas County rough bbox. If the polygon is clearly inside Tarrant only,
+    skip the DCAD query to avoid empty joins."""
+    # Dallas County: roughly -97.04 to -96.55 lng, 32.55 to 33.02 lat
+    return (
+        max_lng >= -97.04
+        and min_lng <= -96.55
+        and max_lat >= 32.55
+        and min_lat <= 33.02
+    )
+
+
 _FILENAME_SAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
@@ -157,26 +185,56 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
 
     min_lat, min_lng, max_lat, max_lng = polygon_bbox(polygon)
 
-    redfin_data: dict[str, dict] = {}
-    if include_redfin:
-        try:
-            parcel_result, redfin_data = await asyncio.gather(
-                asyncio.to_thread(query_parcels, polygon),
-                pull_grid(min_lng, min_lat, max_lng, max_lat),
-            )
-        except Exception:
-            try:
-                parcel_result = await asyncio.to_thread(query_parcels, polygon)
-            except Exception as exc:
-                raise HTTPException(status_code=500, detail=str(exc)) from exc
-    else:
-        try:
-            parcel_result = await asyncio.to_thread(query_parcels, polygon)
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
+    in_dallas = _bbox_overlaps_dallas(min_lat, min_lng, max_lat, max_lng)
+    in_tarrant = _bbox_overlaps_tarrant(min_lat, min_lng, max_lat, max_lng)
 
-    rows = parcel_result.parcels
-    exempt_set = parcel_result.exempt_accounts
+    redfin_data: dict[str, dict] = {}
+
+    # Build coroutines for each active data source.
+    async def _run_queries() -> tuple:
+        tasks: list = []
+        if in_dallas:
+            tasks.append(asyncio.to_thread(query_parcels, polygon))
+        if in_tarrant:
+            tasks.append(asyncio.to_thread(query_tad_parcels, polygon))
+        if include_redfin:
+            tasks.append(pull_grid(min_lng, min_lat, max_lng, max_lat))
+        return await asyncio.gather(*tasks, return_exceptions=True)
+
+    results = await _run_queries()
+
+    # Unpack results in the same order they were inserted.
+    idx = 0
+    dcad_result = None
+    tad_result = None
+    if in_dallas:
+        r = results[idx]; idx += 1
+        if not isinstance(r, Exception):
+            dcad_result = r
+    if in_tarrant:
+        r = results[idx]; idx += 1
+        if not isinstance(r, Exception):
+            tad_result = r
+    redfin_fetch_ok = False
+    if include_redfin:
+        r = results[idx]; idx += 1
+        if not isinstance(r, Exception):
+            redfin_data = r or {}
+            redfin_fetch_ok = True
+
+    # Merge rows from all counties, deduplicating by (account_num, county).
+    all_rows: list[dict[str, Any]] = []
+    exempt_set: set[str] = set()
+    if dcad_result:
+        all_rows.extend(dcad_result.parcels)
+        exempt_set.update(dcad_result.exempt_accounts)
+    if tad_result:
+        all_rows.extend(tad_result.parcels)
+
+    if not all_rows:
+        raise HTTPException(status_code=500, detail="Parcel query failed for all counties")
+
+    rows = all_rows
     features: list[dict[str, Any]] = []
 
     for row in rows:
@@ -186,7 +244,11 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
         addr_key = normalize_addr_key(str(row.get("property_address", "") or ""))
         on_redfin = addr_key in redfin_data and direct_match
         redfin_listing = redfin_data.get(addr_key) if on_redfin else None
-        prop_type = classify_parcel(row, exempt_set)
+        # TAD rows carry division_cd="TAD" — use TAD classifier; DCAD rows use existing classifier.
+        if row.get("division_cd") == "TAD":
+            prop_type = _classify_tad(row)
+        else:
+            prop_type = classify_parcel(row, exempt_set)
         try:
             feature = build_feature(row, prop_type, on_redfin, redfin_listing)
             features.append(feature)
@@ -206,7 +268,7 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
         "counts": counts,
         "job_id": job_id,
         "redfin_requested": include_redfin,
-        "redfin_ok": len(redfin_data) > 0,
+        "redfin_ok": redfin_fetch_ok,
     }
 
 
