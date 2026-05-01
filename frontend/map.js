@@ -100,6 +100,7 @@ let currentJobId = null;
 let lastPolygon = null;
 let lastAnalysisGeojson = null;
 let lastAnalysisCounts = null;
+let lastIncludedRedfin = false;
 const verificationByAccount = new Map();
 const potentialTargetByAccount = new Map();
 const verificationBadgeMarkers = new Map();
@@ -669,7 +670,6 @@ function clearTargetBadge(accountNum) {
 function renderSidebar(counts, markers) {
   document.getElementById("sidebar-loading").classList.add("hidden");
   document.getElementById("sidebar-results").classList.remove("hidden");
-  document.getElementById("layer-toggles")?.classList.remove("hidden");
 
   const countsPanel = document.getElementById("counts-panel");
   countsPanel.innerHTML = Object.entries({
@@ -864,14 +864,13 @@ map.on("draw:created", async (e) => {
           ? `${data.counts.active} active listing${data.counts.active !== 1 ? "s" : ""} found`
           : "Redfin pull unavailable; DCAD results shown")
       : "DCAD-only mode (Redfin disabled)";
-    const layerToggles = document.getElementById("layer-toggles");
-    if (layerToggles) layerToggles.classList.remove("hidden");
     redfinLayerVisible = Boolean(document.getElementById("toggle-redfin")?.checked);
     if (redfinLayerVisible) {
       redfinLayer.addTo(map);
     } else {
       map.removeLayer(redfinLayer);
     }
+    lastIncludedRedfin = includeRedfin;
     lastAnalysisGeojson = data;
     lastAnalysisCounts = data.counts;
     const markers = renderFeatures(data);
@@ -956,19 +955,86 @@ document.getElementById("btn-clear").addEventListener("click", () => {
   updateBrushStatus(null);
   document.getElementById("verify-brush-menu")?.classList.add("hidden");
   document.getElementById("target-brush-menu")?.classList.add("hidden");
-  document.getElementById("layer-toggles")?.classList.add("hidden");
+  document.getElementById("redfin-toggle-status").textContent = "";
+  lastIncludedRedfin = false;
   document.getElementById("sidebar-results").classList.add("hidden");
   document.getElementById("sidebar-loading").classList.add("hidden");
   document.getElementById("sidebar-instructions").classList.remove("hidden");
 });
 
+// Redfin toggle: if Redfin wasn't included in the last fetch, re-run analysis
+// with include_redfin: true, preserving any in-session verification tags.
+async function rerunWithRedfin() {
+  if (!lastPolygon || lastPolygon.length < 3) return;
+  const statusEl = document.getElementById("redfin-toggle-status");
+  const toggleEl = document.getElementById("toggle-redfin");
+  if (toggleEl) toggleEl.disabled = true;
+  if (statusEl) statusEl.textContent = "Fetching Redfin\u2026";
+  try {
+    const resp = await fetch("/api/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ polygon: lastPolygon, include_redfin: true }),
+    });
+    if (!resp.ok) throw new Error(`Server error: ${resp.status}`);
+    const data = await resp.json();
+    currentJobId = data.job_id;
+    // Merge server state without overwriting in-session tag changes.
+    data.features.forEach((feature) => {
+      const p = feature.properties || {};
+      if (!p.account_num) return;
+      if (!verificationByAccount.has(p.account_num)) {
+        const normalized = normalizeVerificationValue(p.verified_vacant);
+        verificationByAccount.set(p.account_num, normalized);
+        p.verified_vacant = normalized;
+      } else {
+        p.verified_vacant = verificationByAccount.get(p.account_num);
+      }
+      if (!potentialTargetByAccount.has(p.account_num)) {
+        const potential = String(p.potential_target || "").trim().toLowerCase() === "yes" ? "Yes" : "";
+        potentialTargetByAccount.set(p.account_num, potential);
+        p.potential_target = potential;
+      } else {
+        p.potential_target = potentialTargetByAccount.get(p.account_num);
+      }
+    });
+    lastIncludedRedfin = true;
+    lastAnalysisGeojson = data;
+    lastAnalysisCounts = data.counts;
+    redfinLayerVisible = true;
+    redfinLayer.addTo(map);
+    const markers = renderFeatures(data);
+    renderSidebar(data.counts, markers);
+    if (statusEl) statusEl.textContent = data.redfin_ok
+      ? `${data.counts.active} active listing${data.counts.active !== 1 ? "s" : ""} found`
+      : "Redfin unavailable";
+  } catch (err) {
+    if (statusEl) statusEl.textContent = "Redfin fetch failed";
+    console.error("Redfin re-fetch failed", err);
+    if (toggleEl) toggleEl.checked = false;
+    redfinLayerVisible = false;
+    map.removeLayer(redfinLayer);
+  } finally {
+    if (toggleEl) toggleEl.disabled = false;
+  }
+}
+
 // Redfin source toggle: hides/shows Redfin-specific visual styling and markers.
-document.getElementById("toggle-redfin")?.addEventListener("change", (e) => {
+// If Redfin data wasn't fetched for the current polygon, triggers a re-fetch.
+document.getElementById("toggle-redfin")?.addEventListener("change", async (e) => {
   redfinLayerVisible = e.target.checked;
+
+  if (redfinLayerVisible && !lastIncludedRedfin && lastPolygon) {
+    await rerunWithRedfin();
+    return;
+  }
+
   if (redfinLayerVisible) {
     redfinLayer.addTo(map);
   } else {
     map.removeLayer(redfinLayer);
+    const statusEl = document.getElementById("redfin-toggle-status");
+    if (statusEl) statusEl.textContent = "";
   }
 
   // Re-render so active listings fall back to DCAD default styling when hidden.
