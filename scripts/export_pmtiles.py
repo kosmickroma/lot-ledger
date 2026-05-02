@@ -23,68 +23,75 @@ from api.config import get_conn, release_conn
 # Codes mirror classify_parcel() in api/counties/dcad.py.
 # Owner name (gov/HOA) check is omitted — acceptable approximation for tile coloring.
 DCAD_EXPORT_SQL = """
-SELECT feature::text
-FROM (
-  -- Parcels with polygon geometry
-  SELECT json_build_object(
-    'type', 'Feature',
-    'geometry', p.polygon_geojson::json,
-    'properties', json_build_object(
-      'account_num',           p.account_num,
-      'prop_type',             CASE
-        WHEN e.account_num IS NOT NULL
-             OR COALESCE(a.sptd_code, p.sptd_code) IN ('X11', 'D10')           THEN 'exempt'
-        WHEN COALESCE(a.sptd_code, p.sptd_code) IN ('C11', 'C12')
-             AND COALESCE(a.tot_val, 0) <= 500                                  THEN 'exempt'
-        WHEN COALESCE(a.sptd_code, p.sptd_code) IN ('B11', 'B12', 'A14', 'A13') THEN 'multifamily'
-        WHEN COALESCE(a.sptd_code, p.sptd_code) = 'C11'                         THEN 'vacant'
-        WHEN COALESCE(a.sptd_code, p.sptd_code) IN ('C12', 'C13', 'F10', 'F20') THEN 'commercial'
-        ELSE 'single_family'
-      END,
-      'situs_addr',            p.property_address,
-      'owner_name',            p.owner_name,
-      'appraised_val_current', COALESCE(a.tot_val, 0),
-      'source_county',         'dcad'
-    )
-  ) AS feature
+-- Polygon parcels: one feature per physical footprint.
+-- DISTINCT ON (gis_parcel_id) collapses condo units and commercial sub-parcels
+-- that share the same building polygon. Without this, tippecanoe encodes all N
+-- duplicate features and protomaps stacks them on the canvas — N × alpha fills
+-- add up to a fully-opaque solid block.
+WITH polygon_parcels AS (
+  SELECT DISTINCT ON (COALESCE(p.gis_parcel_id, p.account_num))
+    json_build_object(
+      'type', 'Feature',
+      'geometry', p.polygon_geojson::json,
+      'properties', json_build_object(
+        'account_num',           p.account_num,
+        'prop_type',             CASE
+          WHEN e.account_num IS NOT NULL
+               OR COALESCE(a.sptd_code, p.sptd_code) IN ('X11', 'D10')            THEN 'exempt'
+          WHEN COALESCE(a.sptd_code, p.sptd_code) IN ('C11', 'C12')
+               AND COALESCE(a.tot_val, 0) <= 500                                   THEN 'exempt'
+          WHEN COALESCE(a.sptd_code, p.sptd_code) IN ('B11', 'B12', 'A14', 'A13') THEN 'multifamily'
+          WHEN COALESCE(a.sptd_code, p.sptd_code) = 'C11'                          THEN 'vacant'
+          WHEN COALESCE(a.sptd_code, p.sptd_code) IN ('C12', 'C13', 'F10', 'F20') THEN 'commercial'
+          ELSE 'single_family'
+        END,
+        'situs_addr',            p.property_address,
+        'owner_name',            p.owner_name,
+        'appraised_val_current', COALESCE(a.tot_val, 0),
+        'source_county',         'dcad'
+      )
+    ) AS feature
   FROM parcels p
   LEFT JOIN appraisal a       ON p.account_num = a.account_num
   LEFT JOIN exempt_accounts e ON p.account_num = e.account_num
   WHERE p.polygon_geojson IS NOT NULL
     AND p.polygon_geojson != '{"type": "Polygon", "coordinates": []}'
     AND (p.polygon_geojson::json)->>'type' IN ('Polygon', 'MultiPolygon')
+  ORDER BY COALESCE(p.gis_parcel_id, p.account_num), p.account_num
+)
+SELECT feature::text FROM polygon_parcels
 
-  UNION ALL
+UNION ALL
 
-  -- Fallback: parcels with centroid only (no polygon)
-  SELECT json_build_object(
-    'type', 'Feature',
-    'geometry', ST_AsGeoJSON(p.centroid)::json,
-    'properties', json_build_object(
-      'account_num',           p.account_num,
-      'prop_type',             CASE
-        WHEN e.account_num IS NOT NULL
-             OR COALESCE(a.sptd_code, p.sptd_code) IN ('X11', 'D10')           THEN 'exempt'
-        WHEN COALESCE(a.sptd_code, p.sptd_code) IN ('C11', 'C12')
-             AND COALESCE(a.tot_val, 0) <= 500                                  THEN 'exempt'
-        WHEN COALESCE(a.sptd_code, p.sptd_code) IN ('B11', 'B12', 'A14', 'A13') THEN 'multifamily'
-        WHEN COALESCE(a.sptd_code, p.sptd_code) = 'C11'                         THEN 'vacant'
-        WHEN COALESCE(a.sptd_code, p.sptd_code) IN ('C12', 'C13', 'F10', 'F20') THEN 'commercial'
-        ELSE 'single_family'
-      END,
-      'situs_addr',            p.property_address,
-      'owner_name',            p.owner_name,
-      'appraised_val_current', COALESCE(a.tot_val, 0),
-      'source_county',         'dcad'
-    )
-  ) AS feature
-  FROM parcels p
-  LEFT JOIN appraisal a       ON p.account_num = a.account_num
-  LEFT JOIN exempt_accounts e ON p.account_num = e.account_num
-  WHERE (p.polygon_geojson IS NULL
-      OR p.polygon_geojson = '{"type": "Polygon", "coordinates": []}')
-    AND p.centroid IS NOT NULL
-) q
+-- Fallback: parcels with centroid only (no polygon). Points don't stack so no
+-- deduplication needed here.
+SELECT json_build_object(
+  'type', 'Feature',
+  'geometry', ST_AsGeoJSON(p.centroid)::json,
+  'properties', json_build_object(
+    'account_num',           p.account_num,
+    'prop_type',             CASE
+      WHEN e.account_num IS NOT NULL
+           OR COALESCE(a.sptd_code, p.sptd_code) IN ('X11', 'D10')            THEN 'exempt'
+      WHEN COALESCE(a.sptd_code, p.sptd_code) IN ('C11', 'C12')
+           AND COALESCE(a.tot_val, 0) <= 500                                   THEN 'exempt'
+      WHEN COALESCE(a.sptd_code, p.sptd_code) IN ('B11', 'B12', 'A14', 'A13') THEN 'multifamily'
+      WHEN COALESCE(a.sptd_code, p.sptd_code) = 'C11'                          THEN 'vacant'
+      WHEN COALESCE(a.sptd_code, p.sptd_code) IN ('C12', 'C13', 'F10', 'F20') THEN 'commercial'
+      ELSE 'single_family'
+    END,
+    'situs_addr',            p.property_address,
+    'owner_name',            p.owner_name,
+    'appraised_val_current', COALESCE(a.tot_val, 0),
+    'source_county',         'dcad'
+  )
+)::text AS feature
+FROM parcels p
+LEFT JOIN appraisal a       ON p.account_num = a.account_num
+LEFT JOIN exempt_accounts e ON p.account_num = e.account_num
+WHERE (p.polygon_geojson IS NULL
+    OR p.polygon_geojson = '{"type": "Polygon", "coordinates": []}')
+  AND p.centroid IS NOT NULL
 """
 
 
