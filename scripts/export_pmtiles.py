@@ -33,12 +33,12 @@ FROM (
       'account_num',           p.account_num,
       'prop_type',             CASE
         WHEN e.account_num IS NOT NULL
-             OR a.sptd_code IN ('X11', 'D10')           THEN 'exempt'
-        WHEN a.sptd_code IN ('C11', 'C12')
-             AND COALESCE(a.tot_val, 0) <= 500           THEN 'exempt'
-        WHEN a.sptd_code IN ('B11', 'B12', 'A14', 'A13') THEN 'multifamily'
-        WHEN a.sptd_code = 'C11'                         THEN 'vacant'
-        WHEN a.sptd_code IN ('C12', 'C13', 'F10', 'F20') THEN 'commercial'
+             OR COALESCE(a.sptd_code, p.sptd_code) IN ('X11', 'D10')           THEN 'exempt'
+        WHEN COALESCE(a.sptd_code, p.sptd_code) IN ('C11', 'C12')
+             AND COALESCE(a.tot_val, 0) <= 500                                  THEN 'exempt'
+        WHEN COALESCE(a.sptd_code, p.sptd_code) IN ('B11', 'B12', 'A14', 'A13') THEN 'multifamily'
+        WHEN COALESCE(a.sptd_code, p.sptd_code) = 'C11'                         THEN 'vacant'
+        WHEN COALESCE(a.sptd_code, p.sptd_code) IN ('C12', 'C13', 'F10', 'F20') THEN 'commercial'
         ELSE 'single_family'
       END,
       'situs_addr',            p.property_address,
@@ -64,12 +64,12 @@ FROM (
       'account_num',           p.account_num,
       'prop_type',             CASE
         WHEN e.account_num IS NOT NULL
-             OR a.sptd_code IN ('X11', 'D10')           THEN 'exempt'
-        WHEN a.sptd_code IN ('C11', 'C12')
-             AND COALESCE(a.tot_val, 0) <= 500           THEN 'exempt'
-        WHEN a.sptd_code IN ('B11', 'B12', 'A14', 'A13') THEN 'multifamily'
-        WHEN a.sptd_code = 'C11'                         THEN 'vacant'
-        WHEN a.sptd_code IN ('C12', 'C13', 'F10', 'F20') THEN 'commercial'
+             OR COALESCE(a.sptd_code, p.sptd_code) IN ('X11', 'D10')           THEN 'exempt'
+        WHEN COALESCE(a.sptd_code, p.sptd_code) IN ('C11', 'C12')
+             AND COALESCE(a.tot_val, 0) <= 500                                  THEN 'exempt'
+        WHEN COALESCE(a.sptd_code, p.sptd_code) IN ('B11', 'B12', 'A14', 'A13') THEN 'multifamily'
+        WHEN COALESCE(a.sptd_code, p.sptd_code) = 'C11'                         THEN 'vacant'
+        WHEN COALESCE(a.sptd_code, p.sptd_code) IN ('C12', 'C13', 'F10', 'F20') THEN 'commercial'
         ELSE 'single_family'
       END,
       'situs_addr',            p.property_address,

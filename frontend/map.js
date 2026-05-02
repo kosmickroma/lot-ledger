@@ -107,14 +107,24 @@ map.addControl(drawControl);
 // because markerLayer is added to the map after this.
 // One rule per prop_type per layer — v3 PolygonSymbolizer doesn't support
 // function-based fill reliably; filter approach is the safe v3 pattern.
+//
+// opacity in PolygonSymbolizer controls stroke opacity, NOT fill opacity.
+// Alpha must be embedded directly in the fill color string via rgba().
+function _hexRgba(hex, alpha) {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return `rgba(${r},${g},${b},${alpha})`;
+}
+
 function _browseRules(dataLayer) {
   return [{
     dataLayer,
     symbolizer: new protomapsL.PolygonSymbolizer({
-      fill:    (zoom, feature) => COLORS[feature.props.prop_type]       || COLORS.exempt,
+      fill:    (zoom, feature) => _hexRgba(COLORS[feature.props.prop_type] || COLORS.exempt, 0.1),
       stroke:  (zoom, feature) => BORDER_COLORS[feature.props.prop_type] || BORDER_COLORS.exempt,
       width: 1.5,
-      opacity: 0.12,
+      opacity: 1.0,
       perFeature: true,
     }),
   }];
