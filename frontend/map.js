@@ -91,7 +91,7 @@ const labelsLayer = L.tileLayer(
 
 const drawControl = new L.Control.Draw({
   draw: {
-    polygon: { shapeOptions: { color: "#1a5a42", weight: 2, fill: false } },
+    polygon: { shapeOptions: { color: "#f1c40f", weight: 3, fill: false } },
     rectangle: false,
     circle: false,
     circlemarker: false,
@@ -142,6 +142,8 @@ function _updateZoomNudge() {
 map.on("zoomend", _updateZoomNudge);
 _updateZoomNudge();
 
+let drawLayer = L.layerGroup().addTo(map);
+let maskLayer = L.layerGroup().addTo(map);
 let markerLayer = L.layerGroup().addTo(map);
 let redfinLayer = L.layerGroup().addTo(map);
 const redfinToggleInput = document.getElementById("toggle-redfin");
@@ -149,13 +151,13 @@ let redfinLayerVisible = Boolean(redfinToggleInput?.checked);
 if (!redfinLayerVisible) {
   map.removeLayer(redfinLayer);
 }
-let drawLayer = L.layerGroup().addTo(map);
 let verificationBadgeLayer = L.layerGroup().addTo(map);
 let targetBadgeLayer = L.layerGroup().addTo(map);
 let hoaLayer = null;
 let hoaVisible = false;
 let currentJobId = null;
 let lastPolygon = null;
+let lastDrawnLatLngs = null;
 let lastAnalysisCounts = null;
 let lastIncludedRedfin = false;
 const verificationByAccount = new Map();
@@ -209,6 +211,90 @@ async function toggleHoaLayer() {
     btn.textContent = "HOA";
     console.error("HOA layer load failed", e);
   }
+}
+
+function _loadSavedAreas() {
+  try { return JSON.parse(localStorage.getItem("lot_ledger_saved_areas") || "[]"); }
+  catch { return []; }
+}
+
+function _writeSavedAreas(areas) {
+  localStorage.setItem("lot_ledger_saved_areas", JSON.stringify(areas));
+}
+
+function _savedAreaBoundsFromLatLngs(latlngs) {
+  let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
+  for (const [lat, lng] of latlngs) {
+    if (lat < minLat) minLat = lat;
+    if (lat > maxLat) maxLat = lat;
+    if (lng < minLng) minLng = lng;
+    if (lng > maxLng) maxLng = lng;
+  }
+  return [[minLat, minLng], [maxLat, maxLng]];
+}
+
+function saveCurrentArea(name) {
+  if (!lastDrawnLatLngs) return;
+  const areas = _loadSavedAreas();
+  areas.unshift({
+    id: Date.now().toString(),
+    name: name.trim(),
+    latlngs: lastDrawnLatLngs,
+    bounds: _savedAreaBoundsFromLatLngs(lastDrawnLatLngs),
+    savedAt: new Date().toISOString(),
+  });
+  _writeSavedAreas(areas);
+  renderSavedAreasList();
+}
+
+function deleteSavedArea(id) {
+  _writeSavedAreas(_loadSavedAreas().filter(a => a.id !== id));
+  renderSavedAreasList();
+}
+
+function restoreSavedArea(area) {
+  clearDrawResults();
+  L.polygon(area.latlngs, {
+    color: "#f1c40f",
+    weight: 2.5,
+    fill: false,
+    interactive: false,
+  }).addTo(drawLayer);
+  map.fitBounds(area.bounds, { padding: [40, 40] });
+}
+
+function renderSavedAreasList() {
+  const areas = _loadSavedAreas();
+  const section = document.getElementById("saved-areas");
+  const list = document.getElementById("saved-areas-list");
+  if (!section || !list) return;
+
+  section.classList.toggle("hidden", areas.length === 0);
+
+  list.innerHTML = areas.map(area => {
+    const date = new Date(area.savedAt).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+    return `
+      <div class="saved-area-row" data-id="${area.id}">
+        <span class="saved-area-name">${area.name}</span>
+        <span class="saved-area-date">${date}</span>
+        <button class="saved-area-delete" data-id="${area.id}" title="Delete">×</button>
+      </div>`;
+  }).join("");
+
+  list.querySelectorAll(".saved-area-row").forEach(row => {
+    row.addEventListener("click", (e) => {
+      if (e.target.classList.contains("saved-area-delete")) return;
+      const area = _loadSavedAreas().find(a => a.id === row.dataset.id);
+      if (area) restoreSavedArea(area);
+    });
+  });
+
+  list.querySelectorAll(".saved-area-delete").forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      deleteSavedArea(btn.dataset.id);
+    });
+  });
 }
 
 const MapToolbar = L.Control.extend({
@@ -354,6 +440,7 @@ const BasemapSwitcher = L.Control.extend({
   onAdd() {
     const container = L.DomUtil.create("div", "basemap-switcher");
     L.DomEvent.disableClickPropagation(container);
+    const BASEMAP_STORAGE_KEY = "lotledger.activeBasemap";
 
     const mapBtn = L.DomUtil.create("button", "basemap-btn active", container);
     mapBtn.id = "bm-map";
@@ -385,8 +472,13 @@ const BasemapSwitcher = L.Control.extend({
       mapBtn.classList.toggle("active", name === "street");
       contrastBtn.classList.toggle("active", name === "contrast");
       satBtn.classList.toggle("active", name === "satellite");
-      // Force browse canvas to redraw after tile layer change.
-      requestAnimationFrame(() => map.fire("moveend"));
+      try {
+        localStorage.setItem(BASEMAP_STORAGE_KEY, name);
+      } catch (_) {
+        // Ignore storage failures (private mode, blocked storage, etc.).
+      }
+      // Force browse canvas to redraw shortly after tile layer change.
+      setTimeout(() => map.fire("moveend"), 50);
     }
 
     L.DomEvent.on(mapBtn, "click", () => {
@@ -403,6 +495,15 @@ const BasemapSwitcher = L.Control.extend({
       if (activeBasemap === "satellite") return;
       activateBasemap("satellite");
     });
+
+    try {
+      const savedBasemap = localStorage.getItem(BASEMAP_STORAGE_KEY);
+      if (savedBasemap === "street" || savedBasemap === "contrast" || savedBasemap === "satellite") {
+        activateBasemap(savedBasemap);
+      }
+    } catch (_) {
+      // Ignore storage failures and keep default basemap.
+    }
 
     return container;
   },
@@ -1090,7 +1191,19 @@ map.on("draw:created", async (e) => {
     : "Skipping Redfin pull (DCAD-only mode)...";
   drawLayer.addLayer(e.layer);
 
+  // Spotlight mask — dim everything outside the drawn polygon.
+  maskLayer.clearLayers();
+  const _worldRing = [[-90, -180], [-90, 180], [90, 180], [90, -180], [-90, -180]];
+  const _holeRing = e.layer.getLatLngs()[0].map(ll => [ll.lat, ll.lng]);
+  L.polygon([_worldRing, _holeRing], {
+    fillColor: "#000000",
+    fillOpacity: 0.32,
+    stroke: false,
+    interactive: false,
+  }).addTo(maskLayer);
+
   const polygon = e.layer.getLatLngs()[0].map((ll) => [ll.lng, ll.lat]);
+  lastDrawnLatLngs = e.layer.getLatLngs()[0].map((ll) => [ll.lat, ll.lng]);
   lastPolygon = polygon;
 
   try {
@@ -1154,6 +1267,7 @@ map.on("draw:created", async (e) => {
 
 function clearDrawResults() {
   drawLayer.clearLayers();
+  maskLayer.clearLayers();
   markerLayer.clearLayers();
   redfinLayer.clearLayers();
   verificationBadgeLayer.clearLayers();
@@ -1164,6 +1278,7 @@ function clearDrawResults() {
   targetBadgeMarkers.clear();
   currentJobId = null;
   lastPolygon = null;
+  lastDrawnLatLngs = null;
   lastAnalysisGeojson = null;
   lastAnalysisCounts = null;
   document.getElementById("sidebar-results")?.classList.add("hidden");
@@ -1229,6 +1344,12 @@ document.getElementById("btn-download").addEventListener("click", () => {
     const filename = normalizeCsvFilename(entered);
     window.location.href = `/api/download/${currentJobId}?filename=${encodeURIComponent(filename)}`;
   })();
+});
+
+document.getElementById("btn-save-area")?.addEventListener("click", () => {
+  const name = window.prompt("Name this area:", "");
+  if (!name || !name.trim()) return;
+  saveCurrentArea(name);
 });
 
 document.getElementById("btn-clear").addEventListener("click", () => {
@@ -1378,3 +1499,5 @@ map.on("click", async (ev) => {
     console.error("Browse popup failed", e);
   }
 });
+
+renderSavedAreasList();

@@ -30,6 +30,10 @@
         </label>
         <p id="redfin-toggle-status" class="sidebar-note"></p>
       </div>
+        <div id="saved-areas" class="sidebar-section hidden">
+          <p class="sidebar-label">Saved Areas</p>
+          <div id="saved-areas-list"></div>
+        </div>
       <div id="sidebar-instructions" class="sidebar-section">
         <p class="sidebar-copy">Draw a polygon around a target pocket to analyze parcels instantly.</p>
         <p class="sidebar-note">Shortcuts: Enter or right-click to finish. Esc to cancel.</p>
@@ -44,6 +48,7 @@
         <div class="sidebar-actions">
           <button id="btn-download" class="btn-primary">Download CSV</button>
           <button id="btn-clear" class="btn-secondary">Clear</button>
+            <button id="btn-save-area" class="btn-secondary">Save Area</button>
         </div>
         <div id="parcel-list" class="parcel-list"></div>
       </div>
