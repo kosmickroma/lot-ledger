@@ -72,10 +72,15 @@ const satelliteLayer = L.tileLayer(
 streetLayer.addTo(map);
 let activeBasemap = "street";
 
-// Transparent labels overlay — shown on top of satellite tiles
+// Transparent labels overlay — shown on top of satellite tiles.
+// Must live in its own pane (not overlayPane) to avoid corrupting the
+// protomaps canvas when Leaflet removes/re-adds this tile layer.
+map.createPane("labelsPane");
+map.getPane("labelsPane").style.zIndex = "450";
+map.getPane("labelsPane").style.pointerEvents = "none";
 const labelsLayer = L.tileLayer(
   "https://{s}.basemaps.cartocdn.com/rastertiles/voyager_only_labels/{z}/{x}/{y}{r}.png",
-  { subdomains: "abcd", maxZoom: 20, opacity: 1, pane: "overlayPane" }
+  { subdomains: "abcd", maxZoom: 20, opacity: 1, pane: "labelsPane" }
 );
 
 
@@ -377,6 +382,8 @@ const BasemapSwitcher = L.Control.extend({
       mapBtn.classList.toggle("active", name === "street");
       contrastBtn.classList.toggle("active", name === "contrast");
       satBtn.classList.toggle("active", name === "satellite");
+      // Force browse canvas to redraw after tile layer change.
+      requestAnimationFrame(() => map.fire("moveend"));
     }
 
     L.DomEvent.on(mapBtn, "click", () => {

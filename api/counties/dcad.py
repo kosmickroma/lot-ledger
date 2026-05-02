@@ -371,7 +371,7 @@ def classify_parcel(row: dict[str, Any], exempt_set: set[str]) -> str:
 
     if account_num in exempt_set or sptd in {"X11", "D10"} or non_target_owner or is_nominal:
         return "exempt"
-    if sptd in {"B11", "B12", "A14"}:
+    if sptd in {"B11", "B12", "A14", "A13"}:
         return "multifamily"
     if sptd == "C11":
         return "vacant"
