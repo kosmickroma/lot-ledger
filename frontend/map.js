@@ -104,8 +104,8 @@ const browseLayer = protomapsL.leafletLayer({
       symbolizer: new protomapsL.PolygonSymbolizer({
         fill: (zoom, props) => COLORS[props.prop_type] || COLORS.exempt,
         stroke: (zoom, props) => BORDER_COLORS[props.prop_type] || BORDER_COLORS.exempt,
-        width: 1.0,
-        opacity: 0.10,
+        width: 1.5,
+        opacity: 0.5,
       }),
     },
     {
@@ -113,8 +113,8 @@ const browseLayer = protomapsL.leafletLayer({
       symbolizer: new protomapsL.PolygonSymbolizer({
         fill: (zoom, props) => COLORS[props.prop_type] || COLORS.exempt,
         stroke: (zoom, props) => BORDER_COLORS[props.prop_type] || BORDER_COLORS.exempt,
-        width: 1.0,
-        opacity: 0.10,
+        width: 1.5,
+        opacity: 0.5,
       }),
     },
   ],
