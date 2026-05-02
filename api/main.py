@@ -29,8 +29,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from api.config import get_conn, get_settings, release_conn
-from api.counties.dcad import build_feature, classify_parcel, query_parcels
-from api.counties.tad import query_tad_parcels, _classify_tad
+from api.counties.dcad import SPTD_LABELS, build_feature, classify_parcel, query_parcels
+from api.counties.tad import _normalize_tad_row, _classify_tad, query_tad_parcels
 from api.geo import polygon_bbox
 from api.redfin import normalize_addr_key, pull_grid
 
@@ -200,6 +200,126 @@ async def health_db_check() -> dict[str, str]:
         if conn is not None:
             release_conn(conn)
     return {"status": "ok", "db": "ok"}
+
+
+def _fetch_dcad_parcel_by_account(account_num: str) -> tuple[dict[str, Any] | None, set[str]]:
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT p.account_num, p.parcel_key, p.gis_parcel_id,
+                       p.owner_name, p.owner_address, p.owner_city, p.owner_state,
+                       p.owner_zip, p.street_num, p.full_street_name,
+                       p.property_address, p.property_zip, p.division_cd,
+                       COALESCE(a.sptd_code, p.sptd_code) AS sptd_code,
+                       p.nbhd_cd, p.legal1, p.legal2, p.legal3, p.legal4, p.legal5,
+                       p.polygon_geojson,
+                       ST_Y(p.centroid) AS lat,
+                       ST_X(p.centroid) AS lng,
+                       a.land_val, a.impr_val, a.tot_val, a.isd_desc,
+                       r.yr_built, r.tot_living_area, r.tot_main_sf,
+                       l.zoning, l.front_dim, l.depth_dim, l.area_size, l.area_uom,
+                       (e.account_num IS NOT NULL) AS is_exempt_account
+                FROM parcels p
+                LEFT JOIN appraisal a ON p.account_num = a.account_num
+                LEFT JOIN res_detail r ON p.account_num = r.account_num
+                LEFT JOIN LATERAL (
+                    SELECT zoning, front_dim, depth_dim, area_size, area_uom
+                    FROM land_detail
+                    WHERE account_num = p.account_num
+                    LIMIT 1
+                ) l ON TRUE
+                LEFT JOIN exempt_accounts e ON p.account_num = e.account_num
+                WHERE p.account_num = %s
+                LIMIT 1
+                """,
+                (account_num,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None, set()
+            cols = [desc[0] for desc in cur.description]
+            parcel = dict(zip(cols, row))
+
+            sptd_code = str(parcel.get("sptd_code") or "").strip()
+            parcel["state_code"] = SPTD_LABELS.get(sptd_code, sptd_code)
+            land_val = _safe_float(parcel.get("land_val"))
+            tot_val = _safe_float(parcel.get("tot_val"))
+            parcel["land_pct"] = (
+                round((land_val / tot_val) * 100, 1)
+                if land_val is not None and tot_val not in (None, 0)
+                else None
+            )
+            parcel["hoa_name"] = ""
+            parcel["hoa_url"] = ""
+
+            exempt_set = {account_num} if parcel.get("is_exempt_account") else set()
+            return parcel, exempt_set
+    finally:
+        release_conn(conn)
+
+
+def _fetch_tad_parcel_by_account(account_num: str) -> dict[str, Any] | None:
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT parcel_key, account_num, taxpin,
+                       owner_name, owner_addr, owner_city, owner_citystate,
+                       owner_zip, situs_addr, property_class, state_use_code,
+                       legal_descr, school_code,
+                       acres, land_acres, land_sqft,
+                       year_built, living_area,
+                       land_value, improvement_value, total_value,
+                       ST_AsGeoJSON(geom)::json AS polygon_geojson,
+                       ST_Y(centroid) AS _lat,
+                       ST_X(centroid) AS _lng
+                FROM tad_parcels
+                WHERE account_num = %s
+                LIMIT 1
+                """,
+                (account_num,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            cols = [desc[0] for desc in cur.description]
+            raw = dict(zip(cols, row))
+            return _normalize_tad_row(raw)
+    finally:
+        release_conn(conn)
+
+
+@app.get("/api/parcel/{county}/{account_num}")
+async def get_parcel_detail(county: str, account_num: str) -> dict[str, Any]:
+    """
+    Single-parcel detail endpoint used by PMTiles click popups.
+
+    Called by: frontend tile-layer click flow after queryTileFeaturesDebug returns
+    account_num + source_county for the clicked parcel.
+
+    Why it exists: PMTiles stores only minimal properties for fast rendering. This
+    endpoint fetches the full parcel row from the live database and returns one
+    GeoJSON feature in the same shape produced by /api/analyze.
+    """
+    county_key = county.strip().lower()
+    if county_key not in {"dcad", "tad"}:
+        raise HTTPException(status_code=400, detail="county must be 'dcad' or 'tad'")
+
+    if county_key == "dcad":
+        row, exempt_set = _fetch_dcad_parcel_by_account(account_num)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Parcel not found")
+        prop_type = classify_parcel(row, exempt_set)
+        return build_feature(row, prop_type, False, None)
+
+    row = _fetch_tad_parcel_by_account(account_num)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Parcel not found")
+    prop_type = _classify_tad(row)
+    return build_feature(row, prop_type, False, None)
 
 
 @app.post("/api/analyze")
