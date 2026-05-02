@@ -30,6 +30,8 @@ steps:
       - '--region=us-central1'
       - '--platform=managed'
       - '--project=lot-ledger'
+      - '--timeout=3600'
+      - '--memory=1Gi'
       - '--quiet'
 
 options:

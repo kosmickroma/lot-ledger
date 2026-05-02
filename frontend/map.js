@@ -101,7 +101,7 @@ map.addControl(drawControl);
 function _browseRules(dataLayer) {
   return Object.entries(COLORS).map(([propType, fill]) => ({
     dataLayer,
-    filter: (zoom, props) => (props.prop_type || "exempt") === propType,
+    filter: (zoom, feature) => (feature.props.prop_type || "exempt") === propType,
     symbolizer: new protomapsL.PolygonSymbolizer({
       fill,
       stroke: BORDER_COLORS[propType] || BORDER_COLORS.exempt,
@@ -117,6 +117,10 @@ const browseLayer = protomapsL.leafletLayer({
   labelRules: [],
 });
 browseLayer.addTo(map);
+// Disable pointer events on the canvas so draw result polygons beneath it
+// receive clicks normally. queryTileFeaturesDebug still works via map.on("click").
+const _browseContainer = browseLayer.getContainer && browseLayer.getContainer();
+if (_browseContainer) _browseContainer.style.pointerEvents = "none";
 
 let markerLayer = L.layerGroup().addTo(map);
 let redfinLayer = L.layerGroup().addTo(map);
@@ -1312,14 +1316,20 @@ map.on("click", async (ev) => {
   // Don't fire browse popup when draw results are visible — let polygon clicks handle it.
   if (lastAnalysisGeojson) return;
 
-  const features = browseLayer.queryTileFeaturesDebug(ev.latlng.lng, ev.latlng.lat);
-  if (!features || features.length === 0) return;
+  const result = browseLayer.queryTileFeaturesDebug(ev.latlng.lng, ev.latlng.lat);
+  // v3 returns Map<string, PickedFeature[]> keyed by source name (empty string for default)
+  const allFeatures = result instanceof Map ? (result.get("") || []) : (Array.isArray(result) ? result : []);
+  if (allFeatures.length === 0) return;
 
-  const parcel = features.find(f => f.layer.name === "dcad" || f.layer.name === "tad");
+  const parcel = allFeatures.find(f => {
+    const props = (f.feature && f.feature.props) || f.props || {};
+    return props.source_county === "dcad" || props.source_county === "tad";
+  });
   if (!parcel) return;
 
-  const county = parcel.props.source_county;
-  const accountNum = parcel.props.account_num;
+  const pProps = (parcel.feature && parcel.feature.props) || parcel.props || {};
+  const county = pProps.source_county;
+  const accountNum = pProps.account_num;
   if (!county || !accountNum) return;
 
   try {
