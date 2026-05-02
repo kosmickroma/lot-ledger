@@ -114,7 +114,7 @@ function _browseRules(dataLayer) {
       fill:    (zoom, feature) => COLORS[feature.props.prop_type]       || COLORS.exempt,
       stroke:  (zoom, feature) => BORDER_COLORS[feature.props.prop_type] || BORDER_COLORS.exempt,
       width: 1.5,
-      opacity: 0.5,
+      opacity: 0.12,
       perFeature: true,
     }),
   }];
@@ -1223,6 +1223,10 @@ map.on("draw:created", async (e) => {
   lastDrawnLatLngs = e.layer.getLatLngs()[0].map((ll) => [ll.lat, ll.lng]);
   lastPolygon = polygon;
 
+  // Hide browse layer — draw results are the authoritative display; stacking both
+  // causes color mixing and makes fills appear solid.
+  if (map.hasLayer(browseLayer)) browseLayer.remove();
+
   try {
     const data = await runAnalysis(polygon, includeRedfin);
     if (data.source_status && (!data.source_status.dcad_ok || !data.source_status.tad_ok)) {
@@ -1285,6 +1289,7 @@ map.on("draw:created", async (e) => {
 function clearDrawResults() {
   drawLayer.clearLayers();
   maskLayer.clearLayers();
+  if (!map.hasLayer(browseLayer)) browseLayer.addTo(map);
   markerLayer.clearLayers();
   redfinLayer.clearLayers();
   verificationBadgeLayer.clearLayers();
