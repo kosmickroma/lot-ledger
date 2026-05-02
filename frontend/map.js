@@ -99,23 +99,23 @@ map.addControl(drawControl);
 // One rule per prop_type per layer — v3 PolygonSymbolizer doesn't support
 // function-based fill reliably; filter approach is the safe v3 pattern.
 function _browseRules(dataLayer) {
-  return Object.entries(COLORS).map(([propType, fill]) => ({
+  return [{
     dataLayer,
-    filter: (zoom, feature) => (feature.props.prop_type || "exempt") === propType,
     symbolizer: new protomapsL.PolygonSymbolizer({
-      fill,
-      stroke: BORDER_COLORS[propType] || BORDER_COLORS.exempt,
+      fill:    (zoom, feature) => COLORS[feature.props.prop_type]       || COLORS.exempt,
+      stroke:  (zoom, feature) => BORDER_COLORS[feature.props.prop_type] || BORDER_COLORS.exempt,
       width: 1.5,
       opacity: 0.5,
+      perFeature: true,
     }),
-  }));
+  }];
 }
 
 const browseLayer = protomapsL.leafletLayer({
   url: PMTILES_URL,
   paintRules: [..._browseRules("dcad"), ..._browseRules("tad")],
   labelRules: [],
-  minZoom: 13,
+  minZoom: 14,
 });
 browseLayer.addTo(map);
 // Disable pointer events on the canvas so draw result polygons beneath it
@@ -127,7 +127,7 @@ if (_browseContainer) _browseContainer.style.pointerEvents = "none";
 const _zoomNudge = document.getElementById("zoom-nudge");
 function _updateZoomNudge() {
   if (!_zoomNudge) return;
-  const tooFarOut = map.getZoom() < 13;
+  const tooFarOut = map.getZoom() < 14;
   _zoomNudge.classList.toggle("hidden", !tooFarOut || Boolean(lastAnalysisGeojson));
 }
 map.on("zoomend", _updateZoomNudge);
