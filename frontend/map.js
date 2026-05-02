@@ -96,28 +96,24 @@ map.addControl(drawControl);
 // Browse layer — renders all county parcels from PMTiles file on GCS.
 // Uses canvas rendering (not DOM). Always visible; draw results render on top
 // because markerLayer is added to the map after this.
+// One rule per prop_type per layer — v3 PolygonSymbolizer doesn't support
+// function-based fill reliably; filter approach is the safe v3 pattern.
+function _browseRules(dataLayer) {
+  return Object.entries(COLORS).map(([propType, fill]) => ({
+    dataLayer,
+    filter: (zoom, props) => (props.prop_type || "exempt") === propType,
+    symbolizer: new protomapsL.PolygonSymbolizer({
+      fill,
+      stroke: BORDER_COLORS[propType] || BORDER_COLORS.exempt,
+      width: 1.5,
+      opacity: 0.5,
+    }),
+  }));
+}
+
 const browseLayer = protomapsL.leafletLayer({
   url: PMTILES_URL,
-  paintRules: [
-    {
-      dataLayer: "dcad",
-      symbolizer: new protomapsL.PolygonSymbolizer({
-        fill: (zoom, props) => COLORS[props.prop_type] || COLORS.exempt,
-        stroke: (zoom, props) => BORDER_COLORS[props.prop_type] || BORDER_COLORS.exempt,
-        width: 1.5,
-        opacity: 0.5,
-      }),
-    },
-    {
-      dataLayer: "tad",
-      symbolizer: new protomapsL.PolygonSymbolizer({
-        fill: (zoom, props) => COLORS[props.prop_type] || COLORS.exempt,
-        stroke: (zoom, props) => BORDER_COLORS[props.prop_type] || BORDER_COLORS.exempt,
-        width: 1.5,
-        opacity: 0.5,
-      }),
-    },
-  ],
+  paintRules: [..._browseRules("dcad"), ..._browseRules("tad")],
   labelRules: [],
 });
 browseLayer.addTo(map);
