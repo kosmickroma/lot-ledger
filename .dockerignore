@@ -1,0 +1,17 @@
+.env
+*.env
+.git
+__pycache__
+**/__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+docs
+scripts
+frontend/node_modules
+*.pmtiles
+*.mbtiles
+*.geojsonl
+service-account*.json
+gcp-key*.json
+cors.json

@@ -48,10 +48,11 @@ def get_settings() -> Settings:
     db_port_raw = os.getenv("DB_PORT", "5432").strip() or "5432"
     port_raw = os.getenv("PORT", "8000").strip() or "8000"
 
-    missing = [k for k, v in [
-        ("DB_HOST", db_host), ("DB_NAME", db_name),
-        ("DB_USER", db_user), ("DB_PASSWORD", db_password),
-    ] if not v]
+    unix_socket = os.environ.get("INSTANCE_UNIX_SOCKET", "").strip()
+    required = [("DB_NAME", db_name), ("DB_USER", db_user), ("DB_PASSWORD", db_password)]
+    if not unix_socket:
+        required.insert(0, ("DB_HOST", db_host))
+    missing = [k for k, v in required if not v]
 
     if missing:
         raise ValueError(f"Missing required environment variables: {', '.join(missing)}")

@@ -656,6 +656,11 @@ function renderFeatures(geojson) {
         markers[p.addr] = markers[p.addr] || { layer: null, feature };
         return;
       }
+      // Skip dot for condos with polygon geometry — the building outline is the click target.
+      if (isCondo && hasPolygonGeometry) {
+        markers[p.addr] = markers[p.addr] || { layer: null, feature };
+        return;
+      }
       layer = L.circleMarker([p.lat, p.lng], {
         radius: p.on_redfin ? 7 : 5,
         fillColor: color,
