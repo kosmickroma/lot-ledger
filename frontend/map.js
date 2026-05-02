@@ -1313,6 +1313,8 @@ document.getElementById("toggle-redfin")?.addEventListener("change", async (e) =
 map.on("click", async (ev) => {
   const drawHandler = getPolygonDrawHandler();
   if (drawHandler && drawHandler._enabled) return;
+  // Don't fire browse popup when draw results are visible — let polygon clicks handle it.
+  if (lastAnalysisGeojson) return;
 
   const features = browseLayer.queryTileFeaturesDebug(ev.latlng.lng, ev.latlng.lat);
   if (!features || features.length === 0) return;
