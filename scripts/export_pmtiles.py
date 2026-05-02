@@ -117,7 +117,7 @@ SELECT json_build_object(
     'appraised_val_current', COALESCE(t.total_value, 0),
     'source_county',         'tad'
   )
-) AS feature
+)::text AS feature
 FROM tad_parcels t
 WHERE t.geom IS NOT NULL
   AND ST_IsValid(t.geom)

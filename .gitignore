@@ -53,6 +53,7 @@ Thumbs.db
 
 # GeoJSON exports — can be multi-GB, regenerated from DB
 *.geojson
+*.geojsonl
 !frontend/*.geojson
 
 # GCP credentials — never commit
