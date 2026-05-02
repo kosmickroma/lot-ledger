@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote_plus
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -145,6 +145,14 @@ def _google_maps_link(row: dict[str, Any]) -> str:
 get_settings()
 
 app = FastAPI(title="LotLedger")
+
+
+@app.middleware("http")
+async def no_cache_frontend(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.endswith((".js", ".css", ".html")):
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+    return response
 
 
 @app.get("/health")
