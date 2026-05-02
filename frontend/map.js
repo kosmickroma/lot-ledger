@@ -486,13 +486,14 @@ const BasemapSwitcher = L.Control.extend({
       } catch (_) {
         // Ignore storage failures (private mode, blocked storage, etc.).
       }
-      // Silent mode: skip forced repaint on page-load restore — protomaps handles
-      // its own initial paint. For user-triggered switches, call browseLayer.redraw()
-      // directly. map.fire("moveend") doesn't work because removeLayer triggers
-      // viewprereset → _invalidateAll which sets _tileZoom=undefined, causing
-      // _onMoveEnd/_update to bail immediately. redraw() re-sets _tileZoom first.
-      if (!silent) {
-        browseLayer.redraw();
+      // Silent mode: skip repaint on page-load restore — protomaps handles its
+      // own initial paint. For user-triggered switches, remove and re-add the
+      // layer to force a clean reinitialisation. This is the same path that
+      // works on first page load and avoids relying on GridLayer.redraw() which
+      // may not exist on the v3.1.2 instance.
+      if (!silent && map.hasLayer(browseLayer)) {
+        browseLayer.remove();
+        browseLayer.addTo(map);
       }
     }
 
