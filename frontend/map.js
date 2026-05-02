@@ -47,6 +47,10 @@ const TYPE_LABELS = {
   off_market: "Off Market",
 };
 
+// Analysis state is initialized early because zoom-nudge logic references it
+// during startup before the rest of the module wiring runs.
+let lastAnalysisGeojson = null;
+
 const map = L.map("map", { zoomControl: true }).setView(DALLAS_CENTER, DEFAULT_ZOOM);
 
 const streetLayer = L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
@@ -120,7 +124,7 @@ const browseLayer = protomapsL.leafletLayer({
   url: PMTILES_URL,
   paintRules: [..._browseRules("dcad"), ..._browseRules("tad")],
   labelRules: [],
-  minZoom: 14,
+  minZoom: 15,
 });
 browseLayer.addTo(map);
 // Disable pointer events on the canvas so draw result polygons beneath it
@@ -132,7 +136,7 @@ if (_browseContainer) _browseContainer.style.pointerEvents = "none";
 const _zoomNudge = document.getElementById("zoom-nudge");
 function _updateZoomNudge() {
   if (!_zoomNudge) return;
-  const tooFarOut = map.getZoom() < 14;
+  const tooFarOut = map.getZoom() < 15;
   _zoomNudge.classList.toggle("hidden", !tooFarOut || Boolean(lastAnalysisGeojson));
 }
 map.on("zoomend", _updateZoomNudge);
@@ -152,7 +156,6 @@ let hoaLayer = null;
 let hoaVisible = false;
 let currentJobId = null;
 let lastPolygon = null;
-let lastAnalysisGeojson = null;
 let lastAnalysisCounts = null;
 let lastIncludedRedfin = false;
 const verificationByAccount = new Map();
@@ -1325,6 +1328,17 @@ document.getElementById("toggle-redfin")?.addEventListener("change", async (e) =
   }
 });
 
+// Cursor: show pointer when hovering over a parcel in browse mode.
+map.on("mousemove", (ev) => {
+  if (lastAnalysisGeojson) return;
+  if (map.getZoom() < 15) return;
+  const result = browseLayer.queryTileFeaturesDebug(ev.latlng.lng, ev.latlng.lat);
+  const hit = result instanceof Map
+    ? [...result.values()].flat().length > 0
+    : (Array.isArray(result) ? result.length > 0 : false);
+  map.getContainer().style.cursor = hit ? "pointer" : "";
+});
+
 // Browse layer click — hit-test against canvas tiles, fetch full detail from API,
 // open popup using same makePopupHtml used by draw results.
 // Silent during active polygon draw so draw vertices aren't intercepted.
@@ -1335,8 +1349,10 @@ map.on("click", async (ev) => {
   if (lastAnalysisGeojson) return;
 
   const result = browseLayer.queryTileFeaturesDebug(ev.latlng.lng, ev.latlng.lat);
-  // v3 returns Map<string, PickedFeature[]> keyed by source name (empty string for default)
-  const allFeatures = result instanceof Map ? (result.get("") || []) : (Array.isArray(result) ? result : []);
+  // v3 returns Map<string, PickedFeature[]> — flatten all values regardless of key name
+  const allFeatures = result instanceof Map
+    ? [...result.values()].flat()
+    : (Array.isArray(result) ? result : []);
   if (allFeatures.length === 0) return;
 
   const parcel = allFeatures.find(f => {
