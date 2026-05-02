@@ -1,13 +1,15 @@
-# api/dcad.py
+# api/counties/dcad.py
 #
-# DCAD query and parcel classification module for analysis responses.
-# Pulls parcel/appraisal/detail rows from Supabase, applies exact polygon filtering,
-# and builds feature-ready parcel dictionaries with the proven business logic.
+# Dallas Central Appraisal District (DCAD) query and classification module.
+# Queries parcels/appraisal/detail tables, applies exact polygon filtering,
+# classifies each parcel by type, and builds GeoJSON features for the API response.
 #
 # Connects to:
-#   api/config.py  - uses shared database connection helpers
-#   api/geo.py     - uses polygon bbox and point-in-polygon helpers
-#   api/main.py    - imported and used by analyze endpoint (Phase 4)
+#   api/config.py        — shared DB connection helpers
+#   api/geo.py           — polygon_bbox, point_in_polygon
+#   api/redfin.py        — normalize_addr_key for address matching
+#   api/counties/tad.py  — imports ParcelQueryResult, _clean_text, _safe_float, _safe_int
+#   api/main.py          — imports build_feature, classify_parcel, query_parcels
 
 from __future__ import annotations
 
@@ -429,45 +431,4 @@ def build_feature(row: dict[str, Any], prop_type: str, on_redfin: bool, redfin_l
         "type": "Feature",
         "geometry": feature_geometry,
         "properties": props,
-    }
-
-
-def summarize_counts(rows: list[dict[str, Any]], exempt_set: set[str], on_redfin_addresses: dict | set) -> dict[str, int]:
-    """Return aggregate counts by listing/category for legend and API response."""
-    active = 0
-    multifamily = 0
-    vacant = 0
-    commercial = 0
-    exempt = 0
-
-    for row in rows:
-        parcel_key = _clean_text(row.get("parcel_key"))
-        account_num = _clean_text(row.get("account_num"))
-        direct_match = parcel_key == account_num if parcel_key else True
-        addr_key = normalize_addr_key(_clean_text(row.get("property_address")))
-        on_redfin = addr_key in on_redfin_addresses and direct_match
-        if on_redfin:
-            active += 1
-            continue
-
-        prop_type = classify_parcel(row, exempt_set)
-        if prop_type == "multifamily":
-            multifamily += 1
-        elif prop_type == "vacant":
-            vacant += 1
-        elif prop_type == "commercial":
-            commercial += 1
-        elif prop_type == "exempt":
-            exempt += 1
-
-    total = len(rows)
-    off_market = total - active - multifamily - vacant - commercial - exempt
-    return {
-        "active": active,
-        "off_market": max(off_market, 0),
-        "multifamily": multifamily,
-        "vacant": vacant,
-        "commercial": commercial,
-        "exempt": exempt,
-        "total": total,
     }

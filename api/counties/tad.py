@@ -1,17 +1,14 @@
-# api/tad.py
+# api/counties/tad.py
 #
-# TAD (Tarrant Appraisal District) parcel query module.
+# Tarrant Appraisal District (TAD) parcel query module.
 # Queries tad_parcels (PostGIS), applies exact polygon filtering, and returns
-# rows in the same normalized shape that build_feature / classify_parcel /
-# summarize_counts in dcad.py already understand.
+# rows in the same normalized shape that build_feature and classify_parcel expect.
 #
 # Connects to:
-#   api/config.py  — shared DB connection helpers
-#   api/geo.py     — polygon_bbox, point_in_polygon
-#   api/dcad.py    — ParcelQueryResult (shared dataclass), build_feature,
-#                    classify_parcel, summarize_counts
-#   api/main.py    — called from the analyze endpoint when the polygon bbox
-#                    intersects Tarrant County (Phase 4)
+#   api/config.py         — shared DB connection helpers
+#   api/geo.py            — polygon_bbox, point_in_polygon
+#   api/counties/dcad.py  — ParcelQueryResult dataclass, build_feature, classify_parcel
+#   api/main.py           — called from the analyze endpoint
 
 from __future__ import annotations
 
@@ -19,7 +16,7 @@ import json
 from typing import Any
 
 from api.config import get_conn, release_conn
-from api.dcad import ParcelQueryResult, _clean_text, _safe_float, _safe_int
+from api.counties.dcad import ParcelQueryResult, _clean_text, _safe_float, _safe_int
 from api.geo import point_in_polygon, polygon_bbox
 
 

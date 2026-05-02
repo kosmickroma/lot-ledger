@@ -4,10 +4,16 @@
 # Single source of truth for all credentials and runtime settings.
 # Raises clearly at startup if anything is missing — never fails silently.
 #
+# Two connection modes (auto-detected via environment):
+#   Cloud Run  — connects via Unix socket injected by Cloud SQL Auth Proxy
+#                (INSTANCE_UNIX_SOCKET env var set automatically by Cloud Run)
+#   Local dev  — connects via TCP to Cloud SQL public IP (DB_HOST env var)
+#
 # Connects to:
-#   api/main.py        — imports get_settings() and get_conn()
-#   api/dcad.py        — imports get_conn() for all parcel queries
-#   scripts/build_db.py — imports get_conn() to write DCAD data
+#   api/main.py           — imports get_settings() and get_conn()
+#   api/counties/dcad.py  — imports get_conn() for all DCAD queries
+#   api/counties/tad.py   — imports get_conn() for all TAD queries
+#   scripts/build_db.py   — imports get_conn() to write DCAD data
 
 from __future__ import annotations
 
@@ -67,16 +73,31 @@ def get_pool() -> psycopg2.pool.ThreadedConnectionPool:
     global _pool
     if _pool is None:
         s = get_settings()
-        _pool = psycopg2.pool.ThreadedConnectionPool(
-            minconn=1,
-            maxconn=10,
-            host=s.db_host,
-            port=s.db_port,
-            dbname=s.db_name,
-            user=s.db_user,
-            password=s.db_password,
-            connect_timeout=10,
-        )
+        unix_socket = os.environ.get("INSTANCE_UNIX_SOCKET", "").strip()
+        if unix_socket:
+            # Cloud Run: use Unix socket injected by embedded Cloud SQL Auth Proxy.
+            # psycopg2 treats a path starting with "/" as a Unix socket host.
+            _pool = psycopg2.pool.ThreadedConnectionPool(
+                minconn=1,
+                maxconn=20,
+                host=unix_socket,
+                dbname=s.db_name,
+                user=s.db_user,
+                password=s.db_password,
+                connect_timeout=10,
+            )
+        else:
+            # Local dev: connect via TCP to Cloud SQL public IP.
+            _pool = psycopg2.pool.ThreadedConnectionPool(
+                minconn=1,
+                maxconn=20,
+                host=s.db_host,
+                port=s.db_port,
+                dbname=s.db_name,
+                user=s.db_user,
+                password=s.db_password,
+                connect_timeout=10,
+            )
     return _pool
 
 

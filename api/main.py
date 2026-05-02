@@ -29,10 +29,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from api.config import get_conn, get_settings, release_conn
-from api.dcad import build_feature, classify_parcel, query_parcels
+from api.counties.dcad import build_feature, classify_parcel, query_parcels
+from api.counties.tad import query_tad_parcels, _classify_tad
 from api.geo import polygon_bbox
 from api.redfin import normalize_addr_key, pull_grid
-from api.tad import query_tad_parcels, _classify_tad
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
