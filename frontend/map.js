@@ -75,6 +75,7 @@ const satelliteLayer = L.tileLayer(
 
 streetLayer.addTo(map);
 let activeBasemap = "street";
+const BASEMAP_STORAGE_KEY = "lotledger.activeBasemap";
 
 // Transparent labels overlay — shown on top of satellite tiles.
 // Must live in its own pane (not overlayPane) to avoid corrupting the
@@ -87,7 +88,17 @@ const labelsLayer = L.tileLayer(
   { subdomains: "abcd", maxZoom: 20, opacity: 1, pane: "labelsPane" }
 );
 
-
+// Apply saved basemap BEFORE browseLayer is added. If we switch after protomaps
+// is on the map, the tile layer removal fires viewprereset → _invalidateAll on
+// protomaps → _tileZoom = undefined → browse layer goes blank until next pan/zoom.
+try {
+  const _savedBm = localStorage.getItem(BASEMAP_STORAGE_KEY);
+  if (_savedBm === "contrast") {
+    streetLayer.remove(); contrastLayer.addTo(map); activeBasemap = "contrast";
+  } else if (_savedBm === "satellite") {
+    streetLayer.remove(); satelliteLayer.addTo(map); labelsLayer.addTo(map); activeBasemap = "satellite";
+  }
+} catch (_) {}
 
 const drawControl = new L.Control.Draw({
   draw: {
@@ -134,7 +145,7 @@ const browseLayer = protomapsL.leafletLayer({
   url: PMTILES_URL,
   paintRules: [..._browseRules("dcad"), ..._browseRules("tad")],
   labelRules: [],
-  minZoom: 15,
+  minZoom: 14,
 });
 browseLayer.addTo(map);
 // Disable pointer events on the canvas so draw result polygons beneath it
@@ -146,7 +157,7 @@ if (_browseContainer) _browseContainer.style.pointerEvents = "none";
 const _zoomNudge = document.getElementById("zoom-nudge");
 function _updateZoomNudge() {
   if (!_zoomNudge) return;
-  const tooFarOut = map.getZoom() < 15;
+  const tooFarOut = map.getZoom() < 14;
   _zoomNudge.classList.toggle("hidden", !tooFarOut || Boolean(lastAnalysisGeojson));
 }
 map.on("zoomend", _updateZoomNudge);
@@ -281,6 +292,7 @@ function restoreSavedArea(area) {
   }).addTo(maskLayer);
   map.fitBounds(area.bounds, { padding: [40, 40] });
   document.getElementById("btn-draw-clear")?.classList.remove("hidden");
+  document.getElementById("btn-saved-area-clear")?.classList.remove("hidden");
 }
 
 function renderSavedAreasList() {
@@ -354,7 +366,7 @@ const MapToolbar = L.Control.extend({
     clearBtn.id = "btn-draw-clear";
     clearBtn.href = "#";
     clearBtn.title = "Clear results and draw a new area";
-    clearBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6l-1 14H6L5 6"></path><path d="M10 11v6"></path><path d="M14 11v6"></path><path d="M9 6V4h6v2"></path></svg>';
+    clearBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>';
     L.DomEvent.on(clearBtn, "click", (e) => {
       L.DomEvent.preventDefault(e);
       clearDrawResults();
@@ -460,8 +472,6 @@ const BasemapSwitcher = L.Control.extend({
   onAdd() {
     const container = L.DomUtil.create("div", "basemap-switcher");
     L.DomEvent.disableClickPropagation(container);
-    const BASEMAP_STORAGE_KEY = "lotledger.activeBasemap";
-
     const mapBtn = L.DomUtil.create("button", "basemap-btn active", container);
     mapBtn.id = "bm-map";
     mapBtn.textContent = "Map";
@@ -523,15 +533,11 @@ const BasemapSwitcher = L.Control.extend({
       activateBasemap("satellite");
     });
 
-    try {
-      const savedBasemap = localStorage.getItem(BASEMAP_STORAGE_KEY);
-      if (savedBasemap === "street" || savedBasemap === "contrast" || savedBasemap === "satellite") {
-        // silent=true: protomaps handles its own initial paint — no forced repaint needed.
-        activateBasemap(savedBasemap, true);
-      }
-    } catch (_) {
-      // Ignore storage failures and keep default basemap.
-    }
+    // Tile layers already applied pre-init (before browseLayer was added).
+    // Just sync button active states to match the already-correct activeBasemap.
+    mapBtn.classList.toggle("active", activeBasemap === "street");
+    contrastBtn.classList.toggle("active", activeBasemap === "contrast");
+    satBtn.classList.toggle("active", activeBasemap === "satellite");
 
     return container;
   },
@@ -563,6 +569,7 @@ function isDrawInputTarget(target) {
 function setSidebarCollapsed(collapsed) {
   appShell.classList.toggle("sidebar-collapsed", collapsed);
   sidebarToggleBtn.setAttribute("aria-expanded", String(!collapsed));
+  setTimeout(() => map.invalidateSize(), 250);
 }
 
 function updateBrushStatus(brush) {
@@ -1318,6 +1325,7 @@ function clearDrawResults() {
   document.getElementById("sidebar-instructions")?.classList.remove("hidden");
   document.getElementById("sidebar-loading")?.classList.add("hidden");
   document.getElementById("btn-draw-clear")?.classList.add("hidden");
+  document.getElementById("btn-saved-area-clear")?.classList.add("hidden");
 }
 
 map.on("draw:drawstart", () => {
@@ -1485,7 +1493,7 @@ document.getElementById("toggle-redfin")?.addEventListener("change", async (e) =
 // Cursor: show pointer when hovering over a parcel in browse mode.
 map.on("mousemove", (ev) => {
   if (lastAnalysisGeojson) return;
-  if (map.getZoom() < 15) return;
+  if (map.getZoom() < 14) return;
   const result = browseLayer.queryTileFeaturesDebug(ev.latlng.lng, ev.latlng.lat);
   const hit = result instanceof Map
     ? [...result.values()].flat().length > 0
