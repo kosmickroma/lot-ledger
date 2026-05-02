@@ -454,7 +454,7 @@ const BasemapSwitcher = L.Control.extend({
     contrastBtn.id = "bm-contrast";
     contrastBtn.textContent = "Contrast";
 
-    function activateBasemap(name) {
+    function activateBasemap(name, silent = false) {
       [streetLayer, contrastLayer, satelliteLayer, labelsLayer].forEach((layer) => {
         if (map.hasLayer(layer)) map.removeLayer(layer);
       });
@@ -477,8 +477,12 @@ const BasemapSwitcher = L.Control.extend({
       } catch (_) {
         // Ignore storage failures (private mode, blocked storage, etc.).
       }
-      // Force browse canvas to redraw shortly after tile layer change.
-      setTimeout(() => map.fire("moveend"), 50);
+      // Silent mode: skip forced repaint on page-load restore so we don't race
+      // with protomaps' own initial paint cycle. For user-triggered switches,
+      // wait 200ms for Leaflet's tile pane to settle before nudging the canvas.
+      if (!silent) {
+        setTimeout(() => map.fire("moveend"), 200);
+      }
     }
 
     L.DomEvent.on(mapBtn, "click", () => {
@@ -499,7 +503,8 @@ const BasemapSwitcher = L.Control.extend({
     try {
       const savedBasemap = localStorage.getItem(BASEMAP_STORAGE_KEY);
       if (savedBasemap === "street" || savedBasemap === "contrast" || savedBasemap === "satellite") {
-        activateBasemap(savedBasemap);
+        // silent=true: protomaps handles its own initial paint — no forced repaint needed.
+        activateBasemap(savedBasemap, true);
       }
     } catch (_) {
       // Ignore storage failures and keep default basemap.
