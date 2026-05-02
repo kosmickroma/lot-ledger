@@ -53,13 +53,15 @@ let lastAnalysisGeojson = null;
 
 const map = L.map("map", { zoomControl: true }).setView(DALLAS_CENTER, DEFAULT_ZOOM);
 
-const streetLayer = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-  attribution: "&copy; <a href='https://www.openstreetmap.org/copyright'>OpenStreetMap</a> contributors",
-  maxZoom: 19,
+const streetLayer = L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
+  attribution: "&copy; OpenStreetMap contributors &copy; CARTO",
+  subdomains: "abcd",
+  maxZoom: 20,
 });
 
-const contrastLayer = L.tileLayer("https://tiles.stadiamaps.com/tiles/alidade_smooth/{z}/{x}/{y}{r}.png", {
-  attribution: "&copy; <a href='https://stadiamaps.com/'>Stadia Maps</a> &copy; OpenStreetMap contributors",
+const contrastLayer = L.tileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png", {
+  attribution: "&copy; OpenStreetMap contributors &copy; CARTO",
+  subdomains: "abcd",
   maxZoom: 20,
 });
 
@@ -81,8 +83,8 @@ map.createPane("labelsPane");
 map.getPane("labelsPane").style.zIndex = "450";
 map.getPane("labelsPane").style.pointerEvents = "none";
 const labelsLayer = L.tileLayer(
-  "https://tiles.stadiamaps.com/tiles/stamen_toner_labels/{z}/{x}/{y}{r}.png",
-  { maxZoom: 20, opacity: 0.7, pane: "labelsPane" }
+  "https://{s}.basemaps.cartocdn.com/rastertiles/voyager_only_labels/{z}/{x}/{y}{r}.png",
+  { subdomains: "abcd", maxZoom: 20, opacity: 1, pane: "labelsPane" }
 );
 
 
