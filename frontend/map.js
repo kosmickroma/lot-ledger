@@ -280,6 +280,7 @@ function restoreSavedArea(area) {
     interactive: false,
   }).addTo(maskLayer);
   map.fitBounds(area.bounds, { padding: [40, 40] });
+  document.getElementById("btn-draw-clear")?.classList.remove("hidden");
 }
 
 function renderSavedAreasList() {
