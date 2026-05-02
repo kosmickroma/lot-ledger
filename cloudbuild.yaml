@@ -1,0 +1,30 @@
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - build
+      - '-t'
+      - 'us-central1-docker.pkg.dev/lot-ledger/lot-ledger-api/api:$COMMIT_SHA'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/lot-ledger/lot-ledger-api/api:develop'
+      - '.'
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - push
+      - '--all-tags'
+      - 'us-central1-docker.pkg.dev/lot-ledger/lot-ledger-api/api'
+
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - lot-ledger-dev
+      - '--image=us-central1-docker.pkg.dev/lot-ledger/lot-ledger-api/api:$COMMIT_SHA'
+      - '--region=us-central1'
+      - '--platform=managed'
+      - '--project=lot-ledger'
+      - '--quiet'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
