@@ -506,6 +506,22 @@ h1 {
   font-size: 12px;
 }
 
+.zoom-nudge {
+  position: absolute;
+  bottom: 48px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1000;
+  background: rgba(17, 19, 25, 0.82);
+  color: #e1e4eb;
+  border: 1px solid #2f343f;
+  border-radius: 20px;
+  padding: 6px 14px;
+  font-size: 12px;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
 #map {
   width: 100%;
   height: 100%;

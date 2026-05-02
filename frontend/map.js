@@ -115,12 +115,23 @@ const browseLayer = protomapsL.leafletLayer({
   url: PMTILES_URL,
   paintRules: [..._browseRules("dcad"), ..._browseRules("tad")],
   labelRules: [],
+  minZoom: 13,
 });
 browseLayer.addTo(map);
 // Disable pointer events on the canvas so draw result polygons beneath it
 // receive clicks normally. queryTileFeaturesDebug still works via map.on("click").
 const _browseContainer = browseLayer.getContainer && browseLayer.getContainer();
 if (_browseContainer) _browseContainer.style.pointerEvents = "none";
+
+// Nudge chip: visible below zoom 13 when not in draw-results mode.
+const _zoomNudge = document.getElementById("zoom-nudge");
+function _updateZoomNudge() {
+  if (!_zoomNudge) return;
+  const tooFarOut = map.getZoom() < 13;
+  _zoomNudge.classList.toggle("hidden", !tooFarOut || Boolean(lastAnalysisGeojson));
+}
+map.on("zoomend", _updateZoomNudge);
+_updateZoomNudge();
 
 let markerLayer = L.layerGroup().addTo(map);
 let redfinLayer = L.layerGroup().addTo(map);
