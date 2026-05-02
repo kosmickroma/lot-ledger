@@ -34,6 +34,9 @@ const BORDER_COLORS = {
   active: "#c0392b",
 };
 
+// Browse layer — renders all county parcels from PMTiles file on GCS.
+const PMTILES_URL = "https://storage.googleapis.com/lot-ledger-tiles/parcels.pmtiles";
+
 const TYPE_LABELS = {
   single_family: "Off-Market SFR",
   vacant: "Vacant Lot",
@@ -89,6 +92,35 @@ const drawControl = new L.Control.Draw({
   edit: false,
 });
 map.addControl(drawControl);
+
+// Browse layer — renders all county parcels from PMTiles file on GCS.
+// Uses canvas rendering (not DOM). Always visible; draw results render on top
+// because markerLayer is added to the map after this.
+const browseLayer = protomapsL.leafletLayer({
+  url: PMTILES_URL,
+  paintRules: [
+    {
+      dataLayer: "dcad",
+      symbolizer: new protomapsL.PolygonSymbolizer({
+        fill: (zoom, props) => COLORS[props.prop_type] || COLORS.exempt,
+        stroke: (zoom, props) => BORDER_COLORS[props.prop_type] || BORDER_COLORS.exempt,
+        width: 1.0,
+        opacity: 0.10,
+      }),
+    },
+    {
+      dataLayer: "tad",
+      symbolizer: new protomapsL.PolygonSymbolizer({
+        fill: (zoom, props) => COLORS[props.prop_type] || COLORS.exempt,
+        stroke: (zoom, props) => BORDER_COLORS[props.prop_type] || BORDER_COLORS.exempt,
+        width: 1.0,
+        opacity: 0.10,
+      }),
+    },
+  ],
+  labelRules: [],
+});
+browseLayer.addTo(map);
 
 let markerLayer = L.layerGroup().addTo(map);
 let redfinLayer = L.layerGroup().addTo(map);
@@ -1272,5 +1304,35 @@ document.getElementById("toggle-redfin")?.addEventListener("change", async (e) =
     if (lastAnalysisCounts) {
       renderSidebar(lastAnalysisCounts, markers);
     }
+  }
+});
+
+// Browse layer click — hit-test against canvas tiles, fetch full detail from API,
+// open popup using same makePopupHtml used by draw results.
+// Silent during active polygon draw so draw vertices aren't intercepted.
+map.on("click", async (ev) => {
+  const drawHandler = getPolygonDrawHandler();
+  if (drawHandler && drawHandler._enabled) return;
+
+  const features = browseLayer.queryTileFeaturesDebug(ev.latlng.lng, ev.latlng.lat);
+  if (!features || features.length === 0) return;
+
+  const parcel = features.find(f => f.layer.name === "dcad" || f.layer.name === "tad");
+  if (!parcel) return;
+
+  const county = parcel.props.source_county;
+  const accountNum = parcel.props.account_num;
+  if (!county || !accountNum) return;
+
+  try {
+    const resp = await fetch(`/api/parcel/${county}/${accountNum}`);
+    if (!resp.ok) return;
+    const detail = await resp.json();
+    L.popup()
+      .setLatLng(ev.latlng)
+      .setContent(makePopupHtml(detail.properties || detail))
+      .openOn(map);
+  } catch (e) {
+    console.error("Browse popup failed", e);
   }
 });
