@@ -664,8 +664,6 @@ async def download(job_id: str, filename: str | None = None) -> StreamingRespons
         writer.writerow(
             [
                 "Property Address",
-                "Lot Size (sq ft)",
-                "Lot Size (acres)",
                 "MLS Status",
                 "Owner Name",
                 "Owner Mailing Address",
@@ -682,6 +680,8 @@ async def download(job_id: str, filename: str | None = None) -> StreamingRespons
                 "Total Structure Area (sq ft)",
                 "State Code",
                 "Zoning",
+                "Lot Size (sq ft)",
+                "Lot Size (acres)",
                 "Frontage (ft)",
                 "Depth (ft)",
                 "School District",
@@ -695,6 +695,8 @@ async def download(job_id: str, filename: str | None = None) -> StreamingRespons
                 "Potential Target",
                 "HOA",
                 "HOA URL",
+                "Estimated Lot Size (sq ft)",
+                "Estimated Lot Size (acres)",
             ]
         )
         buffer.seek(0)
@@ -728,8 +730,10 @@ async def download(job_id: str, filename: str | None = None) -> StreamingRespons
             area_estimated = bool(row.get("area_estimated"))
             _area_sf = round(_safe_float(area_size), 0) if _safe_float(area_size) is not None else ""
             _area_ac = round(area_size / 43560, 3) if _safe_float(area_size) is not None else ""
-            lot_sqft_csv = f"Est. {int(_area_sf):,}" if area_estimated and _area_sf != "" else _area_sf
-            lot_acres_csv = f"Est. {_area_ac}" if area_estimated and _area_ac != "" else _area_ac
+            lot_sqft_csv = "" if area_estimated else _area_sf
+            lot_acres_csv = "" if area_estimated else _area_ac
+            est_lot_sqft_csv = _area_sf if area_estimated else ""
+            est_lot_acres_csv = _area_ac if area_estimated else ""
             yr_built = row.get("yr_built")
             living_area = row.get("tot_living_area")
             main_area = row.get("tot_main_sf")
@@ -752,8 +756,6 @@ async def download(job_id: str, filename: str | None = None) -> StreamingRespons
             writer.writerow(
                 [
                     display_address,
-                    lot_sqft_csv,
-                    lot_acres_csv,
                     "Active" if on_redfin else "Off Market",
                     row.get("owner_name", ""),
                     row.get("owner_address", ""),
@@ -770,6 +772,8 @@ async def download(job_id: str, filename: str | None = None) -> StreamingRespons
                     int(_safe_float(main_area)) if _safe_float(main_area) not in (None, 0.0) else "",
                     row.get("state_code", "") or row.get("sptd_code", ""),
                     row.get("zoning", "") or "",
+                    lot_sqft_csv,
+                    lot_acres_csv,
                     int(_safe_float(row.get("front_dim"))) if _safe_float(row.get("front_dim")) not in (None, 0.0) else "",
                     int(_safe_float(row.get("depth_dim"))) if _safe_float(row.get("depth_dim")) not in (None, 0.0) else "",
                     row.get("isd_desc", "") or "",
@@ -786,6 +790,8 @@ async def download(job_id: str, filename: str | None = None) -> StreamingRespons
                         or ("N/A (Tarrant HOA not loaded)" if row.get("division_cd") == "TAD" else "")
                     ),
                     row.get("hoa_url", "") or "",
+                    est_lot_sqft_csv,
+                    est_lot_acres_csv,
                 ]
             )
             buffer.seek(0)
