@@ -278,7 +278,39 @@ function deleteSavedArea(id) {
   renderSavedAreasList();
 }
 
+function saveSearchLocation(name, lat, lng) {
+  const areas = _loadSavedAreas();
+  areas.unshift({
+    id: Date.now().toString(),
+    type: "location",
+    name,
+    lat,
+    lng,
+    savedAt: new Date().toISOString(),
+  });
+  _writeSavedAreas(areas);
+  renderSavedAreasList();
+}
+
 async function restoreSavedArea(area) {
+  // Location pins (from address search) — just fly there and show the ring.
+  if (area.type === "location") {
+    const latlng = [area.lat, area.lng];
+    map.flyTo(latlng, 17);
+    if (window._searchHighlight) { window._searchHighlight.remove(); window._searchHighlight = null; }
+    if (window._searchMoveEndHandler) map.off("moveend", window._searchMoveEndHandler);
+    window._searchMoveEndHandler = () => {
+      window._searchMoveEndHandler = null;
+      window._searchHighlight = L.circleMarker(latlng, {
+        radius: 14, color: "#f1c40f", weight: 3,
+        fillColor: "#f1c40f", fillOpacity: 0.12,
+        interactive: false, pane: "overlayPane",
+      }).addTo(map);
+    };
+    map.once("moveend", window._searchMoveEndHandler);
+    return;
+  }
+
   clearDrawResults();
   drawLayer.clearLayers();
   L.polygon(area.latlngs, {
@@ -362,8 +394,10 @@ function renderSavedAreasList() {
 
   list.innerHTML = areas.map(area => {
     const date = new Date(area.savedAt).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+    const icon = area.type === "location" ? "📍" : "▭";
     return `
       <div class="saved-area-row" data-id="${area.id}">
+        <span class="saved-area-icon">${icon}</span>
         <span class="saved-area-name">${area.name}</span>
         <span class="saved-area-date">${date}</span>
         <button class="saved-area-delete" data-id="${area.id}" title="Delete">×</button>
@@ -632,26 +666,50 @@ const AddressSearch = L.Control.extend({
           setTimeout(() => { btn.textContent = "Go"; btn.disabled = false; }, 2000);
           return;
         }
-        const { lat, lon } = results[0];
+        const { lat, lon, display_name } = results[0];
         const latlng = [parseFloat(lat), parseFloat(lon)];
+        const shortName = display_name.split(",")[0].trim();
         map.flyTo(latlng, 17);
         input.value = "";
 
-        // Drop a temporary gold ring at the result so the parcel is easy to spot.
-        // Clears any previous search highlight first, then auto-removes after 6s.
-        if (window._searchHighlight) { window._searchHighlight.remove(); }
-        window._searchHighlight = L.circleMarker(latlng, {
-          radius: 18,
-          color: "#f1c40f",
-          weight: 3,
-          fill: false,
-          interactive: false,
-          pane: "overlayPane",
-        }).addTo(map);
+        // Clear any previous highlight and cancel any pending placement.
+        if (window._searchHighlight) { window._searchHighlight.remove(); window._searchHighlight = null; }
         clearTimeout(window._searchHighlightTimer);
-        window._searchHighlightTimer = setTimeout(() => {
-          if (window._searchHighlight) { window._searchHighlight.remove(); window._searchHighlight = null; }
-        }, 6000);
+        if (window._searchMoveEndHandler) map.off("moveend", window._searchMoveEndHandler);
+
+        // Wait for the map to finish flying before placing the ring so it
+        // doesn't flicker mid-animation. Stays until next search or clear.
+        window._searchMoveEndHandler = () => {
+          window._searchMoveEndHandler = null;
+          window._searchHighlight = L.circleMarker(latlng, {
+            radius: 14,
+            color: "#f1c40f",
+            weight: 3,
+            fillColor: "#f1c40f",
+            fillOpacity: 0.12,
+            interactive: true,
+            pane: "overlayPane",
+          }).addTo(map);
+
+          const popupHtml = `<div style="font-size:12px;min-width:150px;">
+            <div style="font-weight:600;margin-bottom:5px;">${shortName}</div>
+            <a href="#" class="search-save-link" style="color:#f1c40f;text-decoration:none;font-size:11px;">+ Save this location</a>
+          </div>`;
+          window._searchHighlight
+            .bindPopup(popupHtml, { closeButton: false, maxWidth: 220 })
+            .openPopup();
+
+          window._searchHighlight.getPopup()?.getElement()
+            ?.querySelector(".search-save-link")
+            ?.addEventListener("click", e => {
+              e.preventDefault();
+              const name = window.prompt("Name this location:", shortName);
+              if (!name?.trim()) return;
+              saveSearchLocation(name.trim(), latlng[0], latlng[1]);
+              window._searchHighlight?.closePopup();
+            });
+        };
+        map.once("moveend", window._searchMoveEndHandler);
       } catch {
         btn.textContent = "Error";
         setTimeout(() => { btn.textContent = "Go"; btn.disabled = false; }, 2000);
@@ -1263,18 +1321,39 @@ async function fetchTileDataRecursive(tilePolygon, includeRedfin, depth, tileLab
     return [data];
   }
 
-  if ((resp.status === 502 || resp.status === 504) && depth < TILE_MAX_SPLIT_DEPTH) {
-    document.getElementById("redfin-status").textContent =
-      `Tile ${tileLabel} timed out — splitting into subtiles...`;
-    const subTiles = splitBboxIntoTiles(getPolygonBbox(tilePolygon));
-    const nestedResults = [];
-    for (let i = 0; i < subTiles.length; i++) {
-      const subLabel = `${tileLabel}.${i + 1}`;
-      const subPolygon = tileToPolygon(subTiles[i]);
-      const subData = await fetchTileDataRecursive(subPolygon, includeRedfin, depth + 1, subLabel);
-      nestedResults.push(...subData);
+  if (resp.status === 503 || resp.status === 502 || resp.status === 504) {
+    if (depth < TILE_MAX_SPLIT_DEPTH) {
+      // For 503 (server overloaded), wait before splitting to let Cloud Run recover.
+      const waitMs = resp.status === 503 ? 3000 : 1000;
+      document.getElementById("redfin-status").textContent =
+        `Tile ${tileLabel} overloaded (${resp.status}) — retrying in ${waitMs / 1000}s...`;
+      await new Promise(r => setTimeout(r, waitMs));
+
+      // Try the same tile once more before splitting.
+      const retry = await fetch("/api/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ polygon: tilePolygon, include_redfin: includeRedfin }),
+      });
+      if (retry.ok) {
+        const retryData = await retry.json();
+        return [retryData];
+      }
+
+      // Still failing — split into subtiles.
+      document.getElementById("redfin-status").textContent =
+        `Tile ${tileLabel} still failing — splitting into subtiles...`;
+      const subTiles = splitBboxIntoTiles(getPolygonBbox(tilePolygon));
+      const nestedResults = [];
+      for (let i = 0; i < subTiles.length; i++) {
+        await new Promise(r => setTimeout(r, 500)); // breathe between subtiles
+        const subLabel = `${tileLabel}.${i + 1}`;
+        const subPolygon = tileToPolygon(subTiles[i]);
+        const subData = await fetchTileDataRecursive(subPolygon, includeRedfin, depth + 1, subLabel);
+        nestedResults.push(...subData);
+      }
+      return nestedResults;
     }
-    return nestedResults;
   }
 
   throw new Error(`Tile ${tileLabel} failed: ${resp.status}`);
@@ -1291,6 +1370,7 @@ async function runTiledAnalysis(polygon, includeRedfin) {
   let lastSourceStatus = null;
 
   for (let i = 0; i < tiles.length; i++) {
+    if (i > 0) await new Promise(r => setTimeout(r, 300)); // breathe between tiles
     document.getElementById("redfin-status").textContent =
       `Loading tile ${i + 1} of ${tiles.length}...`;
     const tilePolygon = tileToPolygon(tiles[i]);

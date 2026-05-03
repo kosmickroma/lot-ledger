@@ -625,6 +625,13 @@ h1 {
   padding: 7px 20px;
 }
 
+.saved-area-icon {
+  font-size: 11px;
+  flex-shrink: 0;
+  margin-right: 2px;
+  opacity: 0.8;
+}
+
 .saved-area-name {
   font-size: 12px;
   color: #d5d8df;
