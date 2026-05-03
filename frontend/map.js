@@ -195,8 +195,38 @@ let viewportRenderMode = false;   // true when feature count exceeds render thre
 let _vpRenderTimeout = null;      // debounce handle for viewport re-render
 const LARGE_DRAW_THRESHOLD = 2500;  // viewport-only rendering above this count
 const BROWSE_ONLY_THRESHOLD = 30000; // skip all polygon rendering above this; use browse layer
+let _analysisRequestSeq = 0;
+let _activeAnalysisRequestId = 0;
+let _activeAnalysisAbortController = null;
 
 const HOA_COLOR = "#b8860b";
+
+function beginLatestAnalysisRequest() {
+  if (_activeAnalysisAbortController) {
+    _activeAnalysisAbortController.abort();
+  }
+  _activeAnalysisAbortController = new AbortController();
+  _analysisRequestSeq += 1;
+  _activeAnalysisRequestId = _analysisRequestSeq;
+  return {
+    requestId: _activeAnalysisRequestId,
+    signal: _activeAnalysisAbortController.signal,
+  };
+}
+
+function isActiveAnalysisRequest(requestId) {
+  return requestId === _activeAnalysisRequestId;
+}
+
+function isAbortError(err) {
+  return err?.name === "AbortError" || err?.code === "ANALYSIS_ABORTED";
+}
+
+function getAnalysisErrorMessage(err, fallback = "Analysis failed. Please try again.") {
+  if (err?.userMessage && String(err.userMessage).trim()) return err.userMessage;
+  if (err?.message && String(err.message).trim()) return err.message;
+  return fallback;
+}
 
 async function toggleHoaLayer() {
   const btn = document.getElementById("btn-hoa-toggle");
@@ -420,9 +450,11 @@ async function restoreSavedArea(area) {
   document.getElementById("sidebar-results")?.classList.add("hidden");
   document.getElementById("sidebar-loading")?.classList.remove("hidden");
   document.getElementById("redfin-status").textContent = "Loading saved area...";
+  const analysisRequest = beginLatestAnalysisRequest();
 
   try {
-    const data = await runAnalysis(polygon, includeRedfin);
+    const data = await runAnalysis(polygon, includeRedfin, { signal: analysisRequest.signal });
+    if (!isActiveAnalysisRequest(analysisRequest.requestId)) return;
     if (data.source_status && (!data.source_status.dcad_ok || !data.source_status.tad_ok)) {
       throw new Error("Incomplete county result set.");
     }
@@ -461,7 +493,9 @@ async function restoreSavedArea(area) {
     }
     renderSidebar(data.counts, markers);
   } catch (err) {
+    if (isAbortError(err) || !isActiveAnalysisRequest(analysisRequest.requestId)) return;
     console.error("[restoreSavedArea] Analysis failed:", err);
+    document.getElementById("redfin-status").textContent = getAnalysisErrorMessage(err, "Saved area analysis failed. Please try again.");
     document.getElementById("sidebar-loading")?.classList.add("hidden");
     document.getElementById("sidebar-instructions")?.classList.remove("hidden");
   }
@@ -1368,65 +1402,215 @@ function featureCentroidLngLat(feature) {
   return null;
 }
 
-async function fetchTileDataRecursive(tilePolygon, includeRedfin, depth, tileLabel) {
-  const resp = await fetch("/api/analyze", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ polygon: tilePolygon, include_redfin: includeRedfin }),
-  });
+function _sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
 
-  if (resp.ok) {
-    const data = await resp.json();
-    if (data.source_status && (!data.source_status.dcad_ok || !data.source_status.tad_ok)) {
-      throw new Error(`Incomplete county result on tile ${tileLabel}`);
-    }
-    return [data];
+function _computeRetryDelayMs(attemptIndex) {
+  const base = 450 * Math.pow(2, attemptIndex);
+  const jitter = Math.floor(Math.random() * 200);
+  return base + jitter;
+}
+
+function _isRetryableStatus(status) {
+  return [500, 502, 503, 504].includes(status);
+}
+
+async function _parseJsonResponse(resp, endpoint) {
+  let rawBody = "";
+  try {
+    rawBody = await resp.text();
+  } catch {
+    return {
+      ok: false,
+      error: {
+        code: "BODY_READ_FAILED",
+        endpoint,
+        status: resp.status,
+        retryable: false,
+        userMessage: "We could not read the server response. Please try again.",
+      },
+    };
   }
 
-  if (resp.status === 500 || resp.status === 502 || resp.status === 503 || resp.status === 504) {
-    if (depth < TILE_MAX_SPLIT_DEPTH) {
-      // 503 = server overloaded (wait longer), 500 = likely memory/timeout crash on huge tile.
-      const waitMs = resp.status === 503 ? 3000 : 1000;
-      document.getElementById("redfin-status").textContent =
-        `Tile ${tileLabel} overloaded (${resp.status}) — retrying in ${waitMs / 1000}s...`;
-      await new Promise(r => setTimeout(r, waitMs));
+  if (!rawBody || !rawBody.trim()) {
+    return {
+      ok: false,
+      error: {
+        code: "EMPTY_RESPONSE_BODY",
+        endpoint,
+        status: resp.status,
+        retryable: false,
+        userMessage: "Server returned an empty response. Please try again.",
+      },
+    };
+  }
 
-      // Try the same tile once more before splitting.
-      const retry = await fetch("/api/analyze", {
+  try {
+    return { ok: true, data: JSON.parse(rawBody) };
+  } catch {
+    return {
+      ok: false,
+      error: {
+        code: "INVALID_JSON_RESPONSE",
+        endpoint,
+        status: resp.status,
+        retryable: false,
+        userMessage: "Server returned malformed data. Please try again.",
+      },
+    };
+  }
+}
+
+function _buildApiError(resp, endpoint, parsedData = null) {
+  const detail = parsedData?.detail;
+  const detailText = typeof detail === "string" ? detail : "";
+  const userMessage = detailText
+    ? `Server error (${resp.status}): ${detailText}`
+    : resp.status >= 500
+      ? `Server is temporarily busy (${resp.status}). Please try again.`
+      : `Request failed (${resp.status}).`;
+  return {
+    code: "HTTP_ERROR",
+    endpoint,
+    status: resp.status,
+    retryable: _isRetryableStatus(resp.status),
+    userMessage,
+    detail: detailText,
+  };
+}
+
+function _throwStructuredAnalysisError(apiError, fallbackMessage) {
+  const err = new Error(apiError?.userMessage || fallbackMessage);
+  err.code = apiError?.code || "ANALYSIS_REQUEST_FAILED";
+  err.status = apiError?.status;
+  err.userMessage = apiError?.userMessage || fallbackMessage;
+  err.apiError = apiError;
+  throw err;
+}
+
+async function postJsonWithRetry(endpoint, payload, options = {}) {
+  const {
+    signal,
+    maxRetries = 2,
+    statusElement,
+    retryMessageBuilder,
+  } = options;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    let resp;
+    try {
+      resp = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ polygon: tilePolygon, include_redfin: includeRedfin }),
+        body: JSON.stringify(payload),
+        signal,
       });
-      if (retry.ok) {
-        const retryData = await retry.json();
-        return [retryData];
+    } catch (err) {
+      if (err?.name === "AbortError") {
+        const aborted = new Error("Analysis request canceled");
+        aborted.name = "AbortError";
+        aborted.code = "ANALYSIS_ABORTED";
+        throw aborted;
       }
+      _throwStructuredAnalysisError(
+        {
+          code: "NETWORK_ERROR",
+          endpoint,
+          retryable: false,
+          userMessage: "Network error while contacting the server. Please try again.",
+        },
+        "Network error while contacting the server."
+      );
+    }
 
-      // Still failing — split into subtiles.
-      document.getElementById("redfin-status").textContent =
-        `Tile ${tileLabel} still failing — splitting into subtiles...`;
+    const parsed = await _parseJsonResponse(resp, endpoint);
+    if (resp.ok && parsed.ok) return parsed.data;
+
+    let apiError;
+    if (!parsed.ok) {
+      apiError = parsed.error;
+      if (_isRetryableStatus(resp.status)) {
+        apiError.retryable = true;
+        apiError.userMessage = `Server is temporarily busy (${resp.status}). Please try again.`;
+      }
+    } else {
+      apiError = _buildApiError(resp, endpoint, parsed.data);
+    }
+
+    if (apiError.retryable && attempt < maxRetries) {
+      const waitMs = _computeRetryDelayMs(attempt);
+      if (statusElement && typeof retryMessageBuilder === "function") {
+        statusElement.textContent = retryMessageBuilder(attempt + 1, maxRetries + 1, waitMs, apiError.status);
+      }
+      await _sleep(waitMs);
+      continue;
+    }
+
+    _throwStructuredAnalysisError(
+      apiError,
+      `Request to ${endpoint} failed.`
+    );
+  }
+
+  _throwStructuredAnalysisError(
+    {
+      code: "RETRY_EXHAUSTED",
+      endpoint,
+      retryable: false,
+      userMessage: "Server is still busy after multiple attempts. Please try a smaller area.",
+    },
+    "Server is still busy after multiple attempts."
+  );
+}
+
+async function fetchTileDataRecursive(tilePolygon, includeRedfin, depth, tileLabel, options = {}) {
+  const { signal } = options;
+  const redfinStatus = document.getElementById("redfin-status");
+  let data;
+  try {
+    data = await postJsonWithRetry(
+      "/api/analyze",
+      { polygon: tilePolygon, include_redfin: includeRedfin },
+      {
+        signal,
+        maxRetries: 2,
+        statusElement: redfinStatus,
+        retryMessageBuilder: (attempt, total, waitMs, status) =>
+          `Tile ${tileLabel} temporary server error (${status}). Retry ${attempt}/${total} in ${(waitMs / 1000).toFixed(1)}s...`,
+      }
+    );
+  } catch (err) {
+    if (isAbortError(err)) throw err;
+    if (_isRetryableStatus(err?.status) && depth < TILE_MAX_SPLIT_DEPTH) {
+      if (redfinStatus) {
+        redfinStatus.textContent = `Tile ${tileLabel} still failing — splitting into subtiles...`;
+      }
       const subTiles = splitBboxIntoTiles(getPolygonBbox(tilePolygon));
       const nestedResults = [];
       for (let i = 0; i < subTiles.length; i++) {
-        await new Promise(r => setTimeout(r, 500)); // breathe between subtiles
+        await _sleep(500); // breathe between subtiles
         const subLabel = `${tileLabel}.${i + 1}`;
         const subPolygon = tileToPolygon(subTiles[i]);
-        const subData = await fetchTileDataRecursive(subPolygon, includeRedfin, depth + 1, subLabel);
+        const subData = await fetchTileDataRecursive(subPolygon, includeRedfin, depth + 1, subLabel, options);
         nestedResults.push(...subData);
       }
       return nestedResults;
     }
+    throw err;
   }
 
-  const isRetryable = [500, 502, 503, 504].includes(resp.status);
-  throw new Error(
-    isRetryable
-      ? `Tile ${tileLabel} failed after max retries (${resp.status}) — area may be too large`
-      : `Tile ${tileLabel} failed: ${resp.status}`
-  );
+  if (data.source_status && (!data.source_status.dcad_ok || !data.source_status.tad_ok)) {
+    const err = new Error(`Incomplete county result on tile ${tileLabel}`);
+    err.code = "INCOMPLETE_COUNTY_RESULT";
+    err.status = 502;
+    err.userMessage = `Tile ${tileLabel} returned incomplete county data.`;
+    throw err;
+  }
+  return [data];
 }
 
-async function runTiledAnalysis(polygon, includeRedfin) {
+async function runTiledAnalysis(polygon, includeRedfin, options = {}) {
   const bbox = getPolygonBbox(polygon);
   const tiles = getInitialTileGrid(bbox);
   const tileJobIds = [];
@@ -1449,7 +1633,7 @@ async function runTiledAnalysis(polygon, includeRedfin) {
 
     const batchResults = await Promise.all(
       batch.map((tile, idx) =>
-        fetchTileDataRecursive(tileToPolygon(tile), includeRedfin, 0, `${batchStart + idx + 1}`)
+        fetchTileDataRecursive(tileToPolygon(tile), includeRedfin, 0, `${batchStart + idx + 1}`, options)
       )
     );
 
@@ -1489,13 +1673,17 @@ async function runTiledAnalysis(polygon, includeRedfin) {
   }
 
   // Merge server-side so export + verification have a single stable job_id
-  const mergeResp = await fetch("/api/merge-jobs", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ job_ids: tileJobIds }),
-  });
-  if (!mergeResp.ok) throw new Error("Failed to merge tile results for export");
-  const mergeData = await mergeResp.json();
+  const mergeData = await postJsonWithRetry(
+    "/api/merge-jobs",
+    { job_ids: tileJobIds },
+    {
+      signal: options.signal,
+      maxRetries: 2,
+      statusElement: document.getElementById("redfin-status"),
+      retryMessageBuilder: (attempt, total, waitMs) =>
+        `Finalizing merged result (attempt ${attempt}/${total}) in ${(waitMs / 1000).toFixed(1)}s...`,
+    }
+  );
 
   return {
     type: "FeatureCollection",
@@ -1510,18 +1698,22 @@ async function runTiledAnalysis(polygon, includeRedfin) {
   };
 }
 
-async function runAnalysis(polygon, includeRedfin) {
+async function runAnalysis(polygon, includeRedfin, options = {}) {
   const bbox = getPolygonBbox(polygon);
   if (bboxArea(bbox) > TILE_AREA_THRESHOLD) {
-    return runTiledAnalysis(polygon, includeRedfin);
+    return runTiledAnalysis(polygon, includeRedfin, options);
   }
-  const resp = await fetch("/api/analyze", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ polygon, include_redfin: includeRedfin }),
-  });
-  if (!resp.ok) throw new Error(`Server error: ${resp.status}`);
-  return resp.json();
+  return postJsonWithRetry(
+    "/api/analyze",
+    { polygon, include_redfin: includeRedfin },
+    {
+      signal: options.signal,
+      maxRetries: 2,
+      statusElement: document.getElementById("redfin-status"),
+      retryMessageBuilder: (attempt, total, waitMs, status) =>
+        `Analysis retry ${attempt}/${total} after server error (${status}) in ${(waitMs / 1000).toFixed(1)}s...`,
+    }
+  );
 }
 // ---------------------------------------------------------------------------
 
@@ -1621,9 +1813,11 @@ map.on("draw:created", async (e) => {
   const polygon = e.layer.getLatLngs()[0].map((ll) => [ll.lng, ll.lat]);
   lastDrawnLatLngs = e.layer.getLatLngs()[0].map((ll) => [ll.lat, ll.lng]);
   lastPolygon = polygon;
+  const analysisRequest = beginLatestAnalysisRequest();
 
   try {
-    const data = await runAnalysis(polygon, includeRedfin);
+    const data = await runAnalysis(polygon, includeRedfin, { signal: analysisRequest.signal });
+    if (!isActiveAnalysisRequest(analysisRequest.requestId)) return;
     if (data.source_status && (!data.source_status.dcad_ok || !data.source_status.tad_ok)) {
       throw new Error("Incomplete county result set returned; analysis canceled to prevent partial export.");
     }
@@ -1693,11 +1887,12 @@ map.on("draw:created", async (e) => {
       }
     }
   } catch (err) {
+    if (isAbortError(err) || !isActiveAnalysisRequest(analysisRequest.requestId)) return;
     console.error("[draw:created] Analysis failed:", err);
+    document.getElementById("redfin-status").textContent = getAnalysisErrorMessage(err, "Analysis failed. Please try drawing a smaller area.");
     document.getElementById("sidebar-loading").classList.add("hidden");
     document.getElementById("sidebar-instructions").classList.remove("hidden");
     document.getElementById("btn-draw-clear")?.classList.remove("hidden");
-    alert("Analysis failed: " + err.message);
   }
 });
 
