@@ -38,7 +38,7 @@ from api.redfin import normalize_addr_key, pull_grid
 BASE_DIR = Path(__file__).resolve().parent.parent
 FRONTEND_DIR = BASE_DIR / "frontend"
 _job_store: dict[str, dict[str, Any]] = {}
-_JOB_TTL_SECONDS = 1800    # 30-minute TTL per session
+_JOB_TTL_SECONDS = 7200    # 2-hour sliding-window TTL per session
 _JOB_MAX = 50              # max jobs held in memory at once
 _REDFIN_ROW_THRESHOLD = 15_000  # auto-disable Redfin above this parcel count
 
@@ -50,7 +50,8 @@ def _evict_stale_jobs() -> None:
     now = time.monotonic()
     expired = [
         jid for jid, job in _job_store.items()
-        if now - job.get("created_at", 0) > _JOB_TTL_SECONDS
+        # Use last_accessed for sliding-window TTL; fall back to created_at
+        if now - job.get("last_accessed", job.get("created_at", 0)) > _JOB_TTL_SECONDS
     ]
     for jid in expired:
         _job_store.pop(jid, None)
@@ -60,13 +61,15 @@ def _evict_stale_jobs() -> None:
 
 
 def _get_job(job_id: str) -> dict[str, Any] | None:
-    """Return job if it exists and has not expired; evicts on TTL miss."""
+    """Return job if it exists and has not expired; evicts on TTL miss. Touching last_accessed keeps the session alive as long as the user is active."""
     job = _job_store.get(job_id)
     if job is None:
         return None
-    if time.monotonic() - job.get("created_at", 0) > _JOB_TTL_SECONDS:
+    now = time.monotonic()
+    if now - job.get("last_accessed", job.get("created_at", 0)) > _JOB_TTL_SECONDS:
         _job_store.pop(job_id, None)
         return None
+    job["last_accessed"] = now
     return job
 
 
@@ -437,9 +440,9 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
 
     redfin_data: dict[str, dict] = {}
 
-    # Start Redfin task (optional) but run county DB queries sequentially.
-    # This avoids intermittent psycopg2 ThreadedConnectionPool races seen under
-    # concurrent thread execution in mixed-county pulls.
+    # Start Redfin task and county DB queries all in parallel.
+    # DCAD now uses a single JOIN query (not 5 sequential round trips), so each
+    # county only holds one connection — well within the 20-connection pool limit.
     redfin_task = None
     if include_redfin:
         redfin_task = asyncio.create_task(pull_grid(min_lng, min_lat, max_lng, max_lat))
@@ -449,15 +452,19 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
     redfin_fetch_ok = False
     failed_sources: list[str] = []
 
-    try:
-        dcad_result = await asyncio.to_thread(query_parcels, polygon)
-    except Exception:
+    raw_results = await asyncio.gather(
+        asyncio.to_thread(query_parcels, polygon),
+        asyncio.to_thread(query_tad_parcels, polygon),
+        return_exceptions=True,
+    )
+    if isinstance(raw_results[0], Exception):
         failed_sources.append("DCAD")
-
-    try:
-        tad_result = await asyncio.to_thread(query_tad_parcels, polygon)
-    except Exception:
+    else:
+        dcad_result = raw_results[0]
+    if isinstance(raw_results[1], Exception):
         failed_sources.append("TAD")
+    else:
+        tad_result = raw_results[1]
 
     # Never return silent partial county coverage; fail loudly instead.
     # Cancel any pending Redfin task before raising to avoid a dangling coroutine.

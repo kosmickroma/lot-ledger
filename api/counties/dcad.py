@@ -245,14 +245,46 @@ def _fetch_hoa_lookup(parcels: list[dict[str, Any]]) -> dict[str, dict[str, str]
 
 def query_parcels(polygon: list[list[float]]) -> ParcelQueryResult:
     """
-    Query candidate parcels by bbox, then apply exact polygon filtering.
-
+    Single-query DCAD fetch: bbox spatial filter + all account table JOINs in one round trip,
+    then exact point-in-polygon filtering in Python.
     Returns merged parcel rows along with the exempt account-number set.
     """
     min_lat, min_lng, max_lat, max_lng = polygon_bbox(polygon)
-    candidate_rows = _spatial_bbox_filter(min_lat, min_lng, max_lat, max_lng)
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    p.account_num, p.parcel_key, p.gis_parcel_id,
+                    p.owner_name, p.owner_address, p.owner_city, p.owner_state, p.owner_zip,
+                    p.street_num, p.full_street_name, p.property_address, p.property_zip,
+                    p.division_cd, p.nbhd_cd,
+                    p.legal1, p.legal2, p.legal3, p.legal4, p.legal5,
+                    p.polygon_geojson,
+                    ST_AsGeoJSON(p.centroid)::json AS centroid,
+                    COALESCE(a.sptd_code, p.sptd_code) AS sptd_code,
+                    a.land_val, a.impr_val, a.tot_val, a.isd_desc,
+                    r.yr_built, r.tot_living_area, r.tot_main_sf,
+                    l.zoning, l.front_dim, l.depth_dim, l.area_size, l.area_uom,
+                    (e.account_num IS NOT NULL) AS is_exempt
+                FROM parcels p
+                LEFT JOIN appraisal a ON a.account_num = p.account_num
+                LEFT JOIN res_detail r ON r.account_num = p.account_num
+                LEFT JOIN land_detail l ON l.account_num = p.account_num
+                LEFT JOIN exempt_accounts e ON e.account_num = p.account_num
+                WHERE p.division_cd IN ('RES', 'COM')
+                    AND ST_Intersects(p.centroid, ST_MakeEnvelope(%s, %s, %s, %s, 4326))
+                """,
+                (min_lng, min_lat, max_lng, max_lat),
+            )
+            cols = [desc[0] for desc in cur.description]
+            candidate_rows = [dict(zip(cols, row)) for row in cur.fetchall()]
+    finally:
+        release_conn(conn)
 
     exact_rows: list[dict[str, Any]] = []
+    exempt_accounts: set[str] = set()
     for row in candidate_rows:
         lat, lng = _extract_centroid(row.get("centroid"))
         if lat is None or lng is None:
@@ -261,40 +293,17 @@ def query_parcels(polygon: list[list[float]]) -> ParcelQueryResult:
             continue
         row["lat"] = lat
         row["lng"] = lng
+        if row.get("is_exempt"):
+            exempt_accounts.add(_clean_text(row.get("account_num")))
         exact_rows.append(row)
-
-    account_nums = sorted({_clean_text(row.get("account_num")) for row in exact_rows if _clean_text(row.get("account_num"))})
-
-    appraisal_lookup = _fetch_by_account(
-        "appraisal",
-        account_nums,
-        ["account_num", "land_val", "impr_val", "tot_val", "isd_desc", "sptd_code"],
-    )
-    res_lookup = _fetch_by_account(
-        "res_detail",
-        account_nums,
-        ["account_num", "yr_built", "tot_living_area", "tot_main_sf"],
-    )
-    land_lookup = _fetch_by_account(
-        "land_detail",
-        account_nums,
-        ["account_num", "zoning", "front_dim", "depth_dim", "area_size", "area_uom"],
-    )
-    exempt_accounts = _fetch_exempt_accounts(account_nums)
 
     merged_rows: list[dict[str, Any]] = []
     for row in exact_rows:
         account_num = _clean_text(row.get("account_num"))
-        appraisal = appraisal_lookup.get(account_num, {})
-        res_detail = res_lookup.get(account_num, {})
-        land_detail = land_lookup.get(account_num, {})
-
-        sptd_code = _clean_text(appraisal.get("sptd_code") or row.get("sptd_code"))
-        land_val = _safe_float(appraisal.get("land_val"))
-        tot_val = _safe_float(appraisal.get("tot_val"))
-
-        # build_db.py already converts ACRE → sq ft before storing; read as-is.
-        area_size = _safe_float(land_detail.get("area_size"))
+        sptd_code = _clean_text(row.get("sptd_code"))
+        land_val = _safe_float(row.get("land_val"))
+        tot_val = _safe_float(row.get("tot_val"))
+        area_size = _safe_float(row.get("area_size"))
 
         property_address = _clean_text(row.get("property_address"))
         if not property_address:
@@ -327,17 +336,17 @@ def query_parcels(polygon: list[list[float]]) -> ParcelQueryResult:
                 "lng": _safe_float(row.get("lng")),
                 "polygon_geojson": row.get("polygon_geojson"),
                 "land_val": land_val,
-                "impr_val": _safe_float(appraisal.get("impr_val")),
+                "impr_val": _safe_float(row.get("impr_val")),
                 "tot_val": tot_val,
-                "isd_desc": _clean_text(appraisal.get("isd_desc")),
-                "yr_built": _safe_int(res_detail.get("yr_built")),
-                "tot_living_area": _safe_float(res_detail.get("tot_living_area")),
-                "tot_main_sf": _safe_float(res_detail.get("tot_main_sf")),
-                "zoning": _clean_text(land_detail.get("zoning")),
-                "front_dim": _safe_float(land_detail.get("front_dim")),
-                "depth_dim": _safe_float(land_detail.get("depth_dim")),
+                "isd_desc": _clean_text(row.get("isd_desc")),
+                "yr_built": _safe_int(row.get("yr_built")),
+                "tot_living_area": _safe_float(row.get("tot_living_area")),
+                "tot_main_sf": _safe_float(row.get("tot_main_sf")),
+                "zoning": _clean_text(row.get("zoning")),
+                "front_dim": _safe_float(row.get("front_dim")),
+                "depth_dim": _safe_float(row.get("depth_dim")),
                 "area_size": area_size,
-                "area_uom": _clean_text(land_detail.get("area_uom")),
+                "area_uom": _clean_text(row.get("area_uom")),
                 "state_code": SPTD_LABELS.get(sptd_code, sptd_code),
                 "land_pct": round((land_val / tot_val) * 100, 1) if land_val is not None and tot_val not in (None, 0) else None,
                 "hoa_name": "",
