@@ -298,15 +298,56 @@ async function restoreSavedArea(area) {
   if (area.type === "location") {
     const latlng = [area.lat, area.lng];
     map.flyTo(latlng, 17);
-    if (window._searchHighlight) { window._searchHighlight.remove(); window._searchHighlight = null; }
+    window._clearSearchHighlight?.();
     if (window._searchMoveEndHandler) map.off("moveend", window._searchMoveEndHandler);
+    window._clearSearchHighlight = () => {
+      if (window._searchHighlight) { window._searchHighlight.remove(); window._searchHighlight = null; }
+      if (window._searchPopup) { window._searchPopup.remove(); window._searchPopup = null; }
+    };
     window._searchMoveEndHandler = () => {
       window._searchMoveEndHandler = null;
-      window._searchHighlight = L.circleMarker(latlng, {
-        radius: 14, color: "#f1c40f", weight: 3,
-        fillColor: "#f1c40f", fillOpacity: 0.12,
-        interactive: false, pane: "overlayPane",
-      }).addTo(map);
+      setTimeout(async () => {
+        const [slat, slng] = latlng;
+        let highlightLayer = null;
+        try {
+          const result = browseLayer.queryTileFeaturesDebug(slng, slat);
+          const allFeatures = result instanceof Map
+            ? [...result.values()].flat()
+            : (Array.isArray(result) ? result : []);
+          const parcel = allFeatures.find(f => {
+            const props = (f.feature && f.feature.props) || f.props || {};
+            return props.source_county === "dcad" || props.source_county === "tad";
+          });
+          if (parcel) {
+            const pProps = (parcel.feature && parcel.feature.props) || parcel.props || {};
+            const county = pProps.source_county;
+            const accountNum = pProps.account_num;
+            if (county && accountNum) {
+              const resp = await fetch(`/api/parcel/${county}/${accountNum}`);
+              if (resp.ok) {
+                const detail = await resp.json();
+                const geom = detail.geometry;
+                if (geom && (geom.type === "Polygon" || geom.type === "MultiPolygon")) {
+                  highlightLayer = L.geoJSON(detail, {
+                    style: { color: "#f1c40f", weight: 3, fill: false, interactive: false },
+                    interactive: false,
+                  }).addTo(map);
+                }
+              }
+            }
+          }
+        } catch (e) {
+          console.warn("Saved location footprint lookup failed", e);
+        }
+        if (!highlightLayer) {
+          highlightLayer = L.circleMarker(latlng, {
+            radius: 14, color: "#f1c40f", weight: 3,
+            fillColor: "#f1c40f", fillOpacity: 0.12,
+            interactive: false,
+          }).addTo(map);
+        }
+        window._searchHighlight = highlightLayer;
+      }, 800);
     };
     map.once("moveend", window._searchMoveEndHandler);
     return;
@@ -663,8 +704,9 @@ const AddressSearch = L.Control.extend({
       btn.disabled = true;
       btn.textContent = "…";
       try {
+        // bounded=1 + Texas viewbox keeps results inside Texas.
         const resp = await fetch(
-          `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&format=json&limit=1&countrycodes=us`,
+          `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&format=json&limit=1&countrycodes=us&viewbox=-106.65,36.5,-93.51,25.84&bounded=1`,
           { headers: { "Accept-Language": "en" } }
         );
         const results = await resp.json();
@@ -680,41 +722,90 @@ const AddressSearch = L.Control.extend({
         input.value = "";
 
         // Clear any previous highlight and cancel any pending placement.
-        if (window._searchHighlight) { window._searchHighlight.remove(); window._searchHighlight = null; }
-        clearTimeout(window._searchHighlightTimer);
+        window._clearSearchHighlight?.();
         if (window._searchMoveEndHandler) map.off("moveend", window._searchMoveEndHandler);
 
-        // Wait for the map to finish flying before placing the ring so it
-        // doesn't flicker mid-animation. Stays until next search or clear.
+        window._clearSearchHighlight = () => {
+          if (window._searchHighlight) { window._searchHighlight.remove(); window._searchHighlight = null; }
+          if (window._searchPopup) { window._searchPopup.remove(); window._searchPopup = null; }
+        };
+
+        // Wait for map to stop flying, then wait 800ms for PMTiles to load tiles
+        // at the new viewport before querying the browse layer for the parcel footprint.
         window._searchMoveEndHandler = () => {
           window._searchMoveEndHandler = null;
-          window._searchHighlight = L.circleMarker(latlng, {
-            radius: 14,
-            color: "#f1c40f",
-            weight: 3,
-            fillColor: "#f1c40f",
-            fillOpacity: 0.12,
-            interactive: true,
-            pane: "overlayPane",
-          }).addTo(map);
+          setTimeout(async () => {
+            const [slat, slng] = latlng;
+            let highlightLayer = null;
 
-          const popupHtml = `<div style="font-size:12px;min-width:150px;">
-            <div style="font-weight:600;margin-bottom:5px;">${shortName}</div>
-            <a href="#" class="search-save-link" style="color:#f1c40f;text-decoration:none;font-size:11px;">+ Save this location</a>
-          </div>`;
-          window._searchHighlight
-            .bindPopup(popupHtml, { closeButton: false, maxWidth: 220 })
-            .openPopup();
+            // Hit-test the browse layer to find the parcel at this point.
+            try {
+              const result = browseLayer.queryTileFeaturesDebug(slng, slat);
+              const allFeatures = result instanceof Map
+                ? [...result.values()].flat()
+                : (Array.isArray(result) ? result : []);
+              const parcel = allFeatures.find(f => {
+                const props = (f.feature && f.feature.props) || f.props || {};
+                return props.source_county === "dcad" || props.source_county === "tad";
+              });
+              if (parcel) {
+                const pProps = (parcel.feature && parcel.feature.props) || parcel.props || {};
+                const county = pProps.source_county;
+                const accountNum = pProps.account_num;
+                if (county && accountNum) {
+                  const resp = await fetch(`/api/parcel/${county}/${accountNum}`);
+                  if (resp.ok) {
+                    const detail = await resp.json();
+                    const geom = detail.geometry;
+                    if (geom && (geom.type === "Polygon" || geom.type === "MultiPolygon")) {
+                      highlightLayer = L.geoJSON(detail, {
+                        style: { color: "#f1c40f", weight: 3, fill: false, interactive: false },
+                        interactive: false,
+                      }).addTo(map);
+                    }
+                  }
+                }
+              }
+            } catch (e) {
+              console.warn("Search footprint lookup failed", e);
+            }
 
-          window._searchHighlight.getPopup()?.getElement()
-            ?.querySelector(".search-save-link")
-            ?.addEventListener("click", e => {
-              e.preventDefault();
-              const name = window.prompt("Name this location:", shortName);
-              if (!name?.trim()) return;
-              saveSearchLocation(name.trim(), latlng[0], latlng[1]);
-              window._searchHighlight?.closePopup();
-            });
+            // Fall back to a ring marker if no polygon was found.
+            if (!highlightLayer) {
+              highlightLayer = L.circleMarker(latlng, {
+                radius: 14, color: "#f1c40f", weight: 3,
+                fillColor: "#f1c40f", fillOpacity: 0.12,
+                interactive: false,
+              }).addTo(map);
+            }
+            window._searchHighlight = highlightLayer;
+
+            // Separate popup (not bound to marker so it works with geoJSON layers too).
+            const popupHtml = `<div style="font-size:12px;min-width:160px;">
+              <div style="font-weight:600;margin-bottom:6px;">${shortName}</div>
+              <a href="#" id="_search-save" style="color:#c9a24f;text-decoration:none;font-size:11px;margin-right:10px;">+ Save location</a>
+              <a href="#" id="_search-clear" style="color:#888;text-decoration:none;font-size:11px;">✕ Clear</a>
+            </div>`;
+            window._searchPopup = L.popup({ closeButton: false, maxWidth: 240 })
+              .setLatLng(latlng)
+              .setContent(popupHtml)
+              .openOn(map);
+
+            setTimeout(() => {
+              document.getElementById("_search-save")?.addEventListener("click", e => {
+                e.preventDefault();
+                const name = window.prompt("Name this location:", shortName);
+                if (!name?.trim()) return;
+                saveSearchLocation(name.trim(), slat, slng);
+                window._searchPopup?.remove();
+                window._searchPopup = null;
+              });
+              document.getElementById("_search-clear")?.addEventListener("click", e => {
+                e.preventDefault();
+                window._clearSearchHighlight?.();
+              });
+            }, 50);
+          }, 800);
         };
         map.once("moveend", window._searchMoveEndHandler);
       } catch {
