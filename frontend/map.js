@@ -633,8 +633,25 @@ const AddressSearch = L.Control.extend({
           return;
         }
         const { lat, lon } = results[0];
-        map.flyTo([parseFloat(lat), parseFloat(lon)], 17);
+        const latlng = [parseFloat(lat), parseFloat(lon)];
+        map.flyTo(latlng, 17);
         input.value = "";
+
+        // Drop a temporary gold ring at the result so the parcel is easy to spot.
+        // Clears any previous search highlight first, then auto-removes after 6s.
+        if (window._searchHighlight) { window._searchHighlight.remove(); }
+        window._searchHighlight = L.circleMarker(latlng, {
+          radius: 18,
+          color: "#f1c40f",
+          weight: 3,
+          fill: false,
+          interactive: false,
+          pane: "overlayPane",
+        }).addTo(map);
+        clearTimeout(window._searchHighlightTimer);
+        window._searchHighlightTimer = setTimeout(() => {
+          if (window._searchHighlight) { window._searchHighlight.remove(); window._searchHighlight = null; }
+        }, 6000);
       } catch {
         btn.textContent = "Error";
         setTimeout(() => { btn.textContent = "Go"; btn.disabled = false; }, 2000);
@@ -1136,7 +1153,7 @@ function normalizeCsvFilename(rawName) {
 // Phase 2: tile splitting for large-area draws
 // ---------------------------------------------------------------------------
 const TILE_AREA_THRESHOLD = 0.003; // sq-degrees; split bbox above this area
-const TILE_MAX_SPLIT_DEPTH = 2; // 2x2 -> 4x4 -> 8x8 worst-case per failing branch
+const TILE_MAX_SPLIT_DEPTH = 3; // max adaptive refinement depth per failing tile
 
 function getPolygonBbox(polygon) {
   let minLng = Infinity, minLat = Infinity, maxLng = -Infinity, maxLat = -Infinity;
@@ -1153,15 +1170,37 @@ function bboxArea(bbox) {
   return (bbox.maxLng - bbox.minLng) * (bbox.maxLat - bbox.minLat);
 }
 
+// Split bbox into an n×n grid of tiles.
+function splitBboxIntoNxN(bbox, n) {
+  const lngStep = (bbox.maxLng - bbox.minLng) / n;
+  const latStep = (bbox.maxLat - bbox.minLat) / n;
+  const tiles = [];
+  for (let row = 0; row < n; row++) {
+    for (let col = 0; col < n; col++) {
+      tiles.push({
+        minLng: bbox.minLng + col * lngStep,
+        maxLng: bbox.minLng + (col + 1) * lngStep,
+        minLat: bbox.minLat + row * latStep,
+        maxLat: bbox.minLat + (row + 1) * latStep,
+      });
+    }
+  }
+  return tiles;
+}
+
+// Always-2×2 split used during adaptive tile refinement.
 function splitBboxIntoTiles(bbox) {
-  const midLng = (bbox.minLng + bbox.maxLng) / 2;
-  const midLat = (bbox.minLat + bbox.maxLat) / 2;
-  return [
-    { minLng: bbox.minLng, minLat: bbox.minLat, maxLng: midLng,      maxLat: midLat      }, // SW
-    { minLng: midLng,      minLat: bbox.minLat, maxLng: bbox.maxLng, maxLat: midLat      }, // SE
-    { minLng: bbox.minLng, minLat: midLat,      maxLng: midLng,      maxLat: bbox.maxLat }, // NW
-    { minLng: midLng,      minLat: midLat,      maxLng: bbox.maxLng, maxLat: bbox.maxLat }, // NE
-  ];
+  return splitBboxIntoNxN(bbox, 2);
+}
+
+// Choose initial grid size based on bbox area so huge draws start with more tiles.
+// Each tile should stay well under Cloud Run's 60s timeout.
+function getInitialTileGrid(bbox) {
+  const area = bboxArea(bbox);
+  if (area > 0.04) return splitBboxIntoNxN(bbox, 5); // ~county-wide → 25 tiles
+  if (area > 0.015) return splitBboxIntoNxN(bbox, 4); // very large → 16 tiles
+  if (area > 0.006) return splitBboxIntoNxN(bbox, 3); // large → 9 tiles
+  return splitBboxIntoTiles(bbox);                     // normal → 4 tiles
 }
 
 function tileToPolygon(tile) {
@@ -1224,9 +1263,9 @@ async function fetchTileDataRecursive(tilePolygon, includeRedfin, depth, tileLab
     return [data];
   }
 
-  if (resp.status === 502 && depth < TILE_MAX_SPLIT_DEPTH) {
+  if ((resp.status === 502 || resp.status === 504) && depth < TILE_MAX_SPLIT_DEPTH) {
     document.getElementById("redfin-status").textContent =
-      `Refining tile ${tileLabel} due to server load...`;
+      `Tile ${tileLabel} timed out — splitting into subtiles...`;
     const subTiles = splitBboxIntoTiles(getPolygonBbox(tilePolygon));
     const nestedResults = [];
     for (let i = 0; i < subTiles.length; i++) {
@@ -1243,7 +1282,7 @@ async function fetchTileDataRecursive(tilePolygon, includeRedfin, depth, tileLab
 
 async function runTiledAnalysis(polygon, includeRedfin) {
   const bbox = getPolygonBbox(polygon);
-  const tiles = splitBboxIntoTiles(bbox);
+  const tiles = getInitialTileGrid(bbox);
   const tileJobIds = [];
   const allFeatures = [];
   const seenParcelKeys = new Set();
