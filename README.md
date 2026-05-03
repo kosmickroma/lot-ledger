@@ -8,7 +8,7 @@ Draw a polygon on the map, get every parcel inside color-coded by type, compare 
 
 ## What It Does
 
-**Browse layer** — On page load, every parcel in Dallas and Tarrant counties is visible on the map, color-coded and clickable. No draw needed. Rendered from a pre-built PMTiles vector tile file.
+**Browse layer** — On page load, every parcel in Dallas and Tarrant counties is visible on the map, color-coded and clickable. No draw needed. Rendered from a pre-built PMTiles vector tile file. Zoom to level 14+ to see parcels (nudge chip appears if too far out).
 
 **Draw & analyze** — Draw any polygon shape. Results come back instantly: color-coded parcel outlines, sidebar counts by type, and a shortlist of off-market SFR sorted by land % of total value. Large areas tile automatically — no size cap.
 

@@ -161,6 +161,7 @@ function _updateZoomNudge() {
   _zoomNudge.classList.toggle("hidden", !tooFarOut || Boolean(lastAnalysisGeojson));
 }
 map.on("zoomend", _updateZoomNudge);
+map.on("moveend zoomend", () => { if (viewportRenderMode) _scheduleViewportRender(); });
 _updateZoomNudge();
 
 let drawLayer = L.layerGroup().addTo(map);
@@ -186,6 +187,10 @@ const potentialTargetByAccount = new Map();
 const verificationBadgeMarkers = new Map();
 const targetBadgeMarkers = new Map();
 let activeBrush = null;
+let allAnalysisFeatures = null;   // full feature set from last analysis
+let viewportRenderMode = false;   // true when feature count exceeds render threshold
+let _vpRenderTimeout = null;      // debounce handle for viewport re-render
+const LARGE_DRAW_THRESHOLD = 2500; // render all below this; viewport-only above
 
 const HOA_COLOR = "#b8860b";
 
@@ -273,15 +278,15 @@ function deleteSavedArea(id) {
   renderSavedAreasList();
 }
 
-function restoreSavedArea(area) {
+async function restoreSavedArea(area) {
   clearDrawResults();
+  drawLayer.clearLayers();
   L.polygon(area.latlngs, {
     color: "#f1c40f",
     weight: 2.5,
     fill: false,
     interactive: false,
   }).addTo(drawLayer);
-  // Apply same spotlight mask as draw:created so the saved area stands out.
   maskLayer.clearLayers();
   const _worldRing = [[-90, -180], [-90, 180], [90, 180], [90, -180], [-90, -180]];
   L.polygon([_worldRing, area.latlngs], {
@@ -293,6 +298,58 @@ function restoreSavedArea(area) {
   map.fitBounds(area.bounds, { padding: [40, 40] });
   document.getElementById("btn-draw-clear")?.classList.remove("hidden");
   document.getElementById("btn-saved-area-clear")?.classList.remove("hidden");
+
+  // Convert saved [lat, lng] pairs → [lng, lat] for the analysis API.
+  const polygon = area.latlngs.map(([lat, lng]) => [lng, lat]);
+  lastDrawnLatLngs = area.latlngs;
+  lastPolygon = polygon;
+
+  if (map.hasLayer(browseLayer)) browseLayer.remove();
+
+  const includeRedfin = Boolean(document.getElementById("toggle-redfin")?.checked);
+  document.getElementById("sidebar-instructions")?.classList.add("hidden");
+  document.getElementById("sidebar-results")?.classList.add("hidden");
+  document.getElementById("sidebar-loading")?.classList.remove("hidden");
+  document.getElementById("redfin-status").textContent = "Loading saved area...";
+
+  try {
+    const data = await runAnalysis(polygon, includeRedfin);
+    if (data.source_status && (!data.source_status.dcad_ok || !data.source_status.tad_ok)) {
+      throw new Error("Incomplete county result set.");
+    }
+    currentJobId = data.job_id;
+    data.features.forEach(feature => {
+      const p = feature.properties || {};
+      if (!p.account_num) return;
+      const normalized = normalizeVerificationValue(p.verified_vacant);
+      verificationByAccount.set(p.account_num, normalized);
+      p.verified_vacant = normalized;
+      const potential = String(p.potential_target || "").trim().toLowerCase() === "yes" ? "Yes" : "";
+      potentialTargetByAccount.set(p.account_num, potential);
+      p.potential_target = potential;
+    });
+    lastIncludedRedfin = includeRedfin;
+    lastAnalysisGeojson = data;
+    lastAnalysisCounts = data.counts;
+    allAnalysisFeatures = data.features;
+    redfinLayerVisible = includeRedfin;
+    if (redfinLayerVisible) redfinLayer.addTo(map); else map.removeLayer(redfinLayer);
+
+    let markers;
+    if (data.features.length > LARGE_DRAW_THRESHOLD) {
+      viewportRenderMode = true;
+      renderViewportFeatures();
+      markers = {};
+    } else {
+      viewportRenderMode = false;
+      markers = renderFeatures(data);
+    }
+    renderSidebar(data.counts, markers);
+  } catch (err) {
+    console.error("[restoreSavedArea] Analysis failed:", err);
+    document.getElementById("sidebar-loading")?.classList.add("hidden");
+    document.getElementById("sidebar-instructions")?.classList.remove("hidden");
+  }
 }
 
 function renderSavedAreasList() {
@@ -543,6 +600,56 @@ const BasemapSwitcher = L.Control.extend({
   },
 });
 new BasemapSwitcher().addTo(map);
+
+const AddressSearch = L.Control.extend({
+  options: { position: "topright" },
+  onAdd() {
+    const container = L.DomUtil.create("div", "address-search");
+    L.DomEvent.disableClickPropagation(container);
+    L.DomEvent.disableScrollPropagation(container);
+
+    const input = L.DomUtil.create("input", "address-search-input", container);
+    input.type = "text";
+    input.placeholder = "Search address or place...";
+    input.setAttribute("autocomplete", "off");
+
+    const btn = L.DomUtil.create("button", "address-search-btn", container);
+    btn.textContent = "Go";
+
+    const doSearch = async () => {
+      const q = input.value.trim();
+      if (!q) return;
+      btn.disabled = true;
+      btn.textContent = "…";
+      try {
+        const resp = await fetch(
+          `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&format=json&limit=1&countrycodes=us`,
+          { headers: { "Accept-Language": "en" } }
+        );
+        const results = await resp.json();
+        if (!results.length) {
+          btn.textContent = "Not found";
+          setTimeout(() => { btn.textContent = "Go"; btn.disabled = false; }, 2000);
+          return;
+        }
+        const { lat, lon } = results[0];
+        map.flyTo([parseFloat(lat), parseFloat(lon)], 17);
+        input.value = "";
+      } catch {
+        btn.textContent = "Error";
+        setTimeout(() => { btn.textContent = "Go"; btn.disabled = false; }, 2000);
+        return;
+      }
+      btn.textContent = "Go";
+      btn.disabled = false;
+    };
+
+    L.DomEvent.on(btn, "click", doSearch);
+    L.DomEvent.on(input, "keydown", e => { if (e.key === "Enter") doSearch(); });
+    return container;
+  },
+});
+new AddressSearch().addTo(map);
 const appShell = document.querySelector(".app-shell");
 const sidebarToggleBtn = document.getElementById("sidebar-toggle");
 const drawHelper = document.getElementById("draw-helper");
@@ -730,6 +837,7 @@ function makePopupHtml(p) {
           ${row("School District", p.school)}
           ${row("Year Built", p.yr_built)}
           ${row("Sq Ft", p.sqft && p.sqft !== "N/A" ? p.sqft : "N/A")}
+          ${row("Acres", p.lot_acres)}
           ${row("Verified Vacant", verificationDisplay(verifiedVacant))}
           ${row("Potential Target", potentialTarget || "No")}
         </table>
@@ -907,6 +1015,26 @@ function clearTargetBadge(accountNum) {
   targetBadgeMarkers.delete(accountNum);
 }
 
+// Render only the features whose centroid falls within the current map viewport.
+// Called on moveend/zoomend when viewportRenderMode is true (large draw result).
+function renderViewportFeatures() {
+  if (!viewportRenderMode || !allAnalysisFeatures) return;
+  const bounds = map.getBounds().pad(0.15);
+  const visible = allAnalysisFeatures.filter(f => {
+    const p = f.properties || {};
+    if (p.lat == null || p.lng == null) return false;
+    return bounds.contains([p.lat, p.lng]);
+  });
+  renderFeatures({ type: "FeatureCollection", features: visible });
+  if (redfinLayerVisible) redfinLayer.addTo(map); else map.removeLayer(redfinLayer);
+}
+
+// Debounced wrapper so pan/zoom events don't fire renderViewportFeatures dozens of times.
+function _scheduleViewportRender() {
+  clearTimeout(_vpRenderTimeout);
+  _vpRenderTimeout = setTimeout(renderViewportFeatures, 150);
+}
+
 function renderSidebar(counts, markers) {
   document.getElementById("sidebar-loading").classList.add("hidden");
   document.getElementById("sidebar-results").classList.remove("hidden");
@@ -931,20 +1059,27 @@ function renderSidebar(counts, markers) {
     )
     .join("");
 
-  const sorted = Object.values(markers)
-    .map((m) => m.feature)
-    .filter((f) => !f.properties.on_redfin && f.properties.prop_type === "single_family")
-    .sort((a, b) => (parseFloat(b.properties.land_pct) || 0) - (parseFloat(a.properties.land_pct) || 0));
+  // In viewport render mode, build shortlist from the full feature set so the
+  // list doesn't change as the user pans. Clicking flies to the parcel;
+  // the viewport re-render will show it and the user can click for popup.
+  const shortlistFeatures = viewportRenderMode
+    ? (allAnalysisFeatures || [])
+        .filter(f => !f.properties.on_redfin && f.properties.prop_type === "single_family")
+        .sort((a, b) => (parseFloat(b.properties.land_pct) || 0) - (parseFloat(a.properties.land_pct) || 0))
+    : Object.values(markers)
+        .map(m => m.feature)
+        .filter(f => !f.properties.on_redfin && f.properties.prop_type === "single_family")
+        .sort((a, b) => (parseFloat(b.properties.land_pct) || 0) - (parseFloat(a.properties.land_pct) || 0));
 
   const list = document.getElementById("parcel-list");
   list.innerHTML =
-    sorted.length === 0
+    shortlistFeatures.length === 0
       ? "<p class='sidebar-note'>No off-market SFR parcels found.</p>"
       : "<p class='sidebar-label'>Off-Market SFR Sorted by Land %</p>" +
-        sorted
+        shortlistFeatures
           .map(
             (f) => `
-          <div class="parcel-row" data-addr="${f.properties.addr}">
+          <div class="parcel-row" data-addr="${f.properties.addr}" data-lat="${f.properties.lat}" data-lng="${f.properties.lng}">
             <span class="parcel-addr">${f.properties.addr}</span>
             <span class="parcel-pct">${f.properties.land_pct}</span>
           </div>`
@@ -954,9 +1089,14 @@ function renderSidebar(counts, markers) {
   list.querySelectorAll(".parcel-row").forEach((el) => {
     el.addEventListener("click", () => {
       const entry = markers[el.dataset.addr];
-      if (entry) {
+      if (entry && entry.layer) {
         map.flyTo([entry.feature.properties.lat, entry.feature.properties.lng], 18);
         entry.layer.openPopup();
+      } else {
+        // viewport mode — fly to parcel; viewport re-render fires on moveend
+        const lat = parseFloat(el.dataset.lat);
+        const lng = parseFloat(el.dataset.lng);
+        if (!isNaN(lat) && !isNaN(lng)) map.flyTo([lat, lng], 18);
       }
     });
   });
@@ -1034,6 +1174,41 @@ function tileToPolygon(tile) {
   ];
 }
 
+// Ray-cast point-in-polygon. ring is [[lng, lat], ...] (GeoJSON order).
+function pointInPolygonLngLat([lng, lat], ring) {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const [xi, yi] = ring[i];
+    const [xj, yj] = ring[j];
+    if ((yi > lat) !== (yj > lat) && lng < (xj - xi) * (lat - yi) / (yj - yi) + xi) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+// Returns a representative [lng, lat] centroid for a GeoJSON feature.
+// Falls back to properties.lng/lat if geometry is unavailable.
+function featureCentroidLngLat(feature) {
+  const p = feature.properties || {};
+  const geom = feature.geometry;
+  if (geom?.type === "Point") return geom.coordinates;
+  if (geom?.type === "Polygon" && geom.coordinates[0]?.length) {
+    const ring = geom.coordinates[0];
+    let x = 0, y = 0;
+    for (const [px, py] of ring) { x += px; y += py; }
+    return [x / ring.length, y / ring.length];
+  }
+  if (geom?.type === "MultiPolygon" && geom.coordinates[0]?.[0]?.length) {
+    const ring = geom.coordinates[0][0];
+    let x = 0, y = 0;
+    for (const [px, py] of ring) { x += px; y += py; }
+    return [x / ring.length, y / ring.length];
+  }
+  if (p.lng != null && p.lat != null) return [p.lng, p.lat];
+  return null;
+}
+
 async function fetchTileDataRecursive(tilePolygon, includeRedfin, depth, tileLabel) {
   const resp = await fetch("/api/analyze", {
     method: "POST",
@@ -1095,9 +1270,16 @@ async function runTiledAnalysis(polygon, includeRedfin) {
     }
   }
 
-  // Recount from deduplicated features
-  const mergedCounts = { active: 0, off_market: 0, multifamily: 0, vacant: 0, commercial: 0, exempt: 0, total: allFeatures.length };
-  for (const feature of allFeatures) {
+  // Strip parcels outside the drawn polygon — tile bboxes are rectangles that
+  // extend beyond irregular drawn shapes; server filters to the tile rect, not the draw.
+  const filteredFeatures = allFeatures.filter(f => {
+    const pt = featureCentroidLngLat(f);
+    return pt ? pointInPolygonLngLat(pt, polygon) : true;
+  });
+
+  // Recount from deduplicated + clipped features
+  const mergedCounts = { active: 0, off_market: 0, multifamily: 0, vacant: 0, commercial: 0, exempt: 0, total: filteredFeatures.length };
+  for (const feature of filteredFeatures) {
     const p = feature.properties || {};
     if (p.on_redfin) mergedCounts.active++;
     else if (p.prop_type === "multifamily") mergedCounts.multifamily++;
@@ -1118,7 +1300,7 @@ async function runTiledAnalysis(polygon, includeRedfin) {
 
   return {
     type: "FeatureCollection",
-    features: allFeatures,
+    features: filteredFeatures,
     counts: mergedCounts,
     job_id: mergeData.job_id,
     redfin_requested: includeRedfin,
@@ -1277,8 +1459,18 @@ map.on("draw:created", async (e) => {
     lastIncludedRedfin = includeRedfin;
     lastAnalysisGeojson = data;
     lastAnalysisCounts = data.counts;
+    allAnalysisFeatures = data.features;
     document.getElementById("btn-draw-clear")?.classList.remove("hidden");
-    const markers = renderFeatures(data);
+
+    let markers;
+    if (data.features.length > LARGE_DRAW_THRESHOLD) {
+      viewportRenderMode = true;
+      renderViewportFeatures();
+      markers = {};
+    } else {
+      viewportRenderMode = false;
+      markers = renderFeatures(data);
+    }
     renderSidebar(data.counts, markers);
     // Update the always-visible toggle status line.
     const toggleStatus = document.getElementById("redfin-toggle-status");
@@ -1305,6 +1497,9 @@ map.on("draw:created", async (e) => {
 });
 
 function clearDrawResults() {
+  viewportRenderMode = false;
+  allAnalysisFeatures = null;
+  clearTimeout(_vpRenderTimeout);
   drawLayer.clearLayers();
   maskLayer.clearLayers();
   if (!map.hasLayer(browseLayer)) browseLayer.addTo(map);

@@ -342,6 +342,53 @@ h1 {
   color: #fff !important;
 }
 
+.address-search {
+  display: flex;
+  background: rgba(255, 255, 255, 0.97);
+  border-radius: 20px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
+  overflow: hidden;
+  margin-bottom: 8px;
+  margin-left: 8px;
+  border: 1px solid rgba(0,0,0,0.12);
+}
+
+.address-search-input {
+  border: none;
+  outline: none;
+  background: transparent;
+  padding: 5px 12px;
+  font-size: 11px;
+  color: #222;
+  width: 200px;
+  font-family: inherit;
+}
+
+.address-search-input::placeholder {
+  color: #aaa;
+}
+
+.address-search-btn {
+  border: none;
+  background: #2c3e50;
+  color: #fff;
+  padding: 5px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+  font-family: inherit;
+}
+
+.address-search-btn:hover {
+  background: #1a252f;
+}
+
+.address-search-btn:disabled {
+  background: #888;
+  cursor: default;
+}
+
 .basemap-switcher {
   display: flex;
   background: rgba(255, 255, 255, 0.97);
