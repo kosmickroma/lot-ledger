@@ -347,7 +347,6 @@ async function restoreSavedArea(area) {
     if (window._searchMoveEndHandler) map.off("moveend", window._searchMoveEndHandler);
     window._clearSearchHighlight = () => {
       if (window._searchHighlight) { window._searchHighlight.remove(); window._searchHighlight = null; }
-      if (window._searchPopup) { window._searchPopup.remove(); window._searchPopup = null; }
     };
     window._searchMoveEndHandler = () => {
       window._searchMoveEndHandler = null;
@@ -468,15 +467,12 @@ async function restoreSavedArea(area) {
   }
 }
 
-function renderSavedAreasList() {
-  const areas = _loadSavedAreas();
-  const section = document.getElementById("saved-areas");
-  const list = document.getElementById("saved-areas-list");
+function _renderList(sectionId, listId, items) {
+  const section = document.getElementById(sectionId);
+  const list = document.getElementById(listId);
   if (!section || !list) return;
-
-  section.classList.toggle("hidden", areas.length === 0);
-
-  list.innerHTML = areas.map(area => {
+  section.classList.toggle("hidden", items.length === 0);
+  list.innerHTML = items.map(area => {
     const date = new Date(area.savedAt).toLocaleDateString(undefined, { month: "short", day: "numeric" });
     const icon = area.type === "parcel" ? "📌" : area.type === "location" ? "📍" : "▭";
     return `
@@ -487,7 +483,6 @@ function renderSavedAreasList() {
         <button class="saved-area-delete" data-id="${area.id}" title="Delete">×</button>
       </div>`;
   }).join("");
-
   list.querySelectorAll(".saved-area-row").forEach(row => {
     row.addEventListener("click", (e) => {
       if (e.target.classList.contains("saved-area-delete")) return;
@@ -495,13 +490,18 @@ function renderSavedAreasList() {
       if (area) restoreSavedArea(area);
     });
   });
-
   list.querySelectorAll(".saved-area-delete").forEach(btn => {
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
       deleteSavedArea(btn.dataset.id);
     });
   });
+}
+
+function renderSavedAreasList() {
+  const all = _loadSavedAreas();
+  _renderList("saved-areas",   "saved-areas-list",   all.filter(a => !a.type || a.type === "area"));
+  _renderList("saved-parcels", "saved-parcels-list", all.filter(a => a.type === "parcel" || a.type === "location"));
 }
 
 const MapToolbar = L.Control.extend({
@@ -763,7 +763,6 @@ const AddressSearch = L.Control.extend({
 
         window._clearSearchHighlight = () => {
           if (window._searchHighlight) { window._searchHighlight.remove(); window._searchHighlight = null; }
-          if (window._searchPopup) { window._searchPopup.remove(); window._searchPopup = null; }
         };
 
         // Wait for map to stop flying, then wait 800ms for PMTiles to load tiles
@@ -799,23 +798,6 @@ const AddressSearch = L.Control.extend({
               }).addTo(map);
             }
             window._searchHighlight = highlightLayer;
-
-            const popupHtml = `<div style="font-size:12px;min-width:160px;">
-              <div style="font-weight:600;margin-bottom:5px;">${shortName}</div>
-              <span style="color:#aaa;font-size:10px;">Click the parcel to open & save</span>
-              <br><a href="#" id="_search-clear" style="color:#888;text-decoration:none;font-size:11px;margin-top:4px;display:inline-block;">✕ Clear highlight</a>
-            </div>`;
-            window._searchPopup = L.popup({ closeButton: false, maxWidth: 240 })
-              .setLatLng(latlng)
-              .setContent(popupHtml)
-              .openOn(map);
-
-            setTimeout(() => {
-              document.getElementById("_search-clear")?.addEventListener("click", e => {
-                e.preventDefault();
-                window._clearSearchHighlight?.();
-              });
-            }, 50);
           })();
         };
         map.once("moveend", window._searchMoveEndHandler);
@@ -1025,7 +1007,7 @@ function makePopupHtml(p) {
           ${row("Verified Vacant", verificationDisplay(verifiedVacant))}
           ${row("Potential Target", potentialTarget || "No")}
         </table>
-        ${p.account_num ? `<div style="margin-top:8px;border-top:1px solid #e2e8f0;padding-top:6px;">
+        ${p.account_num ? `<div style="margin-top:8px;border-top:1px solid #e2e8f0;padding-top:6px;display:flex;gap:12px;align-items:center;">
           <a href="#" class="parcel-save-link"
             data-account="${p.account_num}"
             data-county="${p.source_county || "dcad"}"
@@ -1033,6 +1015,7 @@ function makePopupHtml(p) {
             data-lat="${p.lat || ""}"
             data-lng="${p.lng || ""}"
             style="color:#4fc3f7;text-decoration:none;font-size:11px;">📌 Save parcel</a>
+          <a href="#" class="parcel-clear-link" style="color:#aaa;text-decoration:none;font-size:11px;">✕ Clear</a>
         </div>` : ""}
       </div>`;
 }
@@ -1252,47 +1235,6 @@ function renderSidebar(counts, markers) {
     )
     .join("");
 
-  // In viewport render mode, build shortlist from the full feature set so the
-  // list doesn't change as the user pans. Clicking flies to the parcel;
-  // the viewport re-render will show it and the user can click for popup.
-  const shortlistFeatures = viewportRenderMode
-    ? (allAnalysisFeatures || [])
-        .filter(f => !f.properties.on_redfin && f.properties.prop_type === "single_family")
-        .sort((a, b) => (parseFloat(b.properties.land_pct) || 0) - (parseFloat(a.properties.land_pct) || 0))
-    : Object.values(markers)
-        .map(m => m.feature)
-        .filter(f => !f.properties.on_redfin && f.properties.prop_type === "single_family")
-        .sort((a, b) => (parseFloat(b.properties.land_pct) || 0) - (parseFloat(a.properties.land_pct) || 0));
-
-  const list = document.getElementById("parcel-list");
-  list.innerHTML =
-    shortlistFeatures.length === 0
-      ? "<p class='sidebar-note'>No off-market SFR parcels found.</p>"
-      : "<p class='sidebar-label'>Off-Market SFR Sorted by Land %</p>" +
-        shortlistFeatures
-          .map(
-            (f) => `
-          <div class="parcel-row" data-addr="${f.properties.addr}" data-lat="${f.properties.lat}" data-lng="${f.properties.lng}">
-            <span class="parcel-addr">${f.properties.addr}</span>
-            <span class="parcel-pct">${f.properties.land_pct}</span>
-          </div>`
-          )
-          .join("");
-
-  list.querySelectorAll(".parcel-row").forEach((el) => {
-    el.addEventListener("click", () => {
-      const entry = markers[el.dataset.addr];
-      if (entry && entry.layer) {
-        map.flyTo([entry.feature.properties.lat, entry.feature.properties.lng], 18);
-        entry.layer.openPopup();
-      } else {
-        // viewport mode — fly to parcel; viewport re-render fires on moveend
-        const lat = parseFloat(el.dataset.lat);
-        const lng = parseFloat(el.dataset.lng);
-        if (!isNaN(lat) && !isNaN(lng)) map.flyTo([lat, lng], 18);
-      }
-    });
-  });
 }
 
 function makeDefaultCsvName() {
@@ -1329,7 +1271,7 @@ function normalizeCsvFilename(rawName) {
 // Phase 2: tile splitting for large-area draws
 // ---------------------------------------------------------------------------
 const TILE_AREA_THRESHOLD = 0.003; // sq-degrees; split bbox above this area
-const TILE_MAX_SPLIT_DEPTH = 3; // max adaptive refinement depth per failing tile
+const TILE_MAX_SPLIT_DEPTH = 4; // max adaptive refinement depth per failing tile
 
 function getPolygonBbox(polygon) {
   let minLng = Infinity, minLat = Infinity, maxLng = -Infinity, maxLat = -Infinity;
@@ -1373,7 +1315,9 @@ function splitBboxIntoTiles(bbox) {
 // Each tile should stay well under Cloud Run's 60s timeout.
 function getInitialTileGrid(bbox) {
   const area = bboxArea(bbox);
-  if (area > 0.04) return splitBboxIntoNxN(bbox, 5); // ~county-wide → 25 tiles
+  if (area > 0.25) return splitBboxIntoNxN(bbox, 9); // multi-county / all-county → 81 tiles
+  if (area > 0.1)  return splitBboxIntoNxN(bbox, 7); // county-scale → 49 tiles
+  if (area > 0.04) return splitBboxIntoNxN(bbox, 5); // large metro area → 25 tiles
   if (area > 0.015) return splitBboxIntoNxN(bbox, 4); // very large → 16 tiles
   if (area > 0.006) return splitBboxIntoNxN(bbox, 3); // large → 9 tiles
   return splitBboxIntoTiles(bbox);                     // normal → 4 tiles
@@ -1439,9 +1383,9 @@ async function fetchTileDataRecursive(tilePolygon, includeRedfin, depth, tileLab
     return [data];
   }
 
-  if (resp.status === 503 || resp.status === 502 || resp.status === 504) {
+  if (resp.status === 500 || resp.status === 502 || resp.status === 503 || resp.status === 504) {
     if (depth < TILE_MAX_SPLIT_DEPTH) {
-      // For 503 (server overloaded), wait before splitting to let Cloud Run recover.
+      // 503 = server overloaded (wait longer), 500 = likely memory/timeout crash on huge tile.
       const waitMs = resp.status === 503 ? 3000 : 1000;
       document.getElementById("redfin-status").textContent =
         `Tile ${tileLabel} overloaded (${resp.status}) — retrying in ${waitMs / 1000}s...`;
@@ -1474,7 +1418,12 @@ async function fetchTileDataRecursive(tilePolygon, includeRedfin, depth, tileLab
     }
   }
 
-  throw new Error(`Tile ${tileLabel} failed: ${resp.status}`);
+  const isRetryable = [500, 502, 503, 504].includes(resp.status);
+  throw new Error(
+    isRetryable
+      ? `Tile ${tileLabel} failed after max retries (${resp.status}) — area may be too large`
+      : `Tile ${tileLabel} failed: ${resp.status}`
+  );
 }
 
 async function runTiledAnalysis(polygon, includeRedfin) {
@@ -1986,26 +1935,39 @@ map.on("click", async (ev) => {
 map.on("popupopen", (e) => {
   const el = e.popup.getElement();
   if (!el) return;
-  const link = el.querySelector(".parcel-save-link");
-  if (!link) return;
-  link.addEventListener("click", async (ev) => {
-    ev.preventDefault();
-    const { account, county, addr, lat, lng } = link.dataset;
-    let geometry = null;
-    try {
-      const resp = await fetch(`/api/parcel/${county}/${account}`);
-      if (resp.ok) {
-        const detail = await resp.json();
-        if (detail.geometry?.type === "Polygon" || detail.geometry?.type === "MultiPolygon") {
-          geometry = detail.geometry;
+
+  const saveLink = el.querySelector(".parcel-save-link");
+  if (saveLink) {
+    saveLink.addEventListener("click", async (ev) => {
+      ev.preventDefault();
+      const { account, county, addr, lat, lng } = saveLink.dataset;
+      let geometry = null;
+      try {
+        const resp = await fetch(`/api/parcel/${county}/${account}`);
+        if (resp.ok) {
+          const detail = await resp.json();
+          if (detail.geometry?.type === "Polygon" || detail.geometry?.type === "MultiPolygon") {
+            geometry = detail.geometry;
+          }
         }
-      }
-    } catch { /* geometry stays null — outline skipped */ }
-    saveParcel(account, county, addr, parseFloat(lat), parseFloat(lng), geometry);
-    link.textContent = "✓ Saved";
-    link.style.color = "#888";
-    link.style.pointerEvents = "none";
-  });
+      } catch { /* geometry stays null — outline skipped */ }
+      saveParcel(account, county, addr, parseFloat(lat), parseFloat(lng), geometry);
+      saveLink.textContent = "✓ Saved";
+      saveLink.style.color = "#888";
+      saveLink.style.pointerEvents = "none";
+    });
+  }
+
+  const clearLink = el.querySelector(".parcel-clear-link");
+  if (clearLink) {
+    // Hide the clear link if there's no active search highlight.
+    if (!window._searchHighlight) clearLink.style.display = "none";
+    clearLink.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      window._clearSearchHighlight?.();
+      clearLink.style.display = "none";
+    });
+  }
 });
 
 renderSavedAreasList();

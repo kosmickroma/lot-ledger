@@ -35,6 +35,10 @@
           <div id="saved-areas-list"></div>
           <button id="btn-saved-area-clear" class="hidden" onclick="clearDrawResults()" style="margin-top:8px;width:100%;padding:5px 0;background:transparent;border:1px solid #555;border-radius:4px;color:#aaa;font-size:11px;cursor:pointer;">× Back to Browse</button>
         </div>
+        <div id="saved-parcels" class="sidebar-section hidden">
+          <p class="sidebar-label">Saved Parcels</p>
+          <div id="saved-parcels-list"></div>
+        </div>
       <div id="sidebar-instructions" class="sidebar-section">
         <p class="sidebar-copy">Draw a polygon around a target pocket to analyze parcels instantly.</p>
         <p class="sidebar-note">Shortcuts: Enter or right-click to finish. Esc to cancel.</p>
@@ -51,7 +55,6 @@
           <button id="btn-clear" class="btn-secondary">Clear</button>
             <button id="btn-save-area" class="btn-secondary">Save Area</button>
         </div>
-        <div id="parcel-list" class="parcel-list"></div>
       </div>
     </aside>
     <main class="map-panel">
