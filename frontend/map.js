@@ -190,7 +190,8 @@ let activeBrush = null;
 let allAnalysisFeatures = null;   // full feature set from last analysis
 let viewportRenderMode = false;   // true when feature count exceeds render threshold
 let _vpRenderTimeout = null;      // debounce handle for viewport re-render
-const LARGE_DRAW_THRESHOLD = 2500; // render all below this; viewport-only above
+const LARGE_DRAW_THRESHOLD = 2500;  // viewport-only rendering above this count
+const BROWSE_ONLY_THRESHOLD = 30000; // skip all polygon rendering above this; use browse layer
 
 const HOA_COLOR = "#b8860b";
 
@@ -368,13 +369,19 @@ async function restoreSavedArea(area) {
     if (redfinLayerVisible) redfinLayer.addTo(map); else map.removeLayer(redfinLayer);
 
     let markers;
-    if (data.features.length > LARGE_DRAW_THRESHOLD) {
-      viewportRenderMode = true;
-      renderViewportFeatures();
+    if (data.features.length > BROWSE_ONLY_THRESHOLD) {
+      viewportRenderMode = false;
       markers = {};
     } else {
-      viewportRenderMode = false;
-      markers = renderFeatures(data);
+      if (map.hasLayer(browseLayer)) browseLayer.remove();
+      if (data.features.length > LARGE_DRAW_THRESHOLD) {
+        viewportRenderMode = true;
+        renderViewportFeatures();
+        markers = {};
+      } else {
+        viewportRenderMode = false;
+        markers = renderFeatures(data);
+      }
     }
     renderSidebar(data.counts, markers);
   } catch (err) {
@@ -1542,10 +1549,6 @@ map.on("draw:created", async (e) => {
   lastDrawnLatLngs = e.layer.getLatLngs()[0].map((ll) => [ll.lat, ll.lng]);
   lastPolygon = polygon;
 
-  // Hide browse layer — draw results are the authoritative display; stacking both
-  // causes color mixing and makes fills appear solid.
-  if (map.hasLayer(browseLayer)) browseLayer.remove();
-
   try {
     const data = await runAnalysis(polygon, includeRedfin);
     if (data.source_status && (!data.source_status.dcad_ok || !data.source_status.tad_ok)) {
@@ -1582,13 +1585,23 @@ map.on("draw:created", async (e) => {
     document.getElementById("btn-draw-clear")?.classList.remove("hidden");
 
     let markers;
-    if (data.features.length > LARGE_DRAW_THRESHOLD) {
-      viewportRenderMode = true;
-      renderViewportFeatures();
+    if (data.features.length > BROWSE_ONLY_THRESHOLD) {
+      // Too many parcels to render as Leaflet polygons — keep browse layer on.
+      // The spotlight mask is already applied so outside is dimmed; browse layer
+      // shows the parcel detail as the user zooms in, same as normal browse mode.
+      viewportRenderMode = false;
       markers = {};
     } else {
-      viewportRenderMode = false;
-      markers = renderFeatures(data);
+      // Under threshold — hide browse layer and render Leaflet polygons.
+      if (map.hasLayer(browseLayer)) browseLayer.remove();
+      if (data.features.length > LARGE_DRAW_THRESHOLD) {
+        viewportRenderMode = true;
+        renderViewportFeatures();
+        markers = {};
+      } else {
+        viewportRenderMode = false;
+        markers = renderFeatures(data);
+      }
     }
     renderSidebar(data.counts, markers);
     // Update the always-visible toggle status line.
