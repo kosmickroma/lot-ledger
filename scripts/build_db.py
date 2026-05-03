@@ -451,12 +451,20 @@ def _build_land_detail_table() -> list[dict[str, object]]:
             area_size = area_size * 43560
             area_uom = "SQUARE FEET"  # normalize label after conversion
 
+        front_dim = _to_float(getattr(row, "FRONT_DIM", None))
+        depth_dim = _to_float(getattr(row, "DEPTH_DIM", None))
+        # DCAD flat-price lots have AREA_SIZE=0 but populate FRONT_DIM/DEPTH_DIM.
+        # Derive the lot area from dimensions so lot_acres is never "N/A" on these.
+        if (area_size is None or area_size <= 0) and front_dim and front_dim > 0 and depth_dim and depth_dim > 0:
+            area_size = front_dim * depth_dim
+            area_uom = "SQUARE FEET"
+
         rows.append(
             {
                 "account_num": account_num,
                 "zoning": _clean_text(getattr(row, "ZONING", None)),
-                "front_dim": _to_float(getattr(row, "FRONT_DIM", None)),
-                "depth_dim": _to_float(getattr(row, "DEPTH_DIM", None)),
+                "front_dim": front_dim,
+                "depth_dim": depth_dim,
                 "area_size": area_size,
                 "area_uom": area_uom,
             }

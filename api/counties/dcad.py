@@ -304,6 +304,15 @@ def query_parcels(polygon: list[list[float]]) -> ParcelQueryResult:
         land_val = _safe_float(row.get("land_val"))
         tot_val = _safe_float(row.get("tot_val"))
         area_size = _safe_float(row.get("area_size"))
+        front_dim = _safe_float(row.get("front_dim"))
+        depth_dim = _safe_float(row.get("depth_dim"))
+        # DCAD flat-price lots store AREA_SIZE=0 but carry frontage+depth.
+        # Derive lot area from dimensions so lot size is never "N/A" on these.
+        # Flag the derivation so the popup and CSV can label it as estimated.
+        area_estimated = False
+        if (area_size is None or area_size <= 0) and front_dim and front_dim > 0 and depth_dim and depth_dim > 0:
+            area_size = front_dim * depth_dim
+            area_estimated = True
 
         property_address = _clean_text(row.get("property_address"))
         if not property_address:
@@ -343,10 +352,11 @@ def query_parcels(polygon: list[list[float]]) -> ParcelQueryResult:
                 "tot_living_area": _safe_float(row.get("tot_living_area")),
                 "tot_main_sf": _safe_float(row.get("tot_main_sf")),
                 "zoning": _clean_text(row.get("zoning")),
-                "front_dim": _safe_float(row.get("front_dim")),
-                "depth_dim": _safe_float(row.get("depth_dim")),
+                "front_dim": front_dim,
+                "depth_dim": depth_dim,
                 "area_size": area_size,
                 "area_uom": _clean_text(row.get("area_uom")),
+                "area_estimated": area_estimated,
                 "state_code": SPTD_LABELS.get(sptd_code, sptd_code),
                 "land_pct": round((land_val / tot_val) * 100, 1) if land_val is not None and tot_val not in (None, 0) else None,
                 "hoa_name": "",
@@ -398,6 +408,8 @@ def build_feature(row: dict[str, Any], prop_type: str, on_redfin: bool, redfin_l
 
     area_size = _safe_float(row.get("area_size"))
     land_pct = _safe_float(row.get("land_pct"))
+    area_estimated = bool(row.get("area_estimated"))
+    est_tag = " (est.)" if area_estimated else ""
     # D10 (Qualified Agricultural Land) carries $0 in DCAD bulk exports — market
     # value is withheld; display a label rather than misleading "$0".
     ag_zero = (
@@ -414,7 +426,8 @@ def build_feature(row: dict[str, Any], prop_type: str, on_redfin: bool, redfin_l
         "land_val": "Ag-exempt" if ag_zero else (f"${row['land_val']:,.0f}" if _safe_float(row.get("land_val")) is not None else "N/A"),
         "tot_val": "Ag-exempt" if ag_zero else (f"${row['tot_val']:,.0f}" if _safe_float(row.get("tot_val")) is not None else "N/A"),
         "land_pct": f"{land_pct:.1f}%" if land_pct is not None else "N/A",
-        "lot_acres": f"{area_size / 43560:.2f} ac" if area_size is not None and area_size > 0 else "N/A",
+        "lot_sqft": f"{int(area_size):,} sf{est_tag}" if area_size is not None and area_size > 0 else "N/A",
+        "lot_acres": f"{area_size / 43560:.2f} ac{est_tag}" if area_size is not None and area_size > 0 else "N/A",
         "frontage": f"{int(row['front_dim'])} ft" if _safe_float(row.get("front_dim")) not in (None, 0.0) else "N/A",
         "depth": f"{int(row['depth_dim'])} ft" if _safe_float(row.get("depth_dim")) not in (None, 0.0) else "N/A",
         "state_code": _clean_text(row.get("state_code")) or "N/A",

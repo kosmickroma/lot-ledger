@@ -1029,15 +1029,15 @@ function makePopupHtml(p) {
           ${row("Total Value", p.tot_val)}
           ${redfinPriceRow}
           ${row("Land % of Total", p.land_pct)}
-          ${row("Lot Size", p.lot_acres)}
+          ${row("Lot Size", p.lot_sqft)}
+          ${row("Acres", p.lot_acres)}
           ${row("Frontage", p.frontage)}
           ${row("Depth", p.depth)}
           ${row("State Code", p.state_code)}
           ${row("Zoning", p.zoning)}
           ${row("School District", p.school)}
           ${row("Year Built", p.yr_built)}
-          ${row("Sq Ft", p.sqft && p.sqft !== "N/A" ? p.sqft : "N/A")}
-          ${row("Acres", p.lot_acres)}
+          ${row("Living Area", p.sqft && p.sqft !== "N/A" ? p.sqft + " sf" : "N/A")}
           ${row("Verified Vacant", verificationDisplay(verifiedVacant))}
           ${row("Potential Target", potentialTarget || "No")}
         </table>
