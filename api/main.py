@@ -300,6 +300,98 @@ def _fetch_tad_parcel_by_account(account_num: str) -> dict[str, Any] | None:
         release_conn(conn)
 
 
+def _find_dcad_near(lat: float, lng: float) -> str | None:
+    """Return the closest DCAD account_num to (lat, lng) within ~440m (0.004°)."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT p.account_num
+                FROM parcels p
+                WHERE p.centroid IS NOT NULL
+                  AND ST_DWithin(
+                      p.centroid,
+                      ST_SetSRID(ST_Point(%s, %s), 4326),
+                      0.004
+                  )
+                ORDER BY ST_Distance(p.centroid, ST_SetSRID(ST_Point(%s, %s), 4326))
+                LIMIT 1
+                """,
+                (lng, lat, lng, lat),
+            )
+            row = cur.fetchone()
+            return row[0] if row else None
+    finally:
+        release_conn(conn)
+
+
+def _find_tad_near(lat: float, lng: float) -> str | None:
+    """Return a TAD account_num whose polygon contains (lat, lng), or the nearest centroid."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT account_num FROM tad_parcels
+                WHERE geom IS NOT NULL
+                  AND ST_Contains(geom, ST_SetSRID(ST_Point(%s, %s), 4326))
+                LIMIT 1
+                """,
+                (lng, lat),
+            )
+            row = cur.fetchone()
+            if row:
+                return row[0]
+            cur.execute(
+                """
+                SELECT account_num FROM tad_parcels
+                WHERE centroid IS NOT NULL
+                  AND ST_DWithin(
+                      centroid,
+                      ST_SetSRID(ST_Point(%s, %s), 4326),
+                      0.004
+                  )
+                ORDER BY ST_Distance(centroid, ST_SetSRID(ST_Point(%s, %s), 4326))
+                LIMIT 1
+                """,
+                (lng, lat, lng, lat),
+            )
+            row = cur.fetchone()
+            return row[0] if row else None
+    finally:
+        release_conn(conn)
+
+
+@app.get("/api/parcel/near")
+async def get_parcel_near(lat: float, lng: float) -> dict[str, Any]:
+    """
+    Nearest-parcel lookup by lat/lng coordinate.
+    Used by address search to reliably find the parcel footprint at a geocoded point.
+    Tries DCAD (centroid proximity) then TAD (polygon contains, then centroid proximity).
+    Returns a GeoJSON Feature in the same shape as /api/parcel/{county}/{account_num}.
+    """
+    dcad_account = _find_dcad_near(lat, lng)
+    if dcad_account:
+        row, exempt_set = _fetch_dcad_parcel_by_account(dcad_account)
+        if row is not None:
+            prop_type = classify_parcel(row, exempt_set)
+            feature = build_feature(row, prop_type, False, None)
+            feature["properties"]["source_county"] = "dcad"
+            return feature
+
+    tad_account = _find_tad_near(lat, lng)
+    if tad_account:
+        row = _fetch_tad_parcel_by_account(tad_account)
+        if row is not None:
+            prop_type = _classify_tad(row)
+            feature = build_feature(row, prop_type, False, None)
+            feature["properties"]["source_county"] = "tad"
+            return feature
+
+    raise HTTPException(status_code=404, detail="No parcel found near this point")
+
+
 @app.get("/api/parcel/{county}/{account_num}")
 async def get_parcel_detail(county: str, account_num: str) -> dict[str, Any]:
     """
@@ -321,13 +413,17 @@ async def get_parcel_detail(county: str, account_num: str) -> dict[str, Any]:
         if row is None:
             raise HTTPException(status_code=404, detail="Parcel not found")
         prop_type = classify_parcel(row, exempt_set)
-        return build_feature(row, prop_type, False, None)
+        feature = build_feature(row, prop_type, False, None)
+        feature["properties"]["source_county"] = "dcad"
+        return feature
 
     row = _fetch_tad_parcel_by_account(account_num)
     if row is None:
         raise HTTPException(status_code=404, detail="Parcel not found")
     prop_type = _classify_tad(row)
-    return build_feature(row, prop_type, False, None)
+    feature = build_feature(row, prop_type, False, None)
+    feature["properties"]["source_county"] = "tad"
+    return feature
 
 
 @app.post("/api/analyze")

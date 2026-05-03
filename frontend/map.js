@@ -175,6 +175,9 @@ if (!redfinLayerVisible) {
 }
 let verificationBadgeLayer = L.layerGroup().addTo(map);
 let targetBadgeLayer = L.layerGroup().addTo(map);
+// Persistent saved-parcel outlines (cyan). Keyed by account_num for dedup + removal.
+const savedParcelLayer = L.layerGroup().addTo(map);
+const savedParcelLayers = {};
 let hoaLayer = null;
 let hoaVisible = false;
 let currentJobId = null;
@@ -275,6 +278,11 @@ function saveCurrentArea(name) {
 }
 
 function deleteSavedArea(id) {
+  const area = _loadSavedAreas().find(a => a.id === id);
+  if (area?.type === "parcel" && area.account_num) {
+    const layer = savedParcelLayers[area.account_num];
+    if (layer) { savedParcelLayer.removeLayer(layer); delete savedParcelLayers[area.account_num]; }
+  }
   _writeSavedAreas(_loadSavedAreas().filter(a => a.id !== id));
   renderSavedAreasList();
 }
@@ -293,6 +301,43 @@ function saveSearchLocation(name, lat, lng) {
   renderSavedAreasList();
 }
 
+const SAVED_PARCEL_COLOR = "#4fc3f7";
+
+function _renderSavedParcelOutline(area) {
+  if (savedParcelLayers[area.account_num]) return; // already on map
+  if (!area.geometry || !["Polygon", "MultiPolygon"].includes(area.geometry.type)) return;
+  const layer = L.geoJSON({ type: "Feature", geometry: area.geometry, properties: {} }, {
+    style: { color: SAVED_PARCEL_COLOR, weight: 3, fill: false, interactive: false },
+    interactive: false,
+  }).addTo(savedParcelLayer);
+  savedParcelLayers[area.account_num] = layer;
+}
+
+function saveParcel(account_num, county, addr, lat, lng, geometry) {
+  const areas = _loadSavedAreas();
+  if (areas.some(a => a.type === "parcel" && a.account_num === account_num)) return; // no dupe
+  areas.unshift({
+    id: Date.now().toString(),
+    type: "parcel",
+    account_num,
+    county,
+    name: addr || account_num,
+    lat,
+    lng,
+    geometry: geometry || null,
+    savedAt: new Date().toISOString(),
+  });
+  _writeSavedAreas(areas);
+  renderSavedAreasList();
+  _renderSavedParcelOutline(areas[0]);
+}
+
+function _restoreAllSavedParcelOutlines() {
+  _loadSavedAreas()
+    .filter(a => a.type === "parcel")
+    .forEach(_renderSavedParcelOutline);
+}
+
 async function restoreSavedArea(area) {
   // Location pins (from address search) — just fly there and show the ring.
   if (area.type === "location") {
@@ -306,34 +351,19 @@ async function restoreSavedArea(area) {
     };
     window._searchMoveEndHandler = () => {
       window._searchMoveEndHandler = null;
-      setTimeout(async () => {
+      (async () => {
         const [slat, slng] = latlng;
         let highlightLayer = null;
         try {
-          const result = browseLayer.queryTileFeaturesDebug(slng, slat);
-          const allFeatures = result instanceof Map
-            ? [...result.values()].flat()
-            : (Array.isArray(result) ? result : []);
-          const parcel = allFeatures.find(f => {
-            const props = (f.feature && f.feature.props) || f.props || {};
-            return props.source_county === "dcad" || props.source_county === "tad";
-          });
-          if (parcel) {
-            const pProps = (parcel.feature && parcel.feature.props) || parcel.props || {};
-            const county = pProps.source_county;
-            const accountNum = pProps.account_num;
-            if (county && accountNum) {
-              const resp = await fetch(`/api/parcel/${county}/${accountNum}`);
-              if (resp.ok) {
-                const detail = await resp.json();
-                const geom = detail.geometry;
-                if (geom && (geom.type === "Polygon" || geom.type === "MultiPolygon")) {
-                  highlightLayer = L.geoJSON(detail, {
-                    style: { color: "#f1c40f", weight: 3, fill: false, interactive: false },
-                    interactive: false,
-                  }).addTo(map);
-                }
-              }
+          const resp = await fetch(`/api/parcel/near?lat=${slat}&lng=${slng}`);
+          if (resp.ok) {
+            const detail = await resp.json();
+            const geom = detail.geometry;
+            if (geom && (geom.type === "Polygon" || geom.type === "MultiPolygon")) {
+              highlightLayer = L.geoJSON(detail, {
+                style: { color: "#f1c40f", weight: 3, fill: false, interactive: false },
+                interactive: false,
+              }).addTo(map);
             }
           }
         } catch (e) {
@@ -347,9 +377,15 @@ async function restoreSavedArea(area) {
           }).addTo(map);
         }
         window._searchHighlight = highlightLayer;
-      }, 800);
+      })();
     };
     map.once("moveend", window._searchMoveEndHandler);
+    return;
+  }
+
+  if (area.type === "parcel") {
+    map.flyTo([area.lat, area.lng], 18);
+    _renderSavedParcelOutline(area);
     return;
   }
 
@@ -442,7 +478,7 @@ function renderSavedAreasList() {
 
   list.innerHTML = areas.map(area => {
     const date = new Date(area.savedAt).toLocaleDateString(undefined, { month: "short", day: "numeric" });
-    const icon = area.type === "location" ? "📍" : "▭";
+    const icon = area.type === "parcel" ? "📌" : area.type === "location" ? "📍" : "▭";
     return `
       <div class="saved-area-row" data-id="${area.id}">
         <span class="saved-area-icon">${icon}</span>
@@ -734,43 +770,27 @@ const AddressSearch = L.Control.extend({
         // at the new viewport before querying the browse layer for the parcel footprint.
         window._searchMoveEndHandler = () => {
           window._searchMoveEndHandler = null;
-          setTimeout(async () => {
+          (async () => {
             const [slat, slng] = latlng;
             let highlightLayer = null;
 
-            // Hit-test the browse layer to find the parcel at this point.
+            // Direct DB lookup — works for any parcel size, no tile dependency.
             try {
-              const result = browseLayer.queryTileFeaturesDebug(slng, slat);
-              const allFeatures = result instanceof Map
-                ? [...result.values()].flat()
-                : (Array.isArray(result) ? result : []);
-              const parcel = allFeatures.find(f => {
-                const props = (f.feature && f.feature.props) || f.props || {};
-                return props.source_county === "dcad" || props.source_county === "tad";
-              });
-              if (parcel) {
-                const pProps = (parcel.feature && parcel.feature.props) || parcel.props || {};
-                const county = pProps.source_county;
-                const accountNum = pProps.account_num;
-                if (county && accountNum) {
-                  const resp = await fetch(`/api/parcel/${county}/${accountNum}`);
-                  if (resp.ok) {
-                    const detail = await resp.json();
-                    const geom = detail.geometry;
-                    if (geom && (geom.type === "Polygon" || geom.type === "MultiPolygon")) {
-                      highlightLayer = L.geoJSON(detail, {
-                        style: { color: "#f1c40f", weight: 3, fill: false, interactive: false },
-                        interactive: false,
-                      }).addTo(map);
-                    }
-                  }
+              const resp = await fetch(`/api/parcel/near?lat=${slat}&lng=${slng}`);
+              if (resp.ok) {
+                const detail = await resp.json();
+                const geom = detail.geometry;
+                if (geom && (geom.type === "Polygon" || geom.type === "MultiPolygon")) {
+                  highlightLayer = L.geoJSON(detail, {
+                    style: { color: "#f1c40f", weight: 3, fill: false, interactive: false },
+                    interactive: false,
+                  }).addTo(map);
                 }
               }
             } catch (e) {
               console.warn("Search footprint lookup failed", e);
             }
 
-            // Fall back to a ring marker if no polygon was found.
             if (!highlightLayer) {
               highlightLayer = L.circleMarker(latlng, {
                 radius: 14, color: "#f1c40f", weight: 3,
@@ -780,11 +800,10 @@ const AddressSearch = L.Control.extend({
             }
             window._searchHighlight = highlightLayer;
 
-            // Separate popup (not bound to marker so it works with geoJSON layers too).
             const popupHtml = `<div style="font-size:12px;min-width:160px;">
-              <div style="font-weight:600;margin-bottom:6px;">${shortName}</div>
-              <a href="#" id="_search-save" style="color:#c9a24f;text-decoration:none;font-size:11px;margin-right:10px;">+ Save location</a>
-              <a href="#" id="_search-clear" style="color:#888;text-decoration:none;font-size:11px;">✕ Clear</a>
+              <div style="font-weight:600;margin-bottom:5px;">${shortName}</div>
+              <span style="color:#aaa;font-size:10px;">Click the parcel to open & save</span>
+              <br><a href="#" id="_search-clear" style="color:#888;text-decoration:none;font-size:11px;margin-top:4px;display:inline-block;">✕ Clear highlight</a>
             </div>`;
             window._searchPopup = L.popup({ closeButton: false, maxWidth: 240 })
               .setLatLng(latlng)
@@ -792,20 +811,12 @@ const AddressSearch = L.Control.extend({
               .openOn(map);
 
             setTimeout(() => {
-              document.getElementById("_search-save")?.addEventListener("click", e => {
-                e.preventDefault();
-                const name = window.prompt("Name this location:", shortName);
-                if (!name?.trim()) return;
-                saveSearchLocation(name.trim(), slat, slng);
-                window._searchPopup?.remove();
-                window._searchPopup = null;
-              });
               document.getElementById("_search-clear")?.addEventListener("click", e => {
                 e.preventDefault();
                 window._clearSearchHighlight?.();
               });
             }, 50);
-          }, 800);
+          })();
         };
         map.once("moveend", window._searchMoveEndHandler);
       } catch {
@@ -1014,6 +1025,15 @@ function makePopupHtml(p) {
           ${row("Verified Vacant", verificationDisplay(verifiedVacant))}
           ${row("Potential Target", potentialTarget || "No")}
         </table>
+        ${p.account_num ? `<div style="margin-top:8px;border-top:1px solid #e2e8f0;padding-top:6px;">
+          <a href="#" class="parcel-save-link"
+            data-account="${p.account_num}"
+            data-county="${p.source_county || "dcad"}"
+            data-addr="${(p.addr || "").replace(/"/g, "&quot;")}"
+            data-lat="${p.lat || ""}"
+            data-lng="${p.lng || ""}"
+            style="color:#4fc3f7;text-decoration:none;font-size:11px;">📌 Save parcel</a>
+        </div>` : ""}
       </div>`;
 }
 
@@ -1928,6 +1948,9 @@ map.on("click", async (ev) => {
   // Don't fire browse popup when draw results are visible — let polygon clicks handle it.
   if (lastAnalysisGeojson) return;
 
+  // Any map click clears an orphaned search highlight (search popup was replaced by this click).
+  window._clearSearchHighlight?.();
+
   const result = browseLayer.queryTileFeaturesDebug(ev.latlng.lng, ev.latlng.lat);
   // v3 returns Map<string, PickedFeature[]> — flatten all values regardless of key name
   const allFeatures = result instanceof Map
@@ -1959,4 +1982,31 @@ map.on("click", async (ev) => {
   }
 });
 
+// Wire up "Save parcel" link in any popup — uses data attributes from makePopupHtml.
+map.on("popupopen", (e) => {
+  const el = e.popup.getElement();
+  if (!el) return;
+  const link = el.querySelector(".parcel-save-link");
+  if (!link) return;
+  link.addEventListener("click", async (ev) => {
+    ev.preventDefault();
+    const { account, county, addr, lat, lng } = link.dataset;
+    let geometry = null;
+    try {
+      const resp = await fetch(`/api/parcel/${county}/${account}`);
+      if (resp.ok) {
+        const detail = await resp.json();
+        if (detail.geometry?.type === "Polygon" || detail.geometry?.type === "MultiPolygon") {
+          geometry = detail.geometry;
+        }
+      }
+    } catch { /* geometry stays null — outline skipped */ }
+    saveParcel(account, county, addr, parseFloat(lat), parseFloat(lng), geometry);
+    link.textContent = "✓ Saved";
+    link.style.color = "#888";
+    link.style.pointerEvents = "none";
+  });
+});
+
 renderSavedAreasList();
+_restoreAllSavedParcelOutlines();
