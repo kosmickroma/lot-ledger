@@ -177,6 +177,6 @@ TAD uses a dedicated `tad_parcels` table (PostGIS geometry, denormalized). Class
 ## Operational Notes
 
 - First request after Cloud Run scale-to-zero is slower (cold start ~2s).
-- In-memory job store survives 30 min per session; restarts clear all jobs.
+- In-memory job store uses a 2-hour sliding-window TTL; any interaction (export, tag, hover) resets the clock. Restarts clear all jobs.
 - Redfin overlay is unofficial and degrades gracefully on failure.
 - PMTiles browse layer requires a full pipeline re-run (~45 min) when data changes.

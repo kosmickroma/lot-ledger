@@ -1436,22 +1436,35 @@ async function runTiledAnalysis(polygon, includeRedfin) {
   let anyRedfinSkipped = false;
   let lastSourceStatus = null;
 
-  for (let i = 0; i < tiles.length; i++) {
-    if (i > 0) await new Promise(r => setTimeout(r, 300)); // breathe between tiles
+  // Fetch tiles in parallel batches. Each tile uses 2 DB connections (DCAD + TAD);
+  // cap at 8 concurrent tiles so we stay under the pool limit of 20.
+  const PARALLEL_LIMIT = 8;
+  for (let batchStart = 0; batchStart < tiles.length; batchStart += PARALLEL_LIMIT) {
+    const batch = tiles.slice(batchStart, batchStart + PARALLEL_LIMIT);
+    const batchEnd = Math.min(batchStart + PARALLEL_LIMIT, tiles.length);
     document.getElementById("redfin-status").textContent =
-      `Loading tile ${i + 1} of ${tiles.length}...`;
-    const tilePolygon = tileToPolygon(tiles[i]);
-    const tileDataList = await fetchTileDataRecursive(tilePolygon, includeRedfin, 0, `${i + 1}`);
-    for (const data of tileDataList) {
-      tileJobIds.push(data.job_id);
-      lastSourceStatus = data.source_status;
-      if (data.redfin_ok) anyRedfinOk = true;
-      if (data.redfin_skipped) anyRedfinSkipped = true;
-      for (const feature of data.features) {
-        const key = feature.properties?.parcel_key || feature.properties?.account_num;
-        if (key && seenParcelKeys.has(key)) continue;
-        if (key) seenParcelKeys.add(key);
-        allFeatures.push(feature);
+      tiles.length <= PARALLEL_LIMIT
+        ? `Loading ${tiles.length} tile${tiles.length > 1 ? "s" : ""} in parallel...`
+        : `Loading tiles ${batchStart + 1}–${batchEnd} of ${tiles.length}...`;
+
+    const batchResults = await Promise.all(
+      batch.map((tile, idx) =>
+        fetchTileDataRecursive(tileToPolygon(tile), includeRedfin, 0, `${batchStart + idx + 1}`)
+      )
+    );
+
+    for (const tileDataList of batchResults) {
+      for (const data of tileDataList) {
+        tileJobIds.push(data.job_id);
+        lastSourceStatus = data.source_status;
+        if (data.redfin_ok) anyRedfinOk = true;
+        if (data.redfin_skipped) anyRedfinSkipped = true;
+        for (const feature of data.features) {
+          const key = feature.properties?.parcel_key || feature.properties?.account_num;
+          if (key && seenParcelKeys.has(key)) continue;
+          if (key) seenParcelKeys.add(key);
+          allFeatures.push(feature);
+        }
       }
     }
   }
