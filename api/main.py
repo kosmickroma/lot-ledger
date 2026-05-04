@@ -1056,6 +1056,14 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
         "created_at": time.monotonic(),
         "last_accessed": time.monotonic(),
     }
+    asyncio.create_task(
+        _persist_session_async(
+            job_id,
+            polygon,
+            len(rows),
+            county_coverage,
+        )
+    )
     return {
         "type": "FeatureCollection",
         "features": features,
@@ -1129,68 +1137,74 @@ async def save_verification(job_id: str, request: VerificationRequest) -> dict[s
         raw = str(value or "").strip().lower()
         return "Yes" if raw in {"1", "true", "yes", "y"} else ""
 
-    # Manual-save model: only persist tags if this session already exists in DB.
-    # Draw/analyze alone should not create persisted state.
-    if _session_exists(job_id):
+    try:
+        # Ensure parent session row exists before writing child tag rows.
+        _persist_session_sync(
+            job_id,
+            polygon,
+            len(rows),
+            _counties_from_rows(rows),
+            None,
+        )
+
+        upsert_rows: dict[tuple[str, str, str], tuple[str, str, str, str, str]] = {}
+        delete_rows: set[tuple[str, str, str]] = set()
+
+        for row in rows:
+            account_num = str(row.get("account_num", "") or "").strip()
+            if not account_num:
+                continue
+            county = _row_county(row)
+
+            verification_value = _normalize_verification(verifications.get(account_num, ""))
+            key_ver = (account_num, county, "verification")
+            if verification_value:
+                upsert_rows[key_ver] = (job_id, account_num, county, "verification", verification_value)
+            else:
+                delete_rows.add(key_ver)
+
+            target_value = _normalize_target(potential_targets.get(account_num, ""))
+            key_target = (account_num, county, "target")
+            if target_value:
+                upsert_rows[key_target] = (job_id, account_num, county, "target", target_value)
+            else:
+                delete_rows.add(key_target)
+
+        conn = get_session_conn()
         try:
-            upsert_rows: dict[tuple[str, str, str], tuple[str, str, str, str, str]] = {}
-            delete_rows: set[tuple[str, str, str]] = set()
-
-            for row in rows:
-                account_num = str(row.get("account_num", "") or "").strip()
-                if not account_num:
-                    continue
-                county = _row_county(row)
-
-                verification_value = _normalize_verification(verifications.get(account_num, ""))
-                key_ver = (account_num, county, "verification")
-                if verification_value:
-                    upsert_rows[key_ver] = (job_id, account_num, county, "verification", verification_value)
-                else:
-                    delete_rows.add(key_ver)
-
-                target_value = _normalize_target(potential_targets.get(account_num, ""))
-                key_target = (account_num, county, "target")
-                if target_value:
-                    upsert_rows[key_target] = (job_id, account_num, county, "target", target_value)
-                else:
-                    delete_rows.add(key_target)
-
-            conn = get_session_conn()
-            try:
-                with conn.cursor() as cur:
-                    if upsert_rows:
-                        execute_values(
-                            cur,
-                            """
-                            INSERT INTO session_tags (session_id, account_num, county, tag_type, tag_value)
-                            VALUES %s
-                            ON CONFLICT (session_id, account_num, county, tag_type)
-                            DO UPDATE SET tag_value = EXCLUDED.tag_value, updated_at = now()
-                            """,
-                            list(upsert_rows.values()),
-                            template="(%s,%s,%s,%s,%s)",
-                            page_size=500,
-                        )
-                    if delete_rows:
-                        cur.executemany(
-                            """
-                            DELETE FROM session_tags
-                            WHERE session_id = %s
-                              AND account_num = %s
-                              AND county = %s
-                              AND tag_type = %s
-                            """,
-                            [(job_id, account_num, county, tag_type) for account_num, county, tag_type in delete_rows],
-                        )
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
-            finally:
-                release_session_conn(conn)
-        except Exception as exc:
-            raise HTTPException(status_code=503, detail=f"Failed to persist verification tags: {exc}") from exc
+            with conn.cursor() as cur:
+                if upsert_rows:
+                    execute_values(
+                        cur,
+                        """
+                        INSERT INTO session_tags (session_id, account_num, county, tag_type, tag_value)
+                        VALUES %s
+                        ON CONFLICT (session_id, account_num, county, tag_type)
+                        DO UPDATE SET tag_value = EXCLUDED.tag_value, updated_at = now()
+                        """,
+                        list(upsert_rows.values()),
+                        template="(%s,%s,%s,%s,%s)",
+                        page_size=500,
+                    )
+                if delete_rows:
+                    cur.executemany(
+                        """
+                        DELETE FROM session_tags
+                        WHERE session_id = %s
+                          AND account_num = %s
+                          AND county = %s
+                          AND tag_type = %s
+                        """,
+                        [(job_id, account_num, county, tag_type) for account_num, county, tag_type in delete_rows],
+                    )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            release_session_conn(conn)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Failed to persist verification tags: {exc}") from exc
 
     updates = 0
     for row in rows:
