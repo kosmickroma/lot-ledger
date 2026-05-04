@@ -2117,7 +2117,7 @@ map.on("click", async (ev) => {
 
   const parcel = allFeatures.find(f => {
     const props = (f.feature && f.feature.props) || f.props || {};
-    return props.source_county === "dcad" || props.source_county === "tad";
+    return props.source_county === "dcad" || props.source_county === "tad" || props.source_county === "collin";
   });
   if (!parcel) return;
 

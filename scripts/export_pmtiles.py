@@ -106,36 +106,44 @@ WHERE (p.polygon_geojson IS NULL
 # Owner name (gov/HOA) check and nominal-value check are omitted — acceptable
 # approximation for tile coloring.
 TAD_EXPORT_SQL = """
-SELECT json_build_object(
-  'type', 'Feature',
-  'geometry', ST_AsGeoJSON(t.geom)::json,
-  'properties', json_build_object(
-    'account_num',           t.account_num,
-    'prop_type',             CASE
-      WHEN t.property_class IN (
-             'D1','D2','G1','G2','G3','G4',
-             'J1','J2','J3','J4','J5',
-             'ROC','AC','X'
-           )                                             THEN 'exempt'
-      WHEN t.property_class IN (
-             'B1','B2','B3','B4','M1','M2','A3'
-           )                                             THEN 'multifamily'
-      WHEN t.property_class IN ('C1','C1C','O1')        THEN 'vacant'
-      WHEN t.property_class IN (
-             'C2','C2C','BC','F1','F2','L1','L2','S'
-           )                                             THEN 'commercial'
-      ELSE 'single_family'
-    END,
-    'situs_addr',            t.situs_addr,
-    'owner_name',            t.owner_name,
-    'appraised_val_current', COALESCE(t.total_value, 0),
-    'area_size',             COALESCE(t.land_sqft, t.land_acres * 43560, 0),
-    'source_county',         'tad'
-  )
-)::text AS feature
-FROM tad_parcels t
-WHERE t.geom IS NOT NULL
-  AND ST_IsValid(t.geom)
+-- Polygon parcels: one feature per physical footprint.
+-- DISTINCT ON (taxpin/account_num/parcel_key) collapses condo or sequence-level
+-- duplicates that share the same geometry and would otherwise stack as solids.
+WITH polygon_parcels AS (
+  SELECT DISTINCT ON (COALESCE(t.taxpin, t.account_num, t.parcel_key))
+    json_build_object(
+      'type', 'Feature',
+      'geometry', ST_AsGeoJSON(t.geom)::json,
+      'properties', json_build_object(
+        'account_num',           t.account_num,
+        'prop_type',             CASE
+          WHEN t.property_class IN (
+                 'D1','D2','G1','G2','G3','G4',
+                 'J1','J2','J3','J4','J5',
+                 'ROC','AC','X'
+               )                                             THEN 'exempt'
+          WHEN t.property_class IN (
+                 'B1','B2','B3','B4','M1','M2','A3'
+               )                                             THEN 'multifamily'
+          WHEN t.property_class IN ('C1','C1C','O1')        THEN 'vacant'
+          WHEN t.property_class IN (
+                 'C2','C2C','BC','F1','F2','L1','L2','S'
+               )                                             THEN 'commercial'
+          ELSE 'single_family'
+        END,
+        'situs_addr',            t.situs_addr,
+        'owner_name',            t.owner_name,
+        'appraised_val_current', COALESCE(t.total_value, 0),
+        'area_size',             COALESCE(t.land_sqft, t.land_acres * 43560, 0),
+        'source_county',         'tad'
+      )
+    )::text AS feature
+  FROM tad_parcels t
+  WHERE t.geom IS NOT NULL
+    AND ST_IsValid(t.geom)
+  ORDER BY COALESCE(t.taxpin, t.account_num, t.parcel_key), t.account_num
+)
+SELECT feature FROM polygon_parcels
 """
 
 
@@ -143,34 +151,42 @@ WHERE t.geom IS NOT NULL
 # Owner name (gov/HOA) check and nominal-value check are omitted — acceptable
 # approximation for tile coloring.
 COLLIN_EXPORT_SQL = """
-SELECT json_build_object(
-  'type', 'Feature',
-  'geometry', ST_AsGeoJSON(c.geom)::json,
-  'properties', json_build_object(
-    'account_num',           c.account_num,
-    'prop_type',             CASE
-      WHEN c.state_cd LIKE 'EX%%'
-           OR c.state_cd IN ('D1', 'D2', 'D6', 'J1A', 'J2A', 'J3A', 'J4A', 'J5', 'J6A')
-                                                     THEN 'exempt'
-      WHEN c.state_cd IN ('A3', 'B1', 'B2', 'B3', 'B4', 'B6', 'B9')
-                                                     THEN 'multifamily'
-      WHEN c.state_cd IN ('C1', 'C2', 'C3', 'C4', 'C5', 'C6', 'O')
-                                                     THEN 'vacant'
-      WHEN c.state_cd IN ('F1', 'F2', 'F3', 'F4', 'F6', 'F7', 'F9', 'M1', 'M2', 'M4', 'M5')
-                                                     THEN 'commercial'
-      ELSE 'single_family'
-    END,
-    'situs_addr',            c.property_address,
-    'owner_name',            c.owner_name,
-    'appraised_val_current', COALESCE(c.total_value, 0),
-    'area_size',             COALESCE(c.land_sqft, c.land_acres * 43560, 0),
-    'area_estimated',        false,
-    'source_county',         'collin'
-  )
-)::text AS feature
-FROM collin_parcels c
-WHERE c.geom IS NOT NULL
-  AND ST_IsValid(c.geom)
+-- Polygon parcels: one feature per physical footprint.
+-- DISTINCT ON (geo_id/account_num) collapses condo/account-level duplicates
+-- that share the same polygon geometry and otherwise render as opaque solids.
+WITH polygon_parcels AS (
+  SELECT DISTINCT ON (COALESCE(c.geo_id, c.account_num, c.parcel_key))
+    json_build_object(
+      'type', 'Feature',
+      'geometry', ST_AsGeoJSON(c.geom)::json,
+      'properties', json_build_object(
+        'account_num',           c.account_num,
+        'prop_type',             CASE
+          WHEN c.state_cd LIKE 'EX%%'
+               OR c.state_cd IN ('D1', 'D2', 'D6', 'J1A', 'J2A', 'J3A', 'J4A', 'J5', 'J6A')
+                                                         THEN 'exempt'
+          WHEN c.state_cd IN ('A3', 'B1', 'B2', 'B3', 'B4', 'B6', 'B9')
+                                                         THEN 'multifamily'
+          WHEN c.state_cd IN ('C1', 'C2', 'C3', 'C4', 'C5', 'C6', 'O')
+                                                         THEN 'vacant'
+          WHEN c.state_cd IN ('F1', 'F2', 'F3', 'F4', 'F6', 'F7', 'F9', 'M1', 'M2', 'M4', 'M5')
+                                                         THEN 'commercial'
+          ELSE 'single_family'
+        END,
+        'situs_addr',            c.property_address,
+        'owner_name',            c.owner_name,
+        'appraised_val_current', COALESCE(c.total_value, 0),
+        'area_size',             COALESCE(c.land_sqft, c.land_acres * 43560, 0),
+        'area_estimated',        false,
+        'source_county',         'collin'
+      )
+    )::text AS feature
+  FROM collin_parcels c
+  WHERE c.geom IS NOT NULL
+    AND ST_IsValid(c.geom)
+  ORDER BY COALESCE(c.geo_id, c.account_num, c.parcel_key), c.account_num
+)
+SELECT feature FROM polygon_parcels
 """
 
 
