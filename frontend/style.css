@@ -342,6 +342,12 @@ h1 {
   color: #fff !important;
 }
 
+/* Quick-win: remove target star brush tools from the toolbar UI. */
+#btn-target-toggle,
+#target-brush-menu {
+  display: none !important;
+}
+
 .address-search {
   display: flex;
   background: rgba(255, 255, 255, 0.97);
