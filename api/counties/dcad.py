@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Any
 
 import pandas as pd
@@ -131,6 +132,23 @@ def _extract_centroid(point_value: Any) -> tuple[float | None, float | None]:
                 return lat, lng
 
     return None, None
+
+
+def _estimate_front_depth(raw: dict[str, Any]) -> tuple[float | None, float | None]:
+    ratio = _safe_float(raw.get("envelope_ratio")) or 999.0
+    perim = _safe_float(raw.get("envelope_perim_ft")) or 0.0
+    area = _safe_float(raw.get("envelope_area_sqft")) or 0.0
+    if ratio > 1.25 or perim <= 0 or area <= 0:
+        return None, None
+    half_p = perim / 2.0
+    disc = half_p * half_p - 4.0 * area
+    if disc < 0:
+        return None, None
+    long_side = round((half_p + math.sqrt(disc)) / 2.0, 0)
+    short_side = round((half_p - math.sqrt(disc)) / 2.0, 0)
+    if short_side <= 0:
+        return None, None
+    return short_side, long_side
 
 
 def _spatial_bbox_filter(min_lat: float, min_lng: float, max_lat: float, max_lng: float) -> list[dict[str, Any]]:
@@ -263,6 +281,25 @@ def query_parcels(polygon: list[list[float]]) -> ParcelQueryResult:
                     p.legal1, p.legal2, p.legal3, p.legal4, p.legal5,
                     p.polygon_geojson,
                     ST_AsGeoJSON(p.centroid)::json AS centroid,
+                    CASE
+                      WHEN p.polygon_geojson IS NOT NULL
+                          AND (p.polygon_geojson::json)->>'type' IN ('Polygon', 'MultiPolygon')
+                      THEN ST_Area(ST_OrientedEnvelope(ST_SetSRID(ST_GeomFromGeoJSON(p.polygon_geojson::text), 4326))::geography)
+                          / NULLIF(ST_Area(ST_SetSRID(ST_GeomFromGeoJSON(p.polygon_geojson::text), 4326)::geography), 0)
+                      ELSE NULL
+                    END AS envelope_ratio,
+                    CASE
+                      WHEN p.polygon_geojson IS NOT NULL
+                          AND (p.polygon_geojson::json)->>'type' IN ('Polygon', 'MultiPolygon')
+                      THEN ST_Perimeter(ST_OrientedEnvelope(ST_SetSRID(ST_GeomFromGeoJSON(p.polygon_geojson::text), 4326))::geography) * 3.28084
+                      ELSE NULL
+                    END AS envelope_perim_ft,
+                    CASE
+                      WHEN p.polygon_geojson IS NOT NULL
+                          AND (p.polygon_geojson::json)->>'type' IN ('Polygon', 'MultiPolygon')
+                      THEN ST_Area(ST_OrientedEnvelope(ST_SetSRID(ST_GeomFromGeoJSON(p.polygon_geojson::text), 4326))::geography) * 10.763910416709722
+                      ELSE NULL
+                    END AS envelope_area_sqft,
                     COALESCE(a.sptd_code, p.sptd_code) AS sptd_code,
                     a.land_val, a.impr_val, a.tot_val, a.isd_desc,
                     r.yr_built, r.tot_living_area, r.tot_main_sf,
@@ -306,6 +343,11 @@ def query_parcels(polygon: list[list[float]]) -> ParcelQueryResult:
         area_size = _safe_float(row.get("area_size"))
         front_dim = _safe_float(row.get("front_dim"))
         depth_dim = _safe_float(row.get("depth_dim"))
+        if front_dim in (None, 0.0) or depth_dim in (None, 0.0):
+            est_front, est_depth = _estimate_front_depth(row)
+            if est_front is not None and est_depth is not None:
+                front_dim = est_front
+                depth_dim = est_depth
         # DCAD flat-price lots store AREA_SIZE=0 but carry frontage+depth.
         # Rows from updated DBs have area_estimated stored; older rows fall back to runtime derivation.
         area_estimated = bool(row.get("area_estimated"))

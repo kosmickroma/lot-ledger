@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from typing import Any
 
@@ -37,6 +38,23 @@ _GOV_KEYWORDS = [
     "COLLIN COLLEGE",
 ]
 _HOA_KEYWORDS = ["HOMEOWNER", "OWNERS ASSOC", " HOA", "CIVIC ASSOC", "PROPERTY OWNERS"]
+
+
+def _estimate_front_depth(raw: dict[str, Any]) -> tuple[float | None, float | None]:
+    ratio = _safe_float(raw.get("envelope_ratio")) or 999.0
+    perim = _safe_float(raw.get("envelope_perim_ft")) or 0.0
+    area = _safe_float(raw.get("envelope_area_sqft")) or 0.0
+    if ratio > 1.25 or perim <= 0 or area <= 0:
+        return None, None
+    half_p = perim / 2.0
+    disc = half_p * half_p - 4.0 * area
+    if disc < 0:
+        return None, None
+    long_side = round((half_p + math.sqrt(disc)) / 2.0, 0)
+    short_side = round((half_p - math.sqrt(disc)) / 2.0, 0)
+    if short_side <= 0:
+        return None, None
+    return short_side, long_side
 
 
 def _collin_bbox_filter(min_lat: float, min_lng: float, max_lat: float, max_lng: float) -> list[dict[str, Any]]:
@@ -115,6 +133,10 @@ def _collin_bbox_filter(min_lat: float, min_lng: float, max_lat: float, max_lng:
                     ag_acres,
                     ag_value,
                     ag_market_value,
+                    ST_Area(ST_OrientedEnvelope(geom)::geography) / NULLIF(ST_Area(geom::geography), 0) AS envelope_ratio,
+                    ST_Perimeter(ST_OrientedEnvelope(geom)::geography) * 3.28084 AS envelope_perim_ft,
+                    ST_Area(ST_OrientedEnvelope(geom)::geography) * 10.763910416709722 AS envelope_area_sqft,
+                    ST_Area(geom::geography) * 10.763910416709722 AS geom_sqft,
                     ST_AsGeoJSON(geom)::json AS polygon_geojson,
                     ST_AsGeoJSON(centroid)::json AS centroid_json
                 FROM collin_parcels
@@ -190,10 +212,18 @@ def _normalize_collin_row(raw: dict[str, Any]) -> dict[str, Any]:
     tot_val = _safe_float(raw.get("total_value"))
 
     area_size = _safe_float(raw.get("land_sqft"))
+    area_estimated = False
     if not area_size:
         land_acres = _safe_float(raw.get("land_acres"))
         if land_acres:
             area_size = land_acres * 43560
+    if not area_size:
+        geom_sqft = _safe_float(raw.get("geom_sqft"))
+        if geom_sqft and geom_sqft > 0:
+            area_size = geom_sqft
+            area_estimated = True
+
+    front_dim, depth_dim = _estimate_front_depth(raw)
 
     property_address = _clean_text(raw.get("property_address")).upper()
     if not property_address:
@@ -238,11 +268,11 @@ def _normalize_collin_row(raw: dict[str, Any]) -> dict[str, Any]:
         "tot_living_area": _safe_float(raw.get("living_area")),
         "tot_main_sf": _safe_float(raw.get("living_area")),
         "zoning": _clean_text(raw.get("zoning")),
-        "front_dim": None,
-        "depth_dim": None,
+        "front_dim": front_dim,
+        "depth_dim": depth_dim,
         "area_size": area_size,
         "area_uom": "SQFT" if area_size else "",
-        "area_estimated": False,
+        "area_estimated": area_estimated,
         "state_code": _clean_text(raw.get("state_cd_name")) or sptd_code,
         "land_pct": round((land_val / tot_val) * 100, 1) if land_val and tot_val else None,
         "hoa_name": "",

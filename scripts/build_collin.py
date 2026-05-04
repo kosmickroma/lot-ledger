@@ -90,8 +90,16 @@ def _first_non_empty(*values: Any) -> str:
     return ""
 
 
-def _build_code_lookup(csv_path: Path) -> dict[str, str]:
-    if not csv_path.exists():
+def _resolve_csv(base_dir: Path, patterns: list[str]) -> Path | None:
+    for pattern in patterns:
+        matches = sorted(base_dir.glob(pattern))
+        if matches:
+            return matches[-1]
+    return None
+
+
+def _build_code_lookup(csv_path: Path | None) -> dict[str, str]:
+    if csv_path is None or not csv_path.exists():
         return {}
     df = pd.read_csv(csv_path, dtype=str, encoding="utf-8", low_memory=False)
     if "Code" not in df.columns or "Name" not in df.columns:
@@ -105,8 +113,8 @@ def _build_code_lookup(csv_path: Path) -> dict[str, str]:
     return lookup
 
 
-def _build_agent_summary(csv_path: Path) -> dict[str, dict[str, Any]]:
-    if not csv_path.exists():
+def _build_agent_summary(csv_path: Path | None) -> dict[str, dict[str, Any]]:
+    if csv_path is None or not csv_path.exists():
         return {}
 
     cols = [
@@ -142,8 +150,8 @@ def _build_agent_summary(csv_path: Path) -> dict[str, dict[str, Any]]:
     return out
 
 
-def _build_permit_summary(csv_path: Path) -> dict[str, dict[str, Any]]:
-    if not csv_path.exists():
+def _build_permit_summary(csv_path: Path | None) -> dict[str, dict[str, Any]]:
+    if csv_path is None or not csv_path.exists():
         return {}
 
     cols = ["propID", "permitIssuedDate", "permitTypeDescr", "permitValue"]
@@ -170,8 +178,8 @@ def _build_permit_summary(csv_path: Path) -> dict[str, dict[str, Any]]:
     return out
 
 
-def _build_protest_summary(csv_path: Path) -> dict[str, dict[str, Any]]:
-    if not csv_path.exists():
+def _build_protest_summary(csv_path: Path | None) -> dict[str, dict[str, Any]]:
+    if csv_path is None or not csv_path.exists():
         return {}
 
     cols = ["propID", "Year", "protStatusDescr", "finalMarketVal", "protActive"]
@@ -202,8 +210,8 @@ def _build_protest_summary(csv_path: Path) -> dict[str, dict[str, Any]]:
     return out
 
 
-def _build_ag_summary(csv_path: Path) -> dict[str, dict[str, Any]]:
-    if not csv_path.exists():
+def _build_ag_summary(csv_path: Path | None) -> dict[str, dict[str, Any]]:
+    if csv_path is None or not csv_path.exists():
         return {}
 
     cols = ["propID", "agType", "agAcres", "agValue", "marketValue"]
@@ -221,6 +229,60 @@ def _build_ag_summary(csv_path: Path) -> dict[str, dict[str, Any]]:
             "ag_acres": _to_float(getattr(row, "agAcres", None)),
             "ag_value": _to_float(getattr(row, "agValue", None)),
             "ag_market_value": _to_float(getattr(row, "marketValue", None)),
+        }
+    return out
+
+
+def _build_appraisal_summary(csv_path: Path | None) -> dict[str, dict[str, Any]]:
+    if csv_path is None or not csv_path.exists():
+        return {}
+
+    cols = [
+        "propID",
+        "propYear",
+        "entitySchoolCode",
+        "landSizeSqft",
+        "landSizeAcres",
+        "imprvMainArea",
+        "imprvYearBuilt",
+        "landTypeCode",
+        "propUseCode",
+        "propSubType",
+        "propType",
+        "legalDescription",
+        "legalAbsSubName",
+        "nbhdCode",
+    ]
+    df = pd.read_csv(csv_path, dtype=str, usecols=[c for c in cols if c], encoding="utf-8", low_memory=False)
+    if "propID" not in df.columns:
+        return {}
+
+    df["propID"] = df["propID"].fillna("").astype(str).str.strip()
+    df = df[df["propID"] != ""].copy()
+
+    if "propYear" in df.columns:
+        df["propYearNum"] = pd.to_numeric(df["propYear"], errors="coerce")
+        df = df.sort_values(["propID", "propYearNum"], ascending=[True, False])
+    df = df.groupby("propID", as_index=False).first()
+
+    out: dict[str, dict[str, Any]] = {}
+    for row in df.itertuples(index=False):
+        prop_id = _clean_text(getattr(row, "propID", ""))
+        if not prop_id:
+            continue
+        out[prop_id] = {
+            "school_code": _clean_text(getattr(row, "entitySchoolCode", "")),
+            "land_sqft": _to_float(getattr(row, "landSizeSqft", None)),
+            "land_acres": _to_float(getattr(row, "landSizeAcres", None)),
+            "living_area": _to_float(getattr(row, "imprvMainArea", None)),
+            "year_built": _to_int(getattr(row, "imprvYearBuilt", None)),
+            "land_type_code": _clean_text(getattr(row, "landTypeCode", "")).upper(),
+            "prop_use_code": _clean_text(getattr(row, "propUseCode", "")).upper(),
+            "prop_sub_type": _clean_text(getattr(row, "propSubType", "")),
+            "prop_type": _clean_text(getattr(row, "propType", "")),
+            "legal_descr": _clean_text(getattr(row, "legalDescription", "")),
+            "subdivision": _clean_text(getattr(row, "legalAbsSubName", "")),
+            "nbhd_code": _clean_text(getattr(row, "nbhdCode", "")),
         }
     return out
 
@@ -332,10 +394,48 @@ def _derive_row(record_map: dict[str, Any], geometry_geojson: str, snapshot_date
     prop_use_code = _clean_text(record_map.get("property_u")).upper()
     land_type_code = _clean_text(record_map.get("land_type_")).upper()
 
+    appraisal = lookups["appraisal"].get(prop_id, {})
     agent = lookups["agent"].get(prop_id, {})
     permits = lookups["permit"].get(prop_id, {})
     protests = lookups["protest"].get(prop_id, {})
     ag = lookups["ag"].get(prop_id, {})
+
+    school_code = _first_non_empty(record_map.get("school"), appraisal.get("school_code"))
+    legal_descr = _first_non_empty(record_map.get("legal_desc"), appraisal.get("legal_descr"))
+    subdivision = _first_non_empty(record_map.get("abs_subd_1"), appraisal.get("subdivision"))
+
+    # Column definitions mark land_sqft as "DO NOT USE"; prefer total land area.
+    land_sqft = _to_float(record_map.get("land_total")) or _to_float(record_map.get("land_sqft"))
+    if not land_sqft or land_sqft <= 0:
+        app_land_sqft = _to_float(appraisal.get("land_sqft"))
+        if app_land_sqft and app_land_sqft > 0:
+            land_sqft = app_land_sqft
+
+    land_acres = _to_float(record_map.get("legal_acre"))
+    if not land_acres or land_acres <= 0:
+        app_land_acres = _to_float(appraisal.get("land_acres"))
+        if app_land_acres and app_land_acres > 0:
+            land_acres = app_land_acres
+
+    living_area = _to_float(record_map.get("living_are"))
+    if not living_area or living_area <= 0:
+        app_living_area = _to_float(appraisal.get("living_area"))
+        if app_living_area and app_living_area > 0:
+            living_area = app_living_area
+
+    year_built = _to_int(record_map.get("yr_blt"))
+    if not year_built:
+        app_year_built = _to_int(appraisal.get("year_built"))
+        if app_year_built:
+            year_built = app_year_built
+
+    if not land_type_code:
+        land_type_code = _clean_text(appraisal.get("land_type_code")).upper()
+    if not prop_use_code:
+        prop_use_code = _clean_text(appraisal.get("prop_use_code")).upper()
+
+    prop_type = _first_non_empty(record_map.get("prop_type_"), appraisal.get("prop_type"))
+    prop_sub_type = _first_non_empty(appraisal.get("prop_sub_type"), record_map.get("property_u"))
 
     return (
         parcel_key,
@@ -352,15 +452,15 @@ def _derive_row(record_map: dict[str, Any], geometry_geojson: str, snapshot_date
         state_cd or None,
         lookups["state_category"].get(state_cd) or None,
         _clean_text(record_map.get("class_cd")) or None,
-        _clean_text(record_map.get("abs_subd_1")) or None,
-        _clean_text(record_map.get("legal_desc")) or None,
-        _clean_text(record_map.get("school")) or None,
+        subdivision or None,
+        legal_descr or None,
+        school_code or None,
         _clean_text(record_map.get("city")) or None,
         _clean_text(record_map.get("zoning")) or None,
-        _to_float(record_map.get("land_sqft")),
-        _to_float(record_map.get("legal_acre")),
-        _to_float(record_map.get("living_are")),
-        _to_int(record_map.get("yr_blt")),
+        land_sqft,
+        land_acres,
+        living_area,
+        year_built,
         _to_float(record_map.get("curr_land_")),
         _to_float(record_map.get("curr_imprv")),
         _to_float(record_map.get("curr_appra")),
@@ -379,8 +479,8 @@ def _derive_row(record_map: dict[str, Any], geometry_geojson: str, snapshot_date
         lookups["land_type"].get(land_type_code) or None,
         prop_use_code or None,
         lookups["prop_use"].get(prop_use_code) or None,
-        _clean_text(record_map.get("prop_type_")) or None,
-        None,
+        prop_type or None,
+        prop_sub_type or None,
         _clean_text(record_map.get("commercial")) or None,
         _clean_text(record_map.get("pool")) or None,
         _to_float(record_map.get("beds")),
@@ -694,19 +794,29 @@ def main() -> None:
     if args.limit > 0:
         print(f"Limit: {args.limit:,}")
 
-    state_category = _build_code_lookup(base_dir / "Collin_CAD_Code_File_-_State_Category_20260503.csv")
-    prop_use = _build_code_lookup(base_dir / "Collin_CAD_Code_File_-_Prop_Use_20260503.csv")
-    land_type = _build_code_lookup(base_dir / "Collin_CAD_Code_File_-_Land_Type_20260503.csv")
+    state_category = _build_code_lookup(_resolve_csv(base_dir, ["Collin_CAD_Code_File_-_State_Category_*.csv"]))
+    prop_use = _build_code_lookup(_resolve_csv(base_dir, ["Collin_CAD_Code_File_-_Prop_Use_*.csv"]))
+    land_type = _build_code_lookup(_resolve_csv(base_dir, ["Collin_CAD_Code_File_-_Land_Type_*.csv"]))
 
-    agent = _build_agent_summary(base_dir / "Collin_CAD_Agent_Prop_List_20260503.csv")
-    permit = _build_permit_summary(base_dir / "Collin_CAD_Building_Permits_20260503.csv")
-    protest = _build_protest_summary(base_dir / "Collin_CAD_Protest_Data_20260503.csv")
-    ag = _build_ag_summary(base_dir / "Collin_CAD_Public_List_-_Ag_Property_20260503.csv")
+    appraisal = _build_appraisal_summary(
+        _resolve_csv(
+            base_dir,
+            [
+                "Collin_CAD_Appraisal_Data_-_Preliminary_*.csv",
+                "Collin_CAD_Appraisal_Data_-_20*.csv",
+            ],
+        )
+    )
+    agent = _build_agent_summary(_resolve_csv(base_dir, ["Collin_CAD_Agent_Prop_List_*.csv"]))
+    permit = _build_permit_summary(_resolve_csv(base_dir, ["Collin_CAD_Building_Permits_*.csv"]))
+    protest = _build_protest_summary(_resolve_csv(base_dir, ["Collin_CAD_Protest_Data_*.csv"]))
+    ag = _build_ag_summary(_resolve_csv(base_dir, ["Collin_CAD_Public_List_-_Ag_Property_*.csv"]))
 
     lookups = {
         "state_category": state_category,
         "prop_use": prop_use,
         "land_type": land_type,
+        "appraisal": appraisal,
         "agent": agent,
         "permit": permit,
         "protest": protest,
@@ -717,6 +827,7 @@ def main() -> None:
     print(f"  state_category: {len(state_category):,}")
     print(f"  prop_use:       {len(prop_use):,}")
     print(f"  land_type:      {len(land_type):,}")
+    print(f"  appraisal:      {len(appraisal):,}")
     print(f"  agent:          {len(agent):,}")
     print(f"  permit:         {len(permit):,}")
     print(f"  protest:        {len(protest):,}")

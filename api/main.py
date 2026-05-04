@@ -33,7 +33,7 @@ from pydantic import BaseModel
 
 from api.config import get_conn, get_session_conn, get_settings, release_conn, release_session_conn
 from api.counties.collin import _classify_collin, _normalize_collin_row, query_collin_parcels
-from api.counties.dcad import SPTD_LABELS, build_feature, classify_parcel, query_parcels
+from api.counties.dcad import SPTD_LABELS, _estimate_front_depth, build_feature, classify_parcel, query_parcels
 from api.counties.tad import _normalize_tad_row, _classify_tad, query_tad_parcels
 from api.geo import polygon_bbox
 from api.redfin import normalize_addr_key, pull_grid
@@ -494,6 +494,25 @@ def _fetch_dcad_parcel_by_account(account_num: str) -> tuple[dict[str, Any] | No
                        p.polygon_geojson,
                        ST_Y(p.centroid) AS lat,
                        ST_X(p.centroid) AS lng,
+                       CASE
+                        WHEN p.polygon_geojson IS NOT NULL
+                            AND (p.polygon_geojson::json)->>'type' IN ('Polygon', 'MultiPolygon')
+                        THEN ST_Area(ST_OrientedEnvelope(ST_SetSRID(ST_GeomFromGeoJSON(p.polygon_geojson::text), 4326))::geography)
+                            / NULLIF(ST_Area(ST_SetSRID(ST_GeomFromGeoJSON(p.polygon_geojson::text), 4326)::geography), 0)
+                        ELSE NULL
+                       END AS envelope_ratio,
+                       CASE
+                        WHEN p.polygon_geojson IS NOT NULL
+                            AND (p.polygon_geojson::json)->>'type' IN ('Polygon', 'MultiPolygon')
+                        THEN ST_Perimeter(ST_OrientedEnvelope(ST_SetSRID(ST_GeomFromGeoJSON(p.polygon_geojson::text), 4326))::geography) * 3.28084
+                        ELSE NULL
+                       END AS envelope_perim_ft,
+                       CASE
+                        WHEN p.polygon_geojson IS NOT NULL
+                            AND (p.polygon_geojson::json)->>'type' IN ('Polygon', 'MultiPolygon')
+                        THEN ST_Area(ST_OrientedEnvelope(ST_SetSRID(ST_GeomFromGeoJSON(p.polygon_geojson::text), 4326))::geography) * 10.763910416709722
+                        ELSE NULL
+                       END AS envelope_area_sqft,
                        a.land_val, a.impr_val, a.tot_val, a.isd_desc,
                        r.yr_built, r.tot_living_area, r.tot_main_sf,
                       l.zoning, l.front_dim, l.depth_dim, l.area_size, l.area_uom, l.area_estimated,
@@ -531,6 +550,15 @@ def _fetch_dcad_parcel_by_account(account_num: str) -> tuple[dict[str, Any] | No
             area_size = _safe_float(parcel.get("area_size"))
             front_dim = _safe_float(parcel.get("front_dim"))
             depth_dim = _safe_float(parcel.get("depth_dim"))
+            original_front = front_dim
+            original_depth = depth_dim
+            if front_dim in (None, 0.0) or depth_dim in (None, 0.0):
+                est_front, est_depth = _estimate_front_depth(parcel)
+                if est_front is not None and est_depth is not None:
+                    front_dim = est_front
+                    depth_dim = est_depth
+                    parcel["front_dim"] = est_front
+                    parcel["depth_dim"] = est_depth
             area_estimated = bool(parcel.get("area_estimated"))
             if (area_size is None or area_size <= 0) and front_dim and front_dim > 0 and depth_dim and depth_dim > 0:
                 parcel["area_size"] = front_dim * depth_dim
@@ -559,6 +587,9 @@ def _fetch_tad_parcel_by_account(account_num: str) -> dict[str, Any] | None:
                        acres, land_acres, land_sqft,
                        year_built, living_area,
                        land_value, improvement_value, total_value,
+                       ST_Area(ST_OrientedEnvelope(geom)::geography) / NULLIF(ST_Area(geom::geography), 0) AS envelope_ratio,
+                       ST_Perimeter(ST_OrientedEnvelope(geom)::geography) * 3.28084 AS envelope_perim_ft,
+                       ST_Area(ST_OrientedEnvelope(geom)::geography) * 10.763910416709722 AS envelope_area_sqft,
                        ST_AsGeoJSON(geom)::json AS polygon_geojson,
                        ST_Y(centroid) AS _lat,
                        ST_X(centroid) AS _lng
@@ -654,6 +685,10 @@ def _fetch_collin_parcel_by_account(account_num: str) -> dict[str, Any] | None:
                     ag_acres,
                     ag_value,
                     ag_market_value,
+                    ST_Area(ST_OrientedEnvelope(geom)::geography) / NULLIF(ST_Area(geom::geography), 0) AS envelope_ratio,
+                    ST_Perimeter(ST_OrientedEnvelope(geom)::geography) * 3.28084 AS envelope_perim_ft,
+                    ST_Area(ST_OrientedEnvelope(geom)::geography) * 10.763910416709722 AS envelope_area_sqft,
+                    ST_Area(geom::geography) * 10.763910416709722 AS geom_sqft,
                     ST_AsGeoJSON(geom)::json AS polygon_geojson,
                     ST_Y(centroid) AS _lat,
                     ST_X(centroid) AS _lng
