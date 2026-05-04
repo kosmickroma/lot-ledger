@@ -343,11 +343,13 @@ def query_parcels(polygon: list[list[float]]) -> ParcelQueryResult:
         area_size = _safe_float(row.get("area_size"))
         front_dim = _safe_float(row.get("front_dim"))
         depth_dim = _safe_float(row.get("depth_dim"))
+        dims_estimated = False
         if front_dim in (None, 0.0) or depth_dim in (None, 0.0):
             est_front, est_depth = _estimate_front_depth(row)
             if est_front is not None and est_depth is not None:
                 front_dim = est_front
                 depth_dim = est_depth
+            dims_estimated = True
         # DCAD flat-price lots store AREA_SIZE=0 but carry frontage+depth.
         # Rows from updated DBs have area_estimated stored; older rows fall back to runtime derivation.
         area_estimated = bool(row.get("area_estimated"))
@@ -395,6 +397,7 @@ def query_parcels(polygon: list[list[float]]) -> ParcelQueryResult:
                 "zoning": _clean_text(row.get("zoning")),
                 "front_dim": front_dim,
                 "depth_dim": depth_dim,
+                "dims_estimated": dims_estimated,
                 "area_size": area_size,
                 "area_uom": _clean_text(row.get("area_uom")),
                 "area_estimated": area_estimated,
@@ -451,6 +454,7 @@ def build_feature(row: dict[str, Any], prop_type: str, on_redfin: bool, redfin_l
     land_pct = _safe_float(row.get("land_pct"))
     area_estimated = bool(row.get("area_estimated"))
     est_tag = " (est.)" if area_estimated else ""
+    dims_est_tag = " (est.)" if bool(row.get("dims_estimated")) else ""
     # D10 (Qualified Agricultural Land) carries $0 in DCAD bulk exports — market
     # value is withheld; display a label rather than misleading "$0".
     ag_zero = (
@@ -469,8 +473,8 @@ def build_feature(row: dict[str, Any], prop_type: str, on_redfin: bool, redfin_l
         "land_pct": f"{land_pct:.1f}%" if land_pct is not None else "N/A",
         "lot_sqft": f"{int(area_size):,} sf{est_tag}" if area_size is not None and area_size > 0 else "N/A",
         "lot_acres": f"{area_size / 43560:.2f} ac{est_tag}" if area_size is not None and area_size > 0 else "N/A",
-        "frontage": f"{int(row['front_dim'])} ft" if _safe_float(row.get("front_dim")) not in (None, 0.0) else "N/A",
-        "depth": f"{int(row['depth_dim'])} ft" if _safe_float(row.get("depth_dim")) not in (None, 0.0) else "N/A",
+        "frontage": f"{int(row['front_dim'])} ft{dims_est_tag}" if _safe_float(row.get("front_dim")) not in (None, 0.0) else "N/A",
+        "depth": f"{int(row['depth_dim'])} ft{dims_est_tag}" if _safe_float(row.get("depth_dim")) not in (None, 0.0) else "N/A",
         "state_code": _clean_text(row.get("state_code")) or "N/A",
         "zoning": _clean_text(row.get("zoning")) or "N/A",
         "school": _clean_text(row.get("isd_desc")) or "N/A",

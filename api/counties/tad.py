@@ -207,6 +207,7 @@ def _normalize_tad_row(raw: dict[str, Any]) -> dict[str, Any]:
             area_size = acres * 43560
 
     front_dim, depth_dim = _estimate_front_depth(raw)
+    dims_estimated = front_dim is not None
 
     property_address = _clean_text(raw.get("situs_addr")).upper()
     if not property_address:
@@ -267,6 +268,7 @@ def _normalize_tad_row(raw: dict[str, Any]) -> dict[str, Any]:
         "zoning": "",
         "front_dim": front_dim,
         "depth_dim": depth_dim,
+        "dims_estimated": dims_estimated,
         "area_size": area_size,
         "area_uom": "SQFT",
         "area_estimated": False,

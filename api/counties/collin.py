@@ -224,6 +224,7 @@ def _normalize_collin_row(raw: dict[str, Any]) -> dict[str, Any]:
             area_estimated = True
 
     front_dim, depth_dim = _estimate_front_depth(raw)
+    dims_estimated = front_dim is not None
 
     property_address = _clean_text(raw.get("property_address")).upper()
     if not property_address:
@@ -270,6 +271,7 @@ def _normalize_collin_row(raw: dict[str, Any]) -> dict[str, Any]:
         "zoning": _clean_text(raw.get("zoning")),
         "front_dim": front_dim,
         "depth_dim": depth_dim,
+        "dims_estimated": dims_estimated,
         "area_size": area_size,
         "area_uom": "SQFT" if area_size else "",
         "area_estimated": area_estimated,

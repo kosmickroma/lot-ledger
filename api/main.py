@@ -550,8 +550,7 @@ def _fetch_dcad_parcel_by_account(account_num: str) -> tuple[dict[str, Any] | No
             area_size = _safe_float(parcel.get("area_size"))
             front_dim = _safe_float(parcel.get("front_dim"))
             depth_dim = _safe_float(parcel.get("depth_dim"))
-            original_front = front_dim
-            original_depth = depth_dim
+            dims_estimated = False
             if front_dim in (None, 0.0) or depth_dim in (None, 0.0):
                 est_front, est_depth = _estimate_front_depth(parcel)
                 if est_front is not None and est_depth is not None:
@@ -559,6 +558,8 @@ def _fetch_dcad_parcel_by_account(account_num: str) -> tuple[dict[str, Any] | No
                     depth_dim = est_depth
                     parcel["front_dim"] = est_front
                     parcel["depth_dim"] = est_depth
+                    dims_estimated = True
+            parcel["dims_estimated"] = dims_estimated
             area_estimated = bool(parcel.get("area_estimated"))
             if (area_size is None or area_size <= 0) and front_dim and front_dim > 0 and depth_dim and depth_dim > 0:
                 parcel["area_size"] = front_dim * depth_dim
@@ -1259,6 +1260,8 @@ async def download(job_id: str, filename: str | None = None) -> StreamingRespons
                 "Lot Size (acres)",
                 "Frontage (ft)",
                 "Depth (ft)",
+                "Est Frontage (ft)",
+                "Est Depth (ft)",
                 "School District",
                 "Neighborhood Code",
                 "Subdivision",
@@ -1348,6 +1351,13 @@ async def download(job_id: str, filename: str | None = None) -> StreamingRespons
             lot_acres_csv = "" if area_estimated else _area_ac
             est_lot_sqft_csv = _area_sf if area_estimated else ""
             est_lot_acres_csv = _area_ac if area_estimated else ""
+            dims_estimated = bool(row.get("dims_estimated"))
+            front_dim_val = _safe_float(row.get("front_dim"))
+            depth_dim_val = _safe_float(row.get("depth_dim"))
+            frontage_csv = int(front_dim_val) if (not dims_estimated and front_dim_val not in (None, 0.0)) else ""
+            depth_csv = int(depth_dim_val) if (not dims_estimated and depth_dim_val not in (None, 0.0)) else ""
+            est_frontage_csv = int(front_dim_val) if (dims_estimated and front_dim_val not in (None, 0.0)) else ""
+            est_depth_csv = int(depth_dim_val) if (dims_estimated and depth_dim_val not in (None, 0.0)) else ""
             yr_built = row.get("yr_built")
             living_area = row.get("tot_living_area")
             main_area = row.get("tot_main_sf")
@@ -1388,8 +1398,10 @@ async def download(job_id: str, filename: str | None = None) -> StreamingRespons
                     row.get("zoning", "") or "",
                     lot_sqft_csv,
                     lot_acres_csv,
-                    int(_safe_float(row.get("front_dim"))) if _safe_float(row.get("front_dim")) not in (None, 0.0) else "",
-                    int(_safe_float(row.get("depth_dim"))) if _safe_float(row.get("depth_dim")) not in (None, 0.0) else "",
+                    frontage_csv,
+                    depth_csv,
+                    est_frontage_csv,
+                    est_depth_csv,
                     row.get("isd_desc", "") or "",
                     row.get("nbhd_cd", "") or "",
                     row.get("legal1", "") or "",
