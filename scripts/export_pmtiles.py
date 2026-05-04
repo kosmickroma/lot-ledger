@@ -1,7 +1,8 @@
 # scripts/export_pmtiles.py
 #
 # Role:
-#   Export DCAD and TAD parcel features from Postgres as newline-delimited GeoJSON
+#   Export DCAD, TAD, and Collin parcel features from Postgres as
+#   newline-delimited GeoJSON
 #   for PMTiles generation.
 #
 # Connections:
@@ -9,8 +10,8 @@
 #   - docs/PMTILES_PLAN.md: SQL source of truth for export shape and fields
 #   - tippecanoe CLI: this script prints the next command to run (does not execute it)
 #
-# Classification codes mirror api/counties/dcad.py:classify_parcel()
-# and api/counties/tad.py:_classify_tad() exactly.
+# Classification codes mirror api/counties/dcad.py:classify_parcel(),
+# api/counties/tad.py:_classify_tad(), and api/counties/collin.py:_classify_collin().
 
 from __future__ import annotations
 
@@ -48,11 +49,14 @@ WITH polygon_parcels AS (
         'situs_addr',            p.property_address,
         'owner_name',            p.owner_name,
         'appraised_val_current', COALESCE(a.tot_val, 0),
+        'area_size',             COALESCE(l.area_size, 0),
+        'area_estimated',        COALESCE(l.area_estimated, false),
         'source_county',         'dcad'
       )
     ) AS feature
   FROM parcels p
   LEFT JOIN appraisal a       ON p.account_num = a.account_num
+  LEFT JOIN land_detail l     ON p.account_num = l.account_num
   LEFT JOIN exempt_accounts e ON p.account_num = e.account_num
   WHERE p.polygon_geojson IS NOT NULL
     AND p.polygon_geojson != '{"type": "Polygon", "coordinates": []}'
@@ -83,11 +87,14 @@ SELECT json_build_object(
     'situs_addr',            p.property_address,
     'owner_name',            p.owner_name,
     'appraised_val_current', COALESCE(a.tot_val, 0),
+    'area_size',             COALESCE(l.area_size, 0),
+    'area_estimated',        COALESCE(l.area_estimated, false),
     'source_county',         'dcad'
   )
 )::text AS feature
 FROM parcels p
 LEFT JOIN appraisal a       ON p.account_num = a.account_num
+LEFT JOIN land_detail l     ON p.account_num = l.account_num
 LEFT JOIN exempt_accounts e ON p.account_num = e.account_num
 WHERE (p.polygon_geojson IS NULL
     OR p.polygon_geojson = '{"type": "Polygon", "coordinates": []}')
@@ -122,12 +129,48 @@ SELECT json_build_object(
     'situs_addr',            t.situs_addr,
     'owner_name',            t.owner_name,
     'appraised_val_current', COALESCE(t.total_value, 0),
+    'area_size',             COALESCE(t.land_sqft, t.land_acres * 43560, 0),
     'source_county',         'tad'
   )
 )::text AS feature
 FROM tad_parcels t
 WHERE t.geom IS NOT NULL
   AND ST_IsValid(t.geom)
+"""
+
+
+# Codes mirror _classify_collin() in api/counties/collin.py.
+# Owner name (gov/HOA) check and nominal-value check are omitted — acceptable
+# approximation for tile coloring.
+COLLIN_EXPORT_SQL = """
+SELECT json_build_object(
+  'type', 'Feature',
+  'geometry', ST_AsGeoJSON(c.geom)::json,
+  'properties', json_build_object(
+    'account_num',           c.account_num,
+    'prop_type',             CASE
+      WHEN c.state_cd LIKE 'EX%%'
+           OR c.state_cd IN ('D1', 'D2', 'D6', 'J1A', 'J2A', 'J3A', 'J4A', 'J5', 'J6A')
+                                                     THEN 'exempt'
+      WHEN c.state_cd IN ('A3', 'B1', 'B2', 'B3', 'B4', 'B6', 'B9')
+                                                     THEN 'multifamily'
+      WHEN c.state_cd IN ('C1', 'C2', 'C3', 'C4', 'C5', 'C6', 'O')
+                                                     THEN 'vacant'
+      WHEN c.state_cd IN ('F1', 'F2', 'F3', 'F4', 'F6', 'F7', 'F9', 'M1', 'M2', 'M4', 'M5')
+                                                     THEN 'commercial'
+      ELSE 'single_family'
+    END,
+    'situs_addr',            c.property_address,
+    'owner_name',            c.owner_name,
+    'appraised_val_current', COALESCE(c.total_value, 0),
+    'area_size',             COALESCE(c.land_sqft, c.land_acres * 43560, 0),
+    'area_estimated',        false,
+    'source_county',         'collin'
+  )
+)::text AS feature
+FROM collin_parcels c
+WHERE c.geom IS NOT NULL
+  AND ST_IsValid(c.geom)
 """
 
 
@@ -157,14 +200,16 @@ def export_query_to_geojsonl(sql: str, output_path: Path, cursor_name: str) -> i
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Export DCAD and TAD parcels to newline-delimited GeoJSON for PMTiles."
+        description="Export DCAD, TAD, and Collin parcels to newline-delimited GeoJSON for PMTiles."
     )
     parser.add_argument("--dcad-out", default="dcad.geojsonl")
     parser.add_argument("--tad-out", default="tad.geojsonl")
+    parser.add_argument("--collin-out", default="collin.geojsonl")
     args = parser.parse_args()
 
     dcad_out = Path(args.dcad_out)
     tad_out = Path(args.tad_out)
+    collin_out = Path(args.collin_out)
 
     print("Exporting DCAD...")
     dcad_count = export_query_to_geojsonl(DCAD_EXPORT_SQL, dcad_out, "dcad_export")
@@ -174,6 +219,10 @@ def main() -> None:
     tad_count = export_query_to_geojsonl(TAD_EXPORT_SQL, tad_out, "tad_export")
     print(f"TAD export complete: {tad_out} ({tad_count:,} rows)")
 
+    print("Exporting Collin...")
+    collin_count = export_query_to_geojsonl(COLLIN_EXPORT_SQL, collin_out, "collin_export")
+    print(f"Collin export complete: {collin_out} ({collin_count:,} rows)")
+
     print("\nNext — run tippecanoe (NOT executed by this script):")
     print(
         f"tippecanoe "
@@ -181,12 +230,13 @@ def main() -> None:
         f"-Z12 -z16 "
         f"-pn "
         f"-y account_num -y prop_type -y situs_addr -y owner_name "
-        f"-y appraised_val_current -y source_county "
+        f"-y appraised_val_current -y area_size -y area_estimated -y source_county "
         f"--coalesce-densest-as-needed "
         f"--extend-zooms-if-still-dropping "
         f"-f "
         f"-L '{{\"file\":\"{dcad_out}\",\"layer\":\"dcad\"}}' "
-        f"-L '{{\"file\":\"{tad_out}\",\"layer\":\"tad\"}}'"
+        f"-L '{{\"file\":\"{tad_out}\",\"layer\":\"tad\"}}' "
+        f"-L '{{\"file\":\"{collin_out}\",\"layer\":\"collin\"}}'"
     )
 
 

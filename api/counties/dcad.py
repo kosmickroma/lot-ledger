@@ -266,7 +266,7 @@ def query_parcels(polygon: list[list[float]]) -> ParcelQueryResult:
                     COALESCE(a.sptd_code, p.sptd_code) AS sptd_code,
                     a.land_val, a.impr_val, a.tot_val, a.isd_desc,
                     r.yr_built, r.tot_living_area, r.tot_main_sf,
-                    l.zoning, l.front_dim, l.depth_dim, l.area_size, l.area_uom,
+                    l.zoning, l.front_dim, l.depth_dim, l.area_size, l.area_uom, l.area_estimated,
                     (e.account_num IS NOT NULL) AS is_exempt
                 FROM parcels p
                 LEFT JOIN appraisal a ON a.account_num = p.account_num
@@ -307,9 +307,8 @@ def query_parcels(polygon: list[list[float]]) -> ParcelQueryResult:
         front_dim = _safe_float(row.get("front_dim"))
         depth_dim = _safe_float(row.get("depth_dim"))
         # DCAD flat-price lots store AREA_SIZE=0 but carry frontage+depth.
-        # Derive lot area from dimensions so lot size is never "N/A" on these.
-        # Flag the derivation so the popup and CSV can label it as estimated.
-        area_estimated = False
+        # Rows from updated DBs have area_estimated stored; older rows fall back to runtime derivation.
+        area_estimated = bool(row.get("area_estimated"))
         if (area_size is None or area_size <= 0) and front_dim and front_dim > 0 and depth_dim and depth_dim > 0:
             area_size = front_dim * depth_dim
             area_estimated = True

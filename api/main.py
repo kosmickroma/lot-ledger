@@ -14,11 +14,13 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import csv
 import io
 import re
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote_plus
@@ -26,9 +28,11 @@ from urllib.parse import quote_plus
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from psycopg2.extras import Json, execute_values
 from pydantic import BaseModel
 
-from api.config import get_conn, get_settings, release_conn
+from api.config import get_conn, get_session_conn, get_settings, release_conn, release_session_conn
+from api.counties.collin import _classify_collin, _normalize_collin_row, query_collin_parcels
 from api.counties.dcad import SPTD_LABELS, build_feature, classify_parcel, query_parcels
 from api.counties.tad import _normalize_tad_row, _classify_tad, query_tad_parcels
 from api.geo import polygon_bbox
@@ -41,6 +45,7 @@ _job_store: dict[str, dict[str, Any]] = {}
 _JOB_TTL_SECONDS = 7200    # 2-hour sliding-window TTL per session
 _JOB_MAX = 50              # max jobs held in memory at once
 _REDFIN_ROW_THRESHOLD = 15_000  # auto-disable Redfin above this parcel count
+_SESSION_RETENTION_DAYS = 30
 
 _FILENAME_SAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -60,15 +65,267 @@ def _evict_stale_jobs() -> None:
         _job_store.pop(oldest, None)
 
 
+def _ensure_session_schema() -> None:
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto")
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS saved_areas (
+                    area_id     TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+                    name        TEXT NOT NULL,
+                    polygon     JSONB NOT NULL,
+                    created_at  TIMESTAMPTZ DEFAULT now(),
+                    updated_at  TIMESTAMPTZ DEFAULT now()
+                )
+                """
+            )
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS analysis_sessions (
+                    session_id      TEXT PRIMARY KEY,
+                    polygon         JSONB NOT NULL,
+                    parcel_count    INTEGER,
+                    county_coverage TEXT[],
+                    saved_area_id   TEXT REFERENCES saved_areas(area_id) ON DELETE SET NULL,
+                    created_at      TIMESTAMPTZ DEFAULT now(),
+                    last_accessed   TIMESTAMPTZ DEFAULT now(),
+                    expires_at      TIMESTAMPTZ DEFAULT (now() + interval '{_SESSION_RETENTION_DAYS} days')
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS session_tags (
+                    session_id  TEXT REFERENCES analysis_sessions(session_id) ON DELETE CASCADE,
+                    account_num TEXT NOT NULL,
+                    county      TEXT NOT NULL,
+                    tag_type    TEXT NOT NULL,
+                    tag_value   TEXT NOT NULL,
+                    updated_at  TIMESTAMPTZ DEFAULT now(),
+                    PRIMARY KEY (session_id, account_num, county, tag_type)
+                )
+                """
+            )
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_session_tags_session ON session_tags (session_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_expires ON analysis_sessions (expires_at)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_saved_area ON analysis_sessions (saved_area_id)")
+        conn.commit()
+    finally:
+        release_session_conn(conn)
+
+
+def _counties_from_rows(rows: list[dict[str, Any]]) -> list[str]:
+    seen: set[str] = set()
+    for row in rows:
+        division = str(row.get("division_cd", "") or "").upper()
+        if division == "TAD":
+            seen.add("tad")
+        elif division == "COLLIN":
+            seen.add("collin")
+        else:
+            seen.add("dcad")
+    return sorted(seen)
+
+
+def _persist_session_sync(
+    session_id: str,
+    polygon: list[list[float]],
+    parcel_count: int,
+    county_coverage: list[str],
+    saved_area_id: str | None = None,
+) -> None:
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                INSERT INTO analysis_sessions (
+                    session_id, polygon, parcel_count, county_coverage, saved_area_id,
+                    last_accessed, expires_at
+                ) VALUES (%s, %s, %s, %s, %s, now(), now() + interval '{_SESSION_RETENTION_DAYS} days')
+                ON CONFLICT (session_id) DO UPDATE SET
+                    polygon = EXCLUDED.polygon,
+                    parcel_count = EXCLUDED.parcel_count,
+                    county_coverage = EXCLUDED.county_coverage,
+                    saved_area_id = COALESCE(EXCLUDED.saved_area_id, analysis_sessions.saved_area_id),
+                    last_accessed = now(),
+                    expires_at = now() + interval '{_SESSION_RETENTION_DAYS} days'
+                """,
+                (
+                    session_id,
+                    Json(polygon),
+                    int(parcel_count),
+                    county_coverage,
+                    saved_area_id,
+                ),
+            )
+        conn.commit()
+    finally:
+        release_session_conn(conn)
+
+
+async def _persist_session_async(
+    session_id: str,
+    polygon: list[list[float]],
+    parcel_count: int,
+    county_coverage: list[str],
+) -> None:
+    try:
+        await asyncio.to_thread(
+            _persist_session_sync,
+            session_id,
+            polygon,
+            parcel_count,
+            county_coverage,
+            None,
+        )
+    except Exception as exc:
+        print(f"[session] persist failed for {session_id}: {exc}")
+
+
+def _load_session_tags(session_id: str) -> dict[tuple[str, str], dict[str, str]]:
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT account_num, county, tag_type, tag_value
+                FROM session_tags
+                WHERE session_id = %s
+                """,
+                (session_id,),
+            )
+            out: dict[tuple[str, str], dict[str, str]] = {}
+            for account_num, county, tag_type, tag_value in cur.fetchall():
+                key = (str(account_num or ""), str(county or "").lower())
+                out.setdefault(key, {})[str(tag_type or "")] = str(tag_value or "")
+            return out
+    finally:
+        release_session_conn(conn)
+
+
+def _row_county(row: dict[str, Any]) -> str:
+    division = str(row.get("division_cd", "") or "").upper()
+    if division == "TAD":
+        return "tad"
+    if division == "COLLIN":
+        return "collin"
+    return "dcad"
+
+
+def _apply_session_tags(session_id: str, rows: list[dict[str, Any]]) -> None:
+    tags = _load_session_tags(session_id)
+    for row in rows:
+        account_num = str(row.get("account_num", "") or "")
+        county = _row_county(row)
+        payload = tags.get((account_num, county), {})
+        row["verified_vacant"] = payload.get("verification", "")
+        row["potential_target"] = payload.get("target", "")
+
+
+def _load_session_polygon(session_id: str) -> list[list[float]] | None:
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT polygon
+                FROM analysis_sessions
+                WHERE session_id = %s
+                  AND expires_at > now()
+                """,
+                (session_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            cur.execute(
+                f"""
+                UPDATE analysis_sessions
+                SET last_accessed = now(),
+                    expires_at = now() + interval '{_SESSION_RETENTION_DAYS} days'
+                WHERE session_id = %s
+                """,
+                (session_id,),
+            )
+        conn.commit()
+        polygon = row[0]
+        return polygon if isinstance(polygon, list) else None
+    finally:
+        release_session_conn(conn)
+
+
+def _session_exists(session_id: str) -> bool:
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM analysis_sessions WHERE session_id = %s LIMIT 1", (session_id,))
+            return cur.fetchone() is not None
+    finally:
+        release_session_conn(conn)
+
+
+def _restore_job_from_session(session_id: str) -> dict[str, Any] | None:
+    polygon = _load_session_polygon(session_id)
+    if not polygon or len(polygon) < 3:
+        return None
+
+    def _safe_query(fn):
+        try:
+            return fn(polygon)
+        except Exception:
+            return None
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        dcad_future = executor.submit(_safe_query, query_parcels)
+        tad_future = executor.submit(_safe_query, query_tad_parcels)
+        collin_future = executor.submit(_safe_query, query_collin_parcels)
+        dcad_result = dcad_future.result()
+        tad_result = tad_future.result()
+        collin_result = collin_future.result()
+
+    if dcad_result is None and tad_result is None and collin_result is None:
+        return None
+
+    rows: list[dict[str, Any]] = []
+    if dcad_result:
+        rows.extend(dcad_result.parcels)
+    if tad_result:
+        rows.extend(tad_result.parcels)
+    if collin_result:
+        rows.extend(collin_result.parcels)
+
+    _apply_session_tags(session_id, rows)
+    return {
+        "rows": rows,
+        "redfin_data": {},
+        "polygon": polygon,
+        "created_at": time.monotonic(),
+        "last_accessed": time.monotonic(),
+    }
+
+
 def _get_job(job_id: str) -> dict[str, Any] | None:
     """Return job if it exists and has not expired; evicts on TTL miss. Touching last_accessed keeps the session alive as long as the user is active."""
     job = _job_store.get(job_id)
     if job is None:
-        return None
+        restored = _restore_job_from_session(job_id)
+        if restored is None:
+            return None
+        _evict_stale_jobs()
+        _job_store[job_id] = restored
+        return restored
     now = time.monotonic()
     if now - job.get("last_accessed", job.get("created_at", 0)) > _JOB_TTL_SECONDS:
         _job_store.pop(job_id, None)
-        return None
+        restored = _restore_job_from_session(job_id)
+        if restored is None:
+            return None
+        _evict_stale_jobs()
+        _job_store[job_id] = restored
+        return restored
     job["last_accessed"] = now
     return job
 
@@ -85,6 +342,15 @@ class MergeJobsRequest(BaseModel):
 class VerificationRequest(BaseModel):
     verifications: dict[str, str] = {}
     potential_targets: dict[str, str] = {}
+
+
+class SavedAreaCreateRequest(BaseModel):
+    name: str
+    polygon: list[list[float]]
+
+
+class SavedAreaRenameRequest(BaseModel):
+    name: str
 
 
 def _normalize_csv_filename(raw: str | None) -> str:
@@ -230,13 +496,13 @@ def _fetch_dcad_parcel_by_account(account_num: str) -> tuple[dict[str, Any] | No
                        ST_X(p.centroid) AS lng,
                        a.land_val, a.impr_val, a.tot_val, a.isd_desc,
                        r.yr_built, r.tot_living_area, r.tot_main_sf,
-                       l.zoning, l.front_dim, l.depth_dim, l.area_size, l.area_uom,
+                      l.zoning, l.front_dim, l.depth_dim, l.area_size, l.area_uom, l.area_estimated,
                        (e.account_num IS NOT NULL) AS is_exempt_account
                 FROM parcels p
                 LEFT JOIN appraisal a ON p.account_num = a.account_num
                 LEFT JOIN res_detail r ON p.account_num = r.account_num
                 LEFT JOIN LATERAL (
-                    SELECT zoning, front_dim, depth_dim, area_size, area_uom
+                    SELECT zoning, front_dim, depth_dim, area_size, area_uom, area_estimated
                     FROM land_detail
                     WHERE account_num = p.account_num
                     LIMIT 1
@@ -262,6 +528,15 @@ def _fetch_dcad_parcel_by_account(account_num: str) -> tuple[dict[str, Any] | No
                 if land_val is not None and tot_val not in (None, 0)
                 else None
             )
+            area_size = _safe_float(parcel.get("area_size"))
+            front_dim = _safe_float(parcel.get("front_dim"))
+            depth_dim = _safe_float(parcel.get("depth_dim"))
+            area_estimated = bool(parcel.get("area_estimated"))
+            if (area_size is None or area_size <= 0) and front_dim and front_dim > 0 and depth_dim and depth_dim > 0:
+                parcel["area_size"] = front_dim * depth_dim
+                parcel["area_estimated"] = True
+            else:
+                parcel["area_estimated"] = area_estimated
             parcel["hoa_name"] = ""
             parcel["hoa_url"] = ""
 
@@ -299,6 +574,101 @@ def _fetch_tad_parcel_by_account(account_num: str) -> dict[str, Any] | None:
             cols = [desc[0] for desc in cur.description]
             raw = dict(zip(cols, row))
             return _normalize_tad_row(raw)
+    finally:
+        release_conn(conn)
+
+
+def _fetch_collin_parcel_by_account(account_num: str) -> dict[str, Any] | None:
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    parcel_key,
+                    account_num,
+                    geo_id,
+                    owner_name,
+                    owner_address,
+                    owner_city,
+                    owner_state,
+                    owner_zip,
+                    property_address,
+                    property_city,
+                    property_zip,
+                    state_cd,
+                    state_cd_name,
+                    class_cd,
+                    subdivision,
+                    legal_descr,
+                    school_code,
+                    city_code,
+                    zoning,
+                    land_sqft,
+                    land_acres,
+                    living_area,
+                    year_built,
+                    land_value,
+                    improvement_value,
+                    total_value,
+                    cert_total_value,
+                    curr_market_value,
+                    curr_assessed_value,
+                    curr_ag_use_value,
+                    curr_ag_market_value,
+                    curr_ag_loss_value,
+                    deed_num,
+                    deed_type,
+                    deed_date,
+                    land_type_code,
+                    land_type_name,
+                    prop_use_code,
+                    prop_use_name,
+                    prop_type,
+                    prop_sub_type,
+                    commercial_flag,
+                    pool_flag,
+                    beds,
+                    baths,
+                    stories,
+                    units,
+                    protest_code,
+                    entity_codes,
+                    exemptions,
+                    exempt_homestead,
+                    tax_agent_id,
+                    tax_agent_name,
+                    tax_agent_auth_protest,
+                    tax_agent_auth_resolve,
+                    tax_agent_mailings,
+                    permit_count,
+                    latest_permit_date,
+                    latest_permit_type,
+                    latest_permit_value,
+                    protest_case_count,
+                    latest_protest_year,
+                    latest_protest_status,
+                    latest_protest_final_market,
+                    protest_active,
+                    ag_type,
+                    ag_acres,
+                    ag_value,
+                    ag_market_value,
+                    ST_AsGeoJSON(geom)::json AS polygon_geojson,
+                    ST_Y(centroid) AS _lat,
+                    ST_X(centroid) AS _lng
+                FROM collin_parcels
+                WHERE account_num = %s
+                LIMIT 1
+                """,
+                (account_num,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            cols = [desc[0] for desc in cur.description]
+            raw = dict(zip(cols, row))
+            return _normalize_collin_row(raw)
     finally:
         release_conn(conn)
 
@@ -366,12 +736,49 @@ def _find_tad_near(lat: float, lng: float) -> str | None:
         release_conn(conn)
 
 
+def _find_collin_near(lat: float, lng: float) -> str | None:
+    """Return a Collin account_num whose polygon contains (lat, lng), or nearest centroid."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT account_num FROM collin_parcels
+                WHERE geom IS NOT NULL
+                  AND ST_Contains(geom, ST_SetSRID(ST_Point(%s, %s), 4326))
+                LIMIT 1
+                """,
+                (lng, lat),
+            )
+            row = cur.fetchone()
+            if row:
+                return row[0]
+            cur.execute(
+                """
+                SELECT account_num FROM collin_parcels
+                WHERE centroid IS NOT NULL
+                  AND ST_DWithin(
+                      centroid,
+                      ST_SetSRID(ST_Point(%s, %s), 4326),
+                      0.004
+                  )
+                ORDER BY ST_Distance(centroid, ST_SetSRID(ST_Point(%s, %s), 4326))
+                LIMIT 1
+                """,
+                (lng, lat, lng, lat),
+            )
+            row = cur.fetchone()
+            return row[0] if row else None
+    finally:
+        release_conn(conn)
+
+
 @app.get("/api/parcel/near")
 async def get_parcel_near(lat: float, lng: float) -> dict[str, Any]:
     """
     Nearest-parcel lookup by lat/lng coordinate.
     Used by address search to reliably find the parcel footprint at a geocoded point.
-    Tries DCAD (centroid proximity) then TAD (polygon contains, then centroid proximity).
+    Tries DCAD, TAD, then Collin using polygon containment + centroid proximity.
     Returns a GeoJSON Feature in the same shape as /api/parcel/{county}/{account_num}.
     """
     dcad_account = _find_dcad_near(lat, lng)
@@ -392,6 +799,15 @@ async def get_parcel_near(lat: float, lng: float) -> dict[str, Any]:
             feature["properties"]["source_county"] = "tad"
             return feature
 
+    collin_account = _find_collin_near(lat, lng)
+    if collin_account:
+        row = _fetch_collin_parcel_by_account(collin_account)
+        if row is not None:
+            prop_type = _classify_collin(row)
+            feature = build_feature(row, prop_type, False, None)
+            feature["properties"]["source_county"] = "collin"
+            return feature
+
     raise HTTPException(status_code=404, detail="No parcel found near this point")
 
 
@@ -408,8 +824,8 @@ async def get_parcel_detail(county: str, account_num: str) -> dict[str, Any]:
     GeoJSON feature in the same shape produced by /api/analyze.
     """
     county_key = county.strip().lower()
-    if county_key not in {"dcad", "tad"}:
-        raise HTTPException(status_code=400, detail="county must be 'dcad' or 'tad'")
+    if county_key not in {"dcad", "tad", "collin"}:
+        raise HTTPException(status_code=400, detail="county must be 'dcad', 'tad', or 'collin'")
 
     if county_key == "dcad":
         row, exempt_set = _fetch_dcad_parcel_by_account(account_num)
@@ -420,12 +836,21 @@ async def get_parcel_detail(county: str, account_num: str) -> dict[str, Any]:
         feature["properties"]["source_county"] = "dcad"
         return feature
 
-    row = _fetch_tad_parcel_by_account(account_num)
+    if county_key == "tad":
+        row = _fetch_tad_parcel_by_account(account_num)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Parcel not found")
+        prop_type = _classify_tad(row)
+        feature = build_feature(row, prop_type, False, None)
+        feature["properties"]["source_county"] = "tad"
+        return feature
+
+    row = _fetch_collin_parcel_by_account(account_num)
     if row is None:
         raise HTTPException(status_code=404, detail="Parcel not found")
-    prop_type = _classify_tad(row)
+    prop_type = _classify_collin(row)
     feature = build_feature(row, prop_type, False, None)
-    feature["properties"]["source_county"] = "tad"
+    feature["properties"]["source_county"] = "collin"
     return feature
 
 
@@ -449,12 +874,14 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
 
     dcad_result = None
     tad_result = None
+    collin_result = None
     redfin_fetch_ok = False
     failed_sources: list[str] = []
 
     raw_results = await asyncio.gather(
         asyncio.to_thread(query_parcels, polygon),
         asyncio.to_thread(query_tad_parcels, polygon),
+        asyncio.to_thread(query_collin_parcels, polygon),
         return_exceptions=True,
     )
     if isinstance(raw_results[0], Exception):
@@ -465,6 +892,10 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
         failed_sources.append("TAD")
     else:
         tad_result = raw_results[1]
+    if isinstance(raw_results[2], Exception):
+        failed_sources.append("Collin")
+    else:
+        collin_result = raw_results[2]
 
     # Never return silent partial county coverage; fail loudly instead.
     # Cancel any pending Redfin task before raising to avoid a dangling coroutine.
@@ -484,13 +915,21 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
         exempt_set.update(dcad_result.exempt_accounts)
     if tad_result:
         all_rows.extend(tad_result.parcels)
+    if collin_result:
+        all_rows.extend(collin_result.parcels)
 
     if not all_rows:
         if redfin_task is not None and not redfin_task.done():
             redfin_task.cancel()
         _evict_stale_jobs()
         empty_job_id = str(uuid.uuid4())
-        _job_store[empty_job_id] = {"rows": [], "redfin_data": {}, "created_at": time.monotonic()}
+        _job_store[empty_job_id] = {
+            "rows": [],
+            "redfin_data": {},
+            "polygon": polygon,
+            "created_at": time.monotonic(),
+            "last_accessed": time.monotonic(),
+        }
         return {
             "type": "FeatureCollection",
             "features": [],
@@ -499,7 +938,11 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
             "redfin_requested": include_redfin,
             "redfin_ok": False,
             "redfin_skipped": False,
-            "source_status": {"dcad_ok": dcad_result is not None, "tad_ok": tad_result is not None},
+            "source_status": {
+                "dcad_ok": dcad_result is not None,
+                "tad_ok": tad_result is not None,
+                "collin_ok": collin_result is not None,
+            },
         }
 
     # Auto-disable Redfin for large area draws — prevents timeouts and memory pressure.
@@ -537,6 +980,8 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
         # TAD rows carry division_cd="TAD" — use TAD classifier; DCAD rows use existing classifier.
         if row.get("division_cd") == "TAD":
             prop_type = _classify_tad(row)
+        elif row.get("division_cd") == "COLLIN":
+            prop_type = _classify_collin(row)
         else:
             prop_type = classify_parcel(row, exempt_set)
 
@@ -555,16 +1000,26 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
 
         try:
             feature = build_feature(row, prop_type, on_redfin, redfin_listing)
+            division_cd = str(row.get("division_cd", "") or "").upper()
+            if division_cd == "TAD":
+                feature["properties"]["source_county"] = "tad"
+            elif division_cd == "COLLIN":
+                feature["properties"]["source_county"] = "collin"
+            else:
+                feature["properties"]["source_county"] = "dcad"
             features.append(feature)
         except ValueError:
             continue
 
     _evict_stale_jobs()
     job_id = str(uuid.uuid4())
+    county_coverage = _counties_from_rows(rows)
     _job_store[job_id] = {
         "rows": rows,
         "redfin_data": redfin_data,
+        "polygon": polygon,
         "created_at": time.monotonic(),
+        "last_accessed": time.monotonic(),
     }
     return {
         "type": "FeatureCollection",
@@ -577,6 +1032,7 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
         "source_status": {
             "dcad_ok": dcad_result is not None,
             "tad_ok": tad_result is not None,
+            "collin_ok": collin_result is not None,
         },
     }
 
@@ -608,7 +1064,9 @@ async def merge_jobs(request: MergeJobsRequest) -> dict[str, Any]:
     _job_store[new_job_id] = {
         "rows": merged_rows,
         "redfin_data": merged_redfin,
+        "polygon": [],
         "created_at": time.monotonic(),
+        "last_accessed": time.monotonic(),
     }
     return {"job_id": new_job_id}
 
@@ -622,24 +1080,92 @@ async def save_verification(job_id: str, request: VerificationRequest) -> dict[s
     rows = job.get("rows", [])
     verifications = request.verifications or {}
     potential_targets = request.potential_targets or {}
-    updates = 0
+    polygon = job.get("polygon", [])
 
+    def _normalize_verification(value: Any) -> str:
+        raw = str(value or "").strip().lower()
+        if raw == "yes":
+            return "Yes"
+        if raw == "no":
+            return "No"
+        return ""
+
+    def _normalize_target(value: Any) -> str:
+        raw = str(value or "").strip().lower()
+        return "Yes" if raw in {"1", "true", "yes", "y"} else ""
+
+    # Manual-save model: only persist tags if this session already exists in DB.
+    # Draw/analyze alone should not create persisted state.
+    if _session_exists(job_id):
+        try:
+            upsert_rows: dict[tuple[str, str, str], tuple[str, str, str, str, str]] = {}
+            delete_rows: set[tuple[str, str, str]] = set()
+
+            for row in rows:
+                account_num = str(row.get("account_num", "") or "").strip()
+                if not account_num:
+                    continue
+                county = _row_county(row)
+
+                verification_value = _normalize_verification(verifications.get(account_num, ""))
+                key_ver = (account_num, county, "verification")
+                if verification_value:
+                    upsert_rows[key_ver] = (job_id, account_num, county, "verification", verification_value)
+                else:
+                    delete_rows.add(key_ver)
+
+                target_value = _normalize_target(potential_targets.get(account_num, ""))
+                key_target = (account_num, county, "target")
+                if target_value:
+                    upsert_rows[key_target] = (job_id, account_num, county, "target", target_value)
+                else:
+                    delete_rows.add(key_target)
+
+            conn = get_session_conn()
+            try:
+                with conn.cursor() as cur:
+                    if upsert_rows:
+                        execute_values(
+                            cur,
+                            """
+                            INSERT INTO session_tags (session_id, account_num, county, tag_type, tag_value)
+                            VALUES %s
+                            ON CONFLICT (session_id, account_num, county, tag_type)
+                            DO UPDATE SET tag_value = EXCLUDED.tag_value, updated_at = now()
+                            """,
+                            list(upsert_rows.values()),
+                            template="(%s,%s,%s,%s,%s)",
+                            page_size=500,
+                        )
+                    if delete_rows:
+                        cur.executemany(
+                            """
+                            DELETE FROM session_tags
+                            WHERE session_id = %s
+                              AND account_num = %s
+                              AND county = %s
+                              AND tag_type = %s
+                            """,
+                            [(job_id, account_num, county, tag_type) for account_num, county, tag_type in delete_rows],
+                        )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                release_session_conn(conn)
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"Failed to persist verification tags: {exc}") from exc
+
+    updates = 0
     for row in rows:
         account_num = str(row.get("account_num", "") or "").strip()
-        raw_value = str(verifications.get(account_num, "") or "").strip().lower()
-        if raw_value == "yes":
-            normalized = "Yes"
-        elif raw_value == "no":
-            normalized = "No"
-        else:
-            normalized = ""
-
+        normalized = _normalize_verification(verifications.get(account_num, ""))
         if row.get("verified_vacant") != normalized:
             row["verified_vacant"] = normalized
             updates += 1
 
-        potential_raw = str(potential_targets.get(account_num, "") or "").strip().lower()
-        potential_value = "Yes" if potential_raw in {"1", "true", "yes", "y"} else ""
+        potential_value = _normalize_target(potential_targets.get(account_num, ""))
         if row.get("potential_target") != potential_value:
             row["potential_target"] = potential_value
             updates += 1
@@ -697,6 +1223,45 @@ async def download(job_id: str, filename: str | None = None) -> StreamingRespons
                 "HOA URL",
                 "Estimated Lot Size (sq ft)",
                 "Estimated Lot Size (acres)",
+                "Tax Agent Name",
+                "Tax Agent ID",
+                "Tax Agent Auth Protest",
+                "Tax Agent Auth Resolve",
+                "Tax Agent Mailings",
+                "Permit Count",
+                "Latest Permit Date",
+                "Latest Permit Type",
+                "Latest Permit Value",
+                "Protest Case Count",
+                "Latest Protest Year",
+                "Latest Protest Status",
+                "Latest Protest Final Market Value",
+                "Protest Active",
+                "Ag Type",
+                "Ag Acres",
+                "Ag Use Value",
+                "Ag Market Value",
+                "Deed Number",
+                "Deed Type",
+                "Deed Date",
+                "Land Type Code",
+                "Land Type Name",
+                "Property Use Code",
+                "Property Use Name",
+                "Class Code",
+                "Entity Codes",
+                "Commercial Flag",
+                "Pool Flag",
+                "Beds",
+                "Baths",
+                "Stories",
+                "Units",
+                "Current Market Value",
+                "Current Assessed Value",
+                "Current Ag Use Value",
+                "Current Ag Market Value",
+                "Current Ag Loss Value",
+                "Certified Total Value",
             ]
         )
         buffer.seek(0)
@@ -792,6 +1357,45 @@ async def download(job_id: str, filename: str | None = None) -> StreamingRespons
                     row.get("hoa_url", "") or "",
                     est_lot_sqft_csv,
                     est_lot_acres_csv,
+                    row.get("tax_agent_name", "") or "",
+                    row.get("tax_agent_id", "") or "",
+                    row.get("tax_agent_auth_protest", "") or "",
+                    row.get("tax_agent_auth_resolve", "") or "",
+                    row.get("tax_agent_mailings", "") or "",
+                    int(_safe_float(row.get("permit_count"))) if _safe_float(row.get("permit_count")) not in (None, 0.0) else "",
+                    row.get("latest_permit_date", "") or "",
+                    row.get("latest_permit_type", "") or "",
+                    round(_safe_float(row.get("latest_permit_value")), 0) if _safe_float(row.get("latest_permit_value")) is not None else "",
+                    int(_safe_float(row.get("protest_case_count"))) if _safe_float(row.get("protest_case_count")) not in (None, 0.0) else "",
+                    int(_safe_float(row.get("latest_protest_year"))) if _safe_float(row.get("latest_protest_year")) not in (None, 0.0) else "",
+                    row.get("latest_protest_status", "") or "",
+                    round(_safe_float(row.get("latest_protest_final_market")), 0) if _safe_float(row.get("latest_protest_final_market")) is not None else "",
+                    row.get("protest_active", "") or "",
+                    row.get("ag_type", "") or "",
+                    round(_safe_float(row.get("ag_acres")), 4) if _safe_float(row.get("ag_acres")) is not None else "",
+                    round(_safe_float(row.get("ag_value")), 0) if _safe_float(row.get("ag_value")) is not None else "",
+                    round(_safe_float(row.get("ag_market_value")), 0) if _safe_float(row.get("ag_market_value")) is not None else "",
+                    row.get("deed_num", "") or "",
+                    row.get("deed_type", "") or "",
+                    row.get("deed_date", "") or "",
+                    row.get("land_type_code", "") or "",
+                    row.get("land_type_name", "") or "",
+                    row.get("prop_use_code", "") or "",
+                    row.get("prop_use_name", "") or "",
+                    row.get("class_cd", "") or "",
+                    row.get("entity_codes", "") or "",
+                    row.get("commercial_flag", "") or "",
+                    row.get("pool_flag", "") or "",
+                    round(_safe_float(row.get("beds")), 1) if _safe_float(row.get("beds")) is not None else "",
+                    round(_safe_float(row.get("baths")), 1) if _safe_float(row.get("baths")) is not None else "",
+                    round(_safe_float(row.get("stories")), 1) if _safe_float(row.get("stories")) is not None else "",
+                    round(_safe_float(row.get("units")), 0) if _safe_float(row.get("units")) is not None else "",
+                    round(_safe_float(row.get("curr_market_value")), 0) if _safe_float(row.get("curr_market_value")) is not None else "",
+                    round(_safe_float(row.get("curr_assessed_value")), 0) if _safe_float(row.get("curr_assessed_value")) is not None else "",
+                    round(_safe_float(row.get("curr_ag_use_value")), 0) if _safe_float(row.get("curr_ag_use_value")) is not None else "",
+                    round(_safe_float(row.get("curr_ag_market_value")), 0) if _safe_float(row.get("curr_ag_market_value")) is not None else "",
+                    round(_safe_float(row.get("curr_ag_loss_value")), 0) if _safe_float(row.get("curr_ag_loss_value")) is not None else "",
+                    round(_safe_float(row.get("cert_total_value")), 0) if _safe_float(row.get("cert_total_value")) is not None else "",
                 ]
             )
             buffer.seek(0)
@@ -804,6 +1408,174 @@ async def download(job_id: str, filename: str | None = None) -> StreamingRespons
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="{download_name}"'},
     )
+
+
+def _cleanup_expired_sessions_sync() -> int:
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM analysis_sessions WHERE expires_at < now()")
+            deleted = cur.rowcount or 0
+        conn.commit()
+        return int(deleted)
+    finally:
+        release_session_conn(conn)
+
+
+async def _cleanup_expired_sessions_loop() -> None:
+    while True:
+        try:
+            deleted = await asyncio.to_thread(_cleanup_expired_sessions_sync)
+            if deleted:
+                print(f"[session] cleaned expired sessions: {deleted}")
+        except Exception as exc:
+            print(f"[session] cleanup failed: {exc}")
+        await asyncio.sleep(24 * 60 * 60)
+
+
+@app.on_event("startup")
+async def _startup_session_storage() -> None:
+    await asyncio.to_thread(_ensure_session_schema)
+    app.state.session_cleanup_task = asyncio.create_task(_cleanup_expired_sessions_loop())
+
+
+@app.on_event("shutdown")
+async def _shutdown_session_storage() -> None:
+    task = getattr(app.state, "session_cleanup_task", None)
+    if task is not None:
+        task.cancel()
+        with contextlib.suppress(Exception):
+            await task
+
+
+@app.get("/api/session/{session_id}")
+async def get_session(session_id: str) -> dict[str, Any]:
+    job = _get_job(session_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {
+        "session_id": session_id,
+        "job_id": session_id,
+        "parcel_count": len(job.get("rows", [])),
+        "restored": True,
+    }
+
+
+@app.get("/api/areas")
+async def list_saved_areas() -> dict[str, Any]:
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT area_id, name, polygon, created_at, updated_at
+                FROM saved_areas
+                ORDER BY created_at DESC
+                """
+            )
+            areas = [
+                {
+                    "area_id": row[0],
+                    "name": row[1],
+                    "polygon": row[2],
+                    "created_at": row[3].isoformat() if row[3] else None,
+                    "updated_at": row[4].isoformat() if row[4] else None,
+                }
+                for row in cur.fetchall()
+            ]
+    finally:
+        release_session_conn(conn)
+    return {"areas": areas}
+
+
+@app.post("/api/areas")
+async def create_saved_area(request: SavedAreaCreateRequest) -> dict[str, Any]:
+    name = str(request.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Area name is required")
+    if len(request.polygon) < 3:
+        raise HTTPException(status_code=400, detail="Polygon must have at least 3 points")
+
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO saved_areas (name, polygon)
+                VALUES (%s, %s)
+                RETURNING area_id, created_at, updated_at
+                """,
+                (name, Json(request.polygon)),
+            )
+            row = cur.fetchone()
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        release_session_conn(conn)
+
+    return {
+        "area_id": row[0],
+        "name": name,
+        "polygon": request.polygon,
+        "created_at": row[1].isoformat() if row[1] else None,
+        "updated_at": row[2].isoformat() if row[2] else None,
+    }
+
+
+@app.put("/api/areas/{area_id}")
+async def rename_saved_area(area_id: str, request: SavedAreaRenameRequest) -> dict[str, Any]:
+    name = str(request.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Area name is required")
+
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE saved_areas
+                SET name = %s, updated_at = now()
+                WHERE area_id = %s
+                RETURNING area_id, name, updated_at
+                """,
+                (name, area_id),
+            )
+            row = cur.fetchone()
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        release_session_conn(conn)
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="Saved area not found")
+    return {
+        "area_id": row[0],
+        "name": row[1],
+        "updated_at": row[2].isoformat() if row[2] else None,
+    }
+
+
+@app.delete("/api/areas/{area_id}")
+async def delete_saved_area(area_id: str) -> dict[str, Any]:
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM saved_areas WHERE area_id = %s", (area_id,))
+            deleted = cur.rowcount or 0
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        release_session_conn(conn)
+
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Saved area not found")
+    return {"ok": True, "deleted": int(deleted)}
 
 
 @app.get("/", include_in_schema=False)

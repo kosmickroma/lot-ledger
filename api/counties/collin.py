@@ -1,0 +1,325 @@
+# api/counties/collin.py
+#
+# Collin CAD county query and classification module.
+# Queries collin_parcels (PostGIS), applies exact polygon filtering, and returns
+# rows in the normalized shape expected by build_feature and CSV export.
+#
+# Connects to:
+#   api/config.py         - shared DB connection helpers
+#   api/geo.py            - polygon_bbox, point_in_polygon
+#   api/counties/dcad.py  - ParcelQueryResult and helper converters
+#   api/main.py           - called from analyze and parcel detail routes
+
+from __future__ import annotations
+
+import json
+import re
+from typing import Any
+
+from api.config import get_conn, release_conn
+from api.counties.dcad import ParcelQueryResult, _clean_text, _safe_float, _safe_int
+from api.geo import point_in_polygon, polygon_bbox
+
+
+# Collin uses PTAD-style state category codes.
+_COLLIN_MF_CODES = {"A3", "B1", "B2", "B3", "B4", "B6", "B9"}
+_COLLIN_VACANT_CODES = {"C1", "C2", "C3", "C4", "C5", "C6", "O"}
+_COLLIN_COMMERCIAL_CODES = {"F1", "F2", "F3", "F4", "F6", "F7", "F9", "M1", "M2", "M4", "M5"}
+_COLLIN_EXEMPT_CODES = {"D1", "D2", "D6", "J1A", "J2A", "J3A", "J4A", "J5", "J6A"}
+
+_GOV_KEYWORDS = [
+    "CITY OF ",
+    "COUNTY",
+    "STATE OF TEXAS",
+    "UNITED STATES",
+    " ISD",
+    "INDEPENDENT SCHOOL DISTRICT",
+    "COLLIN COLLEGE",
+]
+_HOA_KEYWORDS = ["HOMEOWNER", "OWNERS ASSOC", " HOA", "CIVIC ASSOC", "PROPERTY OWNERS"]
+
+
+def _collin_bbox_filter(min_lat: float, min_lng: float, max_lat: float, max_lng: float) -> list[dict[str, Any]]:
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    parcel_key,
+                    account_num,
+                    geo_id,
+                    owner_name,
+                    owner_address,
+                    owner_city,
+                    owner_state,
+                    owner_zip,
+                    property_address,
+                    property_city,
+                    property_zip,
+                    state_cd,
+                    state_cd_name,
+                    class_cd,
+                    subdivision,
+                    legal_descr,
+                    school_code,
+                    city_code,
+                    zoning,
+                    land_sqft,
+                    land_acres,
+                    living_area,
+                    year_built,
+                    land_value,
+                    improvement_value,
+                    total_value,
+                    cert_total_value,
+                    curr_market_value,
+                    curr_assessed_value,
+                    curr_ag_use_value,
+                    curr_ag_market_value,
+                    curr_ag_loss_value,
+                    deed_num,
+                    deed_type,
+                    deed_date,
+                    land_type_code,
+                    land_type_name,
+                    prop_use_code,
+                    prop_use_name,
+                    prop_type,
+                    prop_sub_type,
+                    commercial_flag,
+                    pool_flag,
+                    beds,
+                    baths,
+                    stories,
+                    units,
+                    protest_code,
+                    entity_codes,
+                    exemptions,
+                    exempt_homestead,
+                    tax_agent_id,
+                    tax_agent_name,
+                    tax_agent_auth_protest,
+                    tax_agent_auth_resolve,
+                    tax_agent_mailings,
+                    permit_count,
+                    latest_permit_date,
+                    latest_permit_type,
+                    latest_permit_value,
+                    protest_case_count,
+                    latest_protest_year,
+                    latest_protest_status,
+                    latest_protest_final_market,
+                    protest_active,
+                    ag_type,
+                    ag_acres,
+                    ag_value,
+                    ag_market_value,
+                    ST_AsGeoJSON(geom)::json AS polygon_geojson,
+                    ST_AsGeoJSON(centroid)::json AS centroid_json
+                FROM collin_parcels
+                WHERE ST_Intersects(centroid, ST_MakeEnvelope(%s, %s, %s, %s, 4326))
+                """,
+                (min_lng, min_lat, max_lng, max_lat),
+            )
+            cols = [desc[0] for desc in cur.description]
+            return [dict(zip(cols, row)) for row in cur.fetchall()]
+    finally:
+        release_conn(conn)
+
+
+def _centroid_from_geojson(centroid_json: Any) -> tuple[float | None, float | None]:
+    if isinstance(centroid_json, dict):
+        if centroid_json.get("type") == "Point":
+            coords = centroid_json.get("coordinates", [])
+            if len(coords) >= 2:
+                return _safe_float(coords[1]), _safe_float(coords[0])
+    if isinstance(centroid_json, str):
+        try:
+            obj = json.loads(centroid_json)
+            return _centroid_from_geojson(obj)
+        except Exception:
+            return None, None
+    return None, None
+
+
+def _split_exemption_tokens(value: Any) -> set[str]:
+    text = _clean_text(value).upper()
+    if not text:
+        return set()
+    # Collin stores comma-delimited tokens (HS,OV65,EX-XV...).
+    tokens = [t.strip() for t in re.split(r"[,;|/]", text) if t.strip()]
+    return set(tokens)
+
+
+def _is_full_exempt(row: dict[str, Any]) -> bool:
+    state_cd = _clean_text(row.get("sptd_code")).upper()
+    if state_cd.startswith("EX") or state_cd in _COLLIN_EXEMPT_CODES:
+        return True
+
+    for token in _split_exemption_tokens(row.get("exemptions")):
+        if token.startswith("EX"):
+            return True
+    return False
+
+
+def _classify_collin(row: dict[str, Any]) -> str:
+    code = _clean_text(row.get("sptd_code")).upper()
+    owner_up = _clean_text(row.get("owner_name")).upper()
+    tot_val = _safe_float(row.get("tot_val")) or 0.0
+
+    gov_match = any(kw in owner_up for kw in _GOV_KEYWORDS)
+    hoa_match = any(kw in owner_up for kw in _HOA_KEYWORDS)
+    non_target_owner = gov_match or (hoa_match and code not in {"A1", "A2", "A4", "A6", "A9"})
+    is_nominal = tot_val <= 500 and code in _COLLIN_VACANT_CODES
+
+    if _is_full_exempt(row) or non_target_owner or is_nominal:
+        return "exempt"
+    if code in _COLLIN_MF_CODES:
+        return "multifamily"
+    if code in _COLLIN_VACANT_CODES:
+        return "vacant"
+    if code in _COLLIN_COMMERCIAL_CODES:
+        return "commercial"
+    return "single_family"
+
+
+def _normalize_collin_row(raw: dict[str, Any]) -> dict[str, Any]:
+    sptd_code = _clean_text(raw.get("state_cd"))
+    land_val = _safe_float(raw.get("land_value"))
+    tot_val = _safe_float(raw.get("total_value"))
+
+    area_size = _safe_float(raw.get("land_sqft"))
+    if not area_size:
+        land_acres = _safe_float(raw.get("land_acres"))
+        if land_acres:
+            area_size = land_acres * 43560
+
+    property_address = _clean_text(raw.get("property_address")).upper()
+    if not property_address:
+        property_address = _clean_text(raw.get("legal_descr")).upper()
+
+    polygon_geojson = raw.get("polygon_geojson")
+    if isinstance(polygon_geojson, str):
+        try:
+            polygon_geojson = json.loads(polygon_geojson)
+        except Exception:
+            polygon_geojson = None
+
+    return {
+        "account_num": _clean_text(raw.get("account_num")),
+        "parcel_key": _clean_text(raw.get("parcel_key")),
+        "gis_parcel_id": _clean_text(raw.get("geo_id")),
+        "owner_name": _clean_text(raw.get("owner_name")),
+        "owner_address": _clean_text(raw.get("owner_address")),
+        "owner_city": _clean_text(raw.get("owner_city")),
+        "owner_state": _clean_text(raw.get("owner_state")),
+        "owner_zip": _clean_text(raw.get("owner_zip")),
+        "street_num": "",
+        "full_street_name": "",
+        "property_address": property_address,
+        "property_zip": _clean_text(raw.get("property_zip")),
+        "division_cd": "COLLIN",
+        "sptd_code": sptd_code,
+        "nbhd_cd": _clean_text(raw.get("subdivision")) or _clean_text(raw.get("city_code")),
+        "legal1": _clean_text(raw.get("legal_descr")),
+        "legal2": "",
+        "legal3": "",
+        "legal4": "",
+        "legal5": "",
+        "lat": _safe_float(raw.get("_lat")),
+        "lng": _safe_float(raw.get("_lng")),
+        "polygon_geojson": polygon_geojson,
+        "land_val": land_val,
+        "impr_val": _safe_float(raw.get("improvement_value")),
+        "tot_val": tot_val,
+        "isd_desc": _clean_text(raw.get("school_code")),
+        "yr_built": _safe_int(raw.get("year_built")),
+        "tot_living_area": _safe_float(raw.get("living_area")),
+        "tot_main_sf": _safe_float(raw.get("living_area")),
+        "zoning": _clean_text(raw.get("zoning")),
+        "front_dim": None,
+        "depth_dim": None,
+        "area_size": area_size,
+        "area_uom": "SQFT" if area_size else "",
+        "area_estimated": False,
+        "state_code": _clean_text(raw.get("state_cd_name")) or sptd_code,
+        "land_pct": round((land_val / tot_val) * 100, 1) if land_val and tot_val else None,
+        "hoa_name": "",
+        "hoa_url": "",
+        "verified_vacant": "",
+        "potential_target": "",
+        "county": "Collin",
+        "property_city": _clean_text(raw.get("property_city")),
+        "city_code": _clean_text(raw.get("city_code")),
+        "class_cd": _clean_text(raw.get("class_cd")),
+        "prop_use_code": _clean_text(raw.get("prop_use_code")),
+        "prop_use_name": _clean_text(raw.get("prop_use_name")),
+        "land_type_code": _clean_text(raw.get("land_type_code")),
+        "land_type_name": _clean_text(raw.get("land_type_name")),
+        "prop_type": _clean_text(raw.get("prop_type")),
+        "prop_sub_type": _clean_text(raw.get("prop_sub_type")),
+        "commercial_flag": _clean_text(raw.get("commercial_flag")),
+        "pool_flag": _clean_text(raw.get("pool_flag")),
+        "beds": _safe_float(raw.get("beds")),
+        "baths": _safe_float(raw.get("baths")),
+        "stories": _safe_float(raw.get("stories")),
+        "units": _safe_float(raw.get("units")),
+        "deed_num": _clean_text(raw.get("deed_num")),
+        "deed_type": _clean_text(raw.get("deed_type")),
+        "deed_date": _clean_text(raw.get("deed_date")),
+        "entity_codes": _clean_text(raw.get("entity_codes")),
+        "exemptions": _clean_text(raw.get("exemptions")),
+        "exempt_homestead": _clean_text(raw.get("exempt_homestead")),
+        "protest_code": _clean_text(raw.get("protest_code")),
+        "tax_agent_id": _clean_text(raw.get("tax_agent_id")),
+        "tax_agent_name": _clean_text(raw.get("tax_agent_name")),
+        "tax_agent_auth_protest": _clean_text(raw.get("tax_agent_auth_protest")),
+        "tax_agent_auth_resolve": _clean_text(raw.get("tax_agent_auth_resolve")),
+        "tax_agent_mailings": _clean_text(raw.get("tax_agent_mailings")),
+        "permit_count": _safe_int(raw.get("permit_count")),
+        "latest_permit_date": _clean_text(raw.get("latest_permit_date")),
+        "latest_permit_type": _clean_text(raw.get("latest_permit_type")),
+        "latest_permit_value": _safe_float(raw.get("latest_permit_value")),
+        "protest_case_count": _safe_int(raw.get("protest_case_count")),
+        "latest_protest_year": _safe_int(raw.get("latest_protest_year")),
+        "latest_protest_status": _clean_text(raw.get("latest_protest_status")),
+        "latest_protest_final_market": _safe_float(raw.get("latest_protest_final_market")),
+        "protest_active": _clean_text(raw.get("protest_active")),
+        "ag_type": _clean_text(raw.get("ag_type")),
+        "ag_acres": _safe_float(raw.get("ag_acres")),
+        "ag_value": _safe_float(raw.get("ag_value")),
+        "ag_market_value": _safe_float(raw.get("ag_market_value")),
+        "curr_market_value": _safe_float(raw.get("curr_market_value")),
+        "curr_assessed_value": _safe_float(raw.get("curr_assessed_value")),
+        "curr_ag_use_value": _safe_float(raw.get("curr_ag_use_value")),
+        "curr_ag_market_value": _safe_float(raw.get("curr_ag_market_value")),
+        "curr_ag_loss_value": _safe_float(raw.get("curr_ag_loss_value")),
+        "cert_total_value": _safe_float(raw.get("cert_total_value")),
+    }
+
+
+def query_collin_parcels(polygon: list[list[float]]) -> ParcelQueryResult:
+    min_lat, min_lng, max_lat, max_lng = polygon_bbox(polygon)
+    candidates = _collin_bbox_filter(min_lat, min_lng, max_lat, max_lng)
+
+    rows: list[dict[str, Any]] = []
+    exempt_set: set[str] = set()
+
+    for raw in candidates:
+        lat, lng = _centroid_from_geojson(raw.get("centroid_json"))
+        if lat is None or lng is None:
+            continue
+        if not point_in_polygon(lat, lng, polygon):
+            continue
+        raw["_lat"] = lat
+        raw["_lng"] = lng
+        normalized = _normalize_collin_row(raw)
+        if _is_full_exempt(normalized):
+            exempt_set.add(_clean_text(normalized.get("account_num")))
+        rows.append(normalized)
+
+    return ParcelQueryResult(parcels=rows, exempt_accounts=exempt_set)
+
+
+__all__ = ["query_collin_parcels", "_classify_collin", "_normalize_collin_row"]

@@ -455,9 +455,12 @@ def _build_land_detail_table() -> list[dict[str, object]]:
         depth_dim = _to_float(getattr(row, "DEPTH_DIM", None))
         # DCAD flat-price lots have AREA_SIZE=0 but populate FRONT_DIM/DEPTH_DIM.
         # Derive the lot area from dimensions so lot_acres is never "N/A" on these.
+        # Flag when area is estimated so this can be tracked through to export/UI.
+        area_estimated = False
         if (area_size is None or area_size <= 0) and front_dim and front_dim > 0 and depth_dim and depth_dim > 0:
             area_size = front_dim * depth_dim
             area_uom = "SQUARE FEET"
+            area_estimated = True
 
         rows.append(
             {
@@ -467,6 +470,7 @@ def _build_land_detail_table() -> list[dict[str, object]]:
                 "depth_dim": depth_dim,
                 "area_size": area_size,
                 "area_uom": area_uom,
+                "area_estimated": area_estimated,
             }
         )
 
@@ -517,7 +521,7 @@ def main() -> None:
     _upsert_rows("parcels", parcels_rows, "account_num", [col for col in parcels_rows[0] if col != "account_num"])
     _upsert_rows("appraisal", appraisal_rows, "account_num", ["land_val", "impr_val", "tot_val", "isd_desc", "sptd_code"])
     _upsert_rows("res_detail", res_detail_rows, "account_num", ["yr_built", "tot_living_area", "tot_main_sf"])
-    _upsert_rows("land_detail", land_detail_rows, "account_num", ["zoning", "front_dim", "depth_dim", "area_size", "area_uom"])
+    _upsert_rows("land_detail", land_detail_rows, "account_num", ["zoning", "front_dim", "depth_dim", "area_size", "area_uom", "area_estimated"])
     _upsert_rows("exempt_accounts", exempt_rows, "account_num", [])
 
     print("\nFinal row counts:")
