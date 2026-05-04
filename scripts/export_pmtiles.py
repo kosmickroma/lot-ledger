@@ -1,7 +1,7 @@
 # scripts/export_pmtiles.py
 #
 # Role:
-#   Export DCAD, TAD, and Collin parcel features from Postgres as
+#   Export DCAD, TAD, Collin, and Denton parcel features from Postgres as
 #   newline-delimited GeoJSON
 #   for PMTiles generation.
 #
@@ -11,7 +11,8 @@
 #   - tippecanoe CLI: this script prints the next command to run (does not execute it)
 #
 # Classification codes mirror api/counties/dcad.py:classify_parcel(),
-# api/counties/tad.py:_classify_tad(), and api/counties/collin.py:_classify_collin().
+# api/counties/tad.py:_classify_tad(), api/counties/collin.py:_classify_collin(),
+# and api/counties/denton.py:_classify_denton().
 
 from __future__ import annotations
 
@@ -226,6 +227,70 @@ SELECT feature FROM polygon_parcels
 """
 
 
+# Codes mirror _classify_denton() in api/counties/denton.py.
+# Includes primary-code split from comma-delimited state_cd and owner keyword
+# checks to keep PMTiles browse colors aligned with analyze route behavior.
+DENTON_EXPORT_SQL = """
+SELECT json_build_object(
+  'type', 'Feature',
+  'geometry', ST_AsGeoJSON(d.geom)::json,
+  'properties', json_build_object(
+    'account_num',           d.account_num,
+    'prop_type',             CASE
+      WHEN code IN ('D1', 'D2', 'E1', 'E4') THEN 'exempt'
+      WHEN owner_up LIKE '%CITY OF %'
+        OR owner_up LIKE '%COUNTY%'
+        OR owner_up LIKE '%STATE OF TEXAS%'
+        OR owner_up LIKE '%UNITED STATES%'
+        OR owner_up LIKE '% ISD%'
+        OR owner_up LIKE '%INDEPENDENT SCHOOL DISTRICT%'
+        OR owner_up LIKE '%COLLIN COLLEGE%'
+        OR (
+          (
+            owner_up LIKE '%HOMEOWNER%'
+            OR owner_up LIKE '%OWNERS ASSOC%'
+            OR owner_up LIKE '% HOA%'
+            OR owner_up LIKE '%CIVIC ASSOC%'
+            OR owner_up LIKE '%PROPERTY OWNERS%'
+          )
+          AND code NOT IN ('A1', 'A2', 'A3', 'A4', 'A5', 'A6', 'A9')
+        ) THEN 'exempt'
+      WHEN code IN ('B1', 'B2') THEN 'multifamily'
+      WHEN code IN ('C1', 'C2', 'C3', 'C5') THEN 'vacant'
+      WHEN code IN ('F1', 'F2', 'F3', 'J3', 'J5', 'OC1') THEN 'commercial'
+      WHEN code IN ('A1', 'A2', 'A3', 'A4', 'A5', 'A6', 'OA1', 'OA5') THEN 'single_family'
+      ELSE 'single_family'
+    END,
+    'situs_addr',            d.property_address,
+    'owner_name',            d.owner_name,
+    'appraised_val_current', COALESCE(d.total_value, 0),
+    'area_size',             COALESCE(d.land_sqft, d.land_acres * 43560, ST_Area(d.geom::geography) * 10.763910416709722, 0),
+    'area_estimated',        CASE
+                               WHEN COALESCE(d.land_sqft, 0) > 0 THEN false
+                               WHEN COALESCE(d.land_acres, 0) > 0 THEN false
+                               ELSE true
+                             END,
+    'source_county',         'denton'
+  )
+)::text AS feature
+FROM (
+  SELECT
+    p.account_num,
+    p.property_address,
+    p.owner_name,
+    p.total_value,
+    p.land_sqft,
+    p.land_acres,
+    p.geom,
+    UPPER(TRIM(SPLIT_PART(COALESCE(p.state_cd, ''), ',', 1))) AS code,
+    UPPER(COALESCE(p.owner_name, '')) AS owner_up
+  FROM denton_parcels p
+  WHERE p.geom IS NOT NULL
+    AND ST_IsValid(p.geom)
+) d
+"""
+
+
 def export_query_to_geojsonl(sql: str, output_path: Path, cursor_name: str) -> int:
     conn = get_conn()
     row_count = 0
@@ -252,16 +317,18 @@ def export_query_to_geojsonl(sql: str, output_path: Path, cursor_name: str) -> i
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Export DCAD, TAD, and Collin parcels to newline-delimited GeoJSON for PMTiles."
+    description="Export DCAD, TAD, Collin, and Denton parcels to newline-delimited GeoJSON for PMTiles."
     )
     parser.add_argument("--dcad-out", default="dcad.geojsonl")
     parser.add_argument("--tad-out", default="tad.geojsonl")
     parser.add_argument("--collin-out", default="collin.geojsonl")
+    parser.add_argument("--denton-out", default="denton.geojsonl")
     args = parser.parse_args()
 
     dcad_out = Path(args.dcad_out)
     tad_out = Path(args.tad_out)
     collin_out = Path(args.collin_out)
+    denton_out = Path(args.denton_out)
 
     print("Exporting DCAD...")
     dcad_count = export_query_to_geojsonl(DCAD_EXPORT_SQL, dcad_out, "dcad_export")
@@ -274,6 +341,10 @@ def main() -> None:
     print("Exporting Collin...")
     collin_count = export_query_to_geojsonl(COLLIN_EXPORT_SQL, collin_out, "collin_export")
     print(f"Collin export complete: {collin_out} ({collin_count:,} rows)")
+
+    print("Exporting Denton...")
+    denton_count = export_query_to_geojsonl(DENTON_EXPORT_SQL, denton_out, "denton_export")
+    print(f"Denton export complete: {denton_out} ({denton_count:,} rows)")
 
     print("\nNext — run tippecanoe (NOT executed by this script):")
     print(
@@ -288,7 +359,8 @@ def main() -> None:
         f"-f "
         f"-L '{{\"file\":\"{dcad_out}\",\"layer\":\"dcad\"}}' "
         f"-L '{{\"file\":\"{tad_out}\",\"layer\":\"tad\"}}' "
-        f"-L '{{\"file\":\"{collin_out}\",\"layer\":\"collin\"}}'"
+        f"-L '{{\"file\":\"{collin_out}\",\"layer\":\"collin\"}}' "
+        f"-L '{{\"file\":\"{denton_out}\",\"layer\":\"denton\"}}'"
     )
 
 

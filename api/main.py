@@ -34,6 +34,7 @@ from pydantic import BaseModel
 from api.config import get_conn, get_session_conn, get_settings, release_conn, release_session_conn
 from api.counties.collin import _classify_collin, _normalize_collin_row, query_collin_parcels
 from api.counties.dcad import SPTD_LABELS, _estimate_front_depth, build_feature, classify_parcel, query_parcels
+from api.counties.denton import _classify_denton, _normalize_denton_row, query_denton_parcels
 from api.counties.tad import _normalize_tad_row, _classify_tad, query_tad_parcels
 from api.geo import polygon_bbox
 from api.redfin import normalize_addr_key, pull_grid
@@ -124,6 +125,8 @@ def _counties_from_rows(rows: list[dict[str, Any]]) -> list[str]:
             seen.add("tad")
         elif division == "COLLIN":
             seen.add("collin")
+        elif division == "DENTON":
+            seen.add("denton")
         else:
             seen.add("dcad")
     return sorted(seen)
@@ -212,6 +215,8 @@ def _row_county(row: dict[str, Any]) -> str:
         return "tad"
     if division == "COLLIN":
         return "collin"
+    if division == "DENTON":
+        return "denton"
     return "dcad"
 
 
@@ -278,15 +283,17 @@ def _restore_job_from_session(session_id: str) -> dict[str, Any] | None:
         except Exception:
             return None
 
-    with ThreadPoolExecutor(max_workers=3) as executor:
+    with ThreadPoolExecutor(max_workers=4) as executor:
         dcad_future = executor.submit(_safe_query, query_parcels)
         tad_future = executor.submit(_safe_query, query_tad_parcels)
         collin_future = executor.submit(_safe_query, query_collin_parcels)
+        denton_future = executor.submit(_safe_query, query_denton_parcels)
         dcad_result = dcad_future.result()
         tad_result = tad_future.result()
         collin_result = collin_future.result()
+        denton_result = denton_future.result()
 
-    if dcad_result is None and tad_result is None and collin_result is None:
+    if dcad_result is None and tad_result is None and collin_result is None and denton_result is None:
         return None
 
     rows: list[dict[str, Any]] = []
@@ -296,6 +303,8 @@ def _restore_job_from_session(session_id: str) -> dict[str, Any] | None:
         rows.extend(tad_result.parcels)
     if collin_result:
         rows.extend(collin_result.parcels)
+    if denton_result:
+        rows.extend(denton_result.parcels)
 
     _apply_session_tags(session_id, rows)
     return {
@@ -709,6 +718,67 @@ def _fetch_collin_parcel_by_account(account_num: str) -> dict[str, Any] | None:
         release_conn(conn)
 
 
+def _fetch_denton_parcel_by_account(account_num: str) -> dict[str, Any] | None:
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    p.parcel_key,
+                    p.account_num,
+                    p.geo_id,
+                    p.owner_name,
+                    p.owner_address,
+                    p.owner_city,
+                    p.owner_state,
+                    p.owner_zip,
+                    p.property_address,
+                    p.property_city,
+                    p.property_zip,
+                    p.state_cd,
+                    p.exemptions,
+                    p.land_value,
+                    p.improvement_value,
+                    p.total_value,
+                    p.land_sqft,
+                    p.land_total_sqft,
+                    p.land_acres,
+                    p.living_area,
+                    p.year_built,
+                    p.isd_desc,
+                    p.entity_codes,
+                    p.deed_number,
+                    p.deed_date,
+                    p.legal_descr,
+                    p.subdivision,
+                    p.zoning,
+                    p.area_estimated,
+                    ST_Y(p.centroid) AS _lat,
+                    ST_X(p.centroid) AS _lng,
+                    ST_AsGeoJSON(p.geom)::json AS polygon_geojson,
+                    ST_Perimeter(ST_Transform(p.geom, 2276)) AS envelope_perimeter,
+                    ST_Area(ST_Transform(p.geom, 2276)) AS geom_area_sqft,
+                    ST_Area(ST_Transform(ST_OrientedEnvelope(p.geom), 2276)) AS envelope_area_sqft,
+                    ST_Perimeter(ST_Transform(p.geom, 2276)) AS envelope_perim_ft,
+                    ST_Area(ST_Transform(p.geom, 2276)) AS geom_sqft,
+                    ST_Area(ST_Transform(ST_OrientedEnvelope(p.geom), 2276)) / NULLIF(ST_Area(ST_Transform(p.geom, 2276)), 0) AS envelope_ratio
+                FROM denton_parcels p
+                WHERE p.account_num = %s
+                LIMIT 1
+                """,
+                (account_num,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            cols = [desc[0] for desc in cur.description]
+            raw = dict(zip(cols, row))
+            return _normalize_denton_row(raw)
+    finally:
+        release_conn(conn)
+
+
 def _find_dcad_near(lat: float, lng: float) -> str | None:
     """Return the closest DCAD account_num to (lat, lng) within ~440m (0.004°)."""
     conn = get_conn()
@@ -809,12 +879,49 @@ def _find_collin_near(lat: float, lng: float) -> str | None:
         release_conn(conn)
 
 
+def _find_denton_near(lat: float, lng: float) -> str | None:
+    """Return a Denton account_num whose polygon contains (lat, lng), or nearest centroid."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT account_num FROM denton_parcels
+                WHERE geom IS NOT NULL
+                  AND ST_Contains(geom, ST_SetSRID(ST_Point(%s, %s), 4326))
+                LIMIT 1
+                """,
+                (lng, lat),
+            )
+            row = cur.fetchone()
+            if row:
+                return row[0]
+            cur.execute(
+                """
+                SELECT account_num FROM denton_parcels
+                WHERE centroid IS NOT NULL
+                  AND ST_DWithin(
+                      centroid,
+                      ST_SetSRID(ST_Point(%s, %s), 4326),
+                      0.004
+                  )
+                ORDER BY ST_Distance(centroid, ST_SetSRID(ST_Point(%s, %s), 4326))
+                LIMIT 1
+                """,
+                (lng, lat, lng, lat),
+            )
+            row = cur.fetchone()
+            return row[0] if row else None
+    finally:
+        release_conn(conn)
+
+
 @app.get("/api/parcel/near")
 async def get_parcel_near(lat: float, lng: float) -> dict[str, Any]:
     """
     Nearest-parcel lookup by lat/lng coordinate.
     Used by address search to reliably find the parcel footprint at a geocoded point.
-    Tries DCAD, TAD, then Collin using polygon containment + centroid proximity.
+    Tries DCAD, TAD, Collin, then Denton using polygon containment + centroid proximity.
     Returns a GeoJSON Feature in the same shape as /api/parcel/{county}/{account_num}.
     """
     dcad_account = _find_dcad_near(lat, lng)
@@ -844,6 +951,15 @@ async def get_parcel_near(lat: float, lng: float) -> dict[str, Any]:
             feature["properties"]["source_county"] = "collin"
             return feature
 
+    denton_account = _find_denton_near(lat, lng)
+    if denton_account:
+        row = _fetch_denton_parcel_by_account(denton_account)
+        if row is not None:
+            prop_type = _classify_denton(row)
+            feature = build_feature(row, prop_type, False, None)
+            feature["properties"]["source_county"] = "denton"
+            return feature
+
     raise HTTPException(status_code=404, detail="No parcel found near this point")
 
 
@@ -860,8 +976,8 @@ async def get_parcel_detail(county: str, account_num: str) -> dict[str, Any]:
     GeoJSON feature in the same shape produced by /api/analyze.
     """
     county_key = county.strip().lower()
-    if county_key not in {"dcad", "tad", "collin"}:
-        raise HTTPException(status_code=400, detail="county must be 'dcad', 'tad', or 'collin'")
+    if county_key not in {"dcad", "tad", "collin", "denton"}:
+        raise HTTPException(status_code=400, detail="county must be 'dcad', 'tad', 'collin', or 'denton'")
 
     if county_key == "dcad":
         row, exempt_set = _fetch_dcad_parcel_by_account(account_num)
@@ -881,12 +997,21 @@ async def get_parcel_detail(county: str, account_num: str) -> dict[str, Any]:
         feature["properties"]["source_county"] = "tad"
         return feature
 
-    row = _fetch_collin_parcel_by_account(account_num)
+    if county_key == "collin":
+        row = _fetch_collin_parcel_by_account(account_num)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Parcel not found")
+        prop_type = _classify_collin(row)
+        feature = build_feature(row, prop_type, False, None)
+        feature["properties"]["source_county"] = "collin"
+        return feature
+
+    row = _fetch_denton_parcel_by_account(account_num)
     if row is None:
         raise HTTPException(status_code=404, detail="Parcel not found")
-    prop_type = _classify_collin(row)
+    prop_type = _classify_denton(row)
     feature = build_feature(row, prop_type, False, None)
-    feature["properties"]["source_county"] = "collin"
+    feature["properties"]["source_county"] = "denton"
     return feature
 
 
@@ -911,6 +1036,7 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
     dcad_result = None
     tad_result = None
     collin_result = None
+    denton_result = None
     redfin_fetch_ok = False
     failed_sources: list[str] = []
 
@@ -918,6 +1044,7 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
         asyncio.to_thread(query_parcels, polygon),
         asyncio.to_thread(query_tad_parcels, polygon),
         asyncio.to_thread(query_collin_parcels, polygon),
+        asyncio.to_thread(query_denton_parcels, polygon),
         return_exceptions=True,
     )
     if isinstance(raw_results[0], Exception):
@@ -932,6 +1059,10 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
         failed_sources.append("Collin")
     else:
         collin_result = raw_results[2]
+    if isinstance(raw_results[3], Exception):
+        failed_sources.append("Denton")
+    else:
+        denton_result = raw_results[3]
 
     # Never return silent partial county coverage; fail loudly instead.
     # Cancel any pending Redfin task before raising to avoid a dangling coroutine.
@@ -953,6 +1084,8 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
         all_rows.extend(tad_result.parcels)
     if collin_result:
         all_rows.extend(collin_result.parcels)
+    if denton_result:
+        all_rows.extend(denton_result.parcels)
 
     if not all_rows:
         if redfin_task is not None and not redfin_task.done():
@@ -978,6 +1111,7 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
                 "dcad_ok": dcad_result is not None,
                 "tad_ok": tad_result is not None,
                 "collin_ok": collin_result is not None,
+                "denton_ok": denton_result is not None,
             },
         }
 
@@ -1018,6 +1152,8 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
             prop_type = _classify_tad(row)
         elif row.get("division_cd") == "COLLIN":
             prop_type = _classify_collin(row)
+        elif row.get("division_cd") == "DENTON":
+            prop_type = _classify_denton(row)
         else:
             prop_type = classify_parcel(row, exempt_set)
 
@@ -1041,6 +1177,8 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
                 feature["properties"]["source_county"] = "tad"
             elif division_cd == "COLLIN":
                 feature["properties"]["source_county"] = "collin"
+            elif division_cd == "DENTON":
+                feature["properties"]["source_county"] = "denton"
             else:
                 feature["properties"]["source_county"] = "dcad"
             features.append(feature)
@@ -1077,6 +1215,7 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
             "dcad_ok": dcad_result is not None,
             "tad_ok": tad_result is not None,
             "collin_ok": collin_result is not None,
+            "denton_ok": denton_result is not None,
         },
     }
 
@@ -1314,6 +1453,13 @@ async def download(job_id: str, filename: str | None = None) -> StreamingRespons
                 "Current Ag Market Value",
                 "Current Ag Loss Value",
                 "Certified Total Value",
+                "Denton - Exemptions",
+                "Denton - Homestead (HS)",
+                "Denton - School District",
+                "Denton - Entity Codes",
+                "Denton - Deed Number",
+                "Denton - Deed Date",
+                "Denton - Subdivision",
             ]
         )
         buffer.seek(0)
@@ -1457,6 +1603,13 @@ async def download(job_id: str, filename: str | None = None) -> StreamingRespons
                     round(_safe_float(row.get("curr_ag_market_value")), 0) if _safe_float(row.get("curr_ag_market_value")) is not None else "",
                     round(_safe_float(row.get("curr_ag_loss_value")), 0) if _safe_float(row.get("curr_ag_loss_value")) is not None else "",
                     round(_safe_float(row.get("cert_total_value")), 0) if _safe_float(row.get("cert_total_value")) is not None else "",
+                    row.get("exemptions", "") or "",
+                    row.get("exempt_homestead", "") or "",
+                    row.get("isd_desc", "") or "",
+                    row.get("entity_codes", "") or "",
+                    row.get("deed_number", "") or "",
+                    row.get("deed_date", "") or "",
+                    row.get("subdivision", "") or "",
                 ]
             )
             buffer.seek(0)
