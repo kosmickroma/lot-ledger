@@ -23,8 +23,9 @@ ingest/
 *.db
 *.sqlite
 
-# Docs — internal notes, not for repo
-docs/
+# Docs — internal notes, not for repo (CODE_GUIDE.md is the exception)
+docs/*
+!docs/CODE_GUIDE.md
 
 # Render / deployment artifacts
 .render/

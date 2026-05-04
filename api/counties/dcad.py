@@ -14,8 +14,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 import math
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 import pandas as pd
 
@@ -254,8 +257,8 @@ def _fetch_hoa_lookup(parcels: list[dict[str, Any]]) -> dict[str, dict[str, str]
                 row[0]: {"hoa_name": row[1] or "", "hoa_url": row[2] or ""}
                 for row in cur.fetchall()
             }
-    except Exception:
-        # Table may not exist yet (load_hoa.py not run); degrade gracefully.
+    except Exception as exc:
+        logger.warning("HOA boundary lookup failed (table missing or query error): %s", exc)
         return {}
     finally:
         release_conn(conn)
