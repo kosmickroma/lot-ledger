@@ -143,7 +143,7 @@ function _browseRules(dataLayer) {
 
 const browseLayer = protomapsL.leafletLayer({
   url: PMTILES_URL,
-  paintRules: [..._browseRules("dcad"), ..._browseRules("tad")],
+  paintRules: [..._browseRules("dcad"), ..._browseRules("tad"), ..._browseRules("collin")],
   labelRules: [],
   minZoom: 14,
 });
