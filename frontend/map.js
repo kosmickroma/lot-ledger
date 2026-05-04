@@ -143,7 +143,7 @@ function _browseRules(dataLayer) {
 
 const browseLayer = protomapsL.leafletLayer({
   url: PMTILES_URL,
-  paintRules: [..._browseRules("dcad"), ..._browseRules("tad"), ..._browseRules("collin")],
+  paintRules: [..._browseRules("dcad"), ..._browseRules("tad"), ..._browseRules("collin"), ..._browseRules("denton")],
   labelRules: [],
   minZoom: 14,
 });
@@ -2117,7 +2117,7 @@ map.on("click", async (ev) => {
 
   const parcel = allFeatures.find(f => {
     const props = (f.feature && f.feature.props) || f.props || {};
-    return props.source_county === "dcad" || props.source_county === "tad" || props.source_county === "collin";
+    return props.source_county === "dcad" || props.source_county === "tad" || props.source_county === "collin" || props.source_county === "denton";
   });
   if (!parcel) return;
 
