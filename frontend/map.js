@@ -21,7 +21,7 @@ const COLORS = {
   multifamily: "#8e44ad",
   commercial: "#e67e22",
   exempt: "#95a5a6",
-  active: "#1f5f43",
+  active: "#D92228",
 };
 
 const BORDER_COLORS = {
@@ -31,7 +31,7 @@ const BORDER_COLORS = {
   multifamily: "#6c3483",
   commercial: "#d35400",
   exempt: "#7f8c8d",
-  active: "#153f2d",
+  active: "#a3161a",
 };
 
 // Browse layer — renders all county parcels from PMTiles file on GCS.
@@ -82,6 +82,7 @@ let lastAnalysisGeojson = null;
 
 const map = L.map("map", { zoomControl: true }).setView(DALLAS_CENTER, DEFAULT_ZOOM);
 const MAP_CANVAS_RENDERER = L.canvas();
+const MAP_SVG_RENDERER = L.svg();
 
 const streetLayer = L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
   attribution: "&copy; OpenStreetMap contributors &copy; CARTO",
@@ -234,6 +235,7 @@ let lastAnalysisCounts = null;
 let lastIncludedRedfin = false;
 let lastIncludedSold = false;
 let lastSoldPoints = [];
+let matchedSoldLabelPoints = [];
 let soldMarkers = [];
 let filterState = { ...DEFAULT_FILTERS };
 const verificationByAccount = new Map();
@@ -609,7 +611,10 @@ async function restoreSavedArea(area) {
     if (data.features.length <= BROWSE_ONLY_THRESHOLD) {
       const soldJoin = attachSoldCompsToFeatures(allAnalysisFeatures, lastSoldPoints);
       lastSoldPoints = soldJoin.unmatchedSoldPoints;
+      matchedSoldLabelPoints = soldJoin.matchedLabelPoints || [];
       data.sold_points = lastSoldPoints;
+    } else {
+      matchedSoldLabelPoints = [];
     }
     redfinLayerVisible = false;
     soldLayerVisible = Boolean(filterState.sold);
@@ -1451,7 +1456,21 @@ function attachSoldCompsToFeatures(features, soldPoints) {
   }
 
   const unmatchedSoldPoints = points.filter((point) => !matchedSoldKeys.has(soldPointMatchKey(point)));
-  return { unmatchedSoldPoints };
+  const matchedLabelPoints = [];
+  for (const feature of list) {
+    const p = feature?.properties || {};
+    if (!p.sold_comp) continue;
+    const lat = Number(p.lat);
+    const lng = Number(p.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+    matchedLabelPoints.push({
+      lat,
+      lng,
+      sold_price: p.sold_comp.sold_price,
+    });
+  }
+
+  return { unmatchedSoldPoints, matchedLabelPoints };
 }
 
 function renderSoldPoints(points) {
@@ -1475,6 +1494,23 @@ function renderSoldPoints(points) {
     }).bindPopup(() => makeSoldPopupHtml(point), { maxWidth: 300 }).addTo(soldLayer);
     soldMarkers.push({ marker, priceLabel: abbreviatePrice(point.sold_price) });
   });
+
+  // Matched sold comps are represented by gold parcel outlines. Create
+  // invisible anchor markers so zoomed sold price labels still render.
+  matchedSoldLabelPoints.forEach((point) => {
+    const marker = L.circleMarker([point.lat, point.lng], {
+      pane: "soldPane",
+      radius: 0,
+      stroke: false,
+      fill: false,
+      opacity: 0,
+      fillOpacity: 0,
+      interactive: false,
+      bubblingMouseEvents: false,
+    }).addTo(soldLayer);
+    soldMarkers.push({ marker, priceLabel: abbreviatePrice(point.sold_price) });
+  });
+
   refreshSoldPriceLabels();
 }
 
@@ -1558,10 +1594,10 @@ function renderFeatures(geojson) {
 
     let layer;
     if (renderCondoOutline) {
-      // Interactive so clicking the building outline shows the first unit's popup.
+      // Non-interactive visual outline for condo building footprints.
       L.geoJSON(feature, {
         renderer: MAP_CANVAS_RENDERER,
-        bubblingMouseEvents: false,
+        interactive: false,
         style: {
           color: parcelBorderColor,
           fill: false,
@@ -1569,14 +1605,12 @@ function renderFeatures(geojson) {
           opacity: 0.75,
         },
       })
-        .bindPopup(() => makePopupHtml(p), { maxWidth: 280 })
-        .on("click", applyBrush)
         .addTo(targetLayer);
     }
 
     if (renderPolygon) {
       layer = L.geoJSON(feature, {
-        renderer: MAP_CANVAS_RENDERER,
+        renderer: MAP_SVG_RENDERER,
         bubblingMouseEvents: false,
         style: {
           color: parcelBorderColor,
@@ -1602,7 +1636,7 @@ function renderFeatures(geojson) {
         return;
       }
       layer = L.circleMarker([p.lat, p.lng], {
-        renderer: MAP_CANVAS_RENDERER,
+        renderer: MAP_SVG_RENDERER,
         radius: p.on_redfin ? 7 : 5,
         fillColor: color,
         color: parcelBorderColor,
@@ -2303,7 +2337,10 @@ map.on("draw:created", async (e) => {
     if (data.features.length <= BROWSE_ONLY_THRESHOLD) {
       const soldJoin = attachSoldCompsToFeatures(allAnalysisFeatures, lastSoldPoints);
       lastSoldPoints = soldJoin.unmatchedSoldPoints;
+      matchedSoldLabelPoints = soldJoin.matchedLabelPoints || [];
       data.sold_points = lastSoldPoints;
+    } else {
+      matchedSoldLabelPoints = [];
     }
     renderSoldPoints(lastSoldPoints);
     document.getElementById("btn-draw-clear")?.classList.remove("hidden");
@@ -2368,6 +2405,7 @@ function clearDrawResults() {
   lastIncludedRedfin = false;
   lastIncludedSold = false;
   lastSoldPoints = [];
+  matchedSoldLabelPoints = [];
   document.getElementById("redfin-toggle-status").textContent = "";
   document.getElementById("sold-toggle-status").textContent = "";
   document.getElementById("sidebar-results")?.classList.add("hidden");
@@ -2566,7 +2604,10 @@ async function rerunWithSold() {
     if (Array.isArray(allAnalysisFeatures) && allAnalysisFeatures.length <= BROWSE_ONLY_THRESHOLD) {
       const soldJoin = attachSoldCompsToFeatures(allAnalysisFeatures, lastSoldPoints);
       lastSoldPoints = soldJoin.unmatchedSoldPoints;
+      matchedSoldLabelPoints = soldJoin.matchedLabelPoints || [];
       data.sold_points = lastSoldPoints;
+    } else {
+      matchedSoldLabelPoints = [];
     }
     soldLayerVisible = true;
     soldLayer.addTo(map);

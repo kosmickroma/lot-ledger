@@ -1389,6 +1389,7 @@ async def download(job_id: str, filename: str | None = None) -> StreamingRespons
 
     rows = job.get("rows", [])
     redfin_data: dict[str, dict] = job.get("redfin_data", {})
+    sold_points: list[dict[str, Any]] = job.get("sold_points", []) or []
 
     download_name = _normalize_csv_filename(filename)
 
@@ -1635,6 +1636,47 @@ async def download(job_id: str, filename: str | None = None) -> StreamingRespons
             yield buffer.getvalue()
             buffer.truncate(0)
             buffer.seek(0)
+
+        if sold_points:
+            writer.writerow([])
+            writer.writerow(
+                [
+                    "Sold Address",
+                    "Sold Price",
+                    "Sold Date",
+                    "Days on Market",
+                    "Lot Size (sq ft)",
+                    "Listing URL",
+                    "Source County",
+                ]
+            )
+            buffer.seek(0)
+            yield buffer.getvalue()
+            buffer.truncate(0)
+            buffer.seek(0)
+
+            sold_sorted = sorted(
+                sold_points,
+                key=lambda p: str(p.get("sold_date", "") or ""),
+                reverse=True,
+            )
+
+            for sold in sold_sorted:
+                writer.writerow(
+                    [
+                        sold.get("address", "") or "",
+                        round(_safe_float(sold.get("sold_price")), 0) if _safe_float(sold.get("sold_price")) is not None else "",
+                        sold.get("sold_date", "") or "",
+                        int(_safe_float(sold.get("dom"))) if _safe_float(sold.get("dom")) not in (None, 0.0) else "",
+                        round(_safe_float(sold.get("lot_sqft")), 0) if _safe_float(sold.get("lot_sqft")) is not None else "",
+                        sold.get("listing_url", "") or "",
+                        sold.get("source_county", "") or "",
+                    ]
+                )
+                buffer.seek(0)
+                yield buffer.getvalue()
+                buffer.truncate(0)
+                buffer.seek(0)
 
     return StreamingResponse(
         generate_csv(),
