@@ -238,6 +238,7 @@ let lastSoldPoints = [];
 let lastSoldPanelPoints = [];
 let matchedSoldLabelPoints = [];
 let soldMarkers = [];
+let transientSoldSidebarPopup = null;
 let soldCompsSortMode = "price";
 let soldCompsCollapsed = true;
 let filterState = { ...DEFAULT_FILTERS };
@@ -394,6 +395,12 @@ function soldPointKey(point) {
   return String(point?.listing_url || `${point?.lat},${point?.lng},${point?.sold_date || ""}`);
 }
 
+function closeTransientSoldSidebarPopup() {
+  if (!transientSoldSidebarPopup) return;
+  map.closePopup(transientSoldSidebarPopup);
+  transientSoldSidebarPopup = null;
+}
+
 function findMatchedFeatureForSoldPoint(point) {
   if (!Array.isArray(allAnalysisFeatures) || !allAnalysisFeatures.length) return null;
   const listingUrl = String(point?.listing_url || "");
@@ -421,7 +428,8 @@ function zoomToSoldComp(point) {
     opened = true;
     if (!matchedFeature) return;
     const p = matchedFeature.properties || {};
-    L.popup({ autoPan: false })
+    closeTransientSoldSidebarPopup();
+    transientSoldSidebarPopup = L.popup({ autoPan: false })
       .setLatLng([lat, lng])
       .setContent(makePopupHtml(p))
       .openOn(map);
@@ -2439,6 +2447,7 @@ async function persistTagStateForExport() {
 }
 
 map.on("draw:created", async (e) => {
+  closeTransientSoldSidebarPopup();
   map.getContainer().classList.remove("drawing-active");
   drawLayer.clearLayers();
   PARCEL_LAYER_KEYS.forEach((key) => parcelTypeLayers[key]?.clearLayers());
@@ -2562,6 +2571,7 @@ map.on("draw:created", async (e) => {
 });
 
 function clearDrawResults() {
+  closeTransientSoldSidebarPopup();
   viewportRenderMode = false;
   allAnalysisFeatures = null;
   clearTimeout(_vpRenderTimeout);
@@ -2620,6 +2630,11 @@ map.on("contextmenu", () => {
   if (handler && handler.enabled()) {
     handler.completeShape();
   }
+});
+
+// Sidebar-triggered sold popups should dismiss once the map is moved away.
+map.on("movestart", () => {
+  closeTransientSoldSidebarPopup();
 });
 
 document.addEventListener("keydown", (event) => {
