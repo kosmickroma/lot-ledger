@@ -47,11 +47,11 @@ const TYPE_LABELS = {
   off_market: "Off Market",
 };
 
-const SOLD_MARKER_COLOR = "#c9a24f";
-const SOLD_MARKER_BORDER = "#8e6f2c";
-const SOLD_OUTLINE_COLOR = "#FFD700";
-const SOLD_FALLBACK_DOT_COLOR = "#4B0082";
-const SOLD_FALLBACK_DOT_BORDER = "#312e81";
+const SOLD_MARKER_COLOR = "#d4af37";
+const SOLD_MARKER_BORDER = "#8b6b1f";
+const SOLD_OUTLINE_COLOR = "#d4af37";
+const SOLD_FALLBACK_DOT_COLOR = "#004225";
+const SOLD_FALLBACK_DOT_BORDER = "#d4af37";
 const FILTER_STORAGE_KEY = "lotledger.map.filters.v1";
 
 const DEFAULT_FILTERS = {
@@ -244,6 +244,22 @@ let soldCompsCollapsed = true;
 let soldCompsFilter = { dateWindow: "1yr", prices: null, yearBuilts: null };
 let allSoldPointsRef = [];
 let filterState = { ...DEFAULT_FILTERS };
+const SOLD_PRICE_BUCKETS = ["u200", "200-400", "400-800", "800-1000", "1000-3000", "3000+"];
+const SOLD_PRICE_LABELS = {
+  "u200": "<$200K",
+  "200-400": "$200-400K",
+  "400-800": "$400-800K",
+  "800-1000": "$800K-1M",
+  "1000-3000": "$1M-3M",
+  "3000+": "$3M+",
+};
+const SOLD_YEAR_BUCKETS = ["pre1960", "1960-1980", "1980-2000", "2000+"];
+const SOLD_YEAR_LABELS = {
+  "pre1960": "<1960",
+  "1960-1980": "1960-80",
+  "1980-2000": "1980-2000",
+  "2000+": "2000+",
+};
 const verificationByAccount = new Map();
 const potentialTargetByAccount = new Map();
 const verificationBadgeMarkers = new Map();
@@ -326,6 +342,26 @@ function classifyFeatureForFilter(feature) {
 function isFeatureVisible(feature) {
   const bucket = classifyFeatureForFilter(feature);
   return Boolean(filterState[bucket]);
+}
+
+function getVisibleFeatureCounts(features) {
+  const counts = {
+    active: 0,
+    off_market: 0,
+    vacant: 0,
+    multifamily: 0,
+    commercial: 0,
+    exempt: 0,
+  };
+
+  const list = Array.isArray(features) ? features : [];
+  list.forEach((feature) => {
+    const bucket = classifyFeatureForFilter(feature);
+    if (!(bucket in counts) || !isFeatureVisible(feature)) return;
+    counts[bucket] += 1;
+  });
+
+  return counts;
 }
 
 function abbreviatePrice(value) {
@@ -454,9 +490,10 @@ function _getSoldCompsFilterCutoff() {
 function _getSoldPriceBucket(price) {
   if (price < 200_000) return "u200";
   if (price < 400_000) return "200-400";
-  if (price < 600_000) return "400-600";
-  if (price < 800_000) return "600-800";
-  return "800+";
+  if (price < 800_000) return "400-800";
+  if (price < 1_000_000) return "800-1000";
+  if (price < 3_000_000) return "1000-3000";
+  return "3000+";
 }
 
 function _getYearBuiltBucket(yr) {
@@ -484,18 +521,80 @@ function _soldPointPassesFilter(p, cutoff, prices, yearBuilts) {
   return true;
 }
 
+function soldCompsFiltersAreActive() {
+  return soldCompsFilter.prices !== null
+    || soldCompsFilter.yearBuilts !== null
+    || soldCompsFilter.dateWindow !== "1yr";
+}
+
+function updateMatchedSoldCompVisibility(cutoff, prices, yearBuilts) {
+  const features = Array.isArray(allAnalysisFeatures) ? allAnalysisFeatures : [];
+  const nextMatchedLabelPoints = [];
+
+  features.forEach((feature) => {
+    const props = feature?.properties;
+    if (!props) return;
+
+    const source = props._sold_comp_source;
+    if (!source || !_soldPointPassesFilter(source, cutoff, prices, yearBuilts)) {
+      delete props.sold_comp;
+      return;
+    }
+
+    props.sold_comp = { ...source };
+    const lat = Number(props.lat);
+    const lng = Number(props.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+    nextMatchedLabelPoints.push({
+      lat,
+      lng,
+      sold_price: source.sold_price,
+      sold_date: source.sold_date,
+    });
+  });
+
+  matchedSoldLabelPoints = nextMatchedLabelPoints;
+}
+
+function updateSoldStatusText() {
+  const soldStatus = document.getElementById("sold-toggle-status");
+  if (!soldStatus) return;
+  if (!filterState.sold) {
+    soldStatus.textContent = "Sold comps hidden";
+    return;
+  }
+
+  const filteredCount = lastSoldPanelPoints.length;
+  const totalCount = allSoldPointsRef.length;
+  if (soldCompsFiltersAreActive() && filteredCount < totalCount) {
+    soldStatus.textContent = `${filteredCount} of ${totalCount} sold comps found`;
+    return;
+  }
+
+  soldStatus.textContent = `${filteredCount} sold comp${filteredCount !== 1 ? "s" : ""} found`;
+}
+
 function applyAndRenderSoldFilters() {
   const { prices, yearBuilts } = soldCompsFilter;
   const cutoff = _getSoldCompsFilterCutoff();
   lastSoldPanelPoints = allSoldPointsRef.filter((p) =>
     _soldPointPassesFilter(p, cutoff, prices, yearBuilts)
   );
+  updateMatchedSoldCompVisibility(cutoff, prices, yearBuilts);
   // Re-render map dots respecting filters (renderSoldPoints clears layer if sold is off)
   const filteredMap = lastSoldPoints.filter((p) =>
     _soldPointPassesFilter(p, cutoff, prices, yearBuilts)
   );
   renderSoldPoints(filteredMap);
+  if (lastAnalysisGeojson && Array.isArray(lastAnalysisGeojson.features) && lastAnalysisGeojson.features.length <= BROWSE_ONLY_THRESHOLD) {
+    if (viewportRenderMode) {
+      renderViewportFeatures();
+    } else {
+      renderFeatures(lastAnalysisGeojson);
+    }
+  }
   renderSoldCompsPanel();
+  updateSoldStatusText();
 }
 
 // --- End sold comps filter helpers ---
@@ -551,21 +650,16 @@ function renderSoldCompsPanel() {
     .slice(0, 5);
 
   // --- Filter bar ---
-  const ALL_PRICE_BUCKETS = ["u200", "200-400", "400-600", "600-800", "800+"];
-  const PRICE_LABELS = { "u200": "<$200K", "200-400": "$200–400K", "400-600": "$400–600K", "600-800": "$600–800K", "800+": "$800K+" };
-  const ALL_YEAR_BUCKETS = ["pre1960", "1960-1980", "1980-2000", "2000+"];
-  const YEAR_LABELS = { "pre1960": "<1960", "1960-1980": "1960–80", "1980-2000": "1980–2000", "2000+": "2000+" };
-
   const datePills = ["3mo", "6mo", "1yr", "2yr", "all"].map((dw) =>
     `<button type="button" class="sold-sort-btn${soldCompsFilter.dateWindow === dw ? " active" : ""}" data-date-window="${dw}">${dw === "all" ? "All" : dw}</button>`
   ).join("");
-  const pricePills = ALL_PRICE_BUCKETS.map((b) => {
+  const pricePills = SOLD_PRICE_BUCKETS.map((b) => {
     const isActive = soldCompsFilter.prices === null || soldCompsFilter.prices.has(b);
-    return `<button type="button" class="sold-sort-btn${isActive ? " active" : ""}" data-price-bucket="${b}">${PRICE_LABELS[b]}</button>`;
+    return `<button type="button" class="sold-sort-btn${isActive ? " active" : ""}" data-price-bucket="${b}">${SOLD_PRICE_LABELS[b]}</button>`;
   }).join("");
-  const yearPills = ALL_YEAR_BUCKETS.map((b) => {
+  const yearPills = SOLD_YEAR_BUCKETS.map((b) => {
     const isActive = soldCompsFilter.yearBuilts === null || soldCompsFilter.yearBuilts.has(b);
-    return `<button type="button" class="sold-sort-btn${isActive ? " active" : ""}" data-year-bucket="${b}">${YEAR_LABELS[b]}</button>`;
+    return `<button type="button" class="sold-sort-btn${isActive ? " active" : ""}" data-year-bucket="${b}">${SOLD_YEAR_LABELS[b]}</button>`;
   }).join("");
   const filterBar = `
     <div class="sold-filter-bar">
@@ -575,8 +669,7 @@ function renderSoldCompsPanel() {
     </div>`;
   // --- End filter bar ---
 
-  const isFiltered = soldCompsFilter.prices !== null || soldCompsFilter.yearBuilts !== null || soldCompsFilter.dateWindow !== "1yr";
-  const countLabel = isFiltered
+  const countLabel = soldCompsFiltersAreActive()
     ? `${lastSoldPanelPoints.length} of ${allSoldPointsRef.length} comps`
     : `${lastSoldPanelPoints.length} comps`;
 
@@ -626,7 +719,7 @@ function renderSoldCompsPanel() {
     });
   });
 
-  const ALL_PRICE_BUCKET_SET = new Set(["u200", "200-400", "400-600", "600-800", "800+"]);
+  const ALL_PRICE_BUCKET_SET = new Set(SOLD_PRICE_BUCKETS);
   panel.querySelectorAll("[data-price-bucket]").forEach((btn) => {
     btn.addEventListener("click", () => {
       const b = btn.dataset.priceBucket;
@@ -646,7 +739,7 @@ function renderSoldCompsPanel() {
     });
   });
 
-  const ALL_YEAR_BUCKET_SET = new Set(["pre1960", "1960-1980", "1980-2000", "2000+"]);
+  const ALL_YEAR_BUCKET_SET = new Set(SOLD_YEAR_BUCKETS);
   panel.querySelectorAll("[data-year-bucket]").forEach((btn) => {
     btn.addEventListener("click", () => {
       const b = btn.dataset.yearBucket;
@@ -939,11 +1032,7 @@ async function restoreSavedArea(area) {
     applyAndRenderSoldFilters();
 
     const soldStatus = document.getElementById("sold-toggle-status");
-    if (soldStatus) {
-      soldStatus.textContent = filterState.sold
-        ? `${lastSoldPanelPoints.length} sold comp${lastSoldPanelPoints.length !== 1 ? "s" : ""} found`
-        : "";
-    }
+    if (soldStatus) updateSoldStatusText();
 
     let markers;
     if (data.features.length > BROWSE_ONLY_THRESHOLD) {
@@ -1581,12 +1670,7 @@ function applyMapVisibilityFilters() {
     }
   }
 
-  const soldStatus = document.getElementById("sold-toggle-status");
-  if (soldStatus) {
-    soldStatus.textContent = filterState.sold
-      ? `${lastSoldPanelPoints.length} sold comp${lastSoldPanelPoints.length !== 1 ? "s" : ""} found`
-      : "Sold comps hidden";
-  }
+  updateSoldStatusText();
 }
 
 loadFilters();
@@ -1797,7 +1881,7 @@ function makeSoldPopupHtml(point) {
   return `
       <div class="popup">
         <div class="popup-addr">${point.address || "Unknown address"}</div>
-        <div class="popup-status" style="color:${SOLD_MARKER_COLOR};">SOLD COMP</div>
+        <div class="popup-status sold-popup-status" style="color:${SOLD_MARKER_COLOR};">SOLD COMP</div>
         <table class="popup-table">
           ${row("Sold Price", price)}
           ${row("Sold Date", soldDate)}
@@ -1891,6 +1975,7 @@ function attachSoldCompsToFeatures(features, soldPoints) {
   list.forEach((feature) => {
     if (!feature?.properties) return;
     delete feature.properties.sold_comp;
+    delete feature.properties._sold_comp_source;
   });
 
   const polygonCandidates = [];
@@ -1916,14 +2001,16 @@ function attachSoldCompsToFeatures(features, soldPoints) {
       const b = candidate.bounds;
       if (lng < b.minLng || lng > b.maxLng || lat < b.minLat || lat > b.maxLat) continue;
       if (!pointInPolygonGeometry(pointLngLat, candidate.geometry)) continue;
-      if (!candidate.feature.properties.sold_comp) {
-        candidate.feature.properties.sold_comp = {
+      if (!candidate.feature.properties._sold_comp_source) {
+        candidate.feature.properties._sold_comp_source = {
           sold_price: point.sold_price,
           sold_date: point.sold_date,
+          yr_built: point.yr_built,
           dom: point.dom,
           lot_sqft: point.lot_sqft,
           listing_url: point.listing_url,
         };
+        candidate.feature.properties.sold_comp = { ...candidate.feature.properties._sold_comp_source };
       }
       matchedSoldKeys.add(key);
       break;
@@ -2203,14 +2290,17 @@ function renderSidebar(counts, markers) {
   document.getElementById("sidebar-results").classList.remove("hidden");
 
   const countsPanel = document.getElementById("counts-panel");
-  countsPanel.innerHTML = Object.entries({
-    active: counts.active,
-    off_market: counts.off_market,
-    vacant: counts.vacant,
-    multifamily: counts.multifamily,
-    commercial: counts.commercial,
-    exempt: counts.exempt,
-  })
+  const visibleCounts = Array.isArray(allAnalysisFeatures) && allAnalysisFeatures.length
+    ? getVisibleFeatureCounts(allAnalysisFeatures)
+    : {
+      active: counts.active,
+      off_market: counts.off_market,
+      vacant: counts.vacant,
+      multifamily: counts.multifamily,
+      commercial: counts.commercial,
+      exempt: counts.exempt,
+    };
+  countsPanel.innerHTML = Object.entries(visibleCounts)
     .filter(([, v]) => v > 0)
     .map(
       ([key, val]) => `
@@ -2868,11 +2958,7 @@ map.on("draw:created", async (e) => {
     }
     renderSidebar(data.counts, markers);
     const soldStatus = document.getElementById("sold-toggle-status");
-    if (soldStatus) {
-      soldStatus.textContent = filterState.sold
-        ? `${lastSoldPanelPoints.length} sold comp${lastSoldPanelPoints.length !== 1 ? "s" : ""} found`
-        : "";
-    }
+    if (soldStatus) updateSoldStatusText();
   } catch (err) {
     if (isAbortError(err) || !isActiveAnalysisRequest(analysisRequest.requestId)) return;
     console.error("[draw:created] Analysis failed:", err);
@@ -3132,9 +3218,7 @@ async function rerunWithSold() {
       if (lastAnalysisCounts) renderSidebar(lastAnalysisCounts, markers);
     }
 
-    if (statusEl) {
-      statusEl.textContent = `${lastSoldPanelPoints.length} sold comp${lastSoldPanelPoints.length !== 1 ? "s" : ""} found`;
-    }
+    if (statusEl) updateSoldStatusText();
   } catch (err) {
     if (statusEl) statusEl.textContent = "Sold comps unavailable";
     console.error("Sold re-fetch failed", err);
