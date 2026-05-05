@@ -71,11 +71,14 @@ const FILTER_INPUT_IDS = {
   exempt: "filter-exempt",
 };
 
+const PARCEL_LAYER_KEYS = ["active", "off_market", "vacant", "multifamily", "commercial", "exempt"];
+
 // Analysis state is initialized early because zoom-nudge logic references it
 // during startup before the rest of the module wiring runs.
 let lastAnalysisGeojson = null;
 
 const map = L.map("map", { zoomControl: true }).setView(DALLAS_CENTER, DEFAULT_ZOOM);
+const MAP_CANVAS_RENDERER = L.canvas();
 
 const streetLayer = L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
   attribution: "&copy; OpenStreetMap contributors &copy; CARTO",
@@ -202,6 +205,9 @@ let maskLayer = L.layerGroup().addTo(map);
 let markerLayer = L.layerGroup().addTo(map);
 let redfinLayer = L.layerGroup().addTo(map);
 let soldLayer = L.layerGroup().addTo(map);
+const parcelTypeLayers = Object.fromEntries(
+  PARCEL_LAYER_KEYS.map((key) => [key, L.layerGroup().addTo(markerLayer)])
+);
 const redfinToggleInput = document.getElementById("toggle-redfin");
 let redfinLayerVisible = false;
 let soldLayerVisible = true;
@@ -235,7 +241,7 @@ let activeBrush = null;
 let allAnalysisFeatures = null;   // full feature set from last analysis
 let viewportRenderMode = false;   // true when feature count exceeds render threshold
 let _vpRenderTimeout = null;      // debounce handle for viewport re-render
-const LARGE_DRAW_THRESHOLD = 2500;  // viewport-only rendering above this count
+const LARGE_DRAW_THRESHOLD = 500;  // viewport-only rendering above this count
 const BROWSE_ONLY_THRESHOLD = 30000; // skip all polygon rendering above this; use browse layer
 let _analysisRequestSeq = 0;
 let _activeAnalysisRequestId = 0;
@@ -324,7 +330,7 @@ function abbreviatePrice(value) {
 
 function refreshSoldPriceLabels() {
   soldMarkers.forEach(({ marker }) => marker.unbindTooltip());
-  if (!soldLayerVisible || map.getZoom() <= 15) return;
+  if (!soldLayerVisible || map.getZoom() < 16) return;
 
   const maxLabels = map.getZoom() >= 18 ? 220 : map.getZoom() >= 17 ? 140 : 80;
   const cellPx = map.getZoom() >= 18 ? 20 : map.getZoom() >= 17 ? 26 : 34;
@@ -1035,16 +1041,21 @@ sidebarToggleBtn.addEventListener("click", () => {
 });
 
 function applyMapVisibilityFilters() {
+  PARCEL_LAYER_KEYS.forEach((key) => {
+    const layer = parcelTypeLayers[key];
+    if (!layer) return;
+    if (Boolean(filterState[key])) {
+      if (!markerLayer.hasLayer(layer)) markerLayer.addLayer(layer);
+    } else if (markerLayer.hasLayer(layer)) {
+      markerLayer.removeLayer(layer);
+    }
+  });
+
   soldLayerVisible = Boolean(filterState.sold);
   if (soldLayerVisible) soldLayer.addTo(map);
   else map.removeLayer(soldLayer);
 
   renderSoldPoints(lastSoldPoints);
-
-  if (lastAnalysisGeojson) {
-    const markers = renderFeatures(lastAnalysisGeojson);
-    if (lastAnalysisCounts) renderSidebar(lastAnalysisCounts, markers);
-  }
 
   const soldStatus = document.getElementById("sold-toggle-status");
   if (soldStatus) {
@@ -1072,6 +1083,8 @@ document.getElementById("btn-filters-reset")?.addEventListener("click", () => {
   syncFilterInputs();
   applyMapVisibilityFilters();
 });
+
+applyMapVisibilityFilters();
 
 function isRedfinVisualActive(feature) {
   return Boolean(feature?.properties?.on_redfin);
@@ -1275,7 +1288,7 @@ function renderSoldPoints(points) {
 }
 
 function renderFeatures(geojson) {
-  markerLayer.clearLayers();
+  PARCEL_LAYER_KEYS.forEach((key) => parcelTypeLayers[key]?.clearLayers());
   redfinLayer.clearLayers();
   verificationBadgeLayer.clearLayers();
   targetBadgeLayer.clearLayers();
@@ -1286,8 +1299,9 @@ function renderFeatures(geojson) {
   const accountRenderedAsPolygon = new Set(); // accounts that got a polygon fill — no dot needed
   const markers = {};
   geojson.features.forEach((feature) => {
-    if (!isFeatureVisible(feature)) return;
     const p = feature.properties;
+    const bucket = classifyFeatureForFilter(feature);
+    const targetLayer = parcelTypeLayers[bucket] || markerLayer;
     const color = getColor(feature);
     const borderColor = getBorderColor(feature);
     if (p.lat == null || p.lng == null) return;
@@ -1344,14 +1358,15 @@ function renderFeatures(geojson) {
       renderTargetBadge(p.account_num, p.lat, p.lng);
     }
 
-    // Polygon outlines always stay in markerLayer. Redfin centroid markers are
-    // shown on redfinLayer only when the source toggle is enabled.
-    const circleLayer = markerLayer;
+    // Route each parcel to a stable per-type layer so filter toggles can
+    // show/hide layers without rebuilding all geometries.
+    const circleLayer = targetLayer;
 
     let layer;
     if (renderCondoOutline) {
       // Interactive so clicking the building outline shows the first unit's popup.
       L.geoJSON(feature, {
+        renderer: MAP_CANVAS_RENDERER,
         style: {
           color: borderColor,
           fill: false,
@@ -1361,11 +1376,12 @@ function renderFeatures(geojson) {
       })
         .bindPopup(() => makePopupHtml(p), { maxWidth: 280 })
         .on("click", applyBrush)
-        .addTo(markerLayer);
+        .addTo(targetLayer);
     }
 
     if (renderPolygon) {
       layer = L.geoJSON(feature, {
+        renderer: MAP_CANVAS_RENDERER,
         style: {
           color: borderColor,
           fillColor: color,
@@ -1375,7 +1391,7 @@ function renderFeatures(geojson) {
         },
       }).bindPopup(() => makePopupHtml(p), { maxWidth: 280 });
       layer.on("click", applyBrush);
-      layer.addTo(markerLayer);
+      layer.addTo(targetLayer);
       // No circle marker rendered when polygon geometry exists — polygon fill IS the click target.
       if (p.account_num) accountRenderedAsPolygon.add(p.account_num);
     } else {
@@ -1390,6 +1406,7 @@ function renderFeatures(geojson) {
         return;
       }
       layer = L.circleMarker([p.lat, p.lng], {
+        renderer: MAP_CANVAS_RENDERER,
         radius: p.on_redfin ? 7 : 5,
         fillColor: color,
         color: borderColor,
@@ -2124,7 +2141,7 @@ function clearDrawResults() {
   drawLayer.clearLayers();
   maskLayer.clearLayers();
   if (!map.hasLayer(browseLayer)) browseLayer.addTo(map);
-  markerLayer.clearLayers();
+  PARCEL_LAYER_KEYS.forEach((key) => parcelTypeLayers[key]?.clearLayers());
   redfinLayer.clearLayers();
   soldLayer.clearLayers();
   verificationBadgeLayer.clearLayers();
