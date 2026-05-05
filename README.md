@@ -179,9 +179,15 @@ Never share your `.env` file or `credentials.json`. Do not commit them to GitHub
 
 **Draw mode** — click the polygon tool, draw a shape around any area, click the checkmark. Results load in the sidebar with counts by type.
 
+**Filters** — checkboxes in the sidebar let you show/hide each parcel type (Vacant, SFR, Off-Market, Multifamily, Commercial, Exempt) in both browse and draw modes.
+
+**Sold comps** — after a draw, the sidebar shows a panel of recently sold properties inside the polygon (DeepFin data). Filter by sold date window, price tier, or year built. Purple outlines on the map indicate parcels with a matched sold comp nearby.
+
 **Tagging** — click any parcel in the sidebar to expand it, use the tag buttons (Interested, Not Interested, etc.)
 
-**Export** — click Download CSV in the sidebar to export all results with tags
+**Export** — click Download CSV in the sidebar to export all results with tags. Sold comp data (price, date, $/sqft, beds/baths, DOM, listing URL) appears as inline columns on the right side of each parcel row.
+
+**Address search** — type any address in the search bar to jump to a parcel. Searches all four counties.
 
 **Saved areas** — click Save Area to name and save your polygon. Click it again later to fly back and restore the draw.
 
