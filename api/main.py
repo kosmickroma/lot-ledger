@@ -606,7 +606,6 @@ async def address_suggest(q: str, limit: int = 8) -> dict[str, Any]:
         return {"items": cached}
 
     prefix = f"{query}%"
-    contains = f"%{query}%"
     per_county_limit = max(3, max_items)
 
     def _rows_to_items(rows: list[tuple[Any, ...]]) -> list[dict[str, Any]]:
@@ -755,123 +754,6 @@ async def address_suggest(q: str, limit: int = 8) -> dict[str, Any]:
             )
 
             rows = cur.fetchall()
-
-            # Optional contains fallback fills sparse cases when prefix matches are too few.
-            if len(rows) < max_items:
-                remaining = max_items - len(rows)
-                cur.execute("SET LOCAL statement_timeout TO '700ms'")
-                cur.execute(
-                    """
-                    WITH dcad AS (
-                        SELECT
-                            'dcad'::text AS county,
-                            p.account_num::text AS account_num,
-                            p.property_address::text AS address,
-                            p.owner_city::text AS city,
-                            ST_Y(p.centroid) AS lat,
-                            ST_X(p.centroid) AS lng
-                        FROM parcels p
-                        WHERE p.centroid IS NOT NULL
-                          AND p.property_address IS NOT NULL
-                          AND p.property_address <> ''
-                          AND upper(p.property_address) LIKE %s
-                          AND upper(p.property_address) NOT LIKE %s
-                        ORDER BY p.property_address
-                        LIMIT %s
-                    ),
-
-                    tad AS (
-                        SELECT
-                            'tad'::text AS county,
-                            t.account_num::text AS account_num,
-                            t.situs_addr::text AS address,
-                            t.owner_city::text AS city,
-                            ST_Y(t.centroid) AS lat,
-                            ST_X(t.centroid) AS lng
-                        FROM tad_parcels t
-                        WHERE t.centroid IS NOT NULL
-                          AND t.situs_addr IS NOT NULL
-                          AND t.situs_addr <> ''
-                          AND upper(t.situs_addr) LIKE %s
-                          AND upper(t.situs_addr) NOT LIKE %s
-                        ORDER BY t.situs_addr
-                        LIMIT %s
-                    ),
-
-                    collin AS (
-                        SELECT
-                            'collin'::text AS county,
-                            c.account_num::text AS account_num,
-                            c.property_address::text AS address,
-                            c.property_city::text AS city,
-                            ST_Y(c.centroid) AS lat,
-                            ST_X(c.centroid) AS lng
-                        FROM collin_parcels c
-                        WHERE c.centroid IS NOT NULL
-                          AND c.property_address IS NOT NULL
-                          AND c.property_address <> ''
-                          AND upper(c.property_address) LIKE %s
-                          AND upper(c.property_address) NOT LIKE %s
-                        ORDER BY c.property_address
-                        LIMIT %s
-                    ),
-
-                    denton AS (
-                        SELECT
-                            'denton'::text AS county,
-                            d.account_num::text AS account_num,
-                            d.property_address::text AS address,
-                            d.property_city::text AS city,
-                            ST_Y(d.centroid) AS lat,
-                            ST_X(d.centroid) AS lng
-                        FROM denton_parcels d
-                        WHERE d.centroid IS NOT NULL
-                          AND d.property_address IS NOT NULL
-                          AND d.property_address <> ''
-                          AND upper(d.property_address) LIKE %s
-                          AND upper(d.property_address) NOT LIKE %s
-                        ORDER BY d.property_address
-                        LIMIT %s
-                    ),
-
-                    candidates AS (
-                        SELECT * FROM dcad
-
-                        UNION ALL
-
-                        SELECT * FROM tad
-
-                        UNION ALL
-
-                        SELECT * FROM collin
-
-                        UNION ALL
-
-                        SELECT * FROM denton
-                    )
-                    SELECT county, account_num, address, city, lat, lng
-                    FROM candidates
-                    ORDER BY address
-                    LIMIT %s
-                    """,
-                    (
-                        contains,
-                        prefix,
-                        remaining,
-                        contains,
-                        prefix,
-                        remaining,
-                        contains,
-                        prefix,
-                        remaining,
-                        contains,
-                        prefix,
-                        remaining,
-                        remaining,
-                    ),
-                )
-                rows.extend(cur.fetchall())
-
             items = _rows_to_items(rows)
             _suggest_cache_put(cache_key, items)
             return {"items": items}
