@@ -1246,7 +1246,6 @@ const AddressSearch = L.Control.extend({
         }
         const data = await resp.json();
         if (requestId !== suggestRequestId) {
-          clearSuggestList();
           return;
         }
         suggestItems = Array.isArray(data.items) ? data.items : [];
