@@ -2431,18 +2431,32 @@ async function persistTagStateForExport() {
   if (resp.ok) return true;
   if (resp.status !== 404) return false;
 
-  const refreshed = await refreshExpiredJob();
-  if (!refreshed) return false;
+  const downloadBtn = document.getElementById("btn-download");
+  const previousLabel = downloadBtn?.textContent || "Download CSV";
+  if (downloadBtn) {
+    downloadBtn.disabled = true;
+    downloadBtn.textContent = "Re-fetching results, please wait…";
+  }
 
   try {
-    const retry = await fetch(`/api/job/${currentJobId}/verification`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ verifications: payload, potential_targets: targetPayload }),
-    });
-    return retry.ok;
-  } catch {
-    return false;
+    const refreshed = await refreshExpiredJob();
+    if (!refreshed) return false;
+
+    try {
+      const retry = await fetch(`/api/job/${currentJobId}/verification`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ verifications: payload, potential_targets: targetPayload }),
+      });
+      return retry.ok;
+    } catch {
+      return false;
+    }
+  } finally {
+    if (downloadBtn) {
+      downloadBtn.disabled = false;
+      downloadBtn.textContent = previousLabel;
+    }
   }
 }
 

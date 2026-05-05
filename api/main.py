@@ -112,10 +112,87 @@ def _ensure_session_schema() -> None:
                 )
                 """
             )
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS cached_jobs (
+                    job_id       TEXT PRIMARY KEY,
+                    created_at   TIMESTAMPTZ DEFAULT now(),
+                    expires_at   TIMESTAMPTZ DEFAULT (now() + interval '{_JOB_TTL_SECONDS} seconds'),
+                    rows         JSONB NOT NULL,
+                    sold_points  JSONB NOT NULL,
+                    polygon      JSONB NOT NULL
+                )
+                """
+            )
             cur.execute("CREATE INDEX IF NOT EXISTS idx_session_tags_session ON session_tags (session_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_expires ON analysis_sessions (expires_at)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_saved_area ON analysis_sessions (saved_area_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_cached_jobs_expires ON cached_jobs (expires_at)")
         conn.commit()
+    finally:
+        release_session_conn(conn)
+
+
+def _persist_cached_job_sync(
+    job_id: str,
+    rows: list[dict[str, Any]],
+    sold_points: list[dict[str, Any]],
+    polygon: list[list[float]],
+) -> None:
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                INSERT INTO cached_jobs (job_id, rows, sold_points, polygon, expires_at)
+                VALUES (%s, %s, %s, %s, now() + interval '{_JOB_TTL_SECONDS} seconds')
+                ON CONFLICT (job_id) DO UPDATE SET
+                    rows = EXCLUDED.rows,
+                    sold_points = EXCLUDED.sold_points,
+                    polygon = EXCLUDED.polygon,
+                    expires_at = now() + interval '{_JOB_TTL_SECONDS} seconds'
+                """,
+                (job_id, Json(rows), Json(sold_points), Json(polygon)),
+            )
+        conn.commit()
+    finally:
+        release_session_conn(conn)
+
+
+def _load_cached_job(job_id: str) -> dict[str, Any] | None:
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT rows, sold_points, polygon
+                FROM cached_jobs
+                WHERE job_id = %s
+                  AND expires_at > now()
+                """,
+                (job_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            cur.execute(
+                f"""
+                UPDATE cached_jobs
+                SET expires_at = now() + interval '{_JOB_TTL_SECONDS} seconds'
+                WHERE job_id = %s
+                """,
+                (job_id,),
+            )
+        conn.commit()
+        rows, sold_points, polygon = row
+        return {
+            "rows": rows if isinstance(rows, list) else [],
+            "redfin_data": {},
+            "sold_points": sold_points if isinstance(sold_points, list) else [],
+            "polygon": polygon if isinstance(polygon, list) else [],
+            "created_at": time.monotonic(),
+            "last_accessed": time.monotonic(),
+        }
     finally:
         release_session_conn(conn)
 
@@ -323,6 +400,11 @@ def _get_job(job_id: str) -> dict[str, Any] | None:
     """Return job if it exists and has not expired; evicts on TTL miss. Touching last_accessed keeps the session alive as long as the user is active."""
     job = _job_store.get(job_id)
     if job is None:
+        cached = _load_cached_job(job_id)
+        if cached is not None:
+            _evict_stale_jobs()
+            _job_store[job_id] = cached
+            return cached
         restored = _restore_job_from_session(job_id)
         if restored is None:
             return None
@@ -332,6 +414,11 @@ def _get_job(job_id: str) -> dict[str, Any] | None:
     now = time.monotonic()
     if now - job.get("last_accessed", job.get("created_at", 0)) > _JOB_TTL_SECONDS:
         _job_store.pop(job_id, None)
+        cached = _load_cached_job(job_id)
+        if cached is not None:
+            _evict_stale_jobs()
+            _job_store[job_id] = cached
+            return cached
         restored = _restore_job_from_session(job_id)
         if restored is None:
             return None
@@ -1112,10 +1199,12 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
         _job_store[empty_job_id] = {
             "rows": [],
             "redfin_data": {},
+            "sold_points": sold_points,
             "polygon": polygon,
             "created_at": time.monotonic(),
             "last_accessed": time.monotonic(),
         }
+        await asyncio.to_thread(_persist_cached_job_sync, empty_job_id, [], sold_points, polygon)
         return {
             "type": "FeatureCollection",
             "features": [],
@@ -1209,10 +1298,12 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
     _job_store[job_id] = {
         "rows": rows,
         "redfin_data": redfin_data,
+        "sold_points": sold_points,
         "polygon": polygon,
         "created_at": time.monotonic(),
         "last_accessed": time.monotonic(),
     }
+    await asyncio.to_thread(_persist_cached_job_sync, job_id, rows, sold_points, polygon)
     asyncio.create_task(
         _persist_session_async(
             job_id,
@@ -1282,6 +1373,7 @@ async def merge_jobs(request: MergeJobsRequest) -> dict[str, Any]:
         "created_at": time.monotonic(),
         "last_accessed": time.monotonic(),
     }
+    await asyncio.to_thread(_persist_cached_job_sync, new_job_id, merged_rows, merged_sold_points, [])
     return {"job_id": new_job_id}
 
 
@@ -1704,6 +1796,8 @@ def _cleanup_expired_sessions_sync() -> int:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM analysis_sessions WHERE expires_at < now()")
             deleted = cur.rowcount or 0
+            cur.execute("DELETE FROM cached_jobs WHERE expires_at < now()")
+            deleted += cur.rowcount or 0
         conn.commit()
         return int(deleted)
     finally:
