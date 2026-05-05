@@ -1053,7 +1053,7 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
         asyncio.to_thread(query_denton_parcels, polygon),
     ]
     if include_sold:
-        tasks.append(asyncio.to_thread(query_sold_parcels, min_lng, min_lat, max_lng, max_lat))
+        tasks.append(asyncio.to_thread(query_sold_parcels, polygon))
 
     raw_results = await asyncio.gather(*tasks, return_exceptions=True)
     if isinstance(raw_results[0], Exception):
