@@ -1991,8 +1991,8 @@ async def download(job_id: str, filename: str | None = None) -> StreamingRespons
                     int(_safe_float(comp.get("yr_built"))) if comp and _safe_float(comp.get("yr_built")) not in (None, 0.0) else "",
                     int(_safe_float(comp.get("sqft"))) if comp and _safe_float(comp.get("sqft")) not in (None, 0.0) else "",
                     round(_safe_float(comp.get("lot_sqft")), 0) if comp and _safe_float(comp.get("lot_sqft")) is not None else "",
-                    round(_safe_float(comp.get("beds")), 1) if comp and _safe_float(comp.get("beds")) is not None else "",
-                    round(_safe_float(comp.get("baths")), 1) if comp and _safe_float(comp.get("baths")) is not None else "",
+                    int(_safe_float(comp.get("beds"))) if comp and _safe_float(comp.get("beds")) not in (None, 0.0) else "",
+                    int(_safe_float(comp.get("baths"))) if comp and _safe_float(comp.get("baths")) not in (None, 0.0) else "",
                     int(_safe_float(comp.get("dom"))) if comp and _safe_float(comp.get("dom")) not in (None, 0.0) else "",
                     (comp.get("listing_url", "") or "") if comp else "",
                 ]

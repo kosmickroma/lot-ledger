@@ -74,7 +74,7 @@ def query_sold_parcels(polygon: list[list[float]]) -> list[dict[str, Any]]:
                     lat,
                     lng
                 FROM redfin_sold
-                                WHERE source_county IN ('dallas', 'tarrant')
+                                WHERE source_county IN ('dallas', 'tarrant', 'collin', 'denton')
                                     AND geom IS NOT NULL
                                     AND ST_Within(
                                         geom,
