@@ -71,23 +71,6 @@
         <p id="redfin-toggle-status"></p>
         <input type="checkbox" id="toggle-sold" checked>
       </div>
-        <div id="saved-areas" class="sidebar-section hidden collapsible-section">
-          <button class="section-toggle" type="button" data-target="saved-areas-body" aria-expanded="true">
-            <span class="sidebar-label">Saved Areas</span>
-          </button>
-          <div id="saved-areas-body" class="collapsible-body">
-            <div id="saved-areas-list"></div>
-            <button id="btn-saved-area-clear" class="hidden" onclick="clearDrawResults()" style="margin-top:8px;width:100%;padding:5px 0;background:transparent;border:1px solid #555;border-radius:4px;color:#aaa;font-size:11px;cursor:pointer;">× Back to Browse</button>
-          </div>
-        </div>
-        <div id="saved-parcels" class="sidebar-section hidden collapsible-section">
-          <button class="section-toggle" type="button" data-target="saved-parcels-body" aria-expanded="true">
-            <span class="sidebar-label">Saved Parcels</span>
-          </button>
-          <div id="saved-parcels-body" class="collapsible-body">
-            <div id="saved-parcels-list"></div>
-          </div>
-        </div>
       <div id="sidebar-instructions" class="sidebar-section">
         <p class="sidebar-copy">Draw a polygon around a target pocket to analyze parcels instantly.</p>
         <p class="sidebar-note">Shortcuts: Enter or right-click to finish. Esc to cancel.</p>
@@ -104,6 +87,23 @@
           <button id="btn-download" class="btn-primary">Download CSV</button>
           <button id="btn-clear" class="btn-secondary">Clear</button>
             <button id="btn-save-area" class="btn-secondary">Save Area</button>
+        </div>
+      </div>
+      <div id="saved-areas" class="sidebar-section hidden collapsible-section">
+        <button class="section-toggle" type="button" data-target="saved-areas-body" aria-expanded="true">
+          <span class="sidebar-label">Saved Areas</span>
+        </button>
+        <div id="saved-areas-body" class="collapsible-body">
+          <div id="saved-areas-list"></div>
+          <button id="btn-saved-area-clear" class="hidden" onclick="clearDrawResults()" style="margin-top:8px;width:100%;padding:5px 0;background:transparent;border:1px solid #555;border-radius:4px;color:#aaa;font-size:11px;cursor:pointer;">× Back to Browse</button>
+        </div>
+      </div>
+      <div id="saved-parcels" class="sidebar-section hidden collapsible-section">
+        <button class="section-toggle" type="button" data-target="saved-parcels-body" aria-expanded="true">
+          <span class="sidebar-label">Saved Parcels</span>
+        </button>
+        <div id="saved-parcels-body" class="collapsible-body">
+          <div id="saved-parcels-list"></div>
         </div>
       </div>
     </aside>
