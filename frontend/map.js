@@ -1096,17 +1096,145 @@ const AddressSearch = L.Control.extend({
     L.DomEvent.disableClickPropagation(container);
     L.DomEvent.disableScrollPropagation(container);
 
-    const input = L.DomUtil.create("input", "address-search-input", container);
+    const row = L.DomUtil.create("div", "address-search-row", container);
+
+    const input = L.DomUtil.create("input", "address-search-input", row);
     input.type = "text";
     input.placeholder = "Search address or place...";
     input.setAttribute("autocomplete", "off");
 
-    const btn = L.DomUtil.create("button", "address-search-btn", container);
+    const btn = L.DomUtil.create("button", "address-search-btn", row);
     btn.textContent = "Go";
+
+    const suggestList = L.DomUtil.create("div", "address-suggest-list hidden", container);
+    let suggestItems = [];
+    let activeSuggestIndex = -1;
+    let suggestTimer = null;
+    let suggestAbort = null;
+
+    const clearSuggestList = () => {
+      suggestItems = [];
+      activeSuggestIndex = -1;
+      suggestList.innerHTML = "";
+      suggestList.classList.add("hidden");
+    };
+
+    const renderSuggestList = () => {
+      suggestList.innerHTML = "";
+      if (!suggestItems.length) {
+        suggestList.classList.add("hidden");
+        return;
+      }
+
+      suggestItems.forEach((item, idx) => {
+        const rowEl = L.DomUtil.create("button", "address-suggest-item", suggestList);
+        rowEl.type = "button";
+        rowEl.setAttribute("aria-selected", idx === activeSuggestIndex ? "true" : "false");
+        rowEl.innerHTML = `
+          <span class="address-suggest-main">${item.address}</span>
+          <span class="address-suggest-sub">${item.city ? `${item.city}, ` : ""}TX · ${item.county.toUpperCase()}</span>
+        `;
+        L.DomEvent.on(rowEl, "mousedown", (e) => {
+          e.preventDefault();
+          selectSuggestion(idx);
+        });
+      });
+      suggestList.classList.remove("hidden");
+    };
+
+    const highlightSearchResult = (latlng) => {
+      window._clearSearchHighlight?.();
+      if (window._searchMoveEndHandler) map.off("moveend", window._searchMoveEndHandler);
+
+      window._clearSearchHighlight = () => {
+        if (window._searchHighlight) {
+          window._searchHighlight.remove();
+          window._searchHighlight = null;
+        }
+      };
+
+      window._searchMoveEndHandler = () => {
+        window._searchMoveEndHandler = null;
+        (async () => {
+          const [slat, slng] = latlng;
+          let highlightLayer = null;
+
+          // Direct DB lookup — works for any parcel size, no tile dependency.
+          try {
+            const resp = await fetch(`/api/parcel/near?lat=${slat}&lng=${slng}`);
+            if (resp.ok) {
+              const detail = await resp.json();
+              const geom = detail.geometry;
+              if (geom && (geom.type === "Polygon" || geom.type === "MultiPolygon")) {
+                highlightLayer = L.geoJSON(detail, {
+                  style: { color: "#f1c40f", weight: 3, fill: false, interactive: false },
+                  interactive: false,
+                }).addTo(map);
+              }
+            }
+          } catch (e) {
+            console.warn("Search footprint lookup failed", e);
+          }
+
+          if (!highlightLayer) {
+            highlightLayer = L.circleMarker(latlng, {
+              radius: 14,
+              color: "#f1c40f",
+              weight: 3,
+              fillColor: "#f1c40f",
+              fillOpacity: 0.12,
+              interactive: false,
+            }).addTo(map);
+          }
+          window._searchHighlight = highlightLayer;
+        })();
+      };
+
+      map.once("moveend", window._searchMoveEndHandler);
+      map.flyTo(latlng, 17);
+      input.value = "";
+      clearSuggestList();
+    };
+
+    const selectSuggestion = (idx) => {
+      const item = suggestItems[idx];
+      if (!item) return;
+      highlightSearchResult([Number(item.lat), Number(item.lng)]);
+    };
+
+    const fetchSuggestions = async () => {
+      const q = input.value.trim();
+      if (q.length < 3) {
+        clearSuggestList();
+        return;
+      }
+
+      if (suggestAbort) suggestAbort.abort();
+      suggestAbort = new AbortController();
+
+      try {
+        const resp = await fetch(`/api/address/suggest?q=${encodeURIComponent(q)}&limit=8`, {
+          signal: suggestAbort.signal,
+        });
+        if (!resp.ok) {
+          clearSuggestList();
+          return;
+        }
+        const data = await resp.json();
+        suggestItems = Array.isArray(data.items) ? data.items : [];
+        activeSuggestIndex = suggestItems.length ? 0 : -1;
+        renderSuggestList();
+      } catch (e) {
+        if (e?.name !== "AbortError") {
+          clearSuggestList();
+        }
+      }
+    };
 
     const doSearch = async () => {
       const q = input.value.trim();
       if (!q) return;
+      clearSuggestList();
       btn.disabled = true;
       btn.textContent = "…";
       try {
@@ -1121,56 +1249,9 @@ const AddressSearch = L.Control.extend({
           setTimeout(() => { btn.textContent = "Go"; btn.disabled = false; }, 2000);
           return;
         }
-        const { lat, lon, display_name } = results[0];
+        const { lat, lon } = results[0];
         const latlng = [parseFloat(lat), parseFloat(lon)];
-        const shortName = display_name.split(",")[0].trim();
-        map.flyTo(latlng, 17);
-        input.value = "";
-
-        // Clear any previous highlight and cancel any pending placement.
-        window._clearSearchHighlight?.();
-        if (window._searchMoveEndHandler) map.off("moveend", window._searchMoveEndHandler);
-
-        window._clearSearchHighlight = () => {
-          if (window._searchHighlight) { window._searchHighlight.remove(); window._searchHighlight = null; }
-        };
-
-        // Wait for map to stop flying, then wait 800ms for PMTiles to load tiles
-        // at the new viewport before querying the browse layer for the parcel footprint.
-        window._searchMoveEndHandler = () => {
-          window._searchMoveEndHandler = null;
-          (async () => {
-            const [slat, slng] = latlng;
-            let highlightLayer = null;
-
-            // Direct DB lookup — works for any parcel size, no tile dependency.
-            try {
-              const resp = await fetch(`/api/parcel/near?lat=${slat}&lng=${slng}`);
-              if (resp.ok) {
-                const detail = await resp.json();
-                const geom = detail.geometry;
-                if (geom && (geom.type === "Polygon" || geom.type === "MultiPolygon")) {
-                  highlightLayer = L.geoJSON(detail, {
-                    style: { color: "#f1c40f", weight: 3, fill: false, interactive: false },
-                    interactive: false,
-                  }).addTo(map);
-                }
-              }
-            } catch (e) {
-              console.warn("Search footprint lookup failed", e);
-            }
-
-            if (!highlightLayer) {
-              highlightLayer = L.circleMarker(latlng, {
-                radius: 14, color: "#f1c40f", weight: 3,
-                fillColor: "#f1c40f", fillOpacity: 0.12,
-                interactive: false,
-              }).addTo(map);
-            }
-            window._searchHighlight = highlightLayer;
-          })();
-        };
-        map.once("moveend", window._searchMoveEndHandler);
+        highlightSearchResult(latlng);
       } catch {
         btn.textContent = "Error";
         setTimeout(() => { btn.textContent = "Go"; btn.disabled = false; }, 2000);
@@ -1181,7 +1262,42 @@ const AddressSearch = L.Control.extend({
     };
 
     L.DomEvent.on(btn, "click", doSearch);
-    L.DomEvent.on(input, "keydown", e => { if (e.key === "Enter") doSearch(); });
+    L.DomEvent.on(input, "input", () => {
+      if (suggestTimer) clearTimeout(suggestTimer);
+      suggestTimer = setTimeout(fetchSuggestions, 220);
+    });
+
+    L.DomEvent.on(input, "keydown", (e) => {
+      if (e.key === "ArrowDown" && suggestItems.length) {
+        e.preventDefault();
+        activeSuggestIndex = (activeSuggestIndex + 1) % suggestItems.length;
+        renderSuggestList();
+        return;
+      }
+      if (e.key === "ArrowUp" && suggestItems.length) {
+        e.preventDefault();
+        activeSuggestIndex = (activeSuggestIndex - 1 + suggestItems.length) % suggestItems.length;
+        renderSuggestList();
+        return;
+      }
+      if (e.key === "Escape") {
+        clearSuggestList();
+        return;
+      }
+      if (e.key === "Enter") {
+        if (suggestItems.length && activeSuggestIndex >= 0) {
+          e.preventDefault();
+          selectSuggestion(activeSuggestIndex);
+        } else {
+          doSearch();
+        }
+      }
+    });
+
+    L.DomEvent.on(input, "blur", () => {
+      setTimeout(clearSuggestList, 120);
+    });
+
     return container;
   },
 });
