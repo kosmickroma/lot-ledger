@@ -17,9 +17,9 @@ from api.config import get_conn, release_conn
 
 
 def query_sold_parcels(min_lng: float, min_lat: float, max_lng: float, max_lat: float) -> list[dict[str, Any]]:
-    """Return Dallas sold listing points within the provided bbox.
+    """Return sold listing points within the provided bbox.
 
-    This is intentionally Dallas-only for the first rollout.
+    Initial rollout includes Dallas + Tarrant.
     """
     conn = get_conn()
     try:
@@ -36,7 +36,7 @@ def query_sold_parcels(min_lng: float, min_lat: float, max_lng: float, max_lat: 
                     lat,
                     lng
                 FROM redfin_sold
-                WHERE source_county = 'dallas'
+                                WHERE source_county IN ('dallas', 'tarrant')
                   AND lat IS NOT NULL
                   AND lng IS NOT NULL
                   AND lng BETWEEN %s AND %s
