@@ -241,6 +241,8 @@ let soldMarkers = [];
 let transientSoldSidebarPopup = null;
 let soldCompsSortMode = "price";
 let soldCompsCollapsed = true;
+let soldCompsFilter = { dateWindow: "1yr", prices: null, yearBuilts: null };
+let allSoldPointsRef = [];
 let filterState = { ...DEFAULT_FILTERS };
 const verificationByAccount = new Map();
 const potentialTargetByAccount = new Map();
@@ -440,11 +442,69 @@ function zoomToSoldComp(point) {
   setTimeout(openPopup, 400);
 }
 
+// --- Sold comps filter helpers ---
+
+function _getSoldCompsFilterCutoff() {
+  const dw = soldCompsFilter.dateWindow;
+  if (dw === "all") return null;
+  const days = { "3mo": 90, "6mo": 180, "1yr": 365, "2yr": 730 }[dw];
+  return days ? new Date(Date.now() - days * 86_400_000) : null;
+}
+
+function _getSoldPriceBucket(price) {
+  if (price < 200_000) return "u200";
+  if (price < 400_000) return "200-400";
+  if (price < 600_000) return "400-600";
+  if (price < 800_000) return "600-800";
+  return "800+";
+}
+
+function _getYearBuiltBucket(yr) {
+  if (yr < 1960) return "pre1960";
+  if (yr < 1980) return "1960-1980";
+  if (yr < 2000) return "1980-2000";
+  return "2000+";
+}
+
+function _soldPointPassesFilter(p, cutoff, prices, yearBuilts) {
+  if (cutoff && p.sold_date) {
+    const d = new Date(p.sold_date);
+    if (!isNaN(d.getTime()) && d < cutoff) return false;
+  }
+  if (prices !== null) {
+    const price = asNumber(p.sold_price);
+    if (price == null) return false;
+    if (!prices.has(_getSoldPriceBucket(price))) return false;
+  }
+  if (yearBuilts !== null) {
+    const yr = asNumber(p.yr_built);
+    if (yr == null) return false;
+    if (!yearBuilts.has(_getYearBuiltBucket(yr))) return false;
+  }
+  return true;
+}
+
+function applyAndRenderSoldFilters() {
+  const { prices, yearBuilts } = soldCompsFilter;
+  const cutoff = _getSoldCompsFilterCutoff();
+  lastSoldPanelPoints = allSoldPointsRef.filter((p) =>
+    _soldPointPassesFilter(p, cutoff, prices, yearBuilts)
+  );
+  // Re-render map dots respecting filters (renderSoldPoints clears layer if sold is off)
+  const filteredMap = lastSoldPoints.filter((p) =>
+    _soldPointPassesFilter(p, cutoff, prices, yearBuilts)
+  );
+  renderSoldPoints(filteredMap);
+  renderSoldCompsPanel();
+}
+
+// --- End sold comps filter helpers ---
+
 function renderSoldCompsPanel() {
   const panel = document.getElementById("sold-comps-panel");
   if (!panel) return;
 
-  if (!Array.isArray(lastSoldPanelPoints) || lastSoldPanelPoints.length === 0) {
+  if (!Array.isArray(allSoldPointsRef) || allSoldPointsRef.length === 0) {
     panel.innerHTML = "";
     return;
   }
@@ -490,6 +550,36 @@ function renderSoldCompsPanel() {
     .sort((a, b) => metricGetter(b) - metricGetter(a))
     .slice(0, 5);
 
+  // --- Filter bar ---
+  const ALL_PRICE_BUCKETS = ["u200", "200-400", "400-600", "600-800", "800+"];
+  const PRICE_LABELS = { "u200": "<$200K", "200-400": "$200–400K", "400-600": "$400–600K", "600-800": "$600–800K", "800+": "$800K+" };
+  const ALL_YEAR_BUCKETS = ["pre1960", "1960-1980", "1980-2000", "2000+"];
+  const YEAR_LABELS = { "pre1960": "<1960", "1960-1980": "1960–80", "1980-2000": "1980–2000", "2000+": "2000+" };
+
+  const datePills = ["3mo", "6mo", "1yr", "2yr", "all"].map((dw) =>
+    `<button type="button" class="sold-sort-btn${soldCompsFilter.dateWindow === dw ? " active" : ""}" data-date-window="${dw}">${dw === "all" ? "All" : dw}</button>`
+  ).join("");
+  const pricePills = ALL_PRICE_BUCKETS.map((b) => {
+    const isActive = soldCompsFilter.prices === null || soldCompsFilter.prices.has(b);
+    return `<button type="button" class="sold-sort-btn${isActive ? " active" : ""}" data-price-bucket="${b}">${PRICE_LABELS[b]}</button>`;
+  }).join("");
+  const yearPills = ALL_YEAR_BUCKETS.map((b) => {
+    const isActive = soldCompsFilter.yearBuilts === null || soldCompsFilter.yearBuilts.has(b);
+    return `<button type="button" class="sold-sort-btn${isActive ? " active" : ""}" data-year-bucket="${b}">${YEAR_LABELS[b]}</button>`;
+  }).join("");
+  const filterBar = `
+    <div class="sold-filter-bar">
+      <div class="sold-filter-row"><span class="sold-filter-label">Sold</span><div class="sold-filter-pills">${datePills}</div></div>
+      <div class="sold-filter-row"><span class="sold-filter-label">Price</span><div class="sold-filter-pills">${pricePills}</div></div>
+      <div class="sold-filter-row"><span class="sold-filter-label">Built</span><div class="sold-filter-pills">${yearPills}</div></div>
+    </div>`;
+  // --- End filter bar ---
+
+  const isFiltered = soldCompsFilter.prices !== null || soldCompsFilter.yearBuilts !== null || soldCompsFilter.dateWindow !== "1yr";
+  const countLabel = isFiltered
+    ? `${lastSoldPanelPoints.length} of ${allSoldPointsRef.length} comps`
+    : `${lastSoldPanelPoints.length} comps`;
+
   panel.innerHTML = `
     <div class="sold-comps-panel">
       <button class="section-toggle" type="button" id="sold-comps-toggle" aria-expanded="${!soldCompsCollapsed}">
@@ -497,10 +587,11 @@ function renderSoldCompsPanel() {
       </button>
       <div id="sold-comps-body" class="collapsible-body${soldCompsCollapsed ? " hidden" : ""}">
         <div class="sold-comps-summary">
-          <span class="sold-chip">${lastSoldPanelPoints.length} comps</span>
+          <span class="sold-chip">${countLabel}</span>
           <span class="sold-chip">Median ${medianPrice != null ? abbreviatePrice(medianPrice) : "N/A"}</span>
           <span class="sold-chip">Median ${medianPpsf != null ? `$${Math.round(medianPpsf)}/sqft` : "N/A"}</span>
         </div>
+        ${filterBar}
         <div class="sold-sort">
           <button type="button" class="sold-sort-btn${soldCompsSortMode === "price" ? " active" : ""}" data-sort="price">By Price</button>
           <button type="button" class="sold-sort-btn${soldCompsSortMode === "ppsf" ? " active" : ""}" data-sort="ppsf">By $/sqft</button>
@@ -519,12 +610,59 @@ function renderSoldCompsPanel() {
     soldBody?.classList.toggle("hidden", soldCompsCollapsed);
   });
 
-  panel.querySelectorAll(".sold-sort-btn").forEach((btn) => {
+  panel.querySelectorAll(".sold-sort-btn[data-sort]").forEach((btn) => {
     btn.addEventListener("click", () => {
       const next = btn.getAttribute("data-sort") === "ppsf" ? "ppsf" : "price";
       if (next === soldCompsSortMode) return;
       soldCompsSortMode = next;
       renderSoldCompsPanel();
+    });
+  });
+
+  panel.querySelectorAll("[data-date-window]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      soldCompsFilter.dateWindow = btn.dataset.dateWindow;
+      applyAndRenderSoldFilters();
+    });
+  });
+
+  const ALL_PRICE_BUCKET_SET = new Set(["u200", "200-400", "400-600", "600-800", "800+"]);
+  panel.querySelectorAll("[data-price-bucket]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const b = btn.dataset.priceBucket;
+      if (soldCompsFilter.prices === null) {
+        const updated = new Set(ALL_PRICE_BUCKET_SET);
+        updated.delete(b);
+        soldCompsFilter.prices = updated.size < ALL_PRICE_BUCKET_SET.size ? updated : null;
+      } else {
+        if (soldCompsFilter.prices.has(b)) {
+          if (soldCompsFilter.prices.size > 1) soldCompsFilter.prices.delete(b);
+        } else {
+          soldCompsFilter.prices.add(b);
+          if (soldCompsFilter.prices.size === ALL_PRICE_BUCKET_SET.size) soldCompsFilter.prices = null;
+        }
+      }
+      applyAndRenderSoldFilters();
+    });
+  });
+
+  const ALL_YEAR_BUCKET_SET = new Set(["pre1960", "1960-1980", "1980-2000", "2000+"]);
+  panel.querySelectorAll("[data-year-bucket]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const b = btn.dataset.yearBucket;
+      if (soldCompsFilter.yearBuilts === null) {
+        const updated = new Set(ALL_YEAR_BUCKET_SET);
+        updated.delete(b);
+        soldCompsFilter.yearBuilts = updated.size < ALL_YEAR_BUCKET_SET.size ? updated : null;
+      } else {
+        if (soldCompsFilter.yearBuilts.has(b)) {
+          if (soldCompsFilter.yearBuilts.size > 1) soldCompsFilter.yearBuilts.delete(b);
+        } else {
+          soldCompsFilter.yearBuilts.add(b);
+          if (soldCompsFilter.yearBuilts.size === ALL_YEAR_BUCKET_SET.size) soldCompsFilter.yearBuilts = null;
+        }
+      }
+      applyAndRenderSoldFilters();
     });
   });
 
@@ -782,7 +920,7 @@ async function restoreSavedArea(area) {
     lastIncludedRedfin = includeRedfin;
     lastIncludedSold = includeSold;
     lastSoldPoints = Array.isArray(data.sold_points) ? data.sold_points : [];
-    lastSoldPanelPoints = [...lastSoldPoints];
+    allSoldPointsRef = [...lastSoldPoints];
     lastAnalysisGeojson = data;
     lastAnalysisCounts = data.counts;
     allAnalysisFeatures = data.features;
@@ -798,7 +936,7 @@ async function restoreSavedArea(area) {
     soldLayerVisible = Boolean(filterState.sold);
     map.removeLayer(redfinLayer);
     if (soldLayerVisible) soldLayer.addTo(map); else map.removeLayer(soldLayer);
-    renderSoldPoints(lastSoldPoints);
+    applyAndRenderSoldFilters();
 
     const soldStatus = document.getElementById("sold-toggle-status");
     if (soldStatus) {
@@ -1429,7 +1567,7 @@ function applyMapVisibilityFilters() {
   if (soldLayerVisible) soldLayer.addTo(map);
   else map.removeLayer(soldLayer);
 
-  renderSoldPoints(lastSoldPoints);
+  applyAndRenderSoldFilters();
 
   // Sold outlines are embedded in parcel styling, so sold toggle changes need
   // a parcel rerender to immediately reflect outline visibility state.
@@ -2694,7 +2832,7 @@ map.on("draw:created", async (e) => {
     lastIncludedRedfin = false;
     lastIncludedSold = includeSold;
     lastSoldPoints = Array.isArray(data.sold_points) ? data.sold_points : [];
-    lastSoldPanelPoints = [...lastSoldPoints];
+    allSoldPointsRef = [...lastSoldPoints];
     lastAnalysisGeojson = data;
     lastAnalysisCounts = data.counts;
     allAnalysisFeatures = data.features;
@@ -2706,7 +2844,7 @@ map.on("draw:created", async (e) => {
     } else {
       matchedSoldLabelPoints = [];
     }
-    renderSoldPoints(lastSoldPoints);
+    applyAndRenderSoldFilters();
     document.getElementById("btn-draw-clear")?.classList.remove("hidden");
 
     let markers;
@@ -2771,6 +2909,8 @@ function clearDrawResults() {
   lastIncludedSold = false;
   lastSoldPoints = [];
   lastSoldPanelPoints = [];
+  allSoldPointsRef = [];
+  soldCompsFilter = { dateWindow: "1yr", prices: null, yearBuilts: null };
   matchedSoldLabelPoints = [];
   const soldCompsPanel = document.getElementById("sold-comps-panel");
   if (soldCompsPanel) soldCompsPanel.innerHTML = "";
@@ -2901,14 +3041,14 @@ async function rerunWithRedfin() {
     lastIncludedRedfin = true;
     lastIncludedSold = includeSold;
     lastSoldPoints = Array.isArray(data.sold_points) ? data.sold_points : [];
-    lastSoldPanelPoints = [...lastSoldPoints];
+    allSoldPointsRef = [...lastSoldPoints];
     lastAnalysisGeojson = data;
     lastAnalysisCounts = data.counts;
     redfinLayerVisible = true;
     redfinLayer.addTo(map);
     soldLayerVisible = includeSold;
     if (soldLayerVisible) soldLayer.addTo(map); else map.removeLayer(soldLayer);
-    renderSoldPoints(lastSoldPoints);
+    applyAndRenderSoldFilters();
     const markers = renderFeatures(data);
     renderSidebar(data.counts, markers);
     if (statusEl) {
@@ -2972,7 +3112,7 @@ async function rerunWithSold() {
     lastIncludedSold = true;
     lastIncludedRedfin = includeRedfin;
     lastSoldPoints = Array.isArray(data.sold_points) ? data.sold_points : [];
-    lastSoldPanelPoints = [...lastSoldPoints];
+    allSoldPointsRef = [...lastSoldPoints];
     lastAnalysisGeojson = data;
     lastAnalysisCounts = data.counts;
     allAnalysisFeatures = data.features;
@@ -2986,7 +3126,7 @@ async function rerunWithSold() {
     }
     soldLayerVisible = true;
     soldLayer.addTo(map);
-    renderSoldPoints(lastSoldPoints);
+    applyAndRenderSoldFilters();
     if (lastAnalysisGeojson && Array.isArray(lastAnalysisGeojson.features) && lastAnalysisGeojson.features.length <= BROWSE_ONLY_THRESHOLD) {
       const markers = renderFeatures(lastAnalysisGeojson);
       if (lastAnalysisCounts) renderSidebar(lastAnalysisCounts, markers);

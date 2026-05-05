@@ -364,6 +364,34 @@ h1 {
   background: rgba(0, 0, 0, 0.16);
 }
 
+.sold-filter-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.sold-filter-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
+.sold-filter-label {
+  font-size: 10px;
+  color: var(--text-soft);
+  min-width: 26px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.sold-filter-pills {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
 .sold-sort {
   display: flex;
   gap: 6px;
