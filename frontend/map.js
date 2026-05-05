@@ -2023,7 +2023,7 @@ async function persistTagStateForExport() {
 
 map.on("draw:created", async (e) => {
   drawLayer.clearLayers();
-  markerLayer.clearLayers();
+  PARCEL_LAYER_KEYS.forEach((key) => parcelTypeLayers[key]?.clearLayers());
   redfinLayer.clearLayers();
   soldLayer.clearLayers();
   verificationBadgeLayer.clearLayers();
