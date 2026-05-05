@@ -178,6 +178,92 @@ h1 {
   cursor: pointer;
 }
 
+.filter-card {
+  margin-bottom: 14px;
+  padding: 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(201, 162, 79, 0.28);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(0, 0, 0, 0.08)),
+    rgba(15, 61, 47, 0.82);
+}
+
+.filter-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.filter-reset-btn {
+  border: 1px solid rgba(201, 162, 79, 0.38);
+  background: rgba(0, 0, 0, 0.16);
+  color: var(--text-muted);
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.filter-reset-btn:hover {
+  color: #f0dfb3;
+  border-color: rgba(201, 162, 79, 0.62);
+}
+
+.filter-list {
+  display: grid;
+  gap: 6px;
+}
+
+.filter-row {
+  display: grid;
+  grid-template-columns: 10px 1fr auto;
+  align-items: center;
+  gap: 9px;
+  font-size: 12px;
+  color: #dbe0e7;
+  padding: 5px 8px;
+  border-radius: 7px;
+  cursor: pointer;
+  transition: background-color 0.14s ease;
+}
+
+.filter-row:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.filter-swatch {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--sw);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.25);
+}
+
+.filter-name {
+  user-select: none;
+}
+
+.filter-row input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--gold);
+}
+
+.sold-price-label {
+  background: rgba(13, 20, 16, 0.84);
+  color: #f6e7c5;
+  border: 1px solid rgba(201, 162, 79, 0.44);
+  border-radius: 8px;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.32);
+}
+
 .count-row {
   display: flex;
   align-items: center;

@@ -21,7 +21,7 @@ const COLORS = {
   multifamily: "#8e44ad",
   commercial: "#e67e22",
   exempt: "#95a5a6",
-  active: "#e74c3c",
+  active: "#1f5f43",
 };
 
 const BORDER_COLORS = {
@@ -31,7 +31,7 @@ const BORDER_COLORS = {
   multifamily: "#6c3483",
   commercial: "#d35400",
   exempt: "#7f8c8d",
-  active: "#c0392b",
+  active: "#153f2d",
 };
 
 // Browse layer — renders all county parcels from PMTiles file on GCS.
@@ -47,7 +47,29 @@ const TYPE_LABELS = {
   off_market: "Off Market",
 };
 
-const SOLD_MARKER_COLOR = "#4B0082";
+const SOLD_MARKER_COLOR = "#c9a24f";
+const SOLD_MARKER_BORDER = "#8e6f2c";
+const FILTER_STORAGE_KEY = "lotledger.map.filters.v1";
+
+const DEFAULT_FILTERS = {
+  active: true,
+  sold: true,
+  off_market: true,
+  vacant: true,
+  multifamily: true,
+  commercial: true,
+  exempt: true,
+};
+
+const FILTER_INPUT_IDS = {
+  active: "filter-active",
+  sold: "filter-sold",
+  off_market: "filter-off-market",
+  vacant: "filter-vacant",
+  multifamily: "filter-multifamily",
+  commercial: "filter-commercial",
+  exempt: "filter-exempt",
+};
 
 // Analysis state is initialized early because zoom-nudge logic references it
 // during startup before the rest of the module wiring runs.
@@ -89,6 +111,9 @@ const labelsLayer = L.tileLayer(
   "https://{s}.basemaps.cartocdn.com/rastertiles/voyager_only_labels/{z}/{x}/{y}{r}.png",
   { subdomains: "abcd", maxZoom: 20, opacity: 1, pane: "labelsPane" }
 );
+
+map.createPane("soldPane");
+map.getPane("soldPane").style.zIndex = "640";
 
 // Apply saved basemap BEFORE browseLayer is added. If we switch after protomaps
 // is on the map, the tile layer removal fires viewprereset → _invalidateAll on
@@ -163,7 +188,10 @@ function _updateZoomNudge() {
   _zoomNudge.classList.toggle("hidden", !tooFarOut || Boolean(lastAnalysisGeojson));
 }
 map.on("zoomend", _updateZoomNudge);
-map.on("moveend zoomend", () => { if (viewportRenderMode) _scheduleViewportRender(); });
+map.on("moveend zoomend", () => {
+  if (viewportRenderMode) _scheduleViewportRender();
+  refreshSoldPriceLabels();
+});
 _updateZoomNudge();
 
 let drawLayer = L.layerGroup().addTo(map);
@@ -172,9 +200,8 @@ let markerLayer = L.layerGroup().addTo(map);
 let redfinLayer = L.layerGroup().addTo(map);
 let soldLayer = L.layerGroup().addTo(map);
 const redfinToggleInput = document.getElementById("toggle-redfin");
-const soldToggleInput = document.getElementById("toggle-sold");
-let redfinLayerVisible = Boolean(redfinToggleInput?.checked);
-let soldLayerVisible = Boolean(soldToggleInput?.checked);
+let redfinLayerVisible = false;
+let soldLayerVisible = true;
 if (!redfinLayerVisible) {
   map.removeLayer(redfinLayer);
 }
@@ -195,6 +222,8 @@ let lastAnalysisCounts = null;
 let lastIncludedRedfin = false;
 let lastIncludedSold = false;
 let lastSoldPoints = [];
+let soldMarkers = [];
+let filterState = { ...DEFAULT_FILTERS };
 const verificationByAccount = new Map();
 const potentialTargetByAccount = new Map();
 const verificationBadgeMarkers = new Map();
@@ -236,6 +265,81 @@ function getAnalysisErrorMessage(err, fallback = "Analysis failed. Please try ag
   if (err?.userMessage && String(err.userMessage).trim()) return err.userMessage;
   if (err?.message && String(err.message).trim()) return err.message;
   return fallback;
+}
+
+function loadFilters() {
+  try {
+    const raw = localStorage.getItem(FILTER_STORAGE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return;
+    filterState = { ...DEFAULT_FILTERS, ...parsed };
+  } catch (_) {
+    filterState = { ...DEFAULT_FILTERS };
+  }
+}
+
+function saveFilters() {
+  try {
+    localStorage.setItem(FILTER_STORAGE_KEY, JSON.stringify(filterState));
+  } catch (_) {}
+}
+
+function syncFilterInputs() {
+  Object.entries(FILTER_INPUT_IDS).forEach(([key, id]) => {
+    const input = document.getElementById(id);
+    if (input) input.checked = Boolean(filterState[key]);
+  });
+  soldLayerVisible = Boolean(filterState.sold);
+}
+
+function classifyFeatureForFilter(feature) {
+  const p = feature?.properties || {};
+  if (p.on_redfin) return "active";
+  if (p.prop_type === "vacant") return "vacant";
+  if (p.prop_type === "multifamily") return "multifamily";
+  if (p.prop_type === "commercial") return "commercial";
+  if (p.prop_type === "exempt") return "exempt";
+  return "off_market";
+}
+
+function isFeatureVisible(feature) {
+  const bucket = classifyFeatureForFilter(feature);
+  return Boolean(filterState[bucket]);
+}
+
+function abbreviatePrice(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return "";
+  if (n >= 1000000) {
+    const m = n / 1000000;
+    return `$${m >= 10 ? m.toFixed(0) : m.toFixed(1)}m`;
+  }
+  if (n >= 1000) return `$${Math.round(n / 1000)}k`;
+  return `$${Math.round(n)}`;
+}
+
+function refreshSoldPriceLabels() {
+  soldMarkers.forEach(({ marker }) => marker.unbindTooltip());
+  if (!soldLayerVisible || map.getZoom() <= 15) return;
+
+  const cellPx = map.getZoom() >= 18 ? 20 : map.getZoom() >= 17 ? 26 : 34;
+  const occupied = new Set();
+
+  for (const { marker, priceLabel } of soldMarkers) {
+    if (!priceLabel) continue;
+    const p = map.latLngToContainerPoint(marker.getLatLng());
+    const key = `${Math.floor(p.x / cellPx)}:${Math.floor(p.y / cellPx)}`;
+    if (occupied.has(key)) continue;
+    occupied.add(key);
+    marker.bindTooltip(priceLabel, {
+      permanent: true,
+      direction: "top",
+      offset: [10, -8],
+      className: "sold-price-label",
+      interactive: false,
+    });
+  }
 }
 
 async function toggleHoaLayer() {
@@ -455,12 +559,12 @@ async function restoreSavedArea(area) {
 
   if (map.hasLayer(browseLayer)) browseLayer.remove();
 
-  const includeRedfin = Boolean(document.getElementById("toggle-redfin")?.checked);
-  const includeSold = Boolean(document.getElementById("toggle-sold")?.checked);
+  const includeRedfin = false;
+  const includeSold = true;
   document.getElementById("sidebar-instructions")?.classList.add("hidden");
   document.getElementById("sidebar-results")?.classList.add("hidden");
   document.getElementById("sidebar-loading")?.classList.remove("hidden");
-  document.getElementById("redfin-status").textContent = "Loading saved area...";
+  document.getElementById("redfin-status").textContent = "Loading area analysis...";
   const analysisRequest = beginLatestAnalysisRequest();
 
   try {
@@ -486,15 +590,15 @@ async function restoreSavedArea(area) {
     lastAnalysisGeojson = data;
     lastAnalysisCounts = data.counts;
     allAnalysisFeatures = data.features;
-    redfinLayerVisible = includeRedfin;
-    soldLayerVisible = includeSold;
-    if (redfinLayerVisible) redfinLayer.addTo(map); else map.removeLayer(redfinLayer);
+    redfinLayerVisible = false;
+    soldLayerVisible = Boolean(filterState.sold);
+    map.removeLayer(redfinLayer);
     if (soldLayerVisible) soldLayer.addTo(map); else map.removeLayer(soldLayer);
     renderSoldPoints(lastSoldPoints);
 
     const soldStatus = document.getElementById("sold-toggle-status");
     if (soldStatus) {
-      soldStatus.textContent = includeSold
+      soldStatus.textContent = filterState.sold
         ? `${lastSoldPoints.length} sold comp${lastSoldPoints.length !== 1 ? "s" : ""} found`
         : "";
     }
@@ -518,7 +622,7 @@ async function restoreSavedArea(area) {
   } catch (err) {
     if (isAbortError(err) || !isActiveAnalysisRequest(analysisRequest.requestId)) return;
     console.error("[restoreSavedArea] Analysis failed:", err);
-    document.getElementById("redfin-status").textContent = getAnalysisErrorMessage(err, "Saved area analysis failed. Please try again.");
+    document.getElementById("redfin-status").textContent = getAnalysisErrorMessage(err, "Area analysis failed. Please try again.");
     document.getElementById("sidebar-loading")?.classList.add("hidden");
     document.getElementById("sidebar-instructions")?.classList.remove("hidden");
   }
@@ -923,8 +1027,47 @@ sidebarToggleBtn.addEventListener("click", () => {
   setSidebarCollapsed(!collapsed);
 });
 
+function applyMapVisibilityFilters() {
+  soldLayerVisible = Boolean(filterState.sold);
+  if (soldLayerVisible) soldLayer.addTo(map);
+  else map.removeLayer(soldLayer);
+
+  renderSoldPoints(lastSoldPoints);
+
+  if (lastAnalysisGeojson) {
+    const markers = renderFeatures(lastAnalysisGeojson);
+    if (lastAnalysisCounts) renderSidebar(lastAnalysisCounts, markers);
+  }
+
+  const soldStatus = document.getElementById("sold-toggle-status");
+  if (soldStatus) {
+    soldStatus.textContent = filterState.sold
+      ? `${lastSoldPoints.length} sold comp${lastSoldPoints.length !== 1 ? "s" : ""} found`
+      : "Sold comps hidden";
+  }
+}
+
+loadFilters();
+syncFilterInputs();
+Object.entries(FILTER_INPUT_IDS).forEach(([key, id]) => {
+  const input = document.getElementById(id);
+  if (!input) return;
+  input.addEventListener("change", () => {
+    filterState[key] = Boolean(input.checked);
+    saveFilters();
+    applyMapVisibilityFilters();
+  });
+});
+
+document.getElementById("btn-filters-reset")?.addEventListener("click", () => {
+  filterState = { ...DEFAULT_FILTERS };
+  saveFilters();
+  syncFilterInputs();
+  applyMapVisibilityFilters();
+});
+
 function isRedfinVisualActive(feature) {
-  return Boolean(feature?.properties?.on_redfin && redfinLayerVisible);
+  return Boolean(feature?.properties?.on_redfin);
 }
 
 function getColor(feature) {
@@ -1103,20 +1246,25 @@ function makeSoldPopupHtml(point) {
 
 function renderSoldPoints(points) {
   soldLayer.clearLayers();
+  soldMarkers = [];
+  if (!filterState.sold) return;
   const soldPoints = Array.isArray(points) ? points : [];
   soldPoints.forEach((point) => {
     const lat = Number(point.lat);
     const lng = Number(point.lng);
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
-    L.circleMarker([lat, lng], {
-      radius: 5,
+    const marker = L.circleMarker([lat, lng], {
+      pane: "soldPane",
+      radius: 6,
       fillColor: SOLD_MARKER_COLOR,
-      color: "#2E0051",
-      weight: 1.2,
+      color: SOLD_MARKER_BORDER,
+      weight: 1.6,
       opacity: 1,
-      fillOpacity: 0.92,
+      fillOpacity: 0.9,
     }).bindPopup(() => makeSoldPopupHtml(point), { maxWidth: 300 }).addTo(soldLayer);
+    soldMarkers.push({ marker, priceLabel: abbreviatePrice(point.sold_price) });
   });
+  refreshSoldPriceLabels();
 }
 
 function renderFeatures(geojson) {
@@ -1131,6 +1279,7 @@ function renderFeatures(geojson) {
   const accountRenderedAsPolygon = new Set(); // accounts that got a polygon fill — no dot needed
   const markers = {};
   geojson.features.forEach((feature) => {
+    if (!isFeatureVisible(feature)) return;
     const p = feature.properties;
     const color = getColor(feature);
     const borderColor = getBorderColor(feature);
@@ -1190,7 +1339,7 @@ function renderFeatures(geojson) {
 
     // Polygon outlines always stay in markerLayer. Redfin centroid markers are
     // shown on redfinLayer only when the source toggle is enabled.
-    const circleLayer = p.on_redfin && redfinLayerVisible ? redfinLayer : markerLayer;
+    const circleLayer = markerLayer;
 
     let layer;
     if (renderCondoOutline) {
@@ -1214,7 +1363,7 @@ function renderFeatures(geojson) {
           color: borderColor,
           fillColor: color,
           fillOpacity: 0.12,
-          weight: 1.5,
+          weight: p.on_redfin ? 2.2 : 1.5,
           opacity: 0.85,
         },
       }).bindPopup(() => makePopupHtml(p), { maxWidth: 280 });
@@ -1793,8 +1942,8 @@ async function runAnalysis(polygon, includeRedfin, includeSold, options = {}) {
 
 async function refreshExpiredJob() {
   if (!lastPolygon || lastPolygon.length < 3) return false;
-  const includeRedfin = Boolean(document.getElementById("toggle-redfin")?.checked);
-  const includeSold = Boolean(document.getElementById("toggle-sold")?.checked);
+  const includeRedfin = false;
+  const includeSold = true;
   try {
     const data = await runAnalysis(lastPolygon, includeRedfin, includeSold);
     if (data.source_status && (!data.source_status.dcad_ok || !data.source_status.tad_ok)) {
@@ -1869,11 +2018,9 @@ map.on("draw:created", async (e) => {
   document.getElementById("sidebar-instructions").classList.add("hidden");
   document.getElementById("sidebar-results").classList.add("hidden");
   document.getElementById("sidebar-loading").classList.remove("hidden");
-  const includeRedfin = Boolean(document.getElementById("toggle-redfin")?.checked);
-  const includeSold = Boolean(document.getElementById("toggle-sold")?.checked);
-  document.getElementById("redfin-status").textContent = includeRedfin
-    ? "Pulling Redfin listings..."
-    : "Skipping Redfin pull (DCAD-only mode)...";
+  const includeRedfin = false;
+  const includeSold = true;
+  document.getElementById("redfin-status").textContent = "Running analysis...";
   drawLayer.addLayer(e.layer);
 
   // Spotlight mask — dim everything outside the drawn polygon.
@@ -1909,26 +2056,16 @@ map.on("draw:created", async (e) => {
       potentialTargetByAccount.set(p.account_num, potential);
       p.potential_target = potential;
     });
-    document.getElementById("redfin-status").textContent = includeRedfin
-      ? (data.redfin_skipped
-          ? `Redfin auto-disabled — area too large (${data.counts.total.toLocaleString()} parcels)`
-          : data.redfin_ok
-            ? `${data.counts.active} active listing${data.counts.active !== 1 ? "s" : ""} found`
-            : "Redfin pull unavailable; DCAD results shown")
-      : "DCAD-only mode (Redfin disabled)";
-    redfinLayerVisible = Boolean(document.getElementById("toggle-redfin")?.checked);
-    soldLayerVisible = Boolean(document.getElementById("toggle-sold")?.checked);
-    if (redfinLayerVisible) {
-      redfinLayer.addTo(map);
-    } else {
-      map.removeLayer(redfinLayer);
-    }
+    document.getElementById("redfin-status").textContent = "Analysis complete";
+    redfinLayerVisible = false;
+    soldLayerVisible = Boolean(filterState.sold);
+    map.removeLayer(redfinLayer);
     if (soldLayerVisible) {
       soldLayer.addTo(map);
     } else {
       map.removeLayer(soldLayer);
     }
-    lastIncludedRedfin = includeRedfin;
+    lastIncludedRedfin = false;
     lastIncludedSold = includeSold;
     lastSoldPoints = Array.isArray(data.sold_points) ? data.sold_points : [];
     lastAnalysisGeojson = data;
@@ -1957,24 +2094,9 @@ map.on("draw:created", async (e) => {
       }
     }
     renderSidebar(data.counts, markers);
-    // Update the always-visible toggle status line.
-    const toggleStatus = document.getElementById("redfin-toggle-status");
-    if (toggleStatus) {
-      if (!includeRedfin) {
-        toggleStatus.textContent = "";
-      } else if (data.redfin_skipped) {
-        toggleStatus.textContent = `Redfin skipped — ${data.counts.total.toLocaleString()} parcels`;
-      } else if (!data.redfin_ok) {
-        toggleStatus.textContent = "Redfin unavailable";
-      } else if (data.counts.active === 0) {
-        toggleStatus.textContent = "No active listings found";
-      } else {
-        toggleStatus.textContent = `${data.counts.active} active listing${data.counts.active !== 1 ? "s" : ""} found`;
-      }
-    }
     const soldStatus = document.getElementById("sold-toggle-status");
     if (soldStatus) {
-      soldStatus.textContent = includeSold
+      soldStatus.textContent = filterState.sold
         ? `${lastSoldPoints.length} sold comp${lastSoldPoints.length !== 1 ? "s" : ""} found`
         : "";
     }
@@ -2097,8 +2219,8 @@ document.getElementById("btn-clear").addEventListener("click", () => {
   document.getElementById("target-brush-menu")?.classList.add("hidden");
 });
 
-// Redfin toggle: if Redfin wasn't included in the last fetch, re-run analysis
-// with include_redfin: true, preserving any in-session verification tags.
+// Legacy Redfin source-toggle flow (archived): retained for rollback safety.
+// New UX uses map filters and DB-backed overlays instead of source toggles.
 async function rerunWithRedfin() {
   if (!lastPolygon || lastPolygon.length < 3) return;
   const includeSold = Boolean(document.getElementById("toggle-sold")?.checked);

@@ -22,18 +22,54 @@
         <h1>Parcel Analysis</h1>
         <p id="brush-status" class="sidebar-chip hidden">Active Tool: None</p>
       </div>
-      <div id="layer-toggles" class="layer-toggles">
-        <p class="sidebar-label">Sources</p>
-        <label class="layer-toggle-row">
-          <input type="checkbox" id="toggle-redfin">
-          <span>Redfin Listings</span>
-        </label>
-        <p id="redfin-toggle-status" class="sidebar-note"></p>
-        <label class="layer-toggle-row">
-          <input type="checkbox" id="toggle-sold">
-          <span>Sold Comps</span>
-        </label>
+      <div id="map-filters" class="filter-card">
+        <div class="filter-card-head">
+          <p class="sidebar-label">Map Filters</p>
+          <button id="btn-filters-reset" class="filter-reset-btn" type="button">Reset</button>
+        </div>
+        <div class="filter-list" id="filter-list">
+          <label class="filter-row">
+            <span class="filter-swatch" style="--sw:#1f5f43"></span>
+            <span class="filter-name">Listings</span>
+            <input type="checkbox" id="filter-active" checked>
+          </label>
+          <label class="filter-row">
+            <span class="filter-swatch" style="--sw:#c9a24f"></span>
+            <span class="filter-name">Sold</span>
+            <input type="checkbox" id="filter-sold" checked>
+          </label>
+          <label class="filter-row">
+            <span class="filter-swatch" style="--sw:#2980b9"></span>
+            <span class="filter-name">Off Market</span>
+            <input type="checkbox" id="filter-off-market" checked>
+          </label>
+          <label class="filter-row">
+            <span class="filter-swatch" style="--sw:#27ae60"></span>
+            <span class="filter-name">Vacant</span>
+            <input type="checkbox" id="filter-vacant" checked>
+          </label>
+          <label class="filter-row">
+            <span class="filter-swatch" style="--sw:#8e44ad"></span>
+            <span class="filter-name">Multifamily</span>
+            <input type="checkbox" id="filter-multifamily" checked>
+          </label>
+          <label class="filter-row">
+            <span class="filter-swatch" style="--sw:#e67e22"></span>
+            <span class="filter-name">Commercial</span>
+            <input type="checkbox" id="filter-commercial" checked>
+          </label>
+          <label class="filter-row">
+            <span class="filter-swatch" style="--sw:#95a5a6"></span>
+            <span class="filter-name">Exempt</span>
+            <input type="checkbox" id="filter-exempt" checked>
+          </label>
+        </div>
         <p id="sold-toggle-status" class="sidebar-note"></p>
+      </div>
+      <div class="hidden" aria-hidden="true">
+        <input type="checkbox" id="toggle-redfin">
+        <p id="redfin-toggle-status"></p>
+        <input type="checkbox" id="toggle-sold" checked>
       </div>
         <div id="saved-areas" class="sidebar-section hidden">
           <p class="sidebar-label">Saved Areas</p>
