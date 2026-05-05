@@ -17,6 +17,7 @@ import asyncio
 import contextlib
 import csv
 import io
+import logging
 import re
 import time
 import uuid
@@ -38,6 +39,7 @@ from api.counties.denton import _classify_denton, _normalize_denton_row, query_d
 from api.counties.tad import _normalize_tad_row, _classify_tad, query_tad_parcels
 from api.geo import polygon_bbox
 from api.redfin import normalize_addr_key, pull_grid
+from api.sold import query_sold_parcels
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -47,6 +49,7 @@ _JOB_TTL_SECONDS = 7200    # 2-hour sliding-window TTL per session
 _JOB_MAX = 50              # max jobs held in memory at once
 _REDFIN_ROW_THRESHOLD = 15_000  # auto-disable Redfin above this parcel count
 _SESSION_RETENTION_DAYS = 30
+logger = logging.getLogger(__name__)
 
 _FILENAME_SAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -342,6 +345,7 @@ def _get_job(job_id: str) -> dict[str, Any] | None:
 class AnalyzeRequest(BaseModel):
     polygon: list[list[float]]
     include_redfin: bool = False
+    include_sold: bool = False
 
 
 class MergeJobsRequest(BaseModel):
@@ -1019,6 +1023,7 @@ async def get_parcel_detail(county: str, account_num: str) -> dict[str, Any]:
 async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
     polygon = request.polygon
     include_redfin = bool(request.include_redfin)
+    include_sold = bool(request.include_sold)
     if len(polygon) < 3:
         raise HTTPException(status_code=400, detail="Polygon must have at least 3 points")
 
@@ -1038,15 +1043,19 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
     collin_result = None
     denton_result = None
     redfin_fetch_ok = False
+    sold_points: list[dict[str, Any]] = []
     failed_sources: list[str] = []
 
-    raw_results = await asyncio.gather(
+    tasks = [
         asyncio.to_thread(query_parcels, polygon),
         asyncio.to_thread(query_tad_parcels, polygon),
         asyncio.to_thread(query_collin_parcels, polygon),
         asyncio.to_thread(query_denton_parcels, polygon),
-        return_exceptions=True,
-    )
+    ]
+    if include_sold:
+        tasks.append(asyncio.to_thread(query_sold_parcels, min_lng, min_lat, max_lng, max_lat))
+
+    raw_results = await asyncio.gather(*tasks, return_exceptions=True)
     if isinstance(raw_results[0], Exception):
         failed_sources.append("DCAD")
     else:
@@ -1063,6 +1072,14 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
         failed_sources.append("Denton")
     else:
         denton_result = raw_results[3]
+
+    if include_sold and len(raw_results) > 4:
+        sold_result = raw_results[4]
+        if isinstance(sold_result, Exception):
+            logger.warning("Sold points query failed; continuing without sold overlay: %s", sold_result)
+            sold_points = []
+        else:
+            sold_points = sold_result or []
 
     # Never return silent partial county coverage; fail loudly instead.
     # Cancel any pending Redfin task before raising to avoid a dangling coroutine.
@@ -1103,6 +1120,7 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
             "type": "FeatureCollection",
             "features": [],
             "counts": {"active": 0, "off_market": 0, "multifamily": 0, "vacant": 0, "commercial": 0, "exempt": 0, "total": 0},
+            "sold_points": sold_points,
             "job_id": empty_job_id,
             "redfin_requested": include_redfin,
             "redfin_ok": False,
@@ -1207,6 +1225,7 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
         "type": "FeatureCollection",
         "features": features,
         "counts": counts,
+        "sold_points": sold_points,
         "job_id": job_id,
         "redfin_requested": include_redfin,
         "redfin_ok": redfin_fetch_ok,

@@ -47,6 +47,8 @@ const TYPE_LABELS = {
   off_market: "Off Market",
 };
 
+const SOLD_MARKER_COLOR = "#4B0082";
+
 // Analysis state is initialized early because zoom-nudge logic references it
 // during startup before the rest of the module wiring runs.
 let lastAnalysisGeojson = null;
@@ -168,10 +170,16 @@ let drawLayer = L.layerGroup().addTo(map);
 let maskLayer = L.layerGroup().addTo(map);
 let markerLayer = L.layerGroup().addTo(map);
 let redfinLayer = L.layerGroup().addTo(map);
+let soldLayer = L.layerGroup().addTo(map);
 const redfinToggleInput = document.getElementById("toggle-redfin");
+const soldToggleInput = document.getElementById("toggle-sold");
 let redfinLayerVisible = Boolean(redfinToggleInput?.checked);
+let soldLayerVisible = Boolean(soldToggleInput?.checked);
 if (!redfinLayerVisible) {
   map.removeLayer(redfinLayer);
+}
+if (!soldLayerVisible) {
+  map.removeLayer(soldLayer);
 }
 let verificationBadgeLayer = L.layerGroup().addTo(map);
 let targetBadgeLayer = L.layerGroup().addTo(map);
@@ -185,6 +193,8 @@ let lastPolygon = null;
 let lastDrawnLatLngs = null;
 let lastAnalysisCounts = null;
 let lastIncludedRedfin = false;
+let lastIncludedSold = false;
+let lastSoldPoints = [];
 const verificationByAccount = new Map();
 const potentialTargetByAccount = new Map();
 const verificationBadgeMarkers = new Map();
@@ -446,6 +456,7 @@ async function restoreSavedArea(area) {
   if (map.hasLayer(browseLayer)) browseLayer.remove();
 
   const includeRedfin = Boolean(document.getElementById("toggle-redfin")?.checked);
+  const includeSold = Boolean(document.getElementById("toggle-sold")?.checked);
   document.getElementById("sidebar-instructions")?.classList.add("hidden");
   document.getElementById("sidebar-results")?.classList.add("hidden");
   document.getElementById("sidebar-loading")?.classList.remove("hidden");
@@ -453,7 +464,7 @@ async function restoreSavedArea(area) {
   const analysisRequest = beginLatestAnalysisRequest();
 
   try {
-    const data = await runAnalysis(polygon, includeRedfin, { signal: analysisRequest.signal });
+    const data = await runAnalysis(polygon, includeRedfin, includeSold, { signal: analysisRequest.signal });
     if (!isActiveAnalysisRequest(analysisRequest.requestId)) return;
     if (data.source_status && (!data.source_status.dcad_ok || !data.source_status.tad_ok)) {
       throw new Error("Incomplete county result set.");
@@ -470,11 +481,23 @@ async function restoreSavedArea(area) {
       p.potential_target = potential;
     });
     lastIncludedRedfin = includeRedfin;
+    lastIncludedSold = includeSold;
+    lastSoldPoints = Array.isArray(data.sold_points) ? data.sold_points : [];
     lastAnalysisGeojson = data;
     lastAnalysisCounts = data.counts;
     allAnalysisFeatures = data.features;
     redfinLayerVisible = includeRedfin;
+    soldLayerVisible = includeSold;
     if (redfinLayerVisible) redfinLayer.addTo(map); else map.removeLayer(redfinLayer);
+    if (soldLayerVisible) soldLayer.addTo(map); else map.removeLayer(soldLayer);
+    renderSoldPoints(lastSoldPoints);
+
+    const soldStatus = document.getElementById("sold-toggle-status");
+    if (soldStatus) {
+      soldStatus.textContent = includeSold
+        ? `${lastSoldPoints.length} sold comp${lastSoldPoints.length !== 1 ? "s" : ""} found`
+        : "";
+    }
 
     let markers;
     if (data.features.length > BROWSE_ONLY_THRESHOLD) {
@@ -1054,6 +1077,48 @@ function makePopupHtml(p) {
       </div>`;
 }
 
+function makeSoldPopupHtml(point) {
+  const row = (label, val) => `<tr><td class="popup-label">${label}</td><td class="popup-val">${val || "N/A"}</td></tr>`;
+  const price = typeof point.sold_price === "number" ? `$${point.sold_price.toLocaleString()}` : point.sold_price;
+  const soldDate = point.sold_date ? String(point.sold_date).slice(0, 10) : "N/A";
+  const dom = point.dom == null ? "N/A" : String(point.dom);
+  const lotSqft = typeof point.lot_sqft === "number" ? `${point.lot_sqft.toLocaleString()} sf` : point.lot_sqft;
+  const listing = point.listing_url
+    ? `<a href="${point.listing_url}" target="_blank" rel="noopener noreferrer">View listing</a>`
+    : "N/A";
+
+  return `
+      <div class="popup">
+        <div class="popup-addr">${point.address || "Unknown address"}</div>
+        <div class="popup-status" style="color:${SOLD_MARKER_COLOR};">SOLD COMP</div>
+        <table class="popup-table">
+          ${row("Sold Price", price)}
+          ${row("Sold Date", soldDate)}
+          ${row("Days on Market", dom)}
+          ${row("Lot Size", lotSqft)}
+          ${row("Listing", listing)}
+        </table>
+      </div>`;
+}
+
+function renderSoldPoints(points) {
+  soldLayer.clearLayers();
+  const soldPoints = Array.isArray(points) ? points : [];
+  soldPoints.forEach((point) => {
+    const lat = Number(point.lat);
+    const lng = Number(point.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+    L.circleMarker([lat, lng], {
+      radius: 5,
+      fillColor: SOLD_MARKER_COLOR,
+      color: "#2E0051",
+      weight: 1.2,
+      opacity: 1,
+      fillOpacity: 0.92,
+    }).bindPopup(() => makeSoldPopupHtml(point), { maxWidth: 300 }).addTo(soldLayer);
+  });
+}
+
 function renderFeatures(geojson) {
   markerLayer.clearLayers();
   redfinLayer.clearLayers();
@@ -1564,14 +1629,14 @@ async function postJsonWithRetry(endpoint, payload, options = {}) {
   );
 }
 
-async function fetchTileDataRecursive(tilePolygon, includeRedfin, depth, tileLabel, options = {}) {
+async function fetchTileDataRecursive(tilePolygon, includeRedfin, includeSold, depth, tileLabel, options = {}) {
   const { signal } = options;
   const redfinStatus = document.getElementById("redfin-status");
   let data;
   try {
     data = await postJsonWithRetry(
       "/api/analyze",
-      { polygon: tilePolygon, include_redfin: includeRedfin },
+      { polygon: tilePolygon, include_redfin: includeRedfin, include_sold: includeSold },
       {
         signal,
         maxRetries: 2,
@@ -1592,7 +1657,7 @@ async function fetchTileDataRecursive(tilePolygon, includeRedfin, depth, tileLab
         await _sleep(500); // breathe between subtiles
         const subLabel = `${tileLabel}.${i + 1}`;
         const subPolygon = tileToPolygon(subTiles[i]);
-        const subData = await fetchTileDataRecursive(subPolygon, includeRedfin, depth + 1, subLabel, options);
+        const subData = await fetchTileDataRecursive(subPolygon, includeRedfin, includeSold, depth + 1, subLabel, options);
         nestedResults.push(...subData);
       }
       return nestedResults;
@@ -1610,7 +1675,7 @@ async function fetchTileDataRecursive(tilePolygon, includeRedfin, depth, tileLab
   return [data];
 }
 
-async function runTiledAnalysis(polygon, includeRedfin, options = {}) {
+async function runTiledAnalysis(polygon, includeRedfin, includeSold, options = {}) {
   const bbox = getPolygonBbox(polygon);
   const tiles = getInitialTileGrid(bbox);
   const tileJobIds = [];
@@ -1619,6 +1684,8 @@ async function runTiledAnalysis(polygon, includeRedfin, options = {}) {
   let anyRedfinOk = false;
   let anyRedfinSkipped = false;
   let lastSourceStatus = null;
+  const soldPoints = [];
+  const soldPointKeys = new Set();
 
   // Fetch tiles in parallel batches. Each tile uses 2 DB connections (DCAD + TAD);
   // cap at 8 concurrent tiles so we stay under the pool limit of 20.
@@ -1633,7 +1700,7 @@ async function runTiledAnalysis(polygon, includeRedfin, options = {}) {
 
     const batchResults = await Promise.all(
       batch.map((tile, idx) =>
-        fetchTileDataRecursive(tileToPolygon(tile), includeRedfin, 0, `${batchStart + idx + 1}`, options)
+        fetchTileDataRecursive(tileToPolygon(tile), includeRedfin, includeSold, 0, `${batchStart + idx + 1}`, options)
       )
     );
 
@@ -1648,6 +1715,12 @@ async function runTiledAnalysis(polygon, includeRedfin, options = {}) {
           if (key && seenParcelKeys.has(key)) continue;
           if (key) seenParcelKeys.add(key);
           allFeatures.push(feature);
+        }
+        for (const point of data.sold_points || []) {
+          const key = String(point.listing_url || `${point.lat},${point.lng},${point.sold_date || ""}`);
+          if (soldPointKeys.has(key)) continue;
+          soldPointKeys.add(key);
+          soldPoints.push(point);
         }
       }
     }
@@ -1689,6 +1762,7 @@ async function runTiledAnalysis(polygon, includeRedfin, options = {}) {
     type: "FeatureCollection",
     features: filteredFeatures,
     counts: mergedCounts,
+    sold_points: soldPoints,
     job_id: mergeData.job_id,
     redfin_requested: includeRedfin,
     redfin_ok: anyRedfinOk,
@@ -1698,14 +1772,14 @@ async function runTiledAnalysis(polygon, includeRedfin, options = {}) {
   };
 }
 
-async function runAnalysis(polygon, includeRedfin, options = {}) {
+async function runAnalysis(polygon, includeRedfin, includeSold, options = {}) {
   const bbox = getPolygonBbox(polygon);
   if (bboxArea(bbox) > TILE_AREA_THRESHOLD) {
-    return runTiledAnalysis(polygon, includeRedfin, options);
+    return runTiledAnalysis(polygon, includeRedfin, includeSold, options);
   }
   return postJsonWithRetry(
     "/api/analyze",
-    { polygon, include_redfin: includeRedfin },
+    { polygon, include_redfin: includeRedfin, include_sold: includeSold },
     {
       signal: options.signal,
       maxRetries: 2,
@@ -1720,8 +1794,9 @@ async function runAnalysis(polygon, includeRedfin, options = {}) {
 async function refreshExpiredJob() {
   if (!lastPolygon || lastPolygon.length < 3) return false;
   const includeRedfin = Boolean(document.getElementById("toggle-redfin")?.checked);
+  const includeSold = Boolean(document.getElementById("toggle-sold")?.checked);
   try {
-    const data = await runAnalysis(lastPolygon, includeRedfin);
+    const data = await runAnalysis(lastPolygon, includeRedfin, includeSold);
     if (data.source_status && (!data.source_status.dcad_ok || !data.source_status.tad_ok)) {
       return false;
     }
@@ -1777,6 +1852,7 @@ map.on("draw:created", async (e) => {
   drawLayer.clearLayers();
   markerLayer.clearLayers();
   redfinLayer.clearLayers();
+  soldLayer.clearLayers();
   verificationBadgeLayer.clearLayers();
   targetBadgeLayer.clearLayers();
   verificationByAccount.clear();
@@ -1794,6 +1870,7 @@ map.on("draw:created", async (e) => {
   document.getElementById("sidebar-results").classList.add("hidden");
   document.getElementById("sidebar-loading").classList.remove("hidden");
   const includeRedfin = Boolean(document.getElementById("toggle-redfin")?.checked);
+  const includeSold = Boolean(document.getElementById("toggle-sold")?.checked);
   document.getElementById("redfin-status").textContent = includeRedfin
     ? "Pulling Redfin listings..."
     : "Skipping Redfin pull (DCAD-only mode)...";
@@ -1816,7 +1893,7 @@ map.on("draw:created", async (e) => {
   const analysisRequest = beginLatestAnalysisRequest();
 
   try {
-    const data = await runAnalysis(polygon, includeRedfin, { signal: analysisRequest.signal });
+    const data = await runAnalysis(polygon, includeRedfin, includeSold, { signal: analysisRequest.signal });
     if (!isActiveAnalysisRequest(analysisRequest.requestId)) return;
     if (data.source_status && (!data.source_status.dcad_ok || !data.source_status.tad_ok)) {
       throw new Error("Incomplete county result set returned; analysis canceled to prevent partial export.");
@@ -1840,15 +1917,24 @@ map.on("draw:created", async (e) => {
             : "Redfin pull unavailable; DCAD results shown")
       : "DCAD-only mode (Redfin disabled)";
     redfinLayerVisible = Boolean(document.getElementById("toggle-redfin")?.checked);
+    soldLayerVisible = Boolean(document.getElementById("toggle-sold")?.checked);
     if (redfinLayerVisible) {
       redfinLayer.addTo(map);
     } else {
       map.removeLayer(redfinLayer);
     }
+    if (soldLayerVisible) {
+      soldLayer.addTo(map);
+    } else {
+      map.removeLayer(soldLayer);
+    }
     lastIncludedRedfin = includeRedfin;
+    lastIncludedSold = includeSold;
+    lastSoldPoints = Array.isArray(data.sold_points) ? data.sold_points : [];
     lastAnalysisGeojson = data;
     lastAnalysisCounts = data.counts;
     allAnalysisFeatures = data.features;
+    renderSoldPoints(lastSoldPoints);
     document.getElementById("btn-draw-clear")?.classList.remove("hidden");
 
     let markers;
@@ -1886,6 +1972,12 @@ map.on("draw:created", async (e) => {
         toggleStatus.textContent = `${data.counts.active} active listing${data.counts.active !== 1 ? "s" : ""} found`;
       }
     }
+    const soldStatus = document.getElementById("sold-toggle-status");
+    if (soldStatus) {
+      soldStatus.textContent = includeSold
+        ? `${lastSoldPoints.length} sold comp${lastSoldPoints.length !== 1 ? "s" : ""} found`
+        : "";
+    }
   } catch (err) {
     if (isAbortError(err) || !isActiveAnalysisRequest(analysisRequest.requestId)) return;
     console.error("[draw:created] Analysis failed:", err);
@@ -1905,6 +1997,7 @@ function clearDrawResults() {
   if (!map.hasLayer(browseLayer)) browseLayer.addTo(map);
   markerLayer.clearLayers();
   redfinLayer.clearLayers();
+  soldLayer.clearLayers();
   verificationBadgeLayer.clearLayers();
   targetBadgeLayer.clearLayers();
   verificationByAccount.clear();
@@ -1916,6 +2009,11 @@ function clearDrawResults() {
   lastDrawnLatLngs = null;
   lastAnalysisGeojson = null;
   lastAnalysisCounts = null;
+  lastIncludedRedfin = false;
+  lastIncludedSold = false;
+  lastSoldPoints = [];
+  document.getElementById("redfin-toggle-status").textContent = "";
+  document.getElementById("sold-toggle-status").textContent = "";
   document.getElementById("sidebar-results")?.classList.add("hidden");
   document.getElementById("sidebar-instructions")?.classList.remove("hidden");
   document.getElementById("sidebar-loading")?.classList.add("hidden");
@@ -1997,20 +2095,19 @@ document.getElementById("btn-clear").addEventListener("click", () => {
   updateBrushStatus(null);
   document.getElementById("verify-brush-menu")?.classList.add("hidden");
   document.getElementById("target-brush-menu")?.classList.add("hidden");
-  document.getElementById("redfin-toggle-status").textContent = "";
-  lastIncludedRedfin = false;
 });
 
 // Redfin toggle: if Redfin wasn't included in the last fetch, re-run analysis
 // with include_redfin: true, preserving any in-session verification tags.
 async function rerunWithRedfin() {
   if (!lastPolygon || lastPolygon.length < 3) return;
+  const includeSold = Boolean(document.getElementById("toggle-sold")?.checked);
   const statusEl = document.getElementById("redfin-toggle-status");
   const toggleEl = document.getElementById("toggle-redfin");
   if (toggleEl) toggleEl.disabled = true;
   if (statusEl) statusEl.textContent = "Fetching Redfin\u2026";
   try {
-    const data = await runAnalysis(lastPolygon, true);
+    const data = await runAnalysis(lastPolygon, true, includeSold);
     currentJobId = data.job_id;
     // Merge server state without overwriting in-session tag changes.
     data.features.forEach((feature) => {
@@ -2032,10 +2129,15 @@ async function rerunWithRedfin() {
       }
     });
     lastIncludedRedfin = true;
+    lastIncludedSold = includeSold;
+    lastSoldPoints = Array.isArray(data.sold_points) ? data.sold_points : [];
     lastAnalysisGeojson = data;
     lastAnalysisCounts = data.counts;
     redfinLayerVisible = true;
     redfinLayer.addTo(map);
+    soldLayerVisible = includeSold;
+    if (soldLayerVisible) soldLayer.addTo(map); else map.removeLayer(soldLayer);
+    renderSoldPoints(lastSoldPoints);
     const markers = renderFeatures(data);
     renderSidebar(data.counts, markers);
     if (statusEl) {
@@ -2082,6 +2184,57 @@ document.getElementById("toggle-redfin")?.addEventListener("change", async (e) =
     if (lastAnalysisCounts) {
       renderSidebar(lastAnalysisCounts, markers);
     }
+  }
+});
+
+async function rerunWithSold() {
+  if (!lastPolygon || lastPolygon.length < 3) return;
+  const includeRedfin = Boolean(document.getElementById("toggle-redfin")?.checked);
+  const statusEl = document.getElementById("sold-toggle-status");
+  const toggleEl = document.getElementById("toggle-sold");
+  if (toggleEl) toggleEl.disabled = true;
+  if (statusEl) statusEl.textContent = "Fetching sold comps...";
+
+  try {
+    const data = await runAnalysis(lastPolygon, includeRedfin, true);
+    currentJobId = data.job_id;
+    lastIncludedSold = true;
+    lastIncludedRedfin = includeRedfin;
+    lastSoldPoints = Array.isArray(data.sold_points) ? data.sold_points : [];
+    lastAnalysisGeojson = data;
+    lastAnalysisCounts = data.counts;
+    soldLayerVisible = true;
+    soldLayer.addTo(map);
+    renderSoldPoints(lastSoldPoints);
+
+    if (statusEl) {
+      statusEl.textContent = `${lastSoldPoints.length} sold comp${lastSoldPoints.length !== 1 ? "s" : ""} found`;
+    }
+  } catch (err) {
+    if (statusEl) statusEl.textContent = "Sold comps unavailable";
+    console.error("Sold re-fetch failed", err);
+    if (toggleEl) toggleEl.checked = false;
+    soldLayerVisible = false;
+    map.removeLayer(soldLayer);
+  } finally {
+    if (toggleEl) toggleEl.disabled = false;
+  }
+}
+
+document.getElementById("toggle-sold")?.addEventListener("change", async (e) => {
+  soldLayerVisible = e.target.checked;
+
+  if (soldLayerVisible && !lastIncludedSold && lastPolygon) {
+    await rerunWithSold();
+    return;
+  }
+
+  if (soldLayerVisible) {
+    soldLayer.addTo(map);
+  } else {
+    map.removeLayer(soldLayer);
+    const statusEl = document.getElementById("sold-toggle-status");
+    if (statusEl) statusEl.textContent = "";
   }
 });
 
