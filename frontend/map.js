@@ -1119,10 +1119,12 @@ const AddressSearch = L.Control.extend({
       suggestItems = [];
       activeSuggestIndex = -1;
       suggestList.innerHTML = "";
+      delete suggestList.dataset.loadingRequestId;
       suggestList.classList.add("hidden");
     };
 
-    const renderSuggestLoading = () => {
+    const renderSuggestLoading = (requestId) => {
+      suggestList.dataset.loadingRequestId = String(requestId);
       suggestList.innerHTML = '<div class="address-suggest-loading">Searching Texas addresses...</div>';
       suggestList.classList.remove("hidden");
     };
@@ -1227,8 +1229,9 @@ const AddressSearch = L.Control.extend({
         return;
       }
 
-      renderSuggestLoading();
       const requestId = ++suggestRequestId;
+      renderSuggestLoading(requestId);
+      let silentAbort = false;
 
       if (suggestAbort) suggestAbort.abort();
       suggestAbort = new AbortController();
@@ -1238,22 +1241,38 @@ const AddressSearch = L.Control.extend({
           signal: suggestAbort.signal,
         });
         if (!resp.ok) {
-          if (requestId === suggestRequestId && !suggestItems.length) clearSuggestList();
+          if (requestId === suggestRequestId) suggestItems = [];
           return;
         }
         const data = await resp.json();
-        if (requestId !== suggestRequestId) return;
+        if (requestId !== suggestRequestId) {
+          clearSuggestList();
+          return;
+        }
         suggestItems = Array.isArray(data.items) ? data.items : [];
         suggestCache.set(normalized, { ts: now, items: suggestItems.slice(0, 8) });
         if (suggestCache.size > 120) {
           const firstKey = suggestCache.keys().next().value;
           if (firstKey) suggestCache.delete(firstKey);
         }
-        activeSuggestIndex = suggestItems.length ? 0 : -1;
-        renderSuggestList();
       } catch (e) {
-        if (e?.name !== "AbortError") {
-          if (requestId === suggestRequestId && !suggestItems.length) clearSuggestList();
+        if (e?.name === "AbortError") {
+          silentAbort = true;
+          return;
+        }
+        if (requestId === suggestRequestId) suggestItems = [];
+      } finally {
+        if (silentAbort) return;
+        if (requestId !== suggestRequestId) {
+          const stillOwnsLoading = suggestList.dataset.loadingRequestId === String(requestId);
+          if (stillOwnsLoading) clearSuggestList();
+          return;
+        }
+        activeSuggestIndex = suggestItems.length ? 0 : -1;
+        if (suggestItems.length) {
+          renderSuggestList();
+        } else {
+          clearSuggestList();
         }
       }
     };

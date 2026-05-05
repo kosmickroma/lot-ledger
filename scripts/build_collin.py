@@ -621,7 +621,7 @@ def _ensure_table() -> None:
             cur.execute("CREATE INDEX IF NOT EXISTS idx_collin_parcels_geo_id ON collin_parcels (geo_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_collin_parcels_geom ON collin_parcels USING GIST (geom)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_collin_parcels_centroid ON collin_parcels USING GIST (centroid)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_collin_parcels_property_address_upper ON collin_parcels (upper(property_address))")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_collin_parcels_property_address_upper ON collin_parcels (upper(property_address) text_pattern_ops)")
         conn.commit()
     finally:
         release_conn(conn)

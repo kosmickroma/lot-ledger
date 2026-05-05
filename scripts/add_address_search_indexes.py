@@ -49,9 +49,13 @@ def main() -> None:
     try:
         with conn.cursor() as cur:
             for table, idx_name, expr in INDEXES:
+                print(f"  {table}: dropping {idx_name} (if exists) ...", end=" ", flush=True)
+                cur.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {idx_name}")
+                print("done")
+
                 print(f"  {table}: creating {idx_name} ...", end=" ", flush=True)
                 cur.execute(
-                    f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {idx_name} ON {table} ({expr})"
+                    f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {idx_name} ON {table} ({expr} text_pattern_ops)"
                 )
                 print("done")
     except Exception as exc:
