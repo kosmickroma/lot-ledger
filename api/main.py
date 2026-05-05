@@ -1204,7 +1204,10 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
             "created_at": time.monotonic(),
             "last_accessed": time.monotonic(),
         }
-        await asyncio.to_thread(_persist_cached_job_sync, empty_job_id, [], sold_points, polygon)
+        try:
+            await asyncio.to_thread(_persist_cached_job_sync, empty_job_id, [], sold_points, polygon)
+        except Exception as exc:
+            logger.warning("Failed to persist job to cache (non-fatal): %s", exc)
         return {
             "type": "FeatureCollection",
             "features": [],
@@ -1303,7 +1306,10 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
         "created_at": time.monotonic(),
         "last_accessed": time.monotonic(),
     }
-    await asyncio.to_thread(_persist_cached_job_sync, job_id, rows, sold_points, polygon)
+    try:
+        await asyncio.to_thread(_persist_cached_job_sync, job_id, rows, sold_points, polygon)
+    except Exception as exc:
+        logger.warning("Failed to persist job to cache (non-fatal): %s", exc)
     asyncio.create_task(
         _persist_session_async(
             job_id,
@@ -1373,7 +1379,10 @@ async def merge_jobs(request: MergeJobsRequest) -> dict[str, Any]:
         "created_at": time.monotonic(),
         "last_accessed": time.monotonic(),
     }
-    await asyncio.to_thread(_persist_cached_job_sync, new_job_id, merged_rows, merged_sold_points, [])
+    try:
+        await asyncio.to_thread(_persist_cached_job_sync, new_job_id, merged_rows, merged_sold_points, [])
+    except Exception as exc:
+        logger.warning("Failed to persist job to cache (non-fatal): %s", exc)
     return {"job_id": new_job_id}
 
 
