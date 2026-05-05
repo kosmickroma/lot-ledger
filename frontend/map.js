@@ -1069,6 +1069,8 @@ sidebarToggleBtn.addEventListener("click", () => {
 initSidebarCollapsibles();
 
 function applyMapVisibilityFilters() {
+  const previousSoldLayerVisible = soldLayerVisible;
+
   PARCEL_LAYER_KEYS.forEach((key) => {
     const layer = parcelTypeLayers[key];
     if (!layer) return;
@@ -1084,6 +1086,18 @@ function applyMapVisibilityFilters() {
   else map.removeLayer(soldLayer);
 
   renderSoldPoints(lastSoldPoints);
+
+  // Sold outlines are embedded in parcel styling, so sold toggle changes need
+  // a parcel rerender to immediately reflect outline visibility state.
+  const soldToggleChanged = previousSoldLayerVisible !== soldLayerVisible;
+  if (soldToggleChanged && lastAnalysisGeojson && Array.isArray(lastAnalysisGeojson.features) && lastAnalysisGeojson.features.length <= BROWSE_ONLY_THRESHOLD) {
+    if (viewportRenderMode) {
+      renderViewportFeatures();
+    } else {
+      const markers = renderFeatures(lastAnalysisGeojson);
+      if (lastAnalysisCounts) renderSidebar(lastAnalysisCounts, markers);
+    }
+  }
 
   const soldStatus = document.getElementById("sold-toggle-status");
   if (soldStatus) {
@@ -1457,6 +1471,7 @@ function renderSoldPoints(points) {
       weight: 1.2,
       opacity: 1,
       fillOpacity: 0.85,
+      bubblingMouseEvents: false,
     }).bindPopup(() => makeSoldPopupHtml(point), { maxWidth: 300 }).addTo(soldLayer);
     soldMarkers.push({ marker, priceLabel: abbreviatePrice(point.sold_price) });
   });
@@ -1545,6 +1560,7 @@ function renderFeatures(geojson) {
       // Interactive so clicking the building outline shows the first unit's popup.
       L.geoJSON(feature, {
         renderer: MAP_CANVAS_RENDERER,
+        bubblingMouseEvents: false,
         style: {
           color: parcelBorderColor,
           fill: false,
@@ -1560,6 +1576,7 @@ function renderFeatures(geojson) {
     if (renderPolygon) {
       layer = L.geoJSON(feature, {
         renderer: MAP_CANVAS_RENDERER,
+        bubblingMouseEvents: false,
         style: {
           color: parcelBorderColor,
           fillColor: color,
@@ -1591,6 +1608,7 @@ function renderFeatures(geojson) {
         weight: 1.5,
         opacity: 1,
         fillOpacity: 0.9,
+        bubblingMouseEvents: false,
       }).bindPopup(() => makePopupHtml(p), { maxWidth: 280 });
       layer.on("click", applyBrush);
       layer.addTo(circleLayer);
