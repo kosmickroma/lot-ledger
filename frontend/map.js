@@ -695,6 +695,7 @@ const MapToolbar = L.Control.extend({
       if (!handler) return;
       if (handler.enabled()) {
         handler.disable();
+        map.getContainer().classList.remove("drawing-active");
       } else {
         handler.enable();
       }
@@ -709,6 +710,10 @@ const MapToolbar = L.Control.extend({
       L.DomEvent.preventDefault(e);
       const handler = getPolygonDrawHandler();
       if (handler && handler.enabled()) handler.disable();
+      map.getContainer().classList.remove("drawing-active");
+      drawHelper.classList.add("hidden");
+      cancelBtn.classList.add("hidden");
+      document.getElementById("btn-draw")?.classList.remove("active");
     });
 
     const clearBtn = L.DomUtil.create("a", "hidden", container);
@@ -1906,6 +1911,13 @@ async function runTiledAnalysis(polygon, includeRedfin, includeSold, options = {
     return pt ? pointInPolygonLngLat(pt, polygon) : true;
   });
 
+  const filteredSoldPoints = soldPoints.filter((point) => {
+    const lng = Number(point.lng);
+    const lat = Number(point.lat);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
+    return pointInPolygonLngLat([lng, lat], polygon);
+  });
+
   // Recount from deduplicated + clipped features
   const mergedCounts = { active: 0, off_market: 0, multifamily: 0, vacant: 0, commercial: 0, exempt: 0, total: filteredFeatures.length };
   for (const feature of filteredFeatures) {
@@ -1935,7 +1947,7 @@ async function runTiledAnalysis(polygon, includeRedfin, includeSold, options = {
     type: "FeatureCollection",
     features: filteredFeatures,
     counts: mergedCounts,
-    sold_points: soldPoints,
+    sold_points: filteredSoldPoints,
     job_id: mergeData.job_id,
     redfin_requested: includeRedfin,
     redfin_ok: anyRedfinOk,
@@ -2022,6 +2034,7 @@ async function persistTagStateForExport() {
 }
 
 map.on("draw:created", async (e) => {
+  map.getContainer().classList.remove("drawing-active");
   drawLayer.clearLayers();
   PARCEL_LAYER_KEYS.forEach((key) => parcelTypeLayers[key]?.clearLayers());
   redfinLayer.clearLayers();
@@ -2205,6 +2218,9 @@ document.addEventListener("keydown", (event) => {
     event.preventDefault();
     handler.disable();
     drawHelper.classList.add("hidden");
+    map.getContainer().classList.remove("drawing-active");
+    document.getElementById("btn-draw")?.classList.remove("active");
+    document.getElementById("btn-draw-cancel")?.classList.add("hidden");
   }
 });
 
