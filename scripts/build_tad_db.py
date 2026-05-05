@@ -204,6 +204,7 @@ def _ensure_table() -> None:
             cur.execute("CREATE INDEX IF NOT EXISTS idx_tad_parcels_account_num ON tad_parcels (account_num)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_tad_parcels_geom ON tad_parcels USING GIST (geom)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_tad_parcels_centroid ON tad_parcels USING GIST (centroid)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_tad_parcels_situs_addr_upper ON tad_parcels (upper(situs_addr))")
         conn.commit()
     finally:
         release_conn(conn)

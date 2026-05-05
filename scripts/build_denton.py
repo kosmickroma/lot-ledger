@@ -271,6 +271,7 @@ def _ensure_table() -> None:
             cur.execute("CREATE INDEX IF NOT EXISTS idx_denton_parcels_state_cd ON denton_parcels (state_cd)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_denton_parcels_geom ON denton_parcels USING GIST (geom)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_denton_parcels_centroid ON denton_parcels USING GIST (centroid)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_denton_parcels_property_address_upper ON denton_parcels (upper(property_address))")
         conn.commit()
     finally:
         release_conn(conn)

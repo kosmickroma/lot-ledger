@@ -875,10 +875,14 @@ async def address_suggest(q: str, limit: int = 8) -> dict[str, Any]:
             items = _rows_to_items(rows)
             _suggest_cache_put(cache_key, items)
             return {"items": items}
-    except Exception:
-        # Suggestion failures should never block primary search behavior.
+    except Exception as exc:
+        logger.warning("address_suggest failed (non-fatal): %s", exc)
         return {"items": []}
     finally:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         release_conn(conn)
 
 
