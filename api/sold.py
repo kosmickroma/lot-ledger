@@ -10,11 +10,33 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 from psycopg2.extras import RealDictCursor
 
 from api.config import get_conn, release_conn
+
+
+logger = logging.getLogger(__name__)
+
+
+def log_redfin_sold_row_count() -> None:
+    """Log redfin_sold row count once at startup for visibility."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM redfin_sold")
+            row = cur.fetchone()
+            count = int(row[0]) if row and row[0] is not None else 0
+            if count <= 0:
+                logger.warning("redfin_sold startup check returned %d rows", count)
+            else:
+                logger.info("redfin_sold startup check: %d rows", count)
+    except Exception as exc:
+        logger.warning("redfin_sold startup check failed: %s", exc)
+    finally:
+        release_conn(conn)
 
 
 def query_sold_parcels(polygon: list[list[float]]) -> list[dict[str, Any]]:

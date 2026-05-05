@@ -39,7 +39,7 @@ from api.counties.denton import _classify_denton, _normalize_denton_row, query_d
 from api.counties.tad import _normalize_tad_row, _classify_tad, query_tad_parcels
 from api.geo import polygon_bbox
 from api.redfin import normalize_addr_key, pull_grid
-from api.sold import query_sold_parcels
+from api.sold import log_redfin_sold_row_count, query_sold_parcels
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -1402,6 +1402,7 @@ async def download(job_id: str, filename: str | None = None) -> StreamingRespons
     rows = job.get("rows", [])
     redfin_data: dict[str, dict] = job.get("redfin_data", {})
     sold_points: list[dict[str, Any]] = job.get("sold_points", []) or []
+    logger.info("Download job %s: %d parcel rows, %d sold points", job_id, len(rows), len(sold_points))
 
     download_name = _normalize_csv_filename(filename)
 
@@ -1723,6 +1724,7 @@ async def _cleanup_expired_sessions_loop() -> None:
 @app.on_event("startup")
 async def _startup_session_storage() -> None:
     await asyncio.to_thread(_ensure_session_schema)
+    await asyncio.to_thread(log_redfin_sold_row_count)
     app.state.session_cleanup_task = asyncio.create_task(_cleanup_expired_sessions_loop())
 
 
