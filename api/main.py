@@ -415,6 +415,7 @@ def _restore_job_from_session(session_id: str) -> dict[str, Any] | None:
     return {
         "rows": rows,
         "redfin_data": {},
+        "sold_points": [],
         "polygon": polygon,
         "created_at": time.monotonic(),
         "last_accessed": time.monotonic(),
@@ -1709,6 +1710,30 @@ async def download(job_id: str, filename: str | None = None) -> StreamingRespons
     sold_points: list[dict[str, Any]] = job.get("sold_points", []) or []
     logger.info("Download job %s: %d parcel rows, %d sold points", job_id, len(rows), len(sold_points))
 
+    def _deg_dist(lat1, lng1, lat2, lng2):
+        return ((lat1 - lat2) ** 2 + (lng1 - lng2) ** 2) ** 0.5
+
+    _COMP_THRESHOLD = 0.00135  # ~150 m at Texas latitude
+    comp_by_parcel_key: dict[str, dict] = {}
+    for _pr in rows:
+        p_lat = _safe_float(_pr.get("lat"))
+        p_lng = _safe_float(_pr.get("lng"))
+        if p_lat is None or p_lng is None:
+            continue
+        best_comp: dict[str, Any] | None = None
+        best_dist = _COMP_THRESHOLD
+        for _sp in sold_points:
+            s_lat = _safe_float(_sp.get("lat"))
+            s_lng = _safe_float(_sp.get("lng"))
+            if s_lat is None or s_lng is None:
+                continue
+            dist = _deg_dist(p_lat, p_lng, s_lat, s_lng)
+            if dist < best_dist:
+                best_dist = dist
+                best_comp = _sp
+        if best_comp is not None:
+            comp_by_parcel_key[str(_pr.get("account_num", "") or "")] = best_comp
+
     download_name = _normalize_csv_filename(filename)
 
     def generate_csv():
@@ -1798,6 +1823,16 @@ async def download(job_id: str, filename: str | None = None) -> StreamingRespons
                 "Denton - Deed Number",
                 "Denton - Deed Date",
                 "Denton - Subdivision",
+                "Comp Sold Price",
+                "Comp Sold Date",
+                "Comp $/sqft",
+                "Comp Year Built",
+                "Comp Living Area (sqft)",
+                "Comp Lot Size (sqft)",
+                "Comp Beds",
+                "Comp Baths",
+                "Comp Days on Market",
+                "Comp Listing URL",
             ]
         )
         buffer.seek(0)
@@ -1860,6 +1895,8 @@ async def download(job_id: str, filename: str | None = None) -> StreamingRespons
                 or str(row.get("legal1", "") or "").strip()
                 or str(row.get("parcel_key", "") or "").strip()
             )
+
+            comp = comp_by_parcel_key.get(str(row.get("account_num", "") or ""))
 
             writer.writerow(
                 [
@@ -1948,53 +1985,22 @@ async def download(job_id: str, filename: str | None = None) -> StreamingRespons
                     row.get("deed_number", "") or "",
                     row.get("deed_date", "") or "",
                     row.get("subdivision", "") or "",
+                    round(_safe_float(comp.get("sold_price")), 0) if comp and _safe_float(comp.get("sold_price")) is not None else "",
+                    (comp.get("sold_date", "") or "") if comp else "",
+                    round(_safe_float(comp.get("price_per_sqft")), 0) if comp and _safe_float(comp.get("price_per_sqft")) is not None else "",
+                    int(_safe_float(comp.get("yr_built"))) if comp and _safe_float(comp.get("yr_built")) not in (None, 0.0) else "",
+                    int(_safe_float(comp.get("sqft"))) if comp and _safe_float(comp.get("sqft")) not in (None, 0.0) else "",
+                    round(_safe_float(comp.get("lot_sqft")), 0) if comp and _safe_float(comp.get("lot_sqft")) is not None else "",
+                    round(_safe_float(comp.get("beds")), 1) if comp and _safe_float(comp.get("beds")) is not None else "",
+                    round(_safe_float(comp.get("baths")), 1) if comp and _safe_float(comp.get("baths")) is not None else "",
+                    int(_safe_float(comp.get("dom"))) if comp and _safe_float(comp.get("dom")) not in (None, 0.0) else "",
+                    (comp.get("listing_url", "") or "") if comp else "",
                 ]
             )
             buffer.seek(0)
             yield buffer.getvalue()
             buffer.truncate(0)
             buffer.seek(0)
-
-        if sold_points:
-            writer.writerow([])
-            writer.writerow(
-                [
-                    "Sold Address",
-                    "Sold Price",
-                    "Sold Date",
-                    "Days on Market",
-                    "Lot Size (sq ft)",
-                    "Listing URL",
-                    "Source County",
-                ]
-            )
-            buffer.seek(0)
-            yield buffer.getvalue()
-            buffer.truncate(0)
-            buffer.seek(0)
-
-            sold_sorted = sorted(
-                sold_points,
-                key=lambda p: str(p.get("sold_date", "") or ""),
-                reverse=True,
-            )
-
-            for sold in sold_sorted:
-                writer.writerow(
-                    [
-                        sold.get("address", "") or "",
-                        round(_safe_float(sold.get("sold_price")), 0) if _safe_float(sold.get("sold_price")) is not None else "",
-                        sold.get("sold_date", "") or "",
-                        int(_safe_float(sold.get("dom"))) if _safe_float(sold.get("dom")) not in (None, 0.0) else "",
-                        round(_safe_float(sold.get("lot_sqft")), 0) if _safe_float(sold.get("lot_sqft")) is not None else "",
-                        sold.get("listing_url", "") or "",
-                        sold.get("source_county", "") or "",
-                    ]
-                )
-                buffer.seek(0)
-                yield buffer.getvalue()
-                buffer.truncate(0)
-                buffer.seek(0)
 
     return StreamingResponse(
         generate_csv(),
