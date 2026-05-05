@@ -235,8 +235,11 @@ let lastAnalysisCounts = null;
 let lastIncludedRedfin = false;
 let lastIncludedSold = false;
 let lastSoldPoints = [];
+let lastSoldPanelPoints = [];
 let matchedSoldLabelPoints = [];
 let soldMarkers = [];
+let soldCompsSortMode = "price";
+let soldCompsCollapsed = true;
 let filterState = { ...DEFAULT_FILTERS };
 const verificationByAccount = new Map();
 const potentialTargetByAccount = new Map();
@@ -368,6 +371,162 @@ function refreshSoldPriceLabels() {
     });
     shown += 1;
   }
+}
+
+function asNumber(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function median(values) {
+  const nums = values.filter((v) => Number.isFinite(v)).sort((a, b) => a - b);
+  if (!nums.length) return null;
+  const mid = Math.floor(nums.length / 2);
+  if (nums.length % 2 === 0) return (nums[mid - 1] + nums[mid]) / 2;
+  return nums[mid];
+}
+
+function soldAddressStreetOnly(address) {
+  return String(address || "").split(",")[0].trim() || "Unknown address";
+}
+
+function soldPointKey(point) {
+  return String(point?.listing_url || `${point?.lat},${point?.lng},${point?.sold_date || ""}`);
+}
+
+function findMatchedFeatureForSoldPoint(point) {
+  if (!Array.isArray(allAnalysisFeatures) || !allAnalysisFeatures.length) return null;
+  const listingUrl = String(point?.listing_url || "");
+  const fallbackKey = soldPointKey(point);
+  for (const feature of allAnalysisFeatures) {
+    const p = feature?.properties || {};
+    const sold = p.sold_comp;
+    if (!sold) continue;
+    if (listingUrl && String(sold.listing_url || "") === listingUrl) return feature;
+    const featureKey = String(sold.listing_url || `${p.lat},${p.lng},${sold.sold_date || ""}`);
+    if (featureKey === fallbackKey) return feature;
+  }
+  return null;
+}
+
+function zoomToSoldComp(point) {
+  const lat = Number(point?.lat);
+  const lng = Number(point?.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+  const matchedFeature = findMatchedFeatureForSoldPoint(point);
+  const targetZoom = Math.max(map.getZoom(), 17);
+  let opened = false;
+  const openPopup = () => {
+    if (opened) return;
+    opened = true;
+    if (!matchedFeature) return;
+    const p = matchedFeature.properties || {};
+    L.popup({ autoPan: false })
+      .setLatLng([lat, lng])
+      .setContent(makePopupHtml(p))
+      .openOn(map);
+  };
+
+  map.once("moveend", openPopup);
+  map.flyTo([lat, lng], targetZoom, { duration: 0.35 });
+  setTimeout(openPopup, 400);
+}
+
+function renderSoldCompsPanel() {
+  const panel = document.getElementById("sold-comps-panel");
+  if (!panel) return;
+
+  if (!Array.isArray(lastSoldPanelPoints) || lastSoldPanelPoints.length === 0) {
+    panel.innerHTML = "";
+    return;
+  }
+
+  const priceValues = lastSoldPanelPoints.map((p) => asNumber(p.sold_price)).filter((n) => n != null);
+  const ppsfValues = lastSoldPanelPoints.map((p) => asNumber(p.price_per_sqft)).filter((n) => n != null);
+  const medianPrice = median(priceValues);
+  const medianPpsf = median(ppsfValues);
+
+  const metricGetter = soldCompsSortMode === "ppsf"
+    ? (p) => asNumber(p.price_per_sqft) ?? -Infinity
+    : (p) => asNumber(p.sold_price) ?? -Infinity;
+
+  const topRows = [...lastSoldPanelPoints]
+    .sort((a, b) => metricGetter(b) - metricGetter(a))
+    .slice(0, 5)
+    .map((point, idx) => {
+      const price = abbreviatePrice(point.sold_price) || "N/A";
+      const ppsf = asNumber(point.price_per_sqft);
+      const sqft = asNumber(point.sqft);
+      const beds = asNumber(point.beds);
+      const baths = asNumber(point.baths);
+      const yrBuilt = asNumber(point.yr_built);
+      const soldDate = formatSoldDateLabel(point.sold_date) || "N/A";
+      const ppsfText = ppsf != null ? `$${Math.round(ppsf)}/sqft` : "N/A";
+      const sizeText = sqft != null ? `${Math.round(sqft).toLocaleString()} sf` : "N/A sf";
+      const bedBathText = `${beds != null ? beds : "?"}bd/${baths != null ? baths : "?"}ba`;
+      const yearText = yrBuilt != null ? `${Math.round(yrBuilt)}` : "N/A";
+      return `
+        <div class="sold-row" data-sold-idx="${idx}">
+          <div class="sold-row-top">
+            <span class="sold-row-price">${price}</span>
+            <span>${ppsfText}</span>
+          </div>
+          <div class="sold-row-meta">${sizeText} · ${bedBathText} · Built ${yearText}</div>
+          <div class="sold-row-sub">${soldDate} · ${soldAddressStreetOnly(point.address)}</div>
+        </div>
+      `;
+    })
+    .join("");
+
+  const sortedForClick = [...lastSoldPanelPoints]
+    .sort((a, b) => metricGetter(b) - metricGetter(a))
+    .slice(0, 5);
+
+  panel.innerHTML = `
+    <div class="sold-comps-panel">
+      <button class="section-toggle" type="button" id="sold-comps-toggle" aria-expanded="${!soldCompsCollapsed}">
+        <span class="sidebar-label">Sold Comps</span>
+      </button>
+      <div id="sold-comps-body" class="collapsible-body${soldCompsCollapsed ? " hidden" : ""}">
+        <div class="sold-comps-summary">
+          <span class="sold-chip">${lastSoldPanelPoints.length} comps</span>
+          <span class="sold-chip">Median ${medianPrice != null ? abbreviatePrice(medianPrice) : "N/A"}</span>
+          <span class="sold-chip">Median ${medianPpsf != null ? `$${Math.round(medianPpsf)}/sqft` : "N/A"}</span>
+        </div>
+        <div class="sold-sort">
+          <button type="button" class="sold-sort-btn${soldCompsSortMode === "price" ? " active" : ""}" data-sort="price">By Price</button>
+          <button type="button" class="sold-sort-btn${soldCompsSortMode === "ppsf" ? " active" : ""}" data-sort="ppsf">By $/sqft</button>
+        </div>
+        <div class="sold-context">Recent sales — what finished homes are commanding in this pocket</div>
+        <div class="sold-list">${topRows}</div>
+      </div>
+    </div>
+  `;
+
+  const soldToggle = document.getElementById("sold-comps-toggle");
+  const soldBody = document.getElementById("sold-comps-body");
+  soldToggle?.addEventListener("click", () => {
+    soldCompsCollapsed = !soldCompsCollapsed;
+    soldToggle.setAttribute("aria-expanded", String(!soldCompsCollapsed));
+    soldBody?.classList.toggle("hidden", soldCompsCollapsed);
+  });
+
+  panel.querySelectorAll(".sold-sort-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const next = btn.getAttribute("data-sort") === "ppsf" ? "ppsf" : "price";
+      if (next === soldCompsSortMode) return;
+      soldCompsSortMode = next;
+      renderSoldCompsPanel();
+    });
+  });
+
+  panel.querySelectorAll(".sold-row[data-sold-idx]").forEach((rowEl) => {
+    rowEl.addEventListener("click", () => {
+      const idx = Number(rowEl.getAttribute("data-sold-idx"));
+      const point = sortedForClick[idx];
+      if (point) zoomToSoldComp(point);
+    });
+  });
 }
 
 async function toggleHoaLayer() {
@@ -615,6 +774,7 @@ async function restoreSavedArea(area) {
     lastIncludedRedfin = includeRedfin;
     lastIncludedSold = includeSold;
     lastSoldPoints = Array.isArray(data.sold_points) ? data.sold_points : [];
+    lastSoldPanelPoints = [...lastSoldPoints];
     lastAnalysisGeojson = data;
     lastAnalysisCounts = data.counts;
     allAnalysisFeatures = data.features;
@@ -635,7 +795,7 @@ async function restoreSavedArea(area) {
     const soldStatus = document.getElementById("sold-toggle-status");
     if (soldStatus) {
       soldStatus.textContent = filterState.sold
-        ? `${lastSoldPoints.length} sold comp${lastSoldPoints.length !== 1 ? "s" : ""} found`
+        ? `${lastSoldPanelPoints.length} sold comp${lastSoldPanelPoints.length !== 1 ? "s" : ""} found`
         : "";
     }
 
@@ -1117,7 +1277,7 @@ function applyMapVisibilityFilters() {
   const soldStatus = document.getElementById("sold-toggle-status");
   if (soldStatus) {
     soldStatus.textContent = filterState.sold
-      ? `${lastSoldPoints.length} sold comp${lastSoldPoints.length !== 1 ? "s" : ""} found`
+      ? `${lastSoldPanelPoints.length} sold comp${lastSoldPanelPoints.length !== 1 ? "s" : ""} found`
       : "Sold comps hidden";
   }
 }
@@ -1755,6 +1915,8 @@ function renderSidebar(counts, markers) {
     )
     .join("");
 
+  renderSoldCompsPanel();
+
 }
 
 function makeDefaultCsvName() {
@@ -2348,6 +2510,7 @@ map.on("draw:created", async (e) => {
     lastIncludedRedfin = false;
     lastIncludedSold = includeSold;
     lastSoldPoints = Array.isArray(data.sold_points) ? data.sold_points : [];
+    lastSoldPanelPoints = [...lastSoldPoints];
     lastAnalysisGeojson = data;
     lastAnalysisCounts = data.counts;
     allAnalysisFeatures = data.features;
@@ -2385,7 +2548,7 @@ map.on("draw:created", async (e) => {
     const soldStatus = document.getElementById("sold-toggle-status");
     if (soldStatus) {
       soldStatus.textContent = filterState.sold
-        ? `${lastSoldPoints.length} sold comp${lastSoldPoints.length !== 1 ? "s" : ""} found`
+        ? `${lastSoldPanelPoints.length} sold comp${lastSoldPanelPoints.length !== 1 ? "s" : ""} found`
         : "";
     }
   } catch (err) {
@@ -2422,7 +2585,10 @@ function clearDrawResults() {
   lastIncludedRedfin = false;
   lastIncludedSold = false;
   lastSoldPoints = [];
+  lastSoldPanelPoints = [];
   matchedSoldLabelPoints = [];
+  const soldCompsPanel = document.getElementById("sold-comps-panel");
+  if (soldCompsPanel) soldCompsPanel.innerHTML = "";
   document.getElementById("redfin-toggle-status").textContent = "";
   document.getElementById("sold-toggle-status").textContent = "";
   document.getElementById("sidebar-results")?.classList.add("hidden");
@@ -2545,6 +2711,7 @@ async function rerunWithRedfin() {
     lastIncludedRedfin = true;
     lastIncludedSold = includeSold;
     lastSoldPoints = Array.isArray(data.sold_points) ? data.sold_points : [];
+    lastSoldPanelPoints = [...lastSoldPoints];
     lastAnalysisGeojson = data;
     lastAnalysisCounts = data.counts;
     redfinLayerVisible = true;
@@ -2615,6 +2782,7 @@ async function rerunWithSold() {
     lastIncludedSold = true;
     lastIncludedRedfin = includeRedfin;
     lastSoldPoints = Array.isArray(data.sold_points) ? data.sold_points : [];
+    lastSoldPanelPoints = [...lastSoldPoints];
     lastAnalysisGeojson = data;
     lastAnalysisCounts = data.counts;
     allAnalysisFeatures = data.features;
@@ -2635,7 +2803,7 @@ async function rerunWithSold() {
     }
 
     if (statusEl) {
-      statusEl.textContent = `${lastSoldPoints.length} sold comp${lastSoldPoints.length !== 1 ? "s" : ""} found`;
+      statusEl.textContent = `${lastSoldPanelPoints.length} sold comp${lastSoldPanelPoints.length !== 1 ? "s" : ""} found`;
     }
   } catch (err) {
     if (statusEl) statusEl.textContent = "Sold comps unavailable";

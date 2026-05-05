@@ -336,6 +336,99 @@ h1 {
   color: var(--text-main);
 }
 
+#sold-comps-panel {
+  margin-bottom: 12px;
+}
+
+.sold-comps-panel {
+  margin-top: 8px;
+  padding: 10px;
+  border-radius: 9px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.sold-comps-summary {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.sold-chip {
+  font-size: 11px;
+  color: #dbe0e7;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  padding: 3px 8px;
+  background: rgba(0, 0, 0, 0.16);
+}
+
+.sold-sort {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.sold-sort-btn {
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(0, 0, 0, 0.16);
+  color: #cfd4dc;
+  border-radius: 999px;
+  padding: 3px 9px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.sold-sort-btn.active {
+  border-color: rgba(201, 162, 79, 0.6);
+  color: #f5e8c7;
+}
+
+.sold-context {
+  font-size: 11px;
+  color: var(--text-soft);
+  margin-bottom: 8px;
+}
+
+.sold-list {
+  display: grid;
+  gap: 6px;
+}
+
+.sold-row {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  padding: 7px 8px;
+  background: rgba(0, 0, 0, 0.14);
+  cursor: pointer;
+}
+
+.sold-row:hover {
+  border-color: rgba(201, 162, 79, 0.45);
+  background: rgba(201, 162, 79, 0.08);
+}
+
+.sold-row-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  margin-bottom: 3px;
+}
+
+.sold-row-price {
+  font-weight: 700;
+  color: #f4e5bf;
+}
+
+.sold-row-meta,
+.sold-row-sub {
+  font-size: 11px;
+  color: #c5ccd6;
+  line-height: 1.35;
+}
+
 .sidebar-actions {
   display: flex;
   gap: 8px;

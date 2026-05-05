@@ -42,6 +42,12 @@ def query_sold_parcels(polygon: list[list[float]]) -> list[dict[str, Any]]:
                     sold_date,
                     dom,
                     lot_sqft,
+                    sqft,
+                    beds,
+                    baths,
+                    yr_built,
+                    price_per_sqft,
+                    city,
                     listing_url,
                     lat,
                     lng
