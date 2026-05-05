@@ -1244,7 +1244,9 @@ async def merge_jobs(request: MergeJobsRequest) -> dict[str, Any]:
     """Merge rows from multiple tile job_ids into a single exportable job."""
     merged_rows: list[dict[str, Any]] = []
     merged_redfin: dict[str, Any] = {}
+    merged_sold_points: list[dict[str, Any]] = []
     seen_keys: set[str] = set()
+    seen_sold_keys: set[str] = set()
     for job_id in request.job_ids:
         job = _get_job(job_id)
         if job is None:
@@ -1257,6 +1259,15 @@ async def merge_jobs(request: MergeJobsRequest) -> dict[str, Any]:
                 seen_keys.add(key)
             merged_rows.append(row)
         merged_redfin.update(job.get("redfin_data", {}))
+        for point in job.get("sold_points", []) or []:
+            sold_key = str(
+                point.get("listing_url")
+                or f"{point.get('lat')},{point.get('lng')},{point.get('sold_date') or ''}"
+            )
+            if sold_key in seen_sold_keys:
+                continue
+            seen_sold_keys.add(sold_key)
+            merged_sold_points.append(point)
 
     if not merged_rows:
         raise HTTPException(status_code=404, detail="No valid tile jobs found to merge")
@@ -1266,6 +1277,7 @@ async def merge_jobs(request: MergeJobsRequest) -> dict[str, Any]:
     _job_store[new_job_id] = {
         "rows": merged_rows,
         "redfin_data": merged_redfin,
+        "sold_points": merged_sold_points,
         "polygon": [],
         "created_at": time.monotonic(),
         "last_accessed": time.monotonic(),

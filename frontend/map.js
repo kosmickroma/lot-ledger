@@ -333,6 +333,15 @@ function abbreviatePrice(value) {
   return `$${Math.round(n)}`;
 }
 
+function formatSoldDateLabel(value) {
+  if (!value) return "";
+  const d = new Date(String(value));
+  if (Number.isNaN(d.getTime())) return "";
+  const month = d.toLocaleString("en-US", { month: "short" });
+  const year2 = String(d.getFullYear()).slice(-2);
+  return `${month} '${year2}`;
+}
+
 function refreshSoldPriceLabels() {
   soldMarkers.forEach(({ marker }) => marker.unbindTooltip());
   if (!soldLayerVisible || map.getZoom() < 16) return;
@@ -342,14 +351,15 @@ function refreshSoldPriceLabels() {
   const occupied = new Set();
   let shown = 0;
 
-  for (const { marker, priceLabel } of soldMarkers) {
+  for (const { marker, priceLabel, soldDateLabel } of soldMarkers) {
     if (shown >= maxLabels) break;
     if (!priceLabel) continue;
     const p = map.latLngToContainerPoint(marker.getLatLng());
     const key = `${Math.floor(p.x / cellPx)}:${Math.floor(p.y / cellPx)}`;
     if (occupied.has(key)) continue;
     occupied.add(key);
-    marker.bindTooltip(priceLabel, {
+    const labelText = soldDateLabel ? `${priceLabel} · ${soldDateLabel}` : priceLabel;
+    marker.bindTooltip(labelText, {
       permanent: true,
       direction: "top",
       offset: [10, -8],
@@ -1258,7 +1268,6 @@ function makePopupHtml(p) {
     const soldPrice = typeof sold.sold_price === "number" ? `$${sold.sold_price.toLocaleString()}` : sold.sold_price;
     const soldDate = sold.sold_date ? String(sold.sold_date).slice(0, 10) : "N/A";
     const soldDom = sold.dom == null ? "N/A" : String(sold.dom);
-    const soldLotSqft = typeof sold.lot_sqft === "number" ? `${sold.lot_sqft.toLocaleString()} sf` : sold.lot_sqft;
     const soldListing = sold.listing_url
       ? `<a href="${sold.listing_url}" target="_blank" rel="noopener noreferrer">View listing</a>`
       : "N/A";
@@ -1268,7 +1277,6 @@ function makePopupHtml(p) {
       ${row("Sold Price", soldPrice)}
       ${row("Sold Date", soldDate)}
       ${row("Days on Market", soldDom)}
-      ${row("Lot Size", soldLotSqft)}
       ${row("Listing", soldListing)}
     `;
   }
@@ -1467,6 +1475,7 @@ function attachSoldCompsToFeatures(features, soldPoints) {
       lat,
       lng,
       sold_price: p.sold_comp.sold_price,
+      sold_date: p.sold_comp.sold_date,
     });
   }
 
@@ -1492,7 +1501,11 @@ function renderSoldPoints(points) {
       fillOpacity: 0.85,
       bubblingMouseEvents: false,
     }).bindPopup(() => makeSoldPopupHtml(point), { maxWidth: 300 }).addTo(soldLayer);
-    soldMarkers.push({ marker, priceLabel: abbreviatePrice(point.sold_price) });
+    soldMarkers.push({
+      marker,
+      priceLabel: abbreviatePrice(point.sold_price),
+      soldDateLabel: formatSoldDateLabel(point.sold_date),
+    });
   });
 
   // Matched sold comps are represented by gold parcel outlines. Create
@@ -1508,7 +1521,11 @@ function renderSoldPoints(points) {
       interactive: false,
       bubblingMouseEvents: false,
     }).addTo(soldLayer);
-    soldMarkers.push({ marker, priceLabel: abbreviatePrice(point.sold_price) });
+    soldMarkers.push({
+      marker,
+      priceLabel: abbreviatePrice(point.sold_price),
+      soldDateLabel: formatSoldDateLabel(point.sold_date),
+    });
   });
 
   refreshSoldPriceLabels();
@@ -1619,7 +1636,7 @@ function renderFeatures(geojson) {
           weight: parcelBorderWeight,
           opacity: 0.85,
         },
-      }).bindPopup(() => makePopupHtml(p), { maxWidth: 280 });
+      }).bindPopup(() => makePopupHtml(p), { maxWidth: 280, autoPan: false });
       layer.on("click", applyBrush);
       layer.addTo(targetLayer);
       // No circle marker rendered when polygon geometry exists — polygon fill IS the click target.
@@ -1644,7 +1661,7 @@ function renderFeatures(geojson) {
         opacity: 1,
         fillOpacity: 0.9,
         bubblingMouseEvents: false,
-      }).bindPopup(() => makePopupHtml(p), { maxWidth: 280 });
+      }).bindPopup(() => makePopupHtml(p), { maxWidth: 280, autoPan: false });
       layer.on("click", applyBrush);
       layer.addTo(circleLayer);
     }
