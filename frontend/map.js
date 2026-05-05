@@ -188,7 +188,10 @@ function _updateZoomNudge() {
   _zoomNudge.classList.toggle("hidden", !tooFarOut || Boolean(lastAnalysisGeojson));
 }
 map.on("zoomend", _updateZoomNudge);
-map.on("moveend zoomend", () => {
+map.on("moveend", () => {
+  if (viewportRenderMode) _scheduleViewportRender();
+});
+map.on("zoomend", () => {
   if (viewportRenderMode) _scheduleViewportRender();
   refreshSoldPriceLabels();
 });
@@ -323,10 +326,13 @@ function refreshSoldPriceLabels() {
   soldMarkers.forEach(({ marker }) => marker.unbindTooltip());
   if (!soldLayerVisible || map.getZoom() <= 15) return;
 
+  const maxLabels = map.getZoom() >= 18 ? 220 : map.getZoom() >= 17 ? 140 : 80;
   const cellPx = map.getZoom() >= 18 ? 20 : map.getZoom() >= 17 ? 26 : 34;
   const occupied = new Set();
+  let shown = 0;
 
   for (const { marker, priceLabel } of soldMarkers) {
+    if (shown >= maxLabels) break;
     if (!priceLabel) continue;
     const p = map.latLngToContainerPoint(marker.getLatLng());
     const key = `${Math.floor(p.x / cellPx)}:${Math.floor(p.y / cellPx)}`;
@@ -339,6 +345,7 @@ function refreshSoldPriceLabels() {
       className: "sold-price-label",
       interactive: false,
     });
+    shown += 1;
   }
 }
 
@@ -560,7 +567,7 @@ async function restoreSavedArea(area) {
   if (map.hasLayer(browseLayer)) browseLayer.remove();
 
   const includeRedfin = false;
-  const includeSold = true;
+  const includeSold = Boolean(filterState.sold);
   document.getElementById("sidebar-instructions")?.classList.add("hidden");
   document.getElementById("sidebar-results")?.classList.add("hidden");
   document.getElementById("sidebar-loading")?.classList.remove("hidden");
@@ -1943,7 +1950,7 @@ async function runAnalysis(polygon, includeRedfin, includeSold, options = {}) {
 async function refreshExpiredJob() {
   if (!lastPolygon || lastPolygon.length < 3) return false;
   const includeRedfin = false;
-  const includeSold = true;
+  const includeSold = Boolean(filterState.sold);
   try {
     const data = await runAnalysis(lastPolygon, includeRedfin, includeSold);
     if (data.source_status && (!data.source_status.dcad_ok || !data.source_status.tad_ok)) {
@@ -2019,7 +2026,7 @@ map.on("draw:created", async (e) => {
   document.getElementById("sidebar-results").classList.add("hidden");
   document.getElementById("sidebar-loading").classList.remove("hidden");
   const includeRedfin = false;
-  const includeSold = true;
+  const includeSold = Boolean(filterState.sold);
   document.getElementById("redfin-status").textContent = "Running analysis...";
   drawLayer.addLayer(e.layer);
 
