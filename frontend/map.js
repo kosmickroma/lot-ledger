@@ -49,6 +49,9 @@ const TYPE_LABELS = {
 
 const SOLD_MARKER_COLOR = "#c9a24f";
 const SOLD_MARKER_BORDER = "#8e6f2c";
+const SOLD_OUTLINE_COLOR = "#FFD700";
+const SOLD_FALLBACK_DOT_COLOR = "#4B0082";
+const SOLD_FALLBACK_DOT_BORDER = "#312e81";
 const FILTER_STORAGE_KEY = "lotledger.map.filters.v1";
 
 const DEFAULT_FILTERS = {
@@ -603,6 +606,11 @@ async function restoreSavedArea(area) {
     lastAnalysisGeojson = data;
     lastAnalysisCounts = data.counts;
     allAnalysisFeatures = data.features;
+    if (data.features.length <= BROWSE_ONLY_THRESHOLD) {
+      const soldJoin = attachSoldCompsToFeatures(allAnalysisFeatures, lastSoldPoints);
+      lastSoldPoints = soldJoin.unmatchedSoldPoints;
+      data.sold_points = lastSoldPoints;
+    }
     redfinLayerVisible = false;
     soldLayerVisible = Boolean(filterState.sold);
     map.removeLayer(redfinLayer);
@@ -1210,6 +1218,27 @@ function makePopupHtml(p) {
     }
   }
 
+  let soldCompRows = "";
+  if (p.sold_comp) {
+    const sold = p.sold_comp;
+    const soldPrice = typeof sold.sold_price === "number" ? `$${sold.sold_price.toLocaleString()}` : sold.sold_price;
+    const soldDate = sold.sold_date ? String(sold.sold_date).slice(0, 10) : "N/A";
+    const soldDom = sold.dom == null ? "N/A" : String(sold.dom);
+    const soldLotSqft = typeof sold.lot_sqft === "number" ? `${sold.lot_sqft.toLocaleString()} sf` : sold.lot_sqft;
+    const soldListing = sold.listing_url
+      ? `<a href="${sold.listing_url}" target="_blank" rel="noopener noreferrer">View listing</a>`
+      : "N/A";
+
+    soldCompRows = `
+      <tr><td colspan="2" style="padding-top:8px;border-top:1px solid #e2e8f0;font-weight:600;color:${SOLD_MARKER_BORDER};">Recent Sold Comp</td></tr>
+      ${row("Sold Price", soldPrice)}
+      ${row("Sold Date", soldDate)}
+      ${row("Days on Market", soldDom)}
+      ${row("Lot Size", soldLotSqft)}
+      ${row("Listing", soldListing)}
+    `;
+  }
+
   return `
       <div class="popup">
         <div class="popup-addr">${p.addr || "Unknown address"}</div>
@@ -1231,6 +1260,7 @@ function makePopupHtml(p) {
           ${row("Living Area", p.sqft && p.sqft !== "N/A" ? p.sqft + " sf" : "N/A")}
           ${row("Verified Vacant", verificationDisplay(verifiedVacant))}
           ${row("Potential Target", potentialTarget || "No")}
+          ${soldCompRows}
         </table>
         ${p.account_num ? `<div style="margin-top:8px;border-top:1px solid #e2e8f0;padding-top:6px;display:flex;gap:12px;align-items:center;">
           <a href="#" class="parcel-save-link"
@@ -1269,6 +1299,132 @@ function makeSoldPopupHtml(point) {
       </div>`;
 }
 
+function soldDateTimestamp(value) {
+  const t = Date.parse(String(value || ""));
+  return Number.isFinite(t) ? t : -Infinity;
+}
+
+function soldPointMatchKey(point) {
+  return String(point.listing_url || `${point.lat},${point.lng},${point.sold_date || ""}`);
+}
+
+function geometryOuterRings(geometry) {
+  if (!geometry) return [];
+  if (geometry.type === "Polygon") return Array.isArray(geometry.coordinates) ? geometry.coordinates : [];
+  if (geometry.type === "MultiPolygon") {
+    if (!Array.isArray(geometry.coordinates)) return [];
+    return geometry.coordinates.flatMap((poly) => Array.isArray(poly) ? poly : []);
+  }
+  return [];
+}
+
+function pointInPolygonGeometry(pointLngLat, geometry) {
+  if (!geometry) return false;
+  if (geometry.type === "Polygon") {
+    const rings = Array.isArray(geometry.coordinates) ? geometry.coordinates : [];
+    if (!rings.length) return false;
+    if (!pointInPolygonLngLat(pointLngLat, rings[0])) return false;
+    for (let i = 1; i < rings.length; i += 1) {
+      if (pointInPolygonLngLat(pointLngLat, rings[i])) return false;
+    }
+    return true;
+  }
+  if (geometry.type === "MultiPolygon") {
+    const polygons = Array.isArray(geometry.coordinates) ? geometry.coordinates : [];
+    for (const poly of polygons) {
+      if (!Array.isArray(poly) || !poly.length) continue;
+      if (!pointInPolygonLngLat(pointLngLat, poly[0])) continue;
+      let inHole = false;
+      for (let i = 1; i < poly.length; i += 1) {
+        if (pointInPolygonLngLat(pointLngLat, poly[i])) {
+          inHole = true;
+          break;
+        }
+      }
+      if (!inHole) return true;
+    }
+  }
+  return false;
+}
+
+function geometryBounds(geometry) {
+  const rings = geometryOuterRings(geometry);
+  if (!rings.length) return null;
+
+  let minLng = Infinity;
+  let minLat = Infinity;
+  let maxLng = -Infinity;
+  let maxLat = -Infinity;
+
+  for (const ring of rings) {
+    for (const coord of ring) {
+      const lng = Number(coord?.[0]);
+      const lat = Number(coord?.[1]);
+      if (!Number.isFinite(lng) || !Number.isFinite(lat)) continue;
+      if (lng < minLng) minLng = lng;
+      if (lng > maxLng) maxLng = lng;
+      if (lat < minLat) minLat = lat;
+      if (lat > maxLat) maxLat = lat;
+    }
+  }
+
+  if (!Number.isFinite(minLng) || !Number.isFinite(minLat) || !Number.isFinite(maxLng) || !Number.isFinite(maxLat)) {
+    return null;
+  }
+
+  return { minLng, minLat, maxLng, maxLat };
+}
+
+function attachSoldCompsToFeatures(features, soldPoints) {
+  const list = Array.isArray(features) ? features : [];
+  const points = Array.isArray(soldPoints) ? soldPoints : [];
+
+  list.forEach((feature) => {
+    if (!feature?.properties) return;
+    delete feature.properties.sold_comp;
+  });
+
+  const polygonCandidates = [];
+  list.forEach((feature) => {
+    const geom = feature?.geometry;
+    if (!geom || (geom.type !== "Polygon" && geom.type !== "MultiPolygon")) return;
+    const bounds = geometryBounds(geom);
+    if (!bounds) return;
+    polygonCandidates.push({ feature, geometry: geom, bounds });
+  });
+
+  const sortedPoints = [...points].sort((a, b) => soldDateTimestamp(b?.sold_date) - soldDateTimestamp(a?.sold_date));
+  const matchedSoldKeys = new Set();
+
+  for (const point of sortedPoints) {
+    const lng = Number(point?.lng);
+    const lat = Number(point?.lat);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+    const key = soldPointMatchKey(point);
+    const pointLngLat = [lng, lat];
+
+    for (const candidate of polygonCandidates) {
+      const b = candidate.bounds;
+      if (lng < b.minLng || lng > b.maxLng || lat < b.minLat || lat > b.maxLat) continue;
+      if (!pointInPolygonGeometry(pointLngLat, candidate.geometry)) continue;
+      if (!candidate.feature.properties.sold_comp) {
+        candidate.feature.properties.sold_comp = {
+          sold_price: point.sold_price,
+          sold_date: point.sold_date,
+          dom: point.dom,
+          lot_sqft: point.lot_sqft,
+          listing_url: point.listing_url,
+        };
+      }
+      matchedSoldKeys.add(key);
+      break;
+    }
+  }
+
+  const unmatchedSoldPoints = points.filter((point) => !matchedSoldKeys.has(soldPointMatchKey(point)));
+  return { unmatchedSoldPoints };
+}
+
 function renderSoldPoints(points) {
   soldLayer.clearLayers();
   soldMarkers = [];
@@ -1280,12 +1436,12 @@ function renderSoldPoints(points) {
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
     const marker = L.circleMarker([lat, lng], {
       pane: "soldPane",
-      radius: 6,
-      fillColor: SOLD_MARKER_COLOR,
-      color: SOLD_MARKER_BORDER,
-      weight: 1.6,
+      radius: 4,
+      fillColor: SOLD_FALLBACK_DOT_COLOR,
+      color: SOLD_FALLBACK_DOT_BORDER,
+      weight: 1.2,
       opacity: 1,
-      fillOpacity: 0.9,
+      fillOpacity: 0.85,
     }).bindPopup(() => makeSoldPopupHtml(point), { maxWidth: 300 }).addTo(soldLayer);
     soldMarkers.push({ marker, priceLabel: abbreviatePrice(point.sold_price) });
   });
@@ -1309,6 +1465,8 @@ function renderFeatures(geojson) {
     const targetLayer = parcelTypeLayers[bucket] || markerLayer;
     const color = getColor(feature);
     const borderColor = getBorderColor(feature);
+    const parcelBorderColor = p.sold_comp ? SOLD_OUTLINE_COLOR : borderColor;
+    const parcelBorderWeight = p.sold_comp ? (p.on_redfin ? 2.8 : 2.4) : (p.on_redfin ? 2.2 : 1.5);
     if (p.lat == null || p.lng == null) return;
     const hasPolygonGeometry =
       feature.geometry?.type === "Polygon" || feature.geometry?.type === "MultiPolygon";
@@ -1373,9 +1531,9 @@ function renderFeatures(geojson) {
       L.geoJSON(feature, {
         renderer: MAP_CANVAS_RENDERER,
         style: {
-          color: borderColor,
+          color: parcelBorderColor,
           fill: false,
-          weight: 1.2,
+          weight: p.sold_comp ? 2.2 : 1.2,
           opacity: 0.75,
         },
       })
@@ -1388,10 +1546,10 @@ function renderFeatures(geojson) {
       layer = L.geoJSON(feature, {
         renderer: MAP_CANVAS_RENDERER,
         style: {
-          color: borderColor,
+          color: parcelBorderColor,
           fillColor: color,
           fillOpacity: 0.12,
-          weight: p.on_redfin ? 2.2 : 1.5,
+          weight: parcelBorderWeight,
           opacity: 0.85,
         },
       }).bindPopup(() => makePopupHtml(p), { maxWidth: 280 });
@@ -1414,7 +1572,7 @@ function renderFeatures(geojson) {
         renderer: MAP_CANVAS_RENDERER,
         radius: p.on_redfin ? 7 : 5,
         fillColor: color,
-        color: borderColor,
+        color: parcelBorderColor,
         weight: 1.5,
         opacity: 1,
         fillOpacity: 0.9,
@@ -2108,6 +2266,11 @@ map.on("draw:created", async (e) => {
     lastAnalysisGeojson = data;
     lastAnalysisCounts = data.counts;
     allAnalysisFeatures = data.features;
+    if (data.features.length <= BROWSE_ONLY_THRESHOLD) {
+      const soldJoin = attachSoldCompsToFeatures(allAnalysisFeatures, lastSoldPoints);
+      lastSoldPoints = soldJoin.unmatchedSoldPoints;
+      data.sold_points = lastSoldPoints;
+    }
     renderSoldPoints(lastSoldPoints);
     document.getElementById("btn-draw-clear")?.classList.remove("hidden");
 
