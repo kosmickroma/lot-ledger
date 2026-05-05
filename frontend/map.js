@@ -1495,8 +1495,9 @@ function renderFeatures(geojson) {
     const targetLayer = parcelTypeLayers[bucket] || markerLayer;
     const color = getColor(feature);
     const borderColor = getBorderColor(feature);
-    const parcelBorderColor = p.sold_comp ? SOLD_OUTLINE_COLOR : borderColor;
-    const parcelBorderWeight = p.sold_comp ? (p.on_redfin ? 2.8 : 2.4) : (p.on_redfin ? 2.2 : 1.5);
+    const hasVisibleSoldComp = Boolean(p.sold_comp) && soldLayerVisible;
+    const parcelBorderColor = hasVisibleSoldComp ? SOLD_OUTLINE_COLOR : borderColor;
+    const parcelBorderWeight = hasVisibleSoldComp ? (p.on_redfin ? 2.8 : 2.4) : (p.on_redfin ? 2.2 : 1.5);
     if (p.lat == null || p.lng == null) return;
     const hasPolygonGeometry =
       feature.geometry?.type === "Polygon" || feature.geometry?.type === "MultiPolygon";
@@ -1564,7 +1565,7 @@ function renderFeatures(geojson) {
         style: {
           color: parcelBorderColor,
           fill: false,
-          weight: p.sold_comp ? 2.2 : 1.2,
+          weight: hasVisibleSoldComp ? 2.2 : 1.2,
           opacity: 0.75,
         },
       })
