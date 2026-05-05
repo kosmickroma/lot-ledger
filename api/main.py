@@ -52,6 +52,31 @@ _SESSION_RETENTION_DAYS = 30
 logger = logging.getLogger(__name__)
 
 _FILENAME_SAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
+_ADDRESS_SUGGEST_CACHE_TTL_SECONDS = 45
+_ADDRESS_SUGGEST_CACHE_MAX = 512
+_address_suggest_cache: dict[tuple[str, int], tuple[float, list[dict[str, Any]]]] = {}
+
+
+def _normalize_suggest_query(raw: str) -> str:
+    return " ".join(str(raw or "").strip().upper().split())
+
+
+def _suggest_cache_get(cache_key: tuple[str, int]) -> list[dict[str, Any]] | None:
+    payload = _address_suggest_cache.get(cache_key)
+    if payload is None:
+        return None
+    ts, items = payload
+    if time.monotonic() - ts > _ADDRESS_SUGGEST_CACHE_TTL_SECONDS:
+        _address_suggest_cache.pop(cache_key, None)
+        return None
+    return [dict(item) for item in items]
+
+
+def _suggest_cache_put(cache_key: tuple[str, int], items: list[dict[str, Any]]) -> None:
+    if len(_address_suggest_cache) >= _ADDRESS_SUGGEST_CACHE_MAX:
+        oldest_key = min(_address_suggest_cache, key=lambda key: _address_suggest_cache[key][0])
+        _address_suggest_cache.pop(oldest_key, None)
+    _address_suggest_cache[cache_key] = (time.monotonic(), [dict(item) for item in items])
 
 
 def _evict_stale_jobs() -> None:
@@ -570,21 +595,62 @@ async def address_suggest(q: str, limit: int = 8) -> dict[str, Any]:
     Texas-only address suggestions from parcel tables.
     Used by frontend typeahead; does not call external geocoders.
     """
-    query = str(q or "").strip()
+    query = _normalize_suggest_query(q)
     if len(query) < 3:
         return {"items": []}
 
     max_items = max(1, min(int(limit or 8), 10))
-    query_upper = query.upper()
-    prefix = f"{query_upper}%"
-    contains = f"%{query_upper}%"
+    cache_key = (query, max_items)
+    cached = _suggest_cache_get(cache_key)
+    if cached is not None:
+        return {"items": cached}
+
+    prefix = f"{query}%"
+    contains = f"%{query}%"
+    per_county_limit = max(3, max_items)
+
+    def _rows_to_items(rows: list[tuple[Any, ...]]) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for county, account_num, address, city, lat, lng in rows:
+            addr_text = str(address or "").strip()
+            acct_text = str(account_num or "").strip()
+            county_text = str(county or "").strip().lower()
+            if not addr_text or not acct_text or not county_text or lat is None or lng is None:
+                continue
+            dedupe_key = (county_text, acct_text)
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+
+            city_text = str(city or "").strip()
+            label = f"{addr_text}, {city_text}, TX" if city_text else f"{addr_text}, TX"
+            items.append(
+                {
+                    "label": label,
+                    "address": addr_text,
+                    "city": city_text,
+                    "county": county_text,
+                    "account_num": acct_text,
+                    "lat": float(lat),
+                    "lng": float(lng),
+                }
+            )
+        items.sort(
+            key=lambda item: (
+                0 if item["address"].upper().startswith(query) else 1,
+                item["address"],
+            )
+        )
+        return items[:max_items]
 
     conn = get_conn()
     try:
         with conn.cursor() as cur:
+            cur.execute("SET LOCAL statement_timeout TO '900ms'")
             cur.execute(
                 """
-                WITH candidates AS (
+                WITH dcad AS (
                     SELECT
                         'dcad'::text AS county,
                         p.account_num::text AS account_num,
@@ -597,9 +663,11 @@ async def address_suggest(q: str, limit: int = 8) -> dict[str, Any]:
                       AND p.property_address IS NOT NULL
                       AND p.property_address <> ''
                       AND upper(p.property_address) LIKE %s
+                    ORDER BY p.property_address
+                    LIMIT %s
+                ),
 
-                    UNION ALL
-
+                tad AS (
                     SELECT
                         'tad'::text AS county,
                         t.account_num::text AS account_num,
@@ -612,9 +680,11 @@ async def address_suggest(q: str, limit: int = 8) -> dict[str, Any]:
                       AND t.situs_addr IS NOT NULL
                       AND t.situs_addr <> ''
                       AND upper(t.situs_addr) LIKE %s
+                    ORDER BY t.situs_addr
+                    LIMIT %s
+                ),
 
-                    UNION ALL
-
+                collin AS (
                     SELECT
                         'collin'::text AS county,
                         c.account_num::text AS account_num,
@@ -627,9 +697,11 @@ async def address_suggest(q: str, limit: int = 8) -> dict[str, Any]:
                       AND c.property_address IS NOT NULL
                       AND c.property_address <> ''
                       AND upper(c.property_address) LIKE %s
+                    ORDER BY c.property_address
+                    LIMIT %s
+                ),
 
-                    UNION ALL
-
+                denton AS (
                     SELECT
                         'denton'::text AS county,
                         d.account_num::text AS account_num,
@@ -642,53 +714,170 @@ async def address_suggest(q: str, limit: int = 8) -> dict[str, Any]:
                       AND d.property_address IS NOT NULL
                       AND d.property_address <> ''
                       AND upper(d.property_address) LIKE %s
+                    ORDER BY d.property_address
+                    LIMIT %s
+                ),
+
+                candidates AS (
+                    SELECT * FROM dcad
+
+                    UNION ALL
+
+                    SELECT * FROM tad
+
+                    UNION ALL
+
+                    SELECT * FROM collin
+
+                    UNION ALL
+
+                    SELECT * FROM denton
                 )
-                SELECT DISTINCT ON (county, account_num)
-                    county,
-                    account_num,
-                    address,
-                    city,
-                    lat,
-                    lng,
-                    CASE
-                        WHEN upper(address) LIKE %s THEN 0
-                        WHEN upper(address) LIKE %s THEN 1
-                        ELSE 2
-                    END AS rank_bucket
+                SELECT county, account_num, address, city, lat, lng
                 FROM candidates
-                ORDER BY county, account_num, rank_bucket, address
+                ORDER BY
+                    CASE WHEN upper(address) LIKE %s THEN 0 ELSE 1 END,
+                    address
                 LIMIT %s
                 """,
-                (contains, contains, contains, contains, prefix, contains, max_items),
+                (
+                    prefix,
+                    per_county_limit,
+                    prefix,
+                    per_county_limit,
+                    prefix,
+                    per_county_limit,
+                    prefix,
+                    per_county_limit,
+                    prefix,
+                    max_items,
+                ),
             )
 
-            items: list[dict[str, Any]] = []
-            for county, account_num, address, city, lat, lng, _ in cur.fetchall():
-                addr_text = str(address or "").strip()
-                if not addr_text:
-                    continue
-                city_text = str(city or "").strip()
-                county_text = str(county or "").strip().lower()
-                label = f"{addr_text}, {city_text}, TX" if city_text else f"{addr_text}, TX"
-                items.append(
-                    {
-                        "label": label,
-                        "address": addr_text,
-                        "city": city_text,
-                        "county": county_text,
-                        "account_num": str(account_num or "").strip(),
-                        "lat": float(lat),
-                        "lng": float(lng),
-                    }
-                )
+            rows = cur.fetchall()
 
-            items.sort(
-                key=lambda item: (
-                    0 if item["address"].upper().startswith(query_upper) else 1,
-                    item["address"],
+            # Optional contains fallback fills sparse cases when prefix matches are too few.
+            if len(rows) < max_items:
+                remaining = max_items - len(rows)
+                cur.execute("SET LOCAL statement_timeout TO '700ms'")
+                cur.execute(
+                    """
+                    WITH dcad AS (
+                        SELECT
+                            'dcad'::text AS county,
+                            p.account_num::text AS account_num,
+                            p.property_address::text AS address,
+                            p.owner_city::text AS city,
+                            ST_Y(p.centroid) AS lat,
+                            ST_X(p.centroid) AS lng
+                        FROM parcels p
+                        WHERE p.centroid IS NOT NULL
+                          AND p.property_address IS NOT NULL
+                          AND p.property_address <> ''
+                          AND upper(p.property_address) LIKE %s
+                          AND upper(p.property_address) NOT LIKE %s
+                        ORDER BY p.property_address
+                        LIMIT %s
+                    ),
+
+                    tad AS (
+                        SELECT
+                            'tad'::text AS county,
+                            t.account_num::text AS account_num,
+                            t.situs_addr::text AS address,
+                            t.owner_city::text AS city,
+                            ST_Y(t.centroid) AS lat,
+                            ST_X(t.centroid) AS lng
+                        FROM tad_parcels t
+                        WHERE t.centroid IS NOT NULL
+                          AND t.situs_addr IS NOT NULL
+                          AND t.situs_addr <> ''
+                          AND upper(t.situs_addr) LIKE %s
+                          AND upper(t.situs_addr) NOT LIKE %s
+                        ORDER BY t.situs_addr
+                        LIMIT %s
+                    ),
+
+                    collin AS (
+                        SELECT
+                            'collin'::text AS county,
+                            c.account_num::text AS account_num,
+                            c.property_address::text AS address,
+                            c.property_city::text AS city,
+                            ST_Y(c.centroid) AS lat,
+                            ST_X(c.centroid) AS lng
+                        FROM collin_parcels c
+                        WHERE c.centroid IS NOT NULL
+                          AND c.property_address IS NOT NULL
+                          AND c.property_address <> ''
+                          AND upper(c.property_address) LIKE %s
+                          AND upper(c.property_address) NOT LIKE %s
+                        ORDER BY c.property_address
+                        LIMIT %s
+                    ),
+
+                    denton AS (
+                        SELECT
+                            'denton'::text AS county,
+                            d.account_num::text AS account_num,
+                            d.property_address::text AS address,
+                            d.property_city::text AS city,
+                            ST_Y(d.centroid) AS lat,
+                            ST_X(d.centroid) AS lng
+                        FROM denton_parcels d
+                        WHERE d.centroid IS NOT NULL
+                          AND d.property_address IS NOT NULL
+                          AND d.property_address <> ''
+                          AND upper(d.property_address) LIKE %s
+                          AND upper(d.property_address) NOT LIKE %s
+                        ORDER BY d.property_address
+                        LIMIT %s
+                    ),
+
+                    candidates AS (
+                        SELECT * FROM dcad
+
+                        UNION ALL
+
+                        SELECT * FROM tad
+
+                        UNION ALL
+
+                        SELECT * FROM collin
+
+                        UNION ALL
+
+                        SELECT * FROM denton
+                    )
+                    SELECT county, account_num, address, city, lat, lng
+                    FROM candidates
+                    ORDER BY address
+                    LIMIT %s
+                    """,
+                    (
+                        contains,
+                        prefix,
+                        remaining,
+                        contains,
+                        prefix,
+                        remaining,
+                        contains,
+                        prefix,
+                        remaining,
+                        contains,
+                        prefix,
+                        remaining,
+                        remaining,
+                    ),
                 )
-            )
-            return {"items": items[:max_items]}
+                rows.extend(cur.fetchall())
+
+            items = _rows_to_items(rows)
+            _suggest_cache_put(cache_key, items)
+            return {"items": items}
+    except Exception:
+        # Suggestion failures should never block primary search behavior.
+        return {"items": []}
     finally:
         release_conn(conn)
 

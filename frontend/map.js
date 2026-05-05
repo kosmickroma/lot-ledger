@@ -1111,12 +1111,20 @@ const AddressSearch = L.Control.extend({
     let activeSuggestIndex = -1;
     let suggestTimer = null;
     let suggestAbort = null;
+    let suggestRequestId = 0;
+    const suggestCache = new Map();
+    const SUGGEST_CACHE_TTL_MS = 30000;
 
     const clearSuggestList = () => {
       suggestItems = [];
       activeSuggestIndex = -1;
       suggestList.innerHTML = "";
       suggestList.classList.add("hidden");
+    };
+
+    const renderSuggestLoading = () => {
+      suggestList.innerHTML = '<div class="address-suggest-loading">Searching Texas addresses...</div>';
+      suggestList.classList.remove("hidden");
     };
 
     const renderSuggestList = () => {
@@ -1209,6 +1217,19 @@ const AddressSearch = L.Control.extend({
         return;
       }
 
+      const normalized = q.toUpperCase();
+      const now = Date.now();
+      const cached = suggestCache.get(normalized);
+      if (cached && now - cached.ts < SUGGEST_CACHE_TTL_MS) {
+        suggestItems = Array.isArray(cached.items) ? cached.items : [];
+        activeSuggestIndex = suggestItems.length ? 0 : -1;
+        renderSuggestList();
+        return;
+      }
+
+      renderSuggestLoading();
+      const requestId = ++suggestRequestId;
+
       if (suggestAbort) suggestAbort.abort();
       suggestAbort = new AbortController();
 
@@ -1217,16 +1238,22 @@ const AddressSearch = L.Control.extend({
           signal: suggestAbort.signal,
         });
         if (!resp.ok) {
-          clearSuggestList();
+          if (requestId === suggestRequestId && !suggestItems.length) clearSuggestList();
           return;
         }
         const data = await resp.json();
+        if (requestId !== suggestRequestId) return;
         suggestItems = Array.isArray(data.items) ? data.items : [];
+        suggestCache.set(normalized, { ts: now, items: suggestItems.slice(0, 8) });
+        if (suggestCache.size > 120) {
+          const firstKey = suggestCache.keys().next().value;
+          if (firstKey) suggestCache.delete(firstKey);
+        }
         activeSuggestIndex = suggestItems.length ? 0 : -1;
         renderSuggestList();
       } catch (e) {
         if (e?.name !== "AbortError") {
-          clearSuggestList();
+          if (requestId === suggestRequestId && !suggestItems.length) clearSuggestList();
         }
       }
     };

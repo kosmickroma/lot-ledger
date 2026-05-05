@@ -642,6 +642,12 @@ h1 {
   z-index: 1200;
 }
 
+.address-suggest-loading {
+  font-size: 11px;
+  color: #475569;
+  padding: 9px 10px;
+}
+
 .address-suggest-item {
   width: 100%;
   text-align: left;
