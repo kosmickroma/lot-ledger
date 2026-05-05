@@ -1008,6 +1008,19 @@ const sidebarToggleBtn = document.getElementById("sidebar-toggle");
 const drawHelper = document.getElementById("draw-helper");
 const brushStatus = document.getElementById("brush-status");
 
+function initSidebarCollapsibles() {
+  document.querySelectorAll(".section-toggle[data-target]").forEach((btn) => {
+    const targetId = btn.dataset.target;
+    const body = targetId ? document.getElementById(targetId) : null;
+    if (!body) return;
+    btn.addEventListener("click", () => {
+      const expanded = btn.getAttribute("aria-expanded") !== "false";
+      btn.setAttribute("aria-expanded", String(!expanded));
+      body.classList.toggle("hidden", expanded);
+    });
+  });
+}
+
 const BRUSH_LABELS = {
   verify_yes: "Verified Vacant",
   verify_no: "Verified Not Vacant",
@@ -1052,6 +1065,8 @@ sidebarToggleBtn.addEventListener("click", () => {
   const collapsed = appShell.classList.contains("sidebar-collapsed");
   setSidebarCollapsed(!collapsed);
 });
+
+initSidebarCollapsibles();
 
 function applyMapVisibilityFilters() {
   PARCEL_LAYER_KEYS.forEach((key) => {
@@ -2528,9 +2543,19 @@ async function rerunWithSold() {
     lastSoldPoints = Array.isArray(data.sold_points) ? data.sold_points : [];
     lastAnalysisGeojson = data;
     lastAnalysisCounts = data.counts;
+    allAnalysisFeatures = data.features;
+    if (Array.isArray(allAnalysisFeatures) && allAnalysisFeatures.length <= BROWSE_ONLY_THRESHOLD) {
+      const soldJoin = attachSoldCompsToFeatures(allAnalysisFeatures, lastSoldPoints);
+      lastSoldPoints = soldJoin.unmatchedSoldPoints;
+      data.sold_points = lastSoldPoints;
+    }
     soldLayerVisible = true;
     soldLayer.addTo(map);
     renderSoldPoints(lastSoldPoints);
+    if (lastAnalysisGeojson && Array.isArray(lastAnalysisGeojson.features) && lastAnalysisGeojson.features.length <= BROWSE_ONLY_THRESHOLD) {
+      const markers = renderFeatures(lastAnalysisGeojson);
+      if (lastAnalysisCounts) renderSidebar(lastAnalysisCounts, markers);
+    }
 
     if (statusEl) {
       statusEl.textContent = `${lastSoldPoints.length} sold comp${lastSoldPoints.length !== 1 ? "s" : ""} found`;
