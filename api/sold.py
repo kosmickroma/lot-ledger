@@ -71,8 +71,8 @@ def query_sold_parcels(polygon: list[list[float]]) -> list[dict[str, Any]]:
                     price_per_sqft,
                     city,
                     listing_url,
-                    lat,
-                    lng
+                    COALESCE(lat, ST_Y(ST_Centroid(geom))) AS lat,
+                    COALESCE(lng, ST_X(ST_Centroid(geom))) AS lng
                 FROM redfin_sold
                                 WHERE source_county IN ('dallas', 'tarrant', 'collin', 'denton')
                                     AND geom IS NOT NULL
