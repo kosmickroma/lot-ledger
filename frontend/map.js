@@ -3980,6 +3980,8 @@ async function persistTagStateForExport(statusUpdater = null) {
     } catch {
       return false;
     }
+  } catch {
+    return false;
   }
 }
 
