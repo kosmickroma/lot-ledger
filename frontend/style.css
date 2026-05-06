@@ -597,12 +597,6 @@ h1 {
   color: #fff !important;
 }
 
-/* Quick-win: remove target star brush tools from the toolbar UI. */
-#btn-target-toggle,
-#target-brush-menu {
-  display: none !important;
-}
-
 .address-search {
   display: flex;
   flex-direction: column;
@@ -741,71 +735,6 @@ h1 {
   color: #111;
 }
 
-.verify-brush-menu {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  background: rgba(255, 255, 255, 0.97);
-  border: 1px solid rgba(0, 0, 0, 0.18);
-  border-radius: 8px;
-  padding: 6px 0;
-  margin-top: 118px;
-  margin-left: 0;
-}
-
-.target-brush-menu {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  background: rgba(255, 255, 255, 0.97);
-  border: 1px solid rgba(0, 0, 0, 0.18);
-  border-radius: 8px;
-  padding: 6px 0;
-  margin-top: 118px;
-  margin-left: 44px;
-}
-
-.verify-brush-menu.hidden {
-  display: none;
-}
-
-.target-brush-menu.hidden {
-  display: none;
-}
-
-.verify-brush-option {
-  border: none;
-  background: transparent;
-  color: #555;
-  font-size: 11px;
-  font-weight: 600;
-  padding: 6px 12px;
-  cursor: pointer;
-  text-align: left;
-  transition: background 0.15s, color 0.15s;
-}
-
-.verify-brush-option:hover {
-  background: #f0f0f0;
-  color: #1a5a42;
-}
-
-.verify-brush-option.active {
-  background: #1a5a42;
-  color: #ffffff;
-}
-
-#btn-target-toggle.target-active {
-  background: #f1c40f;
-  color: #1f2937 !important;
-}
-
-.verify-brush-divider {
-  height: 1px;
-  background: rgba(0, 0, 0, 0.12);
-  margin: 3px 8px;
-}
-
 .verify-badge {
   display: flex;
   align-items: center;
@@ -831,10 +760,6 @@ h1 {
   background: #f1c40f;
   color: #1f2937;
   border: 2px solid #c9a227;
-}
-
-#map.brush-active {
-  cursor: crosshair;
 }
 
 /* During polygon drawing, block pointer events on rendered parcel layers so

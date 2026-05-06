@@ -17,6 +17,7 @@ import asyncio
 import contextlib
 import csv
 import io
+import json
 import logging
 import re
 import time
@@ -588,6 +589,20 @@ async def hoa_boundaries() -> dict:
             },
         })
     return {"type": "FeatureCollection", "features": features}
+
+
+@app.get("/api/counties/boundaries")
+async def counties_boundaries() -> dict:
+    """
+    DFW county boundaries (Dallas, Tarrant, Collin, Denton, Rockwall, Parker, Kaufman).
+    Used by frontend for county overlay layer.
+    """
+    geojson_path = FRONTEND_DIR / "tx_counties_dfw.geojson"
+    try:
+        with open(geojson_path) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="County boundaries file not found")
 
 
 @app.get("/api/address/suggest")
