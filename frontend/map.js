@@ -1126,6 +1126,7 @@ async function restoreSavedArea(area) {
       }
     }
     renderSidebar(data.counts, markers);
+    applyResultTags(data);
   } catch (err) {
     if (isAbortError(err) || !isActiveAnalysisRequest(analysisRequest.requestId)) return;
     console.error("[restoreSavedArea] Analysis failed:", err);
@@ -2192,6 +2193,97 @@ function clearTargetBadge(accountNum) {
   targetBadgeMarkers.delete(accountNum);
 }
 
+function _findParcelCoords(accountNum) {
+  const features = lastAnalysisGeojson?.features;
+  if (!Array.isArray(features)) return null;
+  for (const feature of features) {
+    const p = feature?.properties || {};
+    if (String(p.account_num || "") !== String(accountNum || "")) continue;
+    const lat = Number(p.lat);
+    const lng = Number(p.lng);
+    if (Number.isFinite(lat) && Number.isFinite(lng)) return { lat, lng };
+  }
+  return null;
+}
+
+function _setFeatureTag(accountNum, key, value) {
+  const features = lastAnalysisGeojson?.features;
+  if (!Array.isArray(features)) return;
+  for (const feature of features) {
+    const p = feature?.properties || {};
+    if (String(p.account_num || "") === String(accountNum || "")) {
+      p[key] = value;
+    }
+  }
+}
+
+function setVerification(accountNum, value, lat = null, lng = null) {
+  if (!accountNum) return;
+  const normalized = normalizeVerificationValue(value);
+  verificationByAccount.set(accountNum, normalized);
+  _setFeatureTag(accountNum, "verified_vacant", normalized);
+  if (!normalized) {
+    clearVerificationBadge(accountNum);
+    return;
+  }
+  let markerLat = Number(lat);
+  let markerLng = Number(lng);
+  if (!Number.isFinite(markerLat) || !Number.isFinite(markerLng)) {
+    const coords = _findParcelCoords(accountNum);
+    if (!coords) return;
+    markerLat = coords.lat;
+    markerLng = coords.lng;
+  }
+  renderVerificationBadge(accountNum, markerLat, markerLng, normalized);
+}
+
+function setTarget(accountNum, enabled, lat = null, lng = null) {
+  if (!accountNum) return;
+  const normalized = enabled ? "Yes" : "";
+  potentialTargetByAccount.set(accountNum, normalized);
+  _setFeatureTag(accountNum, "potential_target", normalized);
+  if (!enabled) {
+    clearTargetBadge(accountNum);
+    return;
+  }
+  let markerLat = Number(lat);
+  let markerLng = Number(lng);
+  if (!Number.isFinite(markerLat) || !Number.isFinite(markerLng)) {
+    const coords = _findParcelCoords(accountNum);
+    if (!coords) return;
+    markerLat = coords.lat;
+    markerLng = coords.lng;
+  }
+  renderTargetBadge(accountNum, markerLat, markerLng);
+}
+
+function persistSingleTag(accountNum, field, value) {
+  if (!currentJobId || !accountNum) return;
+  fetch("/api/tags/set", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      job_id: currentJobId,
+      account_num: accountNum,
+      field,
+      value,
+    }),
+  }).catch(() => {});
+}
+
+function applyResultTags(result) {
+  if (!result || !result.tags || typeof result.tags !== "object") return;
+  Object.entries(result.tags).forEach(([account_num, t]) => {
+    if (!t || typeof t !== "object") return;
+    if (Object.prototype.hasOwnProperty.call(t, "verified_vacant")) {
+      setVerification(account_num, t.verified_vacant || "");
+    }
+    if (Object.prototype.hasOwnProperty.call(t, "potential_target")) {
+      setTarget(account_num, String(t.potential_target || "").trim().toLowerCase() === "yes");
+    }
+  });
+}
+
 // Render only the features whose centroid falls within the current map viewport.
 // Called on moveend/zoomend when viewportRenderMode is true (large draw result).
 function renderViewportFeatures() {
@@ -2877,6 +2969,7 @@ map.on("draw:created", async (e) => {
       }
     }
     renderSidebar(data.counts, markers);
+    applyResultTags(data);
     const soldStatus = document.getElementById("sold-toggle-status");
     if (soldStatus) updateSoldStatusText();
   } catch (err) {
@@ -3050,6 +3143,7 @@ async function rerunWithRedfin() {
     applyAndRenderSoldFilters();
     const markers = renderFeatures(data);
     renderSidebar(data.counts, markers);
+    applyResultTags(data);
     if (statusEl) {
       if (!data.redfin_ok) {
         statusEl.textContent = "Redfin unavailable";
@@ -3258,8 +3352,8 @@ map.on("popupopen", (e) => {
     verifyYes.addEventListener("click", (ev) => {
       ev.preventDefault();
       const { account, lat, lng } = verifyYes.dataset;
-      verificationByAccount.set(account, "Yes");
-      renderVerificationBadge(account, parseFloat(lat), parseFloat(lng), "Yes");
+      setVerification(account, "yes", parseFloat(lat), parseFloat(lng));
+      persistSingleTag(account, "verified_vacant", "yes");
       e.popup.close();
     });
   }
@@ -3269,8 +3363,8 @@ map.on("popupopen", (e) => {
     verifyNo.addEventListener("click", (ev) => {
       ev.preventDefault();
       const { account, lat, lng } = verifyNo.dataset;
-      verificationByAccount.set(account, "No");
-      renderVerificationBadge(account, parseFloat(lat), parseFloat(lng), "No");
+      setVerification(account, "no", parseFloat(lat), parseFloat(lng));
+      persistSingleTag(account, "verified_vacant", "no");
       e.popup.close();
     });
   }
@@ -3280,8 +3374,8 @@ map.on("popupopen", (e) => {
     verifyClear.addEventListener("click", (ev) => {
       ev.preventDefault();
       const { account } = verifyClear.dataset;
-      verificationByAccount.set(account, "");
-      clearVerificationBadge(account);
+      setVerification(account, null);
+      persistSingleTag(account, "verified_vacant", null);
       e.popup.close();
     });
   }
@@ -3292,8 +3386,8 @@ map.on("popupopen", (e) => {
     targetOn.addEventListener("click", (ev) => {
       ev.preventDefault();
       const { account, lat, lng } = targetOn.dataset;
-      potentialTargetByAccount.set(account, "Yes");
-      renderTargetBadge(account, parseFloat(lat), parseFloat(lng));
+      setTarget(account, true, parseFloat(lat), parseFloat(lng));
+      persistSingleTag(account, "potential_target", "yes");
       e.popup.close();
     });
   }
@@ -3303,8 +3397,8 @@ map.on("popupopen", (e) => {
     targetOff.addEventListener("click", (ev) => {
       ev.preventDefault();
       const { account } = targetOff.dataset;
-      potentialTargetByAccount.set(account, "");
-      clearTargetBadge(account);
+      setTarget(account, false);
+      persistSingleTag(account, "potential_target", null);
       e.popup.close();
     });
   }

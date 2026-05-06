@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote_plus
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from psycopg2.extras import Json, execute_values
@@ -413,10 +413,26 @@ def _restore_job_from_session(session_id: str) -> dict[str, Any] | None:
         rows.extend(denton_result.parcels)
 
     _apply_session_tags(session_id, rows)
+    raw_tags = _load_session_tags(session_id)
+    tags: dict[str, dict[str, Any]] = {}
+    for (account_num, _county), payload in raw_tags.items():
+        verified_raw = str(payload.get("verification", "") or "").strip().lower()
+        target_raw = str(payload.get("target", "") or "").strip().lower()
+        verified_vacant = verified_raw if verified_raw in {"yes", "no"} else None
+        potential_target = "yes" if target_raw == "yes" else None
+        if verified_vacant is None and potential_target is None:
+            continue
+        existing = tags.get(account_num, {"verified_vacant": None, "potential_target": None})
+        if verified_vacant is not None:
+            existing["verified_vacant"] = verified_vacant
+        if potential_target is not None:
+            existing["potential_target"] = potential_target
+        tags[account_num] = existing
     return {
         "rows": rows,
         "redfin_data": {},
         "sold_points": [],
+        "tags": tags,
         "polygon": polygon,
         "created_at": time.monotonic(),
         "last_accessed": time.monotonic(),
@@ -1712,6 +1728,97 @@ async def save_verification(job_id: str, request: VerificationRequest) -> dict[s
             updates += 1
 
     return {"ok": True, "updated": updates}
+
+
+@app.post("/api/tags/set")
+async def set_tag(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    job_id = str(payload.get("job_id") or "").strip()
+    account_num = str(payload.get("account_num") or "").strip()
+    field = str(payload.get("field") or "").strip()
+    value = payload.get("value")
+
+    if not job_id or not account_num or field not in {"verified_vacant", "potential_target"}:
+        raise HTTPException(status_code=400, detail="Invalid payload")
+
+    job = _get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    rows = job.get("rows", [])
+    polygon = job.get("polygon", [])
+    row_ref: dict[str, Any] | None = None
+    county = ""
+    for row in rows:
+        if str(row.get("account_num", "") or "").strip() == account_num:
+            row_ref = row
+            county = _row_county(row)
+            break
+
+    if not county:
+        raise HTTPException(status_code=400, detail="Account not found in job")
+
+    raw = "" if value is None else str(value).strip().lower()
+    if field == "verified_vacant":
+        tag_type = "verification"
+        if raw == "":
+            tag_value = ""
+        elif raw in {"yes", "no"}:
+            tag_value = "Yes" if raw == "yes" else "No"
+        else:
+            raise HTTPException(status_code=400, detail="Invalid verification value")
+    else:
+        tag_type = "target"
+        if raw in {"", "0", "false", "no", "n"}:
+            tag_value = ""
+        elif raw in {"1", "true", "yes", "y"}:
+            tag_value = "Yes"
+        else:
+            raise HTTPException(status_code=400, detail="Invalid target value")
+
+    try:
+        _persist_session_sync(job_id, polygon, len(rows), _counties_from_rows(rows), None)
+        conn = get_session_conn()
+        try:
+            with conn.cursor() as cur:
+                if tag_value:
+                    cur.execute(
+                        """
+                        INSERT INTO session_tags (session_id, account_num, county, tag_type, tag_value)
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (session_id, account_num, county, tag_type)
+                        DO UPDATE SET tag_value = EXCLUDED.tag_value, updated_at = now()
+                        """,
+                        (job_id, account_num, county, tag_type, tag_value),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        DELETE FROM session_tags
+                        WHERE session_id = %s
+                          AND account_num = %s
+                          AND county = %s
+                          AND tag_type = %s
+                        """,
+                        (job_id, account_num, county, tag_type),
+                    )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            release_session_conn(conn)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Failed to persist tag update: {exc}") from exc
+
+    if row_ref is not None:
+        if field == "verified_vacant":
+            row_ref["verified_vacant"] = tag_value
+        else:
+            row_ref["potential_target"] = tag_value
+
+    return {"ok": True}
 
 
 @app.get("/api/download/{job_id}")
