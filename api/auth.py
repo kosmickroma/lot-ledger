@@ -207,6 +207,12 @@ def get_user_by_id(user_id: int) -> dict[str, Any] | None:
 
 
 def get_current_user(request: Request) -> dict[str, Any]:
+    # Middleware already resolved and validated the user — reuse it to avoid a
+    # second session-DB round-trip on every Depends(get_current_user) call.
+    cached = getattr(request.state, "current_user", None)
+    if cached is not None:
+        return cached
+
     token = request.cookies.get(SESSION_COOKIE_NAME, "")
     if not token:
         raise AuthError("Authentication required")

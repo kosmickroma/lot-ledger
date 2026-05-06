@@ -157,9 +157,16 @@ All configuration lives in the `.env` file:
 | Variable | What it is |
 |---|---|
 | `DATABASE_URL` | Connection string for the parcel database (all county data) |
-| `SESSION_DATABASE_URL` | Connection string for saved areas and tags |
+| `SESSION_DATABASE_URL` | Connection string for saved areas, tags, and auth |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Path to the GCS service account JSON file |
 | `GCS_BUCKET` | Name of the Google Cloud Storage bucket holding the PMTiles file |
+| `SESSION_SECRET` | Random secret for signing session cookies (generate with `python -c "import secrets; print(secrets.token_hex(32))"`) |
+| `BOOTSTRAP_DEV_EMAIL` | Email for the first developer account (created on first startup if DB is empty) |
+| `BOOTSTRAP_DEV_PASSWORD` | Password for the developer account |
+| `BOOTSTRAP_OWNER_EMAIL` | Email for the owner account (optional — add when client email is known) |
+| `BOOTSTRAP_OWNER_PASSWORD` | Password for the owner account (optional) |
+| `AUTH_COOKIE_SECURE` | Set to `false` for local HTTP dev; defaults to `true` (HTTPS only) |
+| `TRUST_PROXY` | Set to `true` on Cloud Run so X-Forwarded-For IP is used for rate limiting |
 
 Never share your `.env` file or `credentials.json`. Do not commit them to GitHub — they are in `.gitignore`.
 
@@ -195,56 +202,27 @@ Never share your `.env` file or `credentials.json`. Do not commit them to GitHub
 
 ## Team Access Setup
 
-To give team members browser access with the ability to revoke it:
+LotLedger has a built-in login system. No Nginx or HTTP basic auth needed.
 
-### HTTP Basic Auth (Recommended — One Password Per Person)
+### Adding a New User
 
-This requires the server to be running on Linux or WSL2 with Nginx installed.
+Log in as owner or developer, click your name in the top-right of the sidebar, and open the **Admin Panel**. Click **Create User**, fill in their email and a temporary password, and set their role:
 
-**Install Nginx:**
-```bash
-sudo apt install nginx apache2-utils -y
-```
+| Role | What they can do |
+|---|---|
+| `member` | Full map access — draw, tag, export, saved areas |
+| `owner` | Member access + create/disable/reset users |
+| `developer` | Full access to everything, immutable role |
 
-**Create a password for each person:**
-```bash
-# First person (creates the file):
-sudo htpasswd -c /etc/nginx/.htpasswd firstname.lastname
+The new user will be prompted to set their own password on first login.
 
-# Additional people (no -c flag):
-sudo htpasswd /etc/nginx/.htpasswd secondperson
-```
+### Disabling a User
 
-**Create `/etc/nginx/sites-available/lotledger`:**
-```nginx
-server {
-    listen 80;
-    server_name _;
+Open Admin Panel → click **Disable** next to the user. Their session is invalidated immediately.
 
-    auth_basic "LotLedger";
-    auth_basic_user_file /etc/nginx/.htpasswd;
+### Resetting a Password
 
-    location / {
-        proxy_pass http://127.0.0.1:8000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-    }
-}
-```
-
-**Enable:**
-```bash
-sudo ln -s /etc/nginx/sites-available/lotledger /etc/nginx/sites-enabled/
-sudo nginx -t && sudo systemctl restart nginx
-```
-
-**To revoke someone's access:**
-```bash
-sudo htpasswd -D /etc/nginx/.htpasswd firstname.lastname
-sudo systemctl reload nginx
-```
-
-Done — their credentials stop working immediately.
+Open Admin Panel → click **Reset Password** next to the user. You'll get a temporary password to share with them securely.
 
 ---
 
