@@ -128,19 +128,24 @@ h1 {
 
 .section-toggle {
   flex: 1;
+  width: 100%;
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   border: 0;
   background: transparent;
   cursor: pointer;
-  padding: 2px 0 8px;
+  position: relative;
+  padding: 2px 24px 8px 0;
 }
 
 .section-toggle::after {
   content: "▾";
   color: var(--text-soft);
-  font-size: 11px;
+  font-size: 16px;
+  position: absolute;
+  right: 2px;
+  top: 0;
   transform: rotate(0deg);
   transition: transform 0.18s ease;
 }
@@ -164,13 +169,14 @@ h1 {
   border: 0;
   background: transparent;
   color: var(--text-soft);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
-  text-transform: uppercase;
+  text-transform: none;
   cursor: pointer;
   border-radius: 2px;
   transition: all 0.18s ease;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
 }
 
 .click-mode-btn:hover {

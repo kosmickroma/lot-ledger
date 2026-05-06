@@ -1656,7 +1656,7 @@ async function restoreSavedArea(area, options = {}) {
     const latlng = [area.lat, area.lng];
     const clickMode = getClickMode();
     if (clickMode === "jump") {
-      map.flyTo(latlng, 17);
+      map.flyTo(latlng, 16);
     } else {
       // Stay mode: only pan if location is off-screen
       if (!isPointInViewport(latlng)) {
@@ -1706,7 +1706,7 @@ async function restoreSavedArea(area, options = {}) {
     _renderSavedParcelOutline(area);
     const clickMode = getClickMode();
     if (clickMode === "jump") {
-      map.flyTo([area.lat, area.lng], 18);
+      map.flyTo([area.lat, area.lng], 16);
     } else {
       // Stay mode: only pan if parcel is off-screen
       if (!isPointInViewport([area.lat, area.lng])) {
@@ -1745,7 +1745,7 @@ async function restoreSavedArea(area, options = {}) {
   // Respect click mode: Jump = fitBounds, Stay = auto-pan only if off-screen
   const clickMode = getClickMode();
   if (clickMode === "jump") {
-    if (bounds) map.fitBounds(bounds, { padding: [40, 40] });
+    if (bounds) map.fitBounds(bounds, { padding: [40, 40], maxZoom: 16 });
   } else {
     // Stay mode: only auto-pan if bounds are off-screen
     if (bounds && !areaBoundsInViewport(bounds)) {
@@ -1870,7 +1870,7 @@ async function restoreNamedSession(session, options = {}) {
   // Respect click mode: Jump = fitBounds, Stay = auto-pan only if off-screen
   const clickMode = getClickMode();
   if (clickMode === "jump") {
-    if (bounds) map.fitBounds(bounds, { padding: [40, 40] });
+    if (bounds) map.fitBounds(bounds, { padding: [40, 40], maxZoom: 16 });
   } else {
     // Stay mode: only auto-pan if bounds are off-screen
     if (bounds && !areaBoundsInViewport(bounds)) {

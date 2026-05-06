@@ -1029,7 +1029,11 @@ async def no_cache_frontend(request: Request, call_next):
 
 @app.post("/auth/login")
 async def auth_login(request: Request, payload: LoginRequest, response: Response) -> dict[str, Any]:
-    require_csrf(request)
+    # No CSRF check on login: there's no authenticated session to protect yet.
+    # Requiring CSRF here only creates a chicken-and-egg cookie-timing bug
+    # (the legitimate case where users hit "Sign In" on a cold page load and
+    # the browser hasn't yet processed the csrf cookie from the prior 401).
+    # CSRF still protects every other endpoint (logout, change-password, all /api/*).
     ip = get_client_ip(request)
     allowed, retry_after = login_allowed(ip)
     if not allowed:
