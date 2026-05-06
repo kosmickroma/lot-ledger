@@ -383,6 +383,11 @@ const BROWSE_ONLY_THRESHOLD = 30000; // skip all polygon rendering above this; u
 let _analysisRequestSeq = 0;
 let _activeAnalysisRequestId = 0;
 let _activeAnalysisAbortController = null;
+let undoPillVersion = 0;
+let _activeUndoSnapshot = null;
+let _undoPillTimer = null;
+let _savedAreasCache = [];
+let _savedParcelsCache = [];
 
 const HOA_COLOR = "#b8860b";
 
@@ -411,6 +416,84 @@ function getAnalysisErrorMessage(err, fallback = "Analysis failed. Please try ag
   if (err?.userMessage && String(err.userMessage).trim()) return err.userMessage;
   if (err?.message && String(err.message).trim()) return err.message;
   return fallback;
+}
+
+function captureFilterState() {
+  return {
+    v: 1,
+    checkboxes: { ...filterState },
+    numeric: { ...numericFilters },
+    sold: {
+      maxDaysAgo: soldCompsFilter.maxDaysAgo,
+      minPrice: soldCompsFilter.minPrice,
+      maxPrice: soldCompsFilter.maxPrice,
+      minYearBuilt: soldCompsFilter.minYearBuilt,
+      maxYearBuilt: soldCompsFilter.maxYearBuilt,
+    },
+  };
+}
+
+function _hydrateNumericInputsFromState() {
+  NUMERIC_FILTER_INPUTS.forEach(({ id, key }) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const val = numericFilters[key];
+    if (val == null) {
+      el.value = "";
+      return;
+    }
+    if (key === "lot_sqft_min" || key === "lot_sqft_max") {
+      el.value = String((Number(val) / 43560).toFixed(2)).replace(/\.00$/, "");
+      return;
+    }
+    if (key === "appr_val_min" || key === "appr_val_max") {
+      el.value = formatNumberWithCommas(val);
+      return;
+    }
+    el.value = String(val);
+  });
+}
+
+function restoreFilterState(state) {
+  if (!state || typeof state !== "object") return;
+  if (Number(state.v || 0) > 1) {
+    console.info("[saved-area] skipping newer filter_state version", state.v);
+    return;
+  }
+  if (Number(state.v || 0) !== 1) return;
+  if (state.checkboxes && typeof state.checkboxes === "object") Object.assign(filterState, state.checkboxes);
+  if (state.numeric && typeof state.numeric === "object") Object.assign(numericFilters, state.numeric);
+  if (state.sold && typeof state.sold === "object") {
+    Object.assign(soldCompsFilter, {
+      maxDaysAgo: state.sold.maxDaysAgo ?? DEFAULT_SOLD_COMPS_FILTER.maxDaysAgo,
+      minPrice: state.sold.minPrice ?? null,
+      maxPrice: state.sold.maxPrice ?? null,
+      minYearBuilt: state.sold.minYearBuilt ?? null,
+      maxYearBuilt: state.sold.maxYearBuilt ?? null,
+    });
+  }
+  syncFilterInputs();
+  _hydrateNumericInputsFromState();
+  _readNumericInputs();
+  if (lastAnalysisGeojson) {
+    applyAndRenderSoldFilters();
+    const markers = viewportRenderMode ? renderViewportFeatures() : renderFeatures(lastAnalysisGeojson);
+    const counts = getVisibleFeatureCounts(lastAnalysisGeojson.features || []);
+    if (lastAnalysisCounts) renderSidebar(counts, markers || {});
+  }
+}
+
+function bumpUndoPillVersion() {
+  undoPillVersion += 1;
+  _dismissUndoPill();
+}
+
+function _dismissUndoPill() {
+  const host = document.getElementById("undo-pill-host");
+  if (host) host.innerHTML = "";
+  if (_undoPillTimer) clearTimeout(_undoPillTimer);
+  _undoPillTimer = null;
+  _activeUndoSnapshot = null;
 }
 
 function loadFilters() {
@@ -841,6 +924,7 @@ function renderSoldCompsPanel() {
   };
 
   const applySoldCompInputFilters = () => {
+    bumpUndoPillVersion();
     const maxDays = parseIntegerInput(soldDaysMaxInput);
     soldCompsFilter.maxDaysAgo = maxDays == null ? DEFAULT_SOLD_COMPS_FILTER.maxDaysAgo : Math.max(1, maxDays);
     if (soldDaysMaxInput) soldDaysMaxInput.value = String(soldCompsFilter.maxDaysAgo);
@@ -1001,13 +1085,63 @@ function _updateCountyLabelVisibility() {
   }
 }
 
-function _loadSavedAreas() {
-  try { return JSON.parse(localStorage.getItem("lot_ledger_saved_areas") || "[]"); }
-  catch { return []; }
+async function _apiJson(url, options = {}) {
+  const resp = await fetch(url, {
+    credentials: "same-origin",
+    ...options,
+  });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    if (resp.status === 401) _handle401?.();
+    if (resp.status === 403 && data?.code === "FORCE_PASSWORD_CHANGE_REQUIRED") _handleForcePasswordChange?.();
+    const err = new Error(data?.detail || `Request failed (${resp.status})`);
+    err.status = resp.status;
+    err.data = data;
+    throw err;
+  }
+  return data;
 }
 
-function _writeSavedAreas(areas) {
-  localStorage.setItem("lot_ledger_saved_areas", JSON.stringify(areas));
+function _normalizeSavedAreaRow(area) {
+  const polygon = Array.isArray(area?.polygon) ? area.polygon : [];
+  return {
+    id: String(area.area_id || area.id || ""),
+    type: String(area.type || "area"),
+    name: String(area.name || "Untitled"),
+    latlngs: polygon,
+    bounds: polygon.length >= 2 ? _savedAreaBoundsFromLatLngs(polygon) : null,
+    savedAt: area.updated_at || area.created_at || new Date().toISOString(),
+    filter_state: area.filter_state && typeof area.filter_state === "object" ? area.filter_state : null,
+    lat: Number.isFinite(Number(area.lat)) ? Number(area.lat) : null,
+    lng: Number.isFinite(Number(area.lng)) ? Number(area.lng) : null,
+    shared_by_username: area.shared_by_username || null,
+  };
+}
+
+function _normalizeSavedParcelRow(parcel) {
+  const payload = parcel?.payload && typeof parcel.payload === "object" ? parcel.payload : {};
+  return {
+    id: `parcel:${parcel.county || "dcad"}:${parcel.account_num || ""}`,
+    type: "parcel",
+    account_num: String(parcel.account_num || ""),
+    county: String(parcel.county || payload.county || "dcad").toLowerCase(),
+    name: String(payload.name || payload.addr || parcel.account_num || "Parcel"),
+    lat: Number(payload.lat),
+    lng: Number(payload.lng),
+    geometry: payload.geometry || null,
+    savedAt: parcel.created_at || new Date().toISOString(),
+  };
+}
+
+async function _reloadSavedResources() {
+  const [areasData, parcelsData] = await Promise.all([
+    _apiJson("/api/areas"),
+    _apiJson("/api/parcels").catch(() => ({ parcels: [] })),
+  ]);
+  _savedAreasCache = Array.isArray(areasData.areas) ? areasData.areas.map(_normalizeSavedAreaRow) : [];
+  _savedParcelsCache = Array.isArray(parcelsData.parcels) ? parcelsData.parcels.map(_normalizeSavedParcelRow) : [];
+  _restoreAllSavedParcelOutlines();
+  renderSavedAreasList();
 }
 
 function _savedAreaBoundsFromLatLngs(latlngs) {
@@ -1021,41 +1155,63 @@ function _savedAreaBoundsFromLatLngs(latlngs) {
   return [[minLat, minLng], [maxLat, maxLng]];
 }
 
-function saveCurrentArea(name) {
+async function saveCurrentArea(name) {
   if (!lastDrawnLatLngs) return;
-  const areas = _loadSavedAreas();
-  areas.unshift({
-    id: Date.now().toString(),
-    name: name.trim(),
-    latlngs: lastDrawnLatLngs,
-    bounds: _savedAreaBoundsFromLatLngs(lastDrawnLatLngs),
-    savedAt: new Date().toISOString(),
+  const trimmed = String(name || "").trim();
+  if (!trimmed) return;
+  bumpUndoPillVersion();
+  const created = await _apiJson("/api/areas", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({
+      name: trimmed,
+      type: "area",
+      polygon: lastDrawnLatLngs,
+      filter_state: captureFilterState(),
+    }),
   });
-  _writeSavedAreas(areas);
+  _savedAreasCache.unshift(_normalizeSavedAreaRow(created));
   renderSavedAreasList();
 }
 
-function deleteSavedArea(id) {
-  const area = _loadSavedAreas().find(a => a.id === id);
-  if (area?.type === "parcel" && area.account_num) {
-    const layer = savedParcelLayers[area.account_num];
-    if (layer) { savedParcelLayer.removeLayer(layer); delete savedParcelLayers[area.account_num]; }
+async function deleteSavedArea(item) {
+  if (!item) return;
+  bumpUndoPillVersion();
+  if (item.type === "parcel") {
+    await _apiJson(`/api/parcels/${encodeURIComponent(item.county || "dcad")}/${encodeURIComponent(item.account_num || "")}`, {
+      method: "DELETE",
+      headers: { ...authHeaders() },
+    });
+    _savedParcelsCache = _savedParcelsCache.filter((p) => !(p.account_num === item.account_num && p.county === item.county));
+    const layer = savedParcelLayers[item.account_num];
+    if (layer) {
+      savedParcelLayer.removeLayer(layer);
+      delete savedParcelLayers[item.account_num];
+    }
+  } else {
+    await _apiJson(`/api/areas/${encodeURIComponent(item.id)}`, {
+      method: "DELETE",
+      headers: { ...authHeaders() },
+    });
+    _savedAreasCache = _savedAreasCache.filter((a) => a.id !== item.id);
   }
-  _writeSavedAreas(_loadSavedAreas().filter(a => a.id !== id));
   renderSavedAreasList();
 }
 
-function saveSearchLocation(name, lat, lng) {
-  const areas = _loadSavedAreas();
-  areas.unshift({
-    id: Date.now().toString(),
-    type: "location",
-    name,
-    lat,
-    lng,
-    savedAt: new Date().toISOString(),
+async function saveSearchLocation(name, lat, lng) {
+  bumpUndoPillVersion();
+  const created = await _apiJson("/api/areas", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({
+      name,
+      type: "location",
+      lat,
+      lng,
+      filter_state: null,
+    }),
   });
-  _writeSavedAreas(areas);
+  _savedAreasCache.unshift(_normalizeSavedAreaRow(created));
   renderSavedAreasList();
 }
 
@@ -1071,32 +1227,132 @@ function _renderSavedParcelOutline(area) {
   savedParcelLayers[area.account_num] = layer;
 }
 
-function saveParcel(account_num, county, addr, lat, lng, geometry) {
-  const areas = _loadSavedAreas();
-  if (areas.some(a => a.type === "parcel" && a.account_num === account_num)) return; // no dupe
-  areas.unshift({
-    id: Date.now().toString(),
-    type: "parcel",
-    account_num,
-    county,
-    name: addr || account_num,
-    lat,
-    lng,
-    geometry: geometry || null,
-    savedAt: new Date().toISOString(),
+async function saveParcel(account_num, county, addr, lat, lng, geometry) {
+  if (!account_num) return;
+  bumpUndoPillVersion();
+  const created = await _apiJson("/api/parcels", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({
+      account_num,
+      county: county || "dcad",
+      payload: {
+        account_num,
+        county,
+        name: addr || account_num,
+        lat,
+        lng,
+        geometry: geometry || null,
+      },
+    }),
   });
-  _writeSavedAreas(areas);
+  const row = _normalizeSavedParcelRow(created);
+  _savedParcelsCache = _savedParcelsCache.filter((p) => !(p.account_num === row.account_num && p.county === row.county));
+  _savedParcelsCache.unshift(row);
   renderSavedAreasList();
-  _renderSavedParcelOutline(areas[0]);
+  _renderSavedParcelOutline(row);
 }
 
 function _restoreAllSavedParcelOutlines() {
-  _loadSavedAreas()
-    .filter(a => a.type === "parcel")
-    .forEach(_renderSavedParcelOutline);
+  Object.values(savedParcelLayers).forEach((layer) => savedParcelLayer.removeLayer(layer));
+  Object.keys(savedParcelLayers).forEach((key) => delete savedParcelLayers[key]);
+  _savedParcelsCache.forEach(_renderSavedParcelOutline);
 }
 
-async function restoreSavedArea(area) {
+function _createUndoSnapshot() {
+  return {
+    filterState: { ...filterState },
+    numericFilters: { ...numericFilters },
+    soldCompsFilter: { ...soldCompsFilter },
+    lastAnalysisGeojson,
+    drawnLayer: lastDrawnLatLngs ? [...lastDrawnLatLngs.map((p) => [...p])] : null,
+    jobId: currentJobId,
+    abortCtrl: null,
+    pillVersion: ++undoPillVersion,
+  };
+}
+
+function _restoreUndoSnapshot(snapshot) {
+  if (!snapshot) return;
+  snapshot.abortCtrl?.abort();
+  filterState = { ...DEFAULT_FILTERS, ...(snapshot.filterState || {}) };
+  Object.assign(numericFilters, snapshot.numericFilters || {});
+  soldCompsFilter = { ...DEFAULT_SOLD_COMPS_FILTER, ...(snapshot.soldCompsFilter || {}) };
+  currentJobId = snapshot.jobId || null;
+  lastAnalysisGeojson = snapshot.lastAnalysisGeojson || null;
+  drawLayer.clearLayers();
+  maskLayer.clearLayers();
+  if (Array.isArray(snapshot.drawnLayer) && snapshot.drawnLayer.length >= 3) {
+    lastDrawnLatLngs = snapshot.drawnLayer;
+    lastPolygon = snapshot.drawnLayer.map(([lat, lng]) => [lng, lat]);
+    L.polygon(snapshot.drawnLayer, {
+      color: "#f1c40f",
+      weight: 2.5,
+      fill: false,
+      interactive: false,
+    }).addTo(drawLayer);
+    const _worldRing = [[-90, -180], [-90, 180], [90, 180], [90, -180], [-90, -180]];
+    L.polygon([_worldRing, snapshot.drawnLayer], {
+      fillColor: "#000000",
+      fillOpacity: 0.32,
+      stroke: false,
+      interactive: false,
+    }).addTo(maskLayer);
+    document.getElementById("btn-draw-clear")?.classList.remove("hidden");
+    document.getElementById("btn-saved-area-clear")?.classList.remove("hidden");
+  } else {
+    lastDrawnLatLngs = null;
+    lastPolygon = null;
+    document.getElementById("btn-saved-area-clear")?.classList.add("hidden");
+  }
+  syncFilterInputs();
+  _hydrateNumericInputsFromState();
+  _readNumericInputs();
+  if (lastAnalysisGeojson) {
+    applyAndRenderSoldFilters();
+    const markers = viewportRenderMode ? renderViewportFeatures() : renderFeatures(lastAnalysisGeojson);
+    const counts = getVisibleFeatureCounts(lastAnalysisGeojson.features || []);
+    if (lastAnalysisCounts) renderSidebar(counts, markers || {});
+  }
+  _dismissUndoPill();
+}
+
+function _countRestoredFilterKeys(state) {
+  if (!state || !state.v) return 0;
+  let count = 0;
+  count += Object.values(state.checkboxes || {}).filter((v) => v === false).length;
+  count += Object.values(state.numeric || {}).filter((v) => v != null && v !== "").length;
+  count += Object.values(state.sold || {}).filter((v) => v != null && v !== "").length;
+  return count;
+}
+
+function _showUndoPill(snapshot, restoredCount) {
+  if (!snapshot || restoredCount <= 0) return;
+  const host = document.getElementById("undo-pill-host");
+  if (!host) return;
+  _activeUndoSnapshot = snapshot;
+  host.innerHTML = `
+    <span class="undo-pill">
+      Restored ${restoredCount} filter${restoredCount === 1 ? "" : "s"}
+      <button type="button" id="undo-pill-btn">Undo</button>
+    </span>
+  `;
+  document.getElementById("undo-pill-btn")?.addEventListener("click", (e) => {
+    e.preventDefault();
+    if (!_activeUndoSnapshot || _activeUndoSnapshot.pillVersion !== snapshot.pillVersion) return;
+    _restoreUndoSnapshot(_activeUndoSnapshot);
+  });
+  if (_undoPillTimer) clearTimeout(_undoPillTimer);
+  _undoPillTimer = setTimeout(() => {
+    if (_activeUndoSnapshot?.pillVersion === snapshot.pillVersion) {
+      _dismissUndoPill();
+      undoPillVersion += 1;
+    }
+  }, 6000);
+}
+
+async function restoreSavedArea(area, options = {}) {
+  const rowEl = options.rowEl || null;
   // Location pins (from address search) — just fly there and show the ring.
   if (area.type === "location") {
     const latlng = [area.lat, area.lng];
@@ -1146,6 +1402,11 @@ async function restoreSavedArea(area) {
     return;
   }
 
+  if (rowEl) rowEl.classList.add("row-shimmer");
+  if (area.filter_state && typeof area.filter_state === "object") {
+    restoreFilterState(area.filter_state);
+  }
+
   clearDrawResults();
   drawLayer.clearLayers();
   L.polygon(area.latlngs, {
@@ -1162,7 +1423,8 @@ async function restoreSavedArea(area) {
     stroke: false,
     interactive: false,
   }).addTo(maskLayer);
-  map.fitBounds(area.bounds, { padding: [40, 40] });
+  const bounds = area.bounds || _savedAreaBoundsFromLatLngs(area.latlngs || []);
+  if (bounds) map.fitBounds(bounds, { padding: [40, 40] });
   document.getElementById("btn-draw-clear")?.classList.remove("hidden");
   document.getElementById("btn-saved-area-clear")?.classList.remove("hidden");
 
@@ -1180,9 +1442,11 @@ async function restoreSavedArea(area) {
   document.getElementById("sidebar-loading")?.classList.remove("hidden");
   document.getElementById("redfin-status").textContent = "Loading area analysis...";
   const analysisRequest = beginLatestAnalysisRequest();
+  if (options.undoSnapshot) options.undoSnapshot.abortCtrl = _activeAnalysisAbortController;
 
   try {
     const data = await runAnalysis(polygon, includeRedfin, includeSold, { signal: analysisRequest.signal });
+    if (analysisRequest.signal.aborted) return;
     if (!isActiveAnalysisRequest(analysisRequest.requestId)) return;
     if (data.source_status && (!data.source_status.dcad_ok || !data.source_status.tad_ok)) {
       throw new Error("Incomplete county result set.");
@@ -1245,7 +1509,64 @@ async function restoreSavedArea(area) {
     document.getElementById("redfin-status").textContent = getAnalysisErrorMessage(err, "Area analysis failed. Please try again.");
     document.getElementById("sidebar-loading")?.classList.add("hidden");
     document.getElementById("sidebar-instructions")?.classList.remove("hidden");
+  } finally {
+    if (rowEl) rowEl.classList.remove("row-shimmer");
   }
+}
+
+function _formatFilterDiffChip(area) {
+  const st = area?.filter_state;
+  if (!st || st.v !== 1) return "";
+  const chips = [];
+  const n = st.numeric || {};
+  if (n.lot_sqft_min != null) chips.push(`Lot ≥ ${(Number(n.lot_sqft_min) / 43560).toFixed(2)}ac`);
+  if (n.yr_built_min != null || n.yr_built_max != null) chips.push(`Built ${n.yr_built_min ?? "?"}–${n.yr_built_max ?? "?"}`);
+  const s = st.sold || {};
+  if (s.maxDaysAgo != null && s.maxDaysAgo !== DEFAULT_SOLD_COMPS_FILTER.maxDaysAgo) chips.push(`Sold ${s.maxDaysAgo}d`);
+  if (!chips.length) return "";
+  const extraCount = Object.values(n).filter((v) => v != null).length + Object.values(s).filter((v) => v != null).length - chips.length;
+  return `${chips.slice(0, 2).join(" · ")}${extraCount > 0 ? ` · +${extraCount}` : ""}`;
+}
+
+async function _renameSavedItemInline(item, rowEl) {
+  if (!item || item.type === "parcel") return;
+  const nameEl = rowEl.querySelector(".saved-area-name");
+  if (!nameEl) return;
+  const input = document.createElement("input");
+  input.className = "saved-area-rename-input";
+  input.value = item.name || "";
+  nameEl.replaceWith(input);
+  input.focus();
+  input.select();
+
+  const cancel = () => renderSavedAreasList();
+  const save = async () => {
+    const nextName = String(input.value || "").trim();
+    if (!nextName || nextName === item.name) {
+      cancel();
+      return;
+    }
+    bumpUndoPillVersion();
+    await _apiJson(`/api/areas/${encodeURIComponent(item.id)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify({ name: nextName }),
+    });
+    await _reloadSavedResources();
+  };
+
+  input.addEventListener("keydown", async (e) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      cancel();
+      return;
+    }
+    if (e.key === "Enter") {
+      e.preventDefault();
+      await save();
+    }
+  });
+  input.addEventListener("blur", cancel);
 }
 
 function _renderList(sectionId, listId, items) {
@@ -1253,36 +1574,163 @@ function _renderList(sectionId, listId, items) {
   const list = document.getElementById(listId);
   if (!section || !list) return;
   section.classList.toggle("hidden", items.length === 0);
-  list.innerHTML = items.map(area => {
+  list.innerHTML = items.map((area) => {
     const date = new Date(area.savedAt).toLocaleDateString(undefined, { month: "short", day: "numeric" });
     const icon = area.type === "parcel" ? "📌" : area.type === "location" ? "📍" : "▭";
+    const chip = _formatFilterDiffChip(area);
+    const canRename = area.type !== "parcel";
     return `
-      <div class="saved-area-row" data-id="${area.id}">
-        <span class="saved-area-icon">${icon}</span>
-        <span class="saved-area-name">${area.name}</span>
-        <span class="saved-area-date">${date}</span>
-        <button class="saved-area-delete" data-id="${area.id}" title="Delete">×</button>
+      <div class="saved-area-row" tabindex="0" data-id="${area.id}" data-type="${area.type}">
+        <div class="saved-area-main">
+          <span class="saved-area-icon">${icon}</span>
+          <span class="saved-area-name">${area.name}</span>
+          <span class="saved-area-date">${date}</span>
+          <span class="saved-area-actions">
+            ${canRename ? `<button type="button" class="saved-area-action-btn rename" data-action="rename" title="Rename">✎</button>` : ""}
+            <button type="button" class="saved-area-action-btn delete" data-action="delete" title="Delete">×</button>
+          </span>
+        </div>
+        <div class="saved-row-filter-chip">${chip}</div>
       </div>`;
   }).join("");
   list.querySelectorAll(".saved-area-row").forEach(row => {
-    row.addEventListener("click", (e) => {
-      if (e.target.classList.contains("saved-area-delete")) return;
-      const area = _loadSavedAreas().find(a => a.id === row.dataset.id);
-      if (area) restoreSavedArea(area);
-    });
-  });
-  list.querySelectorAll(".saved-area-delete").forEach(btn => {
-    btn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      deleteSavedArea(btn.dataset.id);
+    row.addEventListener("click", async (e) => {
+      const actionEl = e.target.closest("[data-action]");
+      const id = row.dataset.id;
+      const all = [..._savedAreasCache, ..._savedParcelsCache];
+      const area = all.find((a) => a.id === id);
+      if (!area) return;
+      if (actionEl?.dataset.action === "delete") {
+        e.stopPropagation();
+        await deleteSavedArea(area);
+        return;
+      }
+      if (actionEl?.dataset.action === "rename") {
+        e.stopPropagation();
+        await _renameSavedItemInline(area, row);
+        return;
+      }
+      bumpUndoPillVersion();
+      const snapshot = _createUndoSnapshot();
+      await restoreSavedArea(area, { rowEl: row, undoSnapshot: snapshot });
+      const restoredCount = _countRestoredFilterKeys(area.filter_state);
+      _showUndoPill(snapshot, restoredCount);
     });
   });
 }
 
 function renderSavedAreasList() {
-  const all = _loadSavedAreas();
-  _renderList("saved-areas",   "saved-areas-list",   all.filter(a => !a.type || a.type === "area"));
-  _renderList("saved-parcels", "saved-parcels-list", all.filter(a => a.type === "parcel" || a.type === "location"));
+  _renderList("saved-areas", "saved-areas-list", _savedAreasCache.filter((a) => a.type === "area"));
+  _renderList("saved-parcels", "saved-parcels-list", [..._savedAreasCache.filter((a) => a.type === "location"), ..._savedParcelsCache]);
+}
+
+function _readLegacySavedItems() {
+  try {
+    const raw = localStorage.getItem("lot_ledger_saved_areas");
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function _hideImportBanner() {
+  document.getElementById("import-banner")?.classList.add("hidden");
+}
+
+async function _importLegacySavedItems() {
+  bumpUndoPillVersion();
+  const items = _readLegacySavedItems();
+  if (!items.length) {
+    _hideImportBanner();
+    return;
+  }
+  for (const item of items) {
+    const t = item?.type || "area";
+    if (t === "parcel") {
+      await _apiJson("/api/parcels", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({
+          account_num: item.account_num,
+          county: item.county || "dcad",
+          payload: {
+            account_num: item.account_num,
+            county: item.county || "dcad",
+            name: item.name,
+            lat: item.lat,
+            lng: item.lng,
+            geometry: item.geometry || null,
+          },
+        }),
+      });
+      continue;
+    }
+    if (t === "location") {
+      await _apiJson("/api/areas", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({
+          name: item.name || "Saved location",
+          type: "location",
+          lat: item.lat,
+          lng: item.lng,
+          filter_state: null,
+        }),
+      });
+      continue;
+    }
+    await _apiJson("/api/areas", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify({
+        name: item.name || "Saved area",
+        type: "area",
+        polygon: Array.isArray(item.latlngs) ? item.latlngs : [],
+        filter_state: item.filter_state && typeof item.filter_state === "object" ? item.filter_state : null,
+      }),
+    });
+  }
+  localStorage.removeItem("lot_ledger_saved_areas");
+  _hideImportBanner();
+  await _reloadSavedResources();
+}
+
+function _maybeShowImportBanner() {
+  const dismissed = localStorage.getItem("lot_ledger_import_dismissed");
+  if (dismissed) return;
+  const items = _readLegacySavedItems();
+  if (!items.length) return;
+
+  const banner = document.getElementById("import-banner");
+  const text = document.getElementById("import-banner-text");
+  const importBtn = document.getElementById("btn-import-local");
+  const dismissBtn = document.getElementById("btn-dismiss-import");
+  if (!banner || !text || !importBtn || !dismissBtn) return;
+
+  text.textContent = `Found ${items.length} saved item${items.length === 1 ? "" : "s"} in this browser`;
+  banner.classList.remove("hidden");
+
+  const onImport = async () => {
+    importBtn.disabled = true;
+    dismissBtn.disabled = true;
+    try {
+      await _importLegacySavedItems();
+    } catch (err) {
+      console.error("import failed", err);
+    } finally {
+      importBtn.disabled = false;
+      dismissBtn.disabled = false;
+    }
+  };
+  const onDismiss = () => {
+    localStorage.setItem("lot_ledger_import_dismissed", "1");
+    _hideImportBanner();
+  };
+
+  importBtn.onclick = () => void onImport();
+  dismissBtn.onclick = onDismiss;
 }
 
 const MapToolbar = L.Control.extend({
@@ -1782,7 +2230,10 @@ function _applyNumericFilters() {
 }
 
 NUMERIC_FILTER_INPUTS.forEach(({ id }) => {
-  document.getElementById(id)?.addEventListener("input", _applyNumericFilters);
+  document.getElementById(id)?.addEventListener("input", () => {
+    bumpUndoPillVersion();
+    _applyNumericFilters();
+  });
 });
 
 ["nf-val-min", "nf-val-max"].forEach((id) => {
@@ -1798,16 +2249,19 @@ NUMERIC_FILTER_INPUTS.forEach(({ id }) => {
     inputEl.value = parsed == null ? "" : formatNumberWithCommas(parsed);
   };
   inputEl.addEventListener("blur", () => {
+    bumpUndoPillVersion();
     normalize();
     _applyNumericFilters();
   });
   inputEl.addEventListener("change", () => {
+    bumpUndoPillVersion();
     normalize();
     _applyNumericFilters();
   });
 });
 
 document.getElementById("btn-numeric-reset")?.addEventListener("click", () => {
+  bumpUndoPillVersion();
   _clearNumericInputs();
   _applyNumericFilters();
 });
@@ -1816,6 +2270,7 @@ Object.entries(FILTER_INPUT_IDS).forEach(([key, id]) => {
   const input = document.getElementById(id);
   if (!input) return;
   input.addEventListener("change", () => {
+    bumpUndoPillVersion();
     filterState[key] = Boolean(input.checked);
     saveFilters();
     applyMapVisibilityFilters();
@@ -1823,6 +2278,7 @@ Object.entries(FILTER_INPUT_IDS).forEach(([key, id]) => {
 });
 
 document.getElementById("btn-filters-reset")?.addEventListener("click", () => {
+  bumpUndoPillVersion();
   filterState = { ...DEFAULT_FILTERS };
   saveFilters();
   syncFilterInputs();
@@ -3029,6 +3485,7 @@ async function persistTagStateForExport() {
 }
 
 map.on("draw:created", async (e) => {
+  bumpUndoPillVersion();
   closeTransientSoldSidebarPopup();
   map.getContainer().classList.remove("drawing-active");
   drawLayer.clearLayers();
@@ -3187,6 +3644,7 @@ function clearDrawResults() {
 }
 
 map.on("draw:drawstart", () => {
+  bumpUndoPillVersion();
   drawHelper.classList.remove("hidden");
   document.getElementById("btn-draw")?.classList.add("active");
   document.getElementById("btn-draw-cancel")?.classList.remove("hidden");
@@ -3253,10 +3711,75 @@ document.getElementById("btn-download").addEventListener("click", () => {
   })();
 });
 
+function _openSaveAreaInlineInput() {
+  const btn = document.getElementById("btn-save-area");
+  if (!btn) return;
+  const parent = btn.parentElement;
+  if (!parent || parent.querySelector(".save-area-inline")) return;
+
+  const wrap = document.createElement("div");
+  wrap.className = "save-area-inline";
+  wrap.style.display = "inline-flex";
+  wrap.style.gap = "6px";
+  wrap.style.alignItems = "center";
+  wrap.style.flex = "1";
+
+  const input = document.createElement("input");
+  input.type = "text";
+  input.placeholder = "Name this area...";
+  input.className = "saved-area-rename-input";
+  input.style.minWidth = "140px";
+
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "saved-area-action-btn";
+  cancel.textContent = "×";
+
+  const finish = () => {
+    wrap.remove();
+    btn.classList.remove("hidden");
+  };
+
+  const submit = async () => {
+    const name = String(input.value || "").trim();
+    if (!name) {
+      finish();
+      return;
+    }
+    input.disabled = true;
+    try {
+      await saveCurrentArea(name);
+    } catch (err) {
+      console.error("save area failed", err);
+    } finally {
+      finish();
+    }
+  };
+
+  cancel.addEventListener("click", finish);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      finish();
+    }
+    if (e.key === "Enter") {
+      e.preventDefault();
+      void submit();
+    }
+  });
+  input.addEventListener("blur", () => {
+    if (!input.value.trim()) finish();
+  });
+
+  wrap.appendChild(input);
+  wrap.appendChild(cancel);
+  parent.appendChild(wrap);
+  btn.classList.add("hidden");
+  requestAnimationFrame(() => input.focus());
+}
+
 document.getElementById("btn-save-area")?.addEventListener("click", () => {
-  const name = window.prompt("Name this area:", "");
-  if (!name || !name.trim()) return;
-  saveCurrentArea(name);
+  _openSaveAreaInlineInput();
 });
 
 document.getElementById("btn-clear").addEventListener("click", () => {
@@ -3492,10 +4015,15 @@ map.on("popupopen", (e) => {
           }
         }
       } catch { /* geometry stays null — outline skipped */ }
-      saveParcel(account, county, addr, parseFloat(lat), parseFloat(lng), geometry);
-      saveLink.textContent = "✓ Saved";
-      saveLink.style.color = "#888";
-      saveLink.style.pointerEvents = "none";
+      try {
+        await saveParcel(account, county, addr, parseFloat(lat), parseFloat(lng), geometry);
+        saveLink.textContent = "✓ Saved";
+        saveLink.style.color = "#888";
+        saveLink.style.pointerEvents = "none";
+      } catch (err) {
+        console.error("save parcel failed", err);
+        saveLink.textContent = "Save failed";
+      }
     });
   }
 
@@ -3567,9 +4095,6 @@ map.on("popupopen", (e) => {
     });
   }
 });
-
-renderSavedAreasList();
-_restoreAllSavedParcelOutlines();
 
 // =============================================================================
 // Auth UI — login modal, user bar, admin panel
@@ -3651,6 +4176,8 @@ function _showLoginForm(errorMsg = "") {
         _hideAuthModal();
         _currentUser = data.user || data;
         _renderUserBar(_currentUser);
+        await _reloadSavedResources().catch((err) => console.error("load saved resources failed", err));
+        _maybeShowImportBanner();
         if (data.force_password_change) {
           _showChangePasswordForm(true);
         }
@@ -4012,6 +4539,8 @@ function _handleForcePasswordChange() {
       const data = await resp.json().catch(() => ({}));
       _currentUser = data.user || data;
       _renderUserBar(_currentUser);
+      await _reloadSavedResources().catch((err) => console.error("load saved resources failed", err));
+      _maybeShowImportBanner();
       if (_currentUser?.force_password_change) {
         _showChangePasswordForm(true);
       }

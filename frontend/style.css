@@ -947,12 +947,157 @@ h1 {
   border-bottom: 1px solid var(--panel-border);
   cursor: pointer;
   transition: background 0.14s ease;
+  position: relative;
 }
 
 .saved-area-row:hover {
   background: var(--gold-soft);
   margin: 0 -20px;
   padding: 7px 20px;
+}
+
+.saved-area-row:focus-within {
+  background: var(--gold-soft);
+  margin: 0 -20px;
+  padding: 7px 20px;
+}
+
+.saved-area-main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+}
+
+.saved-row-filter-chip {
+  display: none;
+  font-size: 10px;
+  color: var(--text-soft);
+  margin-left: 18px;
+  margin-top: 3px;
+  margin-bottom: 2px;
+}
+
+.saved-area-row:hover .saved-row-filter-chip,
+.saved-area-row:focus-within .saved-row-filter-chip {
+  display: block;
+}
+
+.saved-area-actions {
+  display: none;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+}
+
+.saved-area-row:hover .saved-area-actions,
+.saved-area-row:focus-within .saved-area-actions {
+  display: inline-flex;
+}
+
+.saved-area-action-btn {
+  background: none;
+  border: none;
+  color: var(--text-soft);
+  font-size: 12px;
+  cursor: pointer;
+  line-height: 1;
+  padding: 0 3px;
+}
+
+.saved-area-action-btn:hover {
+  color: var(--text-main);
+}
+
+.saved-area-action-btn.delete:hover {
+  color: #e74c3c;
+}
+
+.saved-area-rename-input {
+  flex: 1;
+  min-width: 0;
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid rgba(201, 162, 79, 0.45);
+  border-radius: 6px;
+  color: #dbe0e7;
+  font-size: 12px;
+  padding: 4px 7px;
+}
+
+.row-shimmer::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  background: linear-gradient(90deg, rgba(201,162,79,0) 0%, rgba(201,162,79,0.75) 45%, rgba(201,162,79,0) 100%);
+  background-size: 220% 100%;
+  animation: rowShimmer 1.2s linear infinite;
+}
+
+@keyframes rowShimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -20% 0; }
+}
+
+.undo-pill-host {
+  margin-top: 8px;
+  min-height: 22px;
+}
+
+.undo-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 999px;
+  border: 1px solid rgba(201, 162, 79, 0.5);
+  background: rgba(201, 162, 79, 0.14);
+  color: #f0dfb3;
+  padding: 3px 10px;
+  font-size: 11px;
+}
+
+.undo-pill button {
+  border: none;
+  background: none;
+  color: #fff4c2;
+  cursor: pointer;
+  text-decoration: underline;
+  font-size: 11px;
+  padding: 0;
+}
+
+.import-banner {
+  margin: 8px 12px 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(201, 162, 79, 0.32);
+  background: rgba(201, 162, 79, 0.08);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.import-banner-text {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.import-banner-actions {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.import-banner-actions button {
+  border: 1px solid rgba(201, 162, 79, 0.4);
+  background: rgba(0, 0, 0, 0.18);
+  color: #e6cf97;
+  border-radius: 999px;
+  font-size: 10px;
+  padding: 3px 8px;
+  cursor: pointer;
 }
 
 .saved-area-icon {
