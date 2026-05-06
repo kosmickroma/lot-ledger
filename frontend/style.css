@@ -518,8 +518,25 @@ h1 {
 
 .sidebar-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   margin-bottom: 16px;
+}
+
+.sidebar-actions > button {
+  flex: 1 1 calc(50% - 8px);
+  min-width: 0;
+}
+
+#btn-download {
+  flex-basis: 100%;
+}
+
+.sidebar input,
+.sidebar button,
+.sidebar select,
+.sidebar textarea {
+  box-sizing: border-box;
 }
 
 .btn-primary {
@@ -967,6 +984,7 @@ h1 {
   align-items: center;
   gap: 6px;
   width: 100%;
+  min-width: 0;
 }
 
 .saved-row-filter-chip {
@@ -988,6 +1006,7 @@ h1 {
   align-items: center;
   gap: 2px;
   margin-left: auto;
+  flex-shrink: 0;
 }
 
 .saved-area-row:hover .saved-area-actions,
@@ -1110,10 +1129,42 @@ h1 {
 .saved-area-name {
   font-size: 12px;
   color: #d5d8df;
-  flex: 1;
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.save-area-inline,
+.save-session-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.save-area-inline .saved-area-rename-input,
+.save-session-inline .saved-area-rename-input {
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.saved-area-current {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.saved-area-row-active {
+  background: rgba(201, 162, 79, 0.22);
 }
 
 .saved-area-date {
@@ -1534,5 +1585,4 @@ h1 {
   border-color: rgba(201, 162, 79, 0.6);
   box-shadow: 0 0 0 2px rgba(201, 162, 79, 0.25);
   transition: box-shadow 0.15s ease, border-color 0.15s ease;
-}
 }

@@ -131,6 +131,7 @@
         <p id="redfin-status" class="sidebar-note">Pulling Redfin listings...</p>
       </div>
       <div id="sidebar-results" class="sidebar-section hidden">
+        <p id="session-cache-note" class="sidebar-note hidden"></p>
         <div id="counts-panel" class="counts-panel"></div>
         <div id="sold-comps-panel"></div>
         <div class="sidebar-actions">
@@ -145,6 +146,10 @@
           <span class="sidebar-label">Saved Areas</span>
         </button>
         <div id="saved-areas-body" class="collapsible-body">
+          <div id="saved-area-current" class="saved-area-current hidden">
+            <span class="sidebar-note">Currently viewing: <strong id="saved-area-current-name"></strong></span>
+            <button id="btn-saved-area-current-clear" type="button" class="saved-area-action-btn" title="Clear current saved area">×</button>
+          </div>
           <div id="saved-areas-list"></div>
           <button id="btn-saved-area-clear" class="hidden" onclick="clearDrawResults()" style="margin-top:8px;width:100%;padding:5px 0;background:transparent;border:1px solid #555;border-radius:4px;color:#aaa;font-size:11px;cursor:pointer;">× Back to Browse</button>
         </div>
