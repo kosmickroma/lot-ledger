@@ -544,6 +544,53 @@ def _session_exists(session_id: str, user_id: int) -> bool:
         release_session_conn(conn)
 
 
+def _build_features_from_rows(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Rebuild GeoJSON features from cached raw parcel rows.
+
+    Used when loading a pinned session from cached_jobs — avoids a fresh CAD
+    query while still returning the same feature shape as /api/analyze.
+    Redfin signal is not available from cache, so on_redfin=False for all rows.
+    """
+    exempt_set: set[str] = set()
+    features: list[dict[str, Any]] = []
+    counts: dict[str, int] = {
+        "active": 0, "off_market": 0, "multifamily": 0,
+        "vacant": 0, "commercial": 0, "exempt": 0, "total": len(rows),
+    }
+    for row in rows:
+        division_cd = str(row.get("division_cd", "") or "").upper()
+        if division_cd == "TAD":
+            prop_type = _classify_tad(row)
+        elif division_cd == "COLLIN":
+            prop_type = _classify_collin(row)
+        elif division_cd == "DENTON":
+            prop_type = _classify_denton(row)
+        else:
+            prop_type = classify_parcel(row, exempt_set)
+        if prop_type == "multifamily":
+            counts["multifamily"] += 1
+        elif prop_type == "vacant":
+            counts["vacant"] += 1
+        elif prop_type == "commercial":
+            counts["commercial"] += 1
+        elif prop_type == "exempt":
+            counts["exempt"] += 1
+        else:
+            counts["off_market"] += 1
+        try:
+            feature = build_feature(row, prop_type, False, None)
+            feature["properties"]["source_county"] = (
+                "tad" if division_cd == "TAD"
+                else "collin" if division_cd == "COLLIN"
+                else "denton" if division_cd == "DENTON"
+                else "dcad"
+            )
+            features.append(feature)
+        except Exception:
+            continue
+    return features, counts
+
+
 def _restore_job_from_session(session_id: str, user_id: int) -> dict[str, Any] | None:
     polygon = _load_session_polygon(session_id, user_id)
     if not polygon or len(polygon) < 3:
@@ -677,6 +724,16 @@ class SavedParcelCreateRequest(BaseModel):
     account_num: str
     county: str = "dcad"
     payload: dict[str, Any] | None = None
+
+
+class SaveSessionRequest(BaseModel):
+    name: str
+    filter_state: dict[str, Any] | None = None
+
+
+class UpdateSessionRequest(BaseModel):
+    name: str | None = None
+    filter_state: dict[str, Any] | None = None
 
 
 class LoginRequest(BaseModel):
@@ -2877,6 +2934,230 @@ async def get_session(session_id: str, user: dict[str, Any] = Depends(get_curren
     }
 
 
+@app.get("/api/sessions")
+async def list_sessions(user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
+    """List the current user's named (permanent) sessions, ordered newest first."""
+    uid = int(user["id"])
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT session_id, name, parcel_count, county_coverage, filter_state, polygon, created_at
+                FROM analysis_sessions
+                WHERE user_id = %s AND name IS NOT NULL
+                ORDER BY created_at DESC
+                """,
+                (uid,),
+            )
+            sessions = []
+            for row in cur.fetchall():
+                polygon_latlngs = _to_leaflet_polygon(row[5]) if row[5] else []
+                sessions.append({
+                    "session_id": row[0],
+                    "name": row[1],
+                    "parcel_count": int(row[2] or 0),
+                    "county_coverage": list(row[3] or []),
+                    "filter_state": row[4] if isinstance(row[4], dict) else None,
+                    "latlngs": polygon_latlngs,
+                    "created_at": row[6].isoformat() if row[6] else None,
+                })
+    finally:
+        release_session_conn(conn)
+    return {"sessions": sessions}
+
+
+@app.get("/api/sessions/{session_id}/data")
+async def get_session_data(session_id: str, user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
+    """Return a named session's full parcel data from cached_jobs (same shape as /api/analyze)."""
+    uid = int(user["id"])
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT name FROM analysis_sessions WHERE session_id = %s AND user_id = %s AND name IS NOT NULL",
+                (session_id, uid),
+            )
+            if cur.fetchone() is None:
+                raise HTTPException(status_code=404, detail="Named session not found")
+    finally:
+        release_session_conn(conn)
+
+    cached = _load_cached_job(session_id)
+    if cached is None or int(cached.get("user_id", -1)) != uid:
+        raise HTTPException(status_code=404, detail="Session data not found in cache")
+
+    rows = list(cached.get("rows", []))
+    sold_points = list(cached.get("sold_points", []))
+    _apply_session_tags(session_id, uid, rows)
+    features, counts = _build_features_from_rows(rows)
+    return {
+        "type": "FeatureCollection",
+        "features": features,
+        "counts": counts,
+        "sold_points": sold_points,
+        "job_id": session_id,
+        "redfin_requested": False,
+        "redfin_ok": False,
+        "redfin_skipped": True,
+        "source_status": {"dcad_ok": True, "tad_ok": True, "collin_ok": True, "denton_ok": True},
+    }
+
+
+@app.post("/api/sessions/{session_id}/save")
+async def save_session(
+    session_id: str,
+    request: SaveSessionRequest,
+    req: Request,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Name an ephemeral session, making it permanent. Pins BOTH analysis_sessions and cached_jobs in one transaction."""
+    require_csrf(req)
+    name = str(request.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Session name is required")
+    uid = int(user["id"])
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM analysis_sessions WHERE session_id = %s AND user_id = %s",
+                (session_id, uid),
+            )
+            if cur.fetchone() is None:
+                raise HTTPException(status_code=404, detail="Session not found")
+            cur.execute(
+                """
+                UPDATE analysis_sessions
+                SET name = %s, filter_state = %s, expires_at = NULL, last_accessed = now()
+                WHERE session_id = %s AND user_id = %s
+                RETURNING session_id, name, parcel_count, county_coverage, filter_state, polygon, created_at
+                """,
+                (
+                    name,
+                    Json(request.filter_state) if isinstance(request.filter_state, dict) else None,
+                    session_id,
+                    uid,
+                ),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail="Session not found")
+            # Pin cached_jobs in the same transaction (gap #1: both rows must be NULL or session becomes unloadable)
+            cur.execute("UPDATE cached_jobs SET expires_at = NULL WHERE job_id = %s", (session_id,))
+        conn.commit()
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        release_session_conn(conn)
+
+    polygon_latlngs = _to_leaflet_polygon(row[5]) if row[5] else []
+    return {
+        "session_id": row[0],
+        "name": row[1],
+        "parcel_count": int(row[2] or 0),
+        "county_coverage": list(row[3] or []),
+        "filter_state": row[4] if isinstance(row[4], dict) else None,
+        "latlngs": polygon_latlngs,
+        "created_at": row[6].isoformat() if row[6] else None,
+    }
+
+
+@app.put("/api/sessions/{session_id}")
+async def update_session(
+    session_id: str,
+    request: UpdateSessionRequest,
+    req: Request,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Rename a session and/or update its filter_state. Caller must own the session."""
+    require_csrf(req)
+    if request.name is None and request.filter_state is None:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+    uid = int(user["id"])
+
+    update_cols: list[str] = []
+    params: list[Any] = []
+    if request.name is not None:
+        name = str(request.name or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Session name is required")
+        update_cols.append("name = %s")
+        params.append(name)
+    if request.filter_state is not None:
+        update_cols.append("filter_state = %s")
+        params.append(Json(request.filter_state) if isinstance(request.filter_state, dict) else None)
+
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                UPDATE analysis_sessions
+                SET {', '.join(update_cols)}
+                WHERE session_id = %s AND user_id = %s
+                RETURNING session_id, name, parcel_count, county_coverage, filter_state, polygon, created_at
+                """,
+                (*params, session_id, uid),
+            )
+            row = cur.fetchone()
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        release_session_conn(conn)
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    polygon_latlngs = _to_leaflet_polygon(row[5]) if row[5] else []
+    return {
+        "session_id": row[0],
+        "name": row[1],
+        "parcel_count": int(row[2] or 0),
+        "county_coverage": list(row[3] or []),
+        "filter_state": row[4] if isinstance(row[4], dict) else None,
+        "latlngs": polygon_latlngs,
+        "created_at": row[6].isoformat() if row[6] else None,
+    }
+
+
+@app.delete("/api/sessions/{session_id}")
+async def delete_session(
+    session_id: str,
+    req: Request,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Delete a named session and its cached_jobs row. Cascades to session_tags via FK. Caller must own it."""
+    require_csrf(req)
+    uid = int(user["id"])
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM analysis_sessions WHERE session_id = %s AND user_id = %s",
+                (session_id, uid),
+            )
+            if cur.rowcount == 0:
+                raise HTTPException(status_code=404, detail="Session not found")
+            # Explicit delete — cached_jobs has no FK to analysis_sessions
+            cur.execute("DELETE FROM cached_jobs WHERE job_id = %s", (session_id,))
+        conn.commit()
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        release_session_conn(conn)
+    return {"ok": True}
+
+
 @app.get("/api/areas")
 async def list_saved_areas(user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
     conn = get_session_conn()
@@ -2888,8 +3169,7 @@ async def list_saved_areas(user: dict[str, Any] = Depends(get_current_user)) -> 
                 FROM saved_areas
                 WHERE user_id = %s
                 ORDER BY created_at DESC
-                """
-                ,
+                """,
                 (int(user["id"]),)
             )
             areas = [
