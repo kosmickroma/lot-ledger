@@ -353,6 +353,14 @@ Zero code changes required.
 > Use this when you want to test a feature branch on Cloud Run without merging it to `develop`.
 > The preview lives at its own URL and runs alongside `lot-ledger-dev` (which keeps tracking `develop`).
 
+> **Recommended terminal: [Google Cloud Shell](https://shell.cloud.google.com).** It's a free Linux VM in your browser, with `gcloud` pre-installed and pre-authenticated against your Google account. Every `gcloud` command in this section runs there with no setup. **Avoid pasting `gcloud` commands into PowerShell, CMD, or WSL** — terminal paste mangling (line wraps becoming literal newlines mid-command) is a recurring failure mode and Cloud Shell doesn't have it. WSL is still right for actual development work; Cloud Shell is right for one-off admin like this.
+
+### Format rules for every command in this section
+
+- **Every command is a single line.** No backslash continuations (`\`). Paste each command as-is.
+- If your terminal still wraps long commands onto multiple lines visually, that's fine — just don't insert your own newlines or trailing whitespace.
+- One command per code block. Run each, verify, then move to the next.
+
 ### How it works
 
 | Service | Branch | URL pattern | Auto-deploys? |
@@ -364,124 +372,243 @@ Both services share the same Cloud SQL database. Schema migrations run on startu
 
 ### One-time setup — create the preview service
 
-You only do this once. After that, every preview deploy is a single command.
+You only do this once per GCP project. After that, every preview deploy is a single command.
 
-#### Step 1 — Make sure you're authenticated
+#### Step 1 — Authenticate and set the project
 
-```bash
+In Cloud Shell, you're already authed — skip the login command. In a local terminal:
+
+```
 gcloud auth login
+```
+
+Then in either:
+
+```
 gcloud config set project lot-ledger
 ```
 
-#### Step 2 — Export the dev service config
+#### Step 2 — Grant the build service account the permissions Cloud Build needs
 
-This grabs all the env vars, secrets, Cloud SQL connections, and IAM bindings from `lot-ledger-dev` so the preview service mirrors it exactly:
+This is the single most-likely-to-be-missed step. Post-2024 GCP projects use the **Compute Engine default service account** (`<projectNumber>-compute@developer.gserviceaccount.com`) for `gcloud builds submit`. By default it has NONE of the permissions Cloud Build needs — and the legacy Cloud Build SA that older projects auto-set-up isn't used here. **Three separate grants are required.** Missing any one produces a different cryptic error during the first deploy.
 
-```bash
-gcloud run services describe lot-ledger-dev \
-  --region us-central1 \
-  --format=export \
-  > /tmp/preview-svc.yaml
+> If your project number isn't `505466930182`, find yours with `gcloud projects describe lot-ledger --format='value(projectNumber)'` and substitute throughout. The SA name pattern is always `<projectNumber>-compute@developer.gserviceaccount.com`.
+
+**Grant 1 — Cloud Build builder role (storage, Artifact Registry, build pub/sub, logging):**
+
+```
+gcloud projects add-iam-policy-binding lot-ledger --member=serviceAccount:505466930182-compute@developer.gserviceaccount.com --role=roles/cloudbuild.builds.builder
 ```
 
-#### Step 3 — Edit the exported file
+Without this: `storage.objects.get access denied` when uploading the source tarball.
 
-Open `/tmp/preview-svc.yaml` in your editor and change **only** these fields:
+**Grant 2 — Cloud Run deploy permission:**
 
-```yaml
-metadata:
-  name: lot-ledger-preview        # was: lot-ledger-dev
-spec:
-  template:
-    metadata:
-      name: lot-ledger-preview-00001-xxx   # if present, change the prefix to lot-ledger-preview-
+```
+gcloud projects add-iam-policy-binding lot-ledger --member=serviceAccount:505466930182-compute@developer.gserviceaccount.com --role=roles/run.developer
 ```
 
-Leave everything else untouched (env vars, Cloud SQL annotations, image, service account).
+Without this: `Permission 'run.services.get' denied on resource ...` when the build hits the deploy step. The `cloudbuild.builds.builder` role does NOT include Cloud Run permissions, despite the name.
 
-#### Step 4 — Create the service
+**Grant 3 — Permission to act as the runtime service account:**
 
-```bash
-gcloud run services replace /tmp/preview-svc.yaml --region us-central1
+The Cloud Run service runs as a custom runtime SA (`lot-ledger-run@lot-ledger.iam.gserviceaccount.com` in this project) that holds Cloud SQL / Secret Manager / Artifact Registry reader bindings. The build SA needs explicit permission to deploy *as* the runtime SA — this is granted at the SA level, not the project level:
+
+```
+gcloud iam service-accounts add-iam-policy-binding lot-ledger-run@lot-ledger.iam.gserviceaccount.com --member=serviceAccount:505466930182-compute@developer.gserviceaccount.com --role=roles/iam.serviceAccountUser
 ```
 
-This creates `lot-ledger-preview` with a temporary placeholder image (whatever was on `lot-ledger-dev` at export time). The first real deploy in the next section will replace that image.
+Without this: `User does not have permission to act as service account ...` when the deploy step tries to start a revision.
 
-#### Step 5 — Make the preview URL accessible
+After all three: each command should print `Updated IAM policy for ...` followed by a yaml dump of bindings.
 
-By default the new service is private. To match `lot-ledger-dev` (which is publicly reachable behind the app's own auth):
+> **Tip for paste-mangling terminals:** any of these failing with `command not found` or `--member: not found` means the line wrapped on paste. Write the command to `/tmp/grant.sh` first and `bash` it — see "Common errors" at the bottom.
 
-```bash
-gcloud run services add-iam-policy-binding lot-ledger-preview \
-  --region us-central1 \
-  --member=allUsers \
-  --role=roles/run.invoker
+#### Step 3 — Export the dev service config
+
+This grabs all the env vars, secrets, and Cloud SQL connections from `lot-ledger-dev` so the preview service mirrors it exactly:
+
+```
+gcloud run services describe lot-ledger-dev --region=us-central1 --format=export > /tmp/preview-svc.yaml
 ```
 
-(Skip this step if your `lot-ledger-dev` service is already locked down to specific IAM members — copy the same binding instead.)
+> If the command prompts to enable `cloudresourcemanager.googleapis.com`, type `y` and wait — first-time projects need this API on. The prompt is normal and only appears once.
 
-#### Step 6 — Get the preview URL
+Sanity-check the file:
 
-```bash
-gcloud run services describe lot-ledger-preview \
-  --region us-central1 \
-  --format='value(status.url)'
+```
+head -20 /tmp/preview-svc.yaml
 ```
 
-Bookmark the URL. It stays the same across every preview deploy.
+You should see `name: lot-ledger-dev` near the top.
 
-### Deploying a branch — the everyday command
+#### Step 4 — Rename the service in the exported file
 
-After the one-time setup is done, this is the only thing you run:
+Easiest one-line approach (replaces every occurrence of `lot-ledger-dev` with `lot-ledger-preview`, which is correct for the `name` field, the revision-name prefix if present, and the `urls:` annotation — Cloud Run regenerates the URLs annotation on creation regardless):
 
-```bash
-git checkout feat/your-branch-name
+```
+sed -i 's/lot-ledger-dev/lot-ledger-preview/g' /tmp/preview-svc.yaml
+```
+
+Verify the rename:
+
+```
+grep "name:" /tmp/preview-svc.yaml
+```
+
+The first match should be `name: lot-ledger-preview`. Other matches will be env-var names and container internals — leave those alone.
+
+#### Step 5 — Create the preview service
+
+```
+gcloud run services replace /tmp/preview-svc.yaml --region=us-central1
+```
+
+You should see `Service [lot-ledger-preview] revision [...] has been deployed`. The new service starts with a placeholder image (whatever was on `lot-ledger-dev` at export time). The first real deploy in the next section replaces that image.
+
+#### Step 6 — Make the preview URL publicly accessible
+
+`gcloud run services replace` doesn't carry over IAM bindings, so the new service is locked down by default. Match `lot-ledger-dev`'s public reachability:
+
+```
+gcloud run services add-iam-policy-binding lot-ledger-preview --region=us-central1 --member=allUsers --role=roles/run.invoker
+```
+
+You should see `Updated IAM policy for service [lot-ledger-preview]`.
+
+> If your `lot-ledger-dev` is locked down to specific IAM members instead of `allUsers`, copy that binding pattern here.
+
+#### Step 7 — Get the preview URL and bookmark it
+
+```
+gcloud run services describe lot-ledger-preview --region=us-central1 --format='value(status.url)'
+```
+
+Bookmark the URL it prints (e.g. `https://lot-ledger-preview-505466930182.us-central1.run.app`). It stays the same across every preview deploy.
+
+### Deploying a branch — the everyday workflow
+
+When you have a feature branch you want to preview, run these from a **local clone of the repo** (not Cloud Shell — Cloud Shell is for the GCP setup commands; the build needs your local working tree). The actual `gcloud builds submit` command can be run from either, but a local clone makes the source-tree handling simpler.
+
+#### Step 1 — Make sure your branch has the deploy infrastructure
+
+`cloudbuild-preview.yaml` lives on `develop`. If your feature branch was created before that file existed, merge develop in:
+
+```
+git checkout your-feature-branch
+```
+
+```
+git merge develop --no-edit
+```
+
+The `--no-edit` flag accepts the default merge commit message and skips the editor — without it, git opens nano or vim depending on your environment, which is easy to fumble (especially typing vim commands like `:wq` into nano).
+
+```
+git push origin your-feature-branch
+```
+
+#### Step 2 — Submit the build
+
+```
 gcloud builds submit --config cloudbuild-preview.yaml --project=lot-ledger
 ```
 
-Cloud Build:
-1. Builds a fresh container from the working tree
-2. Tags it `:preview-<short-sha>` and `:preview`
-3. Pushes it to Artifact Registry
-4. Deploys it to `lot-ledger-preview`
+Cloud Build packages your working tree, builds the container, tags it `:preview-<build-id>` and `:preview`, pushes to Artifact Registry, and deploys to `lot-ledger-preview`. Takes 3–5 minutes.
 
-Takes ~3–5 minutes. The preview URL serves the new build immediately on completion.
+When it finishes you'll see a `URL: https://lot-ledger-preview-...` line. Refresh that URL to see the new build.
 
 ### Checking what's currently deployed
 
-```bash
-gcloud run services describe lot-ledger-preview \
-  --region us-central1 \
-  --format='value(spec.template.spec.containers[0].image)'
+```
+gcloud run services describe lot-ledger-preview --region=us-central1 --format='value(spec.template.spec.containers[0].image)'
 ```
 
-The trailing `:preview-<sha>` tells you which commit is live.
+The `:preview-<build-id>` suffix tells you which build is live. Cross-reference with `gcloud builds list --limit=10` to find when it was deployed.
 
 ### Rolling back
 
-Either redeploy a different branch (`git checkout main && gcloud builds submit …`) or pin to a previous image:
+Easiest: redeploy a known-good branch.
 
-```bash
-gcloud run services update lot-ledger-preview \
-  --region us-central1 \
-  --image us-central1-docker.pkg.dev/lot-ledger/lot-ledger-api/api:preview-<old-sha>
+```
+git checkout main
+```
+
+```
+gcloud builds submit --config cloudbuild-preview.yaml --project=lot-ledger
+```
+
+Or pin directly to a previous image:
+
+```
+gcloud run services update lot-ledger-preview --region=us-central1 --image=us-central1-docker.pkg.dev/lot-ledger/lot-ledger-api/api:preview-<old-build-id>
 ```
 
 ### Tearing it down
 
 When you're done with branch previews for a while:
 
-```bash
-gcloud run services delete lot-ledger-preview --region us-central1
+```
+gcloud run services delete lot-ledger-preview --region=us-central1
 ```
 
-The service is gone, no ongoing cost. Recreate it via the one-time setup steps next time you need it.
+The service is gone, no ongoing cost. Re-do the one-time setup next time you need a preview environment.
 
-### Gotchas
+### Common errors and fixes
+
+These are every error we actually hit setting this up the first time, in roughly the order they appeared.
+
+**`storage.objects.get access denied` on `gcloud builds submit`** →
+Missing Grant 1. Run the `roles/cloudbuild.builds.builder` command from Step 2 of one-time setup.
+
+**`Permission 'run.services.get' denied on resource 'namespaces/<project>/services/lot-ledger-preview'`** →
+Missing Grant 2. Run the `roles/run.developer` command from Step 2. Note: this fails in ~4 seconds (an immediate API rejection, not a startup timeout). If your build step 3 fails at exit 1 in under 10s, this is almost certainly the cause.
+
+**`User does not have permission to act as service account lot-ledger-run@...`** →
+Missing Grant 3. Run the `roles/iam.serviceAccountUser` command from Step 2. This is the SA-level grant (not project-level) — the runtime SA name appears literally in the command.
+
+**Build fails at the `gcloud run deploy` step with image tag like `:preview-` (empty after the dash)** →
+The `cloudbuild-preview.yaml` is using a substitution variable that's empty for manual builds. `$SHORT_SHA` and `$COMMIT_SHA` are only populated for Git-trigger builds, not for `gcloud builds submit` from a working directory. Both image references in the file must use `$BUILD_ID` (always populated). If you cloned an older copy, search the file for `$SHORT_SHA` and replace with `$BUILD_ID`.
+
+**Cloud Run rejects deploy with "service must be unique" or similar** →
+You're trying to create `lot-ledger-preview` and it already exists. Skip Step 5 (services replace) and go straight to deploying with `gcloud builds submit`.
+
+**`gcloud builds log <id>` only prints a deprecation warning, no log content** →
+The streaming log subcommand is flaky. To pull just the failed step's output:
+
+```
+gcloud logging read "resource.type=build AND resource.labels.build_id=<id>" --limit=2000 --format="value(textPayload)" --project=lot-ledger --order=asc | grep "Step #3"
+```
+
+Or `gcloud builds describe <id>` for the structured build object (includes step exit codes and failureInfo). Or open `https://console.cloud.google.com/cloud-build/builds;region=global/<id>?project=lot-ledger` for the inline log view.
+
+**Auth session from `lot-ledger-dev` doesn't work on `lot-ledger-preview`** →
+Expected — different domains have different cookie jars. Log in fresh on the preview URL.
+
+**`gcloud` command paste breaks with `unrecognized arguments` or `command not found` even though the command looks right** →
+Your terminal is inserting literal newlines where the line wrapped visually. Reliable workaround: write the command to a temp script and run it. Example:
+
+```
+cat > /tmp/cmd.sh <<'EOF'
+gcloud projects add-iam-policy-binding lot-ledger --member=serviceAccount:505466930182-compute@developer.gserviceaccount.com --role=roles/run.developer
+EOF
+bash /tmp/cmd.sh
+```
+
+The `<<'EOF'` heredoc preserves literal content with no shell interpolation. Paste-safe regardless of how mangled the multiline pastes get. This trick works for any long gcloud command.
+
+Or use [Cloud Shell](https://shell.cloud.google.com) which doesn't have the paste-mangling problem at all.
+
+**Editor opens on `git merge` and you don't know how to save** →
+Use `git merge develop --no-edit` to skip the editor entirely (recommended). If you're already stuck in one:
+- **nano** (the bottom of the screen shows `^O`, `^X` etc.): `Ctrl+O`, `Enter`, `Ctrl+X`
+- **vim** (no help bar, lots of `~` symbols): `Esc`, type `:wq`, `Enter`
+- The default merge commit message is fine — don't change it. If you accidentally typed something into the message body, delete it before saving.
+
+### Gotchas to keep in mind
 
 - **Shared DB**: see the warning above. Phase 1 of the saved-sessions feature is additive and safe. Phase 3's `session_tags` PK migration is destructive — do not preview Phase 3 against the shared DB.
-- **Env vars drift**: if you add a new env var to `lot-ledger-dev` (via the Cloud Run console or `gcloud run services update`), the preview service won't pick it up automatically. Re-run Steps 2–4 to refresh the preview's config.
-- **Auth cookies**: preview and dev have different domains, so a session cookie from one does not work on the other. Log in fresh on the preview URL.
+- **Env vars drift**: if you add a new env var to `lot-ledger-dev` (via the Cloud Run console or `gcloud run services update`), the preview service won't pick it up automatically. Re-run Steps 3–5 of the one-time setup to refresh the preview's config.
 - **Cost**: preview is a real Cloud Run service. Idle, it's near-free. Active, it bills like dev. If you forget to tear it down, it costs the same as keeping a second dev environment around — usually pennies a day at this scale, but worth knowing.
 
 ---

@@ -21,7 +21,7 @@ steps:
     args:
       - build
       - '-t'
-      - 'us-central1-docker.pkg.dev/lot-ledger/lot-ledger-api/api:preview-$SHORT_SHA'
+      - 'us-central1-docker.pkg.dev/lot-ledger/lot-ledger-api/api:preview-$BUILD_ID'
       - '-t'
       - 'us-central1-docker.pkg.dev/lot-ledger/lot-ledger-api/api:preview'
       - '.'
@@ -38,7 +38,7 @@ steps:
       - run
       - deploy
       - lot-ledger-preview
-      - '--image=us-central1-docker.pkg.dev/lot-ledger/lot-ledger-api/api:preview-$SHORT_SHA'
+      - '--image=us-central1-docker.pkg.dev/lot-ledger/lot-ledger-api/api:preview-$BUILD_ID'
       - '--region=us-central1'
       - '--platform=managed'
       - '--project=lot-ledger'

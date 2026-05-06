@@ -4253,7 +4253,7 @@ function _showChangePasswordForm(forced = false) {
       const resp = await fetch("/auth/change-password", {
         method: "POST",
         headers: { "Content-Type": "application/json", ...authHeaders() },
-        body: JSON.stringify({ current_password, new_password }),
+        body: JSON.stringify({ current_password, new_password, confirm_password: confirm }),
         credentials: "same-origin",
       });
       const data = await resp.json().catch(() => ({}));
@@ -4263,7 +4263,13 @@ function _showChangePasswordForm(forced = false) {
         _renderUserBar(_currentUser);
         _hideAuthModal();
       } else {
-        _setAuthError("auth-chpw-error", data?.detail || "Password change failed. Please try again.");
+        const detail = data?.detail;
+        const msg = typeof detail === "string"
+          ? detail
+          : Array.isArray(detail) && detail[0]?.msg
+            ? detail[0].msg
+            : "Password change failed. Please try again.";
+        _setAuthError("auth-chpw-error", msg);
         _setAuthBusy("auth-chpw-btn", false, "Update Password");
       }
     } catch {
