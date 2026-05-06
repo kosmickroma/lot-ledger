@@ -268,6 +268,7 @@ def _ensure_session_schema() -> None:
             )
             cur.execute("CREATE INDEX IF NOT EXISTS idx_saved_areas_user ON saved_areas (user_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_saved_parcels_user ON saved_parcels (user_id)")
+            cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_saved_parcels_user_account ON saved_parcels (user_id, county, account_num)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_cached_jobs_expires ON cached_jobs (expires_at)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_cached_jobs_user ON cached_jobs (user_id)")
         conn.commit()
@@ -670,6 +671,12 @@ class SavedAreaUpdateRequest(BaseModel):
     type: Literal["area", "location"] | None = None
     lat: float | None = None
     lng: float | None = None
+
+
+class SavedParcelCreateRequest(BaseModel):
+    account_num: str
+    county: str = "dcad"
+    payload: dict[str, Any] | None = None
 
 
 class LoginRequest(BaseModel):
@@ -3023,6 +3030,94 @@ async def delete_saved_area(area_id: str, user: dict[str, Any] = Depends(get_cur
 
     if not deleted:
         raise HTTPException(status_code=404, detail="Saved area not found")
+    return {"ok": True, "deleted": int(deleted)}
+
+
+@app.get("/api/parcels")
+async def list_saved_parcels(user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT account_num, county, payload, created_at
+                FROM saved_parcels
+                WHERE user_id = %s
+                ORDER BY created_at DESC
+                """,
+                (int(user["id"]),),
+            )
+            parcels = [
+                {
+                    "account_num": row[0],
+                    "county": row[1],
+                    "payload": row[2] if isinstance(row[2], dict) else {},
+                    "created_at": row[3].isoformat() if row[3] else None,
+                }
+                for row in cur.fetchall()
+            ]
+    finally:
+        release_session_conn(conn)
+    return {"parcels": parcels}
+
+
+@app.post("/api/parcels")
+async def create_saved_parcel(request: SavedParcelCreateRequest, req: Request, user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
+    require_csrf(req)
+    account_num = str(request.account_num or "").strip()
+    county = str(request.county or "dcad").strip().lower() or "dcad"
+    if not account_num:
+        raise HTTPException(status_code=400, detail="account_num is required")
+
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO saved_parcels (account_num, county, payload, user_id)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (user_id, county, account_num)
+                DO UPDATE SET payload = EXCLUDED.payload
+                RETURNING account_num, county, payload, created_at
+                """,
+                (account_num, county, Json(request.payload) if isinstance(request.payload, dict) else Json({}), int(user["id"])),
+            )
+            row = cur.fetchone()
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        release_session_conn(conn)
+
+    return {
+        "account_num": row[0],
+        "county": row[1],
+        "payload": row[2] if isinstance(row[2], dict) else {},
+        "created_at": row[3].isoformat() if row[3] else None,
+    }
+
+
+@app.delete("/api/parcels/{county}/{account_num}")
+async def delete_saved_parcel(county: str, account_num: str, req: Request, user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
+    require_csrf(req)
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM saved_parcels WHERE county = %s AND account_num = %s AND user_id = %s",
+                (str(county or "dcad").strip().lower() or "dcad", str(account_num or "").strip(), int(user["id"])),
+            )
+            deleted = cur.rowcount or 0
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        release_session_conn(conn)
+
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Saved parcel not found")
     return {"ok": True, "deleted": int(deleted)}
 
 
