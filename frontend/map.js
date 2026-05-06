@@ -1864,6 +1864,17 @@ function makePopupHtml(p) {
             data-lng="${p.lng || ""}"
             style="color:#e67e22;text-decoration:none;font-size:11px;">📌 Save parcel</a>
           <a href="#" class="parcel-clear-link" style="color:#aaa;text-decoration:none;font-size:11px;">✕ Clear</a>
+        </div>
+        <div style="margin-top:8px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding-top:6px;border-top:1px solid #e2e8f0;">
+          <div style="flex:1;display:flex;gap:6px;font-size:11px;">
+            <a href="#" class="parcel-verify-yes" data-account="${p.account_num}" data-lat="${p.lat || ""}" data-lng="${p.lng || ""}" style="color:#27ae60;text-decoration:none;">✓ Vacant</a>
+            <a href="#" class="parcel-verify-no" data-account="${p.account_num}" data-lat="${p.lat || ""}" data-lng="${p.lng || ""}" style="color:#e74c3c;text-decoration:none;">✗ Not vacant</a>
+            <a href="#" class="parcel-verify-clear" data-account="${p.account_num}" style="color:#aaa;text-decoration:none;">· Clear</a>
+          </div>
+          <div style="flex:1;display:flex;gap:6px;font-size:11px;justify-content:flex-end;">
+            <a href="#" class="parcel-target-on" data-account="${p.account_num}" data-lat="${p.lat || ""}" data-lng="${p.lng || ""}" style="color:#e67e22;text-decoration:none;">★ Interested</a>
+            <a href="#" class="parcel-target-off" data-account="${p.account_num}" style="color:#aaa;text-decoration:none;">· Clear</a>
+          </div>
         </div>` : ""}
       </div>`;
 }
