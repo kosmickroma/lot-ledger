@@ -1885,6 +1885,9 @@ function makePopupHtml(p) {
       ? `<a href="${p.redfin_url}" target="_blank" rel="noopener noreferrer">${p.redfin_price}</a>`
       : p.redfin_price;
     redfinPriceRow = row("Redfin List Price", urlWrap);
+    if (p.redfin_url) {
+      redfinPriceRow += row("Listing", `<a href="${p.redfin_url}" target="_blank" rel="noopener noreferrer">View listing</a>`);
+    }
 
     // Numeric delta: parse both values
     const rfNum = parseInt(String(p.redfin_price).replace(/[^0-9]/g, ""), 10);
