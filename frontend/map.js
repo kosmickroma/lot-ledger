@@ -13,6 +13,7 @@
 
 const DALLAS_CENTER = [32.78, -96.8];
 const DEFAULT_ZOOM = 13;
+const COUNTY_LABEL_MIN_ZOOM = 9;
 
 const COLORS = {
   single_family: "#2980b9",
@@ -122,6 +123,10 @@ const labelsLayer = L.tileLayer(
 map.createPane("soldPane");
 map.getPane("soldPane").style.zIndex = "640";
 
+map.createPane("countyLabelPane");
+map.getPane("countyLabelPane").style.zIndex = "645";
+map.getPane("countyLabelPane").style.pointerEvents = "none";
+
 // Apply saved basemap BEFORE browseLayer is added. If we switch after protomaps
 // is on the map, the tile layer removal fires viewprereset → _invalidateAll on
 // protomaps → _tileZoom = undefined → browse layer goes blank until next pan/zoom.
@@ -201,6 +206,7 @@ map.on("moveend", () => {
 map.on("zoomend", () => {
   if (viewportRenderMode) _scheduleViewportRender();
   refreshSoldPriceLabels();
+  _updateCountyLabelVisibility();
 });
 _updateZoomNudge();
 
@@ -227,6 +233,7 @@ let targetBadgeLayer = L.layerGroup().addTo(map);
 const savedParcelLayer = L.layerGroup().addTo(map);
 const savedParcelLayers = {};
 let countyLayer = null;
+let countyLabelLayer = null;
 let countyVisible = false;
 let hoaLayer = null;
 let hoaVisible = false;
@@ -818,6 +825,7 @@ async function toggleCountyLayer() {
   const btn = document.getElementById("btn-county-toggle");
   if (countyVisible && countyLayer) {
     map.removeLayer(countyLayer);
+    if (countyLabelLayer && map.hasLayer(countyLabelLayer)) map.removeLayer(countyLabelLayer);
     countyVisible = false;
     btn?.classList.remove("active");
     return;
@@ -826,6 +834,7 @@ async function toggleCountyLayer() {
     countyLayer.addTo(map);
     countyVisible = true;
     btn?.classList.add("active");
+    _updateCountyLabelVisibility();
     return;
   }
 
@@ -842,14 +851,41 @@ async function toggleCountyLayer() {
       },
       interactive: false,
     }).addTo(map);
+    countyLabelLayer = L.layerGroup();
+    countyLayer.eachLayer((layer) => {
+      const bounds = layer.getBounds?.();
+      if (!bounds || !bounds.isValid()) return;
+      const name = layer.feature?.properties?.name || layer.feature?.properties?.NAME || "";
+      if (!name) return;
+      L.marker(bounds.getCenter(), {
+        pane: "countyLabelPane",
+        interactive: false,
+        icon: L.divIcon({
+          className: "county-label",
+          html: name,
+          iconSize: null,
+        }),
+      }).addTo(countyLabelLayer);
+    });
     countyVisible = true;
     if (btn) {
       btn.textContent = "CNTY";
       btn.classList.add("active");
     }
+    _updateCountyLabelVisibility();
   } catch (e) {
     if (btn) btn.textContent = "CNTY";
     console.error("County layer load failed", e);
+  }
+}
+
+function _updateCountyLabelVisibility() {
+  if (!countyLabelLayer) return;
+  const shouldShow = countyVisible && map.getZoom() >= COUNTY_LABEL_MIN_ZOOM;
+  if (shouldShow) {
+    if (!map.hasLayer(countyLabelLayer)) countyLabelLayer.addTo(map);
+  } else if (map.hasLayer(countyLabelLayer)) {
+    map.removeLayer(countyLabelLayer);
   }
 }
 
