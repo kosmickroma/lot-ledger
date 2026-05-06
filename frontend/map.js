@@ -264,7 +264,6 @@ const verificationByAccount = new Map();
 const potentialTargetByAccount = new Map();
 const verificationBadgeMarkers = new Map();
 const targetBadgeMarkers = new Map();
-let activeBrush = null;
 let allAnalysisFeatures = null;   // full feature set from last analysis
 let viewportRenderMode = false;   // true when feature count exceeds render threshold
 let _vpRenderTimeout = null;      // debounce handle for viewport re-render
@@ -1154,89 +1153,10 @@ const MapToolbar = L.Control.extend({
       toggleHoaLayer();
     });
 
-    const verifyBtn = L.DomUtil.create("a", "", container);
-    verifyBtn.id = "btn-verify-toggle";
-    verifyBtn.href = "#";
-    verifyBtn.title = "Verification tools: Vacant, Not Vacant, Remove";
-    verifyBtn.textContent = "✓";
-    L.DomEvent.on(verifyBtn, "click", (e) => {
-      L.DomEvent.preventDefault(e);
-      toggleVerifyMenu();
-    });
-
-    const targetBtn = L.DomUtil.create("a", "", container);
-    targetBtn.id = "btn-target-toggle";
-    targetBtn.href = "#";
-    targetBtn.title = "Target tools: Interested, Unselect";
-    targetBtn.textContent = "★";
-    L.DomEvent.on(targetBtn, "click", (e) => {
-      L.DomEvent.preventDefault(e);
-      toggleTargetMenu();
-    });
-
     return container;
   },
 });
 new MapToolbar().addTo(map);
-
-const VerifyBrushMenu = L.Control.extend({
-  options: { position: "topleft" },
-  onAdd() {
-    const container = L.DomUtil.create("div", "leaflet-bar verify-brush-menu hidden");
-    container.id = "verify-brush-menu";
-    L.DomEvent.disableClickPropagation(container);
-
-    const vacant = L.DomUtil.create("button", "verify-brush-option", container);
-    vacant.type = "button";
-    vacant.dataset.brush = "verify_yes";
-    vacant.textContent = "✓ Vacant";
-    vacant.title = "Mark parcel as verified vacant";
-    L.DomEvent.on(vacant, "click", () => selectBrush("verify_yes"));
-
-    const notVacant = L.DomUtil.create("button", "verify-brush-option", container);
-    notVacant.type = "button";
-    notVacant.dataset.brush = "verify_no";
-    notVacant.textContent = "✗ Not Vacant";
-    notVacant.title = "Mark parcel as verified not vacant";
-    L.DomEvent.on(notVacant, "click", () => selectBrush("verify_no"));
-
-    const clearVerify = L.DomUtil.create("button", "verify-brush-option", container);
-    clearVerify.type = "button";
-    clearVerify.dataset.brush = "verify_clear";
-    clearVerify.textContent = "○ Remove Verify";
-    clearVerify.title = "Remove vacant/not-vacant verification";
-    L.DomEvent.on(clearVerify, "click", () => selectBrush("verify_clear"));
-
-    return container;
-  },
-});
-new VerifyBrushMenu().addTo(map);
-
-const TargetBrushMenu = L.Control.extend({
-  options: { position: "topleft" },
-  onAdd() {
-    const container = L.DomUtil.create("div", "leaflet-bar target-brush-menu hidden");
-    container.id = "target-brush-menu";
-    L.DomEvent.disableClickPropagation(container);
-
-    const interested = L.DomUtil.create("button", "verify-brush-option", container);
-    interested.type = "button";
-    interested.dataset.brush = "target_on";
-    interested.textContent = "★ Interested";
-    interested.title = "Mark parcel as potential target";
-    L.DomEvent.on(interested, "click", () => selectBrush("target_on"));
-
-    const clearTarget = L.DomUtil.create("button", "verify-brush-option", container);
-    clearTarget.type = "button";
-    clearTarget.dataset.brush = "target_off";
-    clearTarget.textContent = "☆ Unselect";
-    clearTarget.title = "Remove potential target mark";
-    L.DomEvent.on(clearTarget, "click", () => selectBrush("target_off"));
-
-    return container;
-  },
-});
-new TargetBrushMenu().addTo(map);
 
 // Google Maps-style basemap switcher — bottom-left pill
 const BasemapSwitcher = L.Control.extend({
@@ -1577,7 +1497,6 @@ new AddressSearch().addTo(map);
 const appShell = document.querySelector(".app-shell");
 const sidebarToggleBtn = document.getElementById("sidebar-toggle");
 const drawHelper = document.getElementById("draw-helper");
-const brushStatus = document.getElementById("brush-status");
 
 function initSidebarCollapsibles() {
   document.querySelectorAll(".section-toggle[data-target]").forEach((btn) => {
@@ -1591,14 +1510,6 @@ function initSidebarCollapsibles() {
     });
   });
 }
-
-const BRUSH_LABELS = {
-  verify_yes: "Verified Vacant",
-  verify_no: "Verified Not Vacant",
-  verify_clear: "Remove Verification",
-  target_on: "Target: Interested",
-  target_off: "Target: Unselect",
-};
 
 function getPolygonDrawHandler() {
   return drawControl?._toolbars?.draw?._modes?.polygon?.handler || null;
@@ -1614,22 +1525,6 @@ function setSidebarCollapsed(collapsed) {
   appShell.classList.toggle("sidebar-collapsed", collapsed);
   sidebarToggleBtn.setAttribute("aria-expanded", String(!collapsed));
   setTimeout(() => map.invalidateSize(), 250);
-}
-
-function updateBrushStatus(brush) {
-  if (!brushStatus) return;
-  if (!brush) {
-    brushStatus.classList.add("hidden");
-    brushStatus.classList.remove("verify", "target");
-    brushStatus.textContent = "Active Tool: None";
-    return;
-  }
-
-  const label = BRUSH_LABELS[brush] || brush;
-  brushStatus.classList.remove("hidden");
-  brushStatus.classList.toggle("verify", brush.startsWith("verify_"));
-  brushStatus.classList.toggle("target", brush.startsWith("target_"));
-  brushStatus.textContent = `Active Tool: ${label}`;
 }
 
 sidebarToggleBtn.addEventListener("click", () => {
@@ -1740,45 +1635,6 @@ function geometryKey(geometry) {
     return JSON.stringify(geometry);
   } catch {
     return "";
-  }
-}
-
-function toggleVerifyMenu() {
-  const menu = document.getElementById("verify-brush-menu");
-  if (!menu) return;
-  document.getElementById("target-brush-menu")?.classList.add("hidden");
-  menu.classList.toggle("hidden");
-}
-
-function toggleTargetMenu() {
-  const menu = document.getElementById("target-brush-menu");
-  if (!menu) return;
-  document.getElementById("verify-brush-menu")?.classList.add("hidden");
-  menu.classList.toggle("hidden");
-}
-
-function selectBrush(brush) {
-  activeBrush = brush || null;
-  const verifyActive = activeBrush && activeBrush.startsWith("verify_");
-  const targetActive = activeBrush && activeBrush.startsWith("target_");
-  document.getElementById("btn-verify-toggle")?.classList.toggle("active", Boolean(verifyActive));
-  document.getElementById("btn-target-toggle")?.classList.toggle("active", Boolean(targetActive));
-  document.getElementById("btn-target-toggle")?.classList.toggle("target-active", Boolean(targetActive));
-  map.getContainer().classList.toggle("brush-active", activeBrush !== null);
-  updateBrushStatus(activeBrush);
-  const verifyMenu = document.getElementById("verify-brush-menu");
-  if (verifyMenu) {
-    verifyMenu.querySelectorAll(".verify-brush-option").forEach((btn) => {
-      btn.classList.toggle("active", btn.dataset.brush === activeBrush);
-    });
-    verifyMenu.classList.add("hidden");
-  }
-  const targetMenu = document.getElementById("target-brush-menu");
-  if (targetMenu) {
-    targetMenu.querySelectorAll(".verify-brush-option").forEach((btn) => {
-      btn.classList.toggle("active", btn.dataset.brush === activeBrush);
-    });
-    targetMenu.classList.add("hidden");
   }
 }
 
@@ -2137,31 +1993,6 @@ function renderFeatures(geojson) {
       condoOutlineSeen.add(condoKey);
     }
 
-    const applyBrush = () => {
-      if (!activeBrush || !p.account_num) return;
-      if (activeBrush === "verify_yes") {
-        verificationByAccount.set(p.account_num, "Yes");
-        p.verified_vacant = "Yes";
-        renderVerificationBadge(p.account_num, p.lat, p.lng, "Yes");
-      } else if (activeBrush === "verify_no") {
-        verificationByAccount.set(p.account_num, "No");
-        p.verified_vacant = "No";
-        renderVerificationBadge(p.account_num, p.lat, p.lng, "No");
-      } else if (activeBrush === "verify_clear") {
-        verificationByAccount.set(p.account_num, "");
-        p.verified_vacant = "";
-        clearVerificationBadge(p.account_num);
-      } else if (activeBrush === "target_on") {
-        potentialTargetByAccount.set(p.account_num, "Yes");
-        p.potential_target = "Yes";
-        renderTargetBadge(p.account_num, p.lat, p.lng);
-      } else if (activeBrush === "target_off") {
-        potentialTargetByAccount.set(p.account_num, "");
-        p.potential_target = "";
-        clearTargetBadge(p.account_num);
-      }
-    };
-
     // Render verification badge if already tagged
     if (p.verified_vacant && p.verified_vacant !== "") {
       renderVerificationBadge(p.account_num, p.lat, p.lng, p.verified_vacant);
@@ -2202,7 +2033,6 @@ function renderFeatures(geojson) {
           opacity: 0.85,
         },
       }).bindPopup(() => makePopupHtml(p), { maxWidth: 280, autoPan: false });
-      layer.on("click", applyBrush);
       layer.addTo(targetLayer);
       // No circle marker rendered when polygon geometry exists — polygon fill IS the click target.
       if (p.account_num) accountRenderedAsPolygon.add(p.account_num);
@@ -2227,7 +2057,6 @@ function renderFeatures(geojson) {
         fillOpacity: 0.9,
         bubblingMouseEvents: false,
       }).bindPopup(() => makePopupHtml(p), { maxWidth: 280, autoPan: false });
-      layer.on("click", applyBrush);
       layer.addTo(circleLayer);
     }
 
@@ -2873,13 +2702,6 @@ map.on("draw:created", async (e) => {
   potentialTargetByAccount.clear();
   verificationBadgeMarkers.clear();
   targetBadgeMarkers.clear();
-  activeBrush = null;
-  document.getElementById("btn-verify-toggle")?.classList.remove("active");
-  document.getElementById("btn-target-toggle")?.classList.remove("active", "target-active");
-  map.getContainer().classList.remove("brush-active");
-  updateBrushStatus(null);
-  document.getElementById("verify-brush-menu")?.classList.add("hidden");
-  document.getElementById("target-brush-menu")?.classList.add("hidden");
   document.getElementById("sidebar-instructions").classList.add("hidden");
   document.getElementById("sidebar-results").classList.add("hidden");
   document.getElementById("sidebar-loading").classList.remove("hidden");
@@ -3095,13 +2917,6 @@ document.getElementById("btn-save-area")?.addEventListener("click", () => {
 
 document.getElementById("btn-clear").addEventListener("click", () => {
   clearDrawResults();
-  activeBrush = null;
-  document.getElementById("btn-verify-toggle")?.classList.remove("active");
-  document.getElementById("btn-target-toggle")?.classList.remove("active", "target-active");
-  map.getContainer().classList.remove("brush-active");
-  updateBrushStatus(null);
-  document.getElementById("verify-brush-menu")?.classList.add("hidden");
-  document.getElementById("target-brush-menu")?.classList.add("hidden");
 });
 
 // Legacy Redfin source-toggle flow (archived): retained for rollback safety.
