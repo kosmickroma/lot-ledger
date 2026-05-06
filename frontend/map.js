@@ -953,7 +953,7 @@ function _renderSavedParcelOutline(area) {
   if (savedParcelLayers[area.account_num]) return; // already on map
   if (!area.geometry || !["Polygon", "MultiPolygon"].includes(area.geometry.type)) return;
   const layer = L.geoJSON({ type: "Feature", geometry: area.geometry, properties: {} }, {
-    style: { color: SAVED_PARCEL_COLOR, weight: 3, fill: true, fillColor: SAVED_PARCEL_COLOR, fillOpacity: 0.28, interactive: false },
+    style: { color: SAVED_PARCEL_COLOR, weight: 3, fill: true, fillColor: SAVED_PARCEL_COLOR, fillOpacity: 0.65, interactive: false },
     interactive: false,
   }).addTo(savedParcelLayer);
   savedParcelLayers[area.account_num] = layer;
@@ -2012,8 +2012,8 @@ function renderSoldPoints(points) {
     }).bindPopup(() => makeSoldPopupHtml(point), { maxWidth: 300 }).addTo(soldLayer);
     soldMarkers.push({
       marker,
-      priceLabel: abbreviatePrice(point.sold_price),
-      soldDateLabel: formatSoldDateLabel(point.sold_date),
+      priceLabel: null,
+      soldDateLabel: null,
     });
   });
 
@@ -2116,7 +2116,7 @@ function renderFeatures(geojson) {
         style: {
           color: parcelBorderColor,
           fillColor: hasVisibleSoldComp ? SOLD_OUTLINE_COLOR : (p.on_redfin ? COLORS.active : color),
-          fillOpacity: (hasVisibleSoldComp || p.on_redfin) ? 0.28 : 0.12,
+          fillOpacity: (hasVisibleSoldComp || p.on_redfin) ? 0.65 : 0.12,
           weight: parcelBorderWeight,
           opacity: 0.85,
         },
