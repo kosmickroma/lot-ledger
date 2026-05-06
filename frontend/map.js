@@ -4898,19 +4898,27 @@ function _showLoginForm(errorMsg = "") {
   box.innerHTML = `
     <span class="auth-modal-title">Sign In to Lot Ledger</span>
     <span class="auth-modal-subtitle">Enter your credentials to continue.</span>
-    <form id="auth-login-form" class="auth-form" autocomplete="on">
+    <form id="auth-login-form" class="auth-form" autocomplete="off">
       <div class="auth-field">
         <label for="auth-email">Email</label>
-        <input type="email" id="auth-email" name="email" autocomplete="username" required placeholder="you@example.com">
+        <input type="email" id="auth-email" name="email" autocomplete="off" autocapitalize="off" spellcheck="false" required placeholder="you@example.com">
       </div>
       <div class="auth-field">
         <label for="auth-password">Password</label>
-        <input type="password" id="auth-password" name="password" autocomplete="current-password" required>
+        <input type="password" id="auth-password" name="password" autocomplete="new-password" data-lpignore="true" required>
       </div>
       <p id="auth-login-error" class="auth-error${errorMsg ? "" : " hidden"}">${errorMsg}</p>
       <button type="submit" id="auth-login-btn" class="auth-submit-btn">Sign In</button>
     </form>`;
   _showAuthModal();
+
+  // Avoid misleading browser autofill bullets in auth password fields.
+  const pwdEl = document.getElementById("auth-password");
+  if (pwdEl) pwdEl.value = "";
+  setTimeout(() => {
+    const delayedPwdEl = document.getElementById("auth-password");
+    if (delayedPwdEl) delayedPwdEl.value = "";
+  }, 0);
 
   document.getElementById("auth-login-form").addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -4967,20 +4975,25 @@ function _showChangePasswordForm(forced = false) {
     <form id="auth-chpw-form" class="auth-form" autocomplete="off">
       <div class="auth-field">
         <label>Current Password</label>
-        <input type="password" id="auth-chpw-current" autocomplete="current-password" required>
+        <input type="password" id="auth-chpw-current" autocomplete="off" data-lpignore="true" required>
       </div>
       <div class="auth-field">
         <label>New Password</label>
-        <input type="password" id="auth-chpw-new" autocomplete="new-password" required>
+        <input type="password" id="auth-chpw-new" autocomplete="off" data-lpignore="true" required>
       </div>
       <div class="auth-field">
         <label>Confirm New Password</label>
-        <input type="password" id="auth-chpw-confirm" autocomplete="new-password" required>
+        <input type="password" id="auth-chpw-confirm" autocomplete="off" data-lpignore="true" required>
       </div>
       <p id="auth-chpw-error" class="auth-error hidden"></p>
       <button type="submit" id="auth-chpw-btn" class="auth-submit-btn">Update Password</button>
     </form>`;
   _showAuthModal();
+
+  ["auth-chpw-current", "auth-chpw-new", "auth-chpw-confirm"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.value = "";
+  });
 
   document.getElementById("auth-close-chpw")?.addEventListener("click", () => {
     _hideAuthModal();
@@ -5013,6 +5026,13 @@ function _showChangePasswordForm(forced = false) {
       });
       const data = await resp.json().catch(() => ({}));
       if (resp.ok) {
+        if (forced) {
+          _hideAuthModal();
+          _currentUser = null;
+          _renderUserBar(null);
+          _showLoginForm("Password updated. Sign in with your new password.");
+          return;
+        }
         _currentUser = data.user || _currentUser;
         if (_currentUser) _currentUser.force_password_change = false;
         _renderUserBar(_currentUser);

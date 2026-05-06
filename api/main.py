@@ -962,6 +962,20 @@ async def auth_gate(request: Request, call_next):
     is_protected = not _is_public_path(path)
     user: dict[str, Any] | None = None
 
+    def _unauth_response() -> JSONResponse:
+        response = JSONResponse({"detail": "Authentication required"}, status_code=401)
+        clear_auth_cookies(response)
+        response.set_cookie(
+            "ll_csrf",
+            generate_csrf_token(),
+            max_age=8 * 60 * 60,
+            httponly=False,
+            secure=os.getenv("AUTH_COOKIE_SECURE", "true").strip().lower() not in {"0", "false", "no"},
+            samesite="lax",
+            path="/",
+        )
+        return response
+
     if is_protected or path.startswith("/api/") or path.startswith("/auth/") or path.startswith("/admin/"):
         try:
             user = get_current_user(request)
@@ -970,19 +984,13 @@ async def auth_gate(request: Request, call_next):
             user = None
 
     if path.startswith("/api/") and user is None:
-        response = JSONResponse({"detail": "Authentication required"}, status_code=401)
-        clear_auth_cookies(response)
-        return response
+        return _unauth_response()
 
     if path.startswith("/admin/") and user is None:
-        response = JSONResponse({"detail": "Authentication required"}, status_code=401)
-        clear_auth_cookies(response)
-        return response
+        return _unauth_response()
 
     if path.startswith("/auth/") and path not in {"/auth/login"} and user is None:
-        response = JSONResponse({"detail": "Authentication required"}, status_code=401)
-        clear_auth_cookies(response)
-        return response
+        return _unauth_response()
 
     if user and bool(user.get("force_password_change")):
         if path.startswith("/api/") or path.startswith("/admin/") or path.startswith("/auth/"):
@@ -994,8 +1002,9 @@ async def auth_gate(request: Request, call_next):
 
     response = await call_next(request)
 
-    # Rolling refresh for authenticated requests, except explicit logout.
-    if user and path != "/auth/logout":
+    # Rolling refresh for authenticated requests, except auth endpoints that
+    # explicitly manage cookies themselves.
+    if user and path not in {"/auth/logout", "/auth/change-password", "/auth/login"}:
         refresh_session_cookie(response, user, request)
 
     if request.url.path.endswith((".js", ".css", ".html")):
