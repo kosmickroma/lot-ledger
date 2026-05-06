@@ -3435,12 +3435,11 @@ function renderSidebar(counts, markers) {
   ];
 
   countsPanel.innerHTML = orderedCountRows
-    .filter(([, v]) => Number(v) > 0)
     .map(([key, val]) => `
       <div class="count-row">
         <span class="count-dot" style="background:${COLORS[key] || COLORS.exempt}"></span>
         <span class="count-label">${TYPE_LABELS[key] || key}</span>
-        <span class="count-val">${val}</span>
+        <span class="count-val">${Number(val) || 0}</span>
       </div>`
     )
     .join("");
