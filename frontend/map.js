@@ -3349,6 +3349,63 @@ map.on("popupopen", (e) => {
       clearLink.style.display = "none";
     });
   }
+
+  // Verify buttons
+  const verifyYes = el.querySelector(".parcel-verify-yes");
+  if (verifyYes) {
+    verifyYes.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      const { account, lat, lng } = verifyYes.dataset;
+      verificationByAccount.set(account, "Yes");
+      renderVerificationBadge(account, parseFloat(lat), parseFloat(lng), "Yes");
+      e.popup.close();
+    });
+  }
+
+  const verifyNo = el.querySelector(".parcel-verify-no");
+  if (verifyNo) {
+    verifyNo.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      const { account, lat, lng } = verifyNo.dataset;
+      verificationByAccount.set(account, "No");
+      renderVerificationBadge(account, parseFloat(lat), parseFloat(lng), "No");
+      e.popup.close();
+    });
+  }
+
+  const verifyClear = el.querySelector(".parcel-verify-clear");
+  if (verifyClear) {
+    verifyClear.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      const { account } = verifyClear.dataset;
+      verificationByAccount.set(account, "");
+      clearVerificationBadge(account);
+      e.popup.close();
+    });
+  }
+
+  // Target buttons
+  const targetOn = el.querySelector(".parcel-target-on");
+  if (targetOn) {
+    targetOn.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      const { account, lat, lng } = targetOn.dataset;
+      potentialTargetByAccount.set(account, "Yes");
+      renderTargetBadge(account, parseFloat(lat), parseFloat(lng));
+      e.popup.close();
+    });
+  }
+
+  const targetOff = el.querySelector(".parcel-target-off");
+  if (targetOff) {
+    targetOff.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      const { account } = targetOff.dataset;
+      potentialTargetByAccount.set(account, "");
+      clearTargetBadge(account);
+      e.popup.close();
+    });
+  }
 });
 
 renderSavedAreasList();
