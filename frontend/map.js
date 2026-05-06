@@ -18,8 +18,8 @@ const COLORS = {
   single_family: "#2980b9",
   off_market: "#2980b9",
   vacant: "#27ae60",
-  multifamily: "#8e44ad",
-  commercial: "#e67e22",
+  multifamily: "#6B7E8F",
+  commercial: "#8B7355",
   exempt: "#95a5a6",
   active: "#D92228",
 };
@@ -28,8 +28,8 @@ const BORDER_COLORS = {
   single_family: "#1a6a9a",
   off_market: "#1a6a9a",
   vacant: "#1e8449",
-  multifamily: "#6c3483",
-  commercial: "#d35400",
+  multifamily: "#566a77",
+  commercial: "#6e5c42",
   exempt: "#7f8c8d",
   active: "#a3161a",
 };
@@ -49,9 +49,9 @@ const TYPE_LABELS = {
 
 const SOLD_MARKER_COLOR = "#d4af37";
 const SOLD_MARKER_BORDER = "#8b6b1f";
-const SOLD_OUTLINE_COLOR = "#d4af37";
+const SOLD_OUTLINE_COLOR = "#5C2D91";
 const SOLD_FALLBACK_DOT_COLOR = "#004225";
-const SOLD_FALLBACK_DOT_BORDER = "#d4af37";
+const SOLD_FALLBACK_DOT_BORDER = "#5C2D91";
 const FILTER_STORAGE_KEY = "lotledger.map.filters.v1";
 
 const DEFAULT_FILTERS = {
@@ -871,7 +871,7 @@ function saveSearchLocation(name, lat, lng) {
   renderSavedAreasList();
 }
 
-const SAVED_PARCEL_COLOR = "#4fc3f7";
+const SAVED_PARCEL_COLOR = "#e67e22";
 
 function _renderSavedParcelOutline(area) {
   if (savedParcelLayers[area.account_num]) return; // already on map
@@ -1862,7 +1862,7 @@ function makePopupHtml(p) {
             data-addr="${(p.addr || "").replace(/"/g, "&quot;")}"
             data-lat="${p.lat || ""}"
             data-lng="${p.lng || ""}"
-            style="color:#4fc3f7;text-decoration:none;font-size:11px;">📌 Save parcel</a>
+            style="color:#e67e22;text-decoration:none;font-size:11px;">📌 Save parcel</a>
           <a href="#" class="parcel-clear-link" style="color:#aaa;text-decoration:none;font-size:11px;">✕ Clear</a>
         </div>` : ""}
       </div>`;
