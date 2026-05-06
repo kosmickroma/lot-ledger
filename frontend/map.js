@@ -23,6 +23,7 @@ const COLORS = {
   commercial: "#8B7355",
   exempt: "#95a5a6",
   active: "#D92228",
+  sold: "#5C2D91",
 };
 
 const BORDER_COLORS = {
@@ -45,6 +46,7 @@ const TYPE_LABELS = {
   commercial: "Commercial",
   exempt: "Exempt",
   active: "Active Listing",
+  sold: "Sold",
   off_market: "Off Market",
 };
 
@@ -2811,8 +2813,9 @@ function makePopupHtml(p) {
   const potentialTarget = String(potentialTargetByAccount.get(p.account_num) || p.potential_target || "").trim();
   const row = (label, val) => `<tr><td class="popup-label">${label}</td><td class="popup-val">${val || "N/A"}</td></tr>`;
 
-  // Redfin price row + delta + listing link (active parcels only)
+  // Redfin price row + delta (active parcels only — sits near Total Value)
   let redfinPriceRow = "";
+  let redfinListingRow = "";
   if (p.on_redfin && p.redfin_price) {
     const urlWrap = p.redfin_url
       ? `<a href="${p.redfin_url}" target="_blank" rel="noopener noreferrer">${p.redfin_price}</a>`
@@ -2831,9 +2834,9 @@ function makePopupHtml(p) {
       redfinPriceRow += `<tr><td class="popup-label">vs DCAD Value</td><td class="popup-val" style="color:${color}">${sign}$${Math.abs(delta).toLocaleString()} (${sign}${pct}%)</td></tr>`;
     }
 
-    // "Listing | View listing" row to match the sold-comp section format
+    // Separate "Listing | View listing" row goes immediately under Potential Target
     if (p.redfin_url) {
-      redfinPriceRow += row("Listing", `<a href="${p.redfin_url}" target="_blank" rel="noopener noreferrer">View listing</a>`);
+      redfinListingRow = row("Listing", `<a href="${p.redfin_url}" target="_blank" rel="noopener noreferrer">View listing</a>`);
     }
   }
 
@@ -2877,6 +2880,7 @@ function makePopupHtml(p) {
           ${row("Living Area", p.sqft && p.sqft !== "N/A" ? p.sqft + " sf" : "N/A")}
           ${row("Verified Vacant", verificationDisplay(verifiedVacant))}
           ${row("Potential Target", potentialTarget || "No")}
+          ${redfinListingRow}
           ${soldCompRows}
         </table>
         ${p.account_num ? `<div style="margin-top:8px;border-top:1px solid #e2e8f0;padding-top:6px;display:flex;gap:12px;align-items:center;">
@@ -3417,11 +3421,22 @@ function renderSidebar(counts, markers) {
       commercial: counts.commercial,
       exempt: counts.exempt,
     };
-  countsPanel.innerHTML = Object.entries(visibleCounts)
-    .filter(([key]) => key !== "sold")
-    .filter(([, v]) => v > 0)
-    .map(
-      ([key, val]) => `
+  const soldCount = Array.isArray(lastSoldPanelPoints) && lastSoldPanelPoints.length
+    ? lastSoldPanelPoints.length
+    : (Array.isArray(allSoldPointsRef) ? allSoldPointsRef.length : 0);
+  const orderedCountRows = [
+    ["active", visibleCounts.active],
+    ["sold", soldCount],
+    ["off_market", visibleCounts.off_market],
+    ["vacant", visibleCounts.vacant],
+    ["multifamily", visibleCounts.multifamily],
+    ["commercial", visibleCounts.commercial],
+    ["exempt", visibleCounts.exempt],
+  ];
+
+  countsPanel.innerHTML = orderedCountRows
+    .filter(([, v]) => Number(v) > 0)
+    .map(([key, val]) => `
       <div class="count-row">
         <span class="count-dot" style="background:${COLORS[key] || COLORS.exempt}"></span>
         <span class="count-label">${TYPE_LABELS[key] || key}</span>
