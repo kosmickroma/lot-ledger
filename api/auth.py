@@ -337,18 +337,19 @@ def seed_bootstrap_users() -> None:
     owner_email = os.getenv("BOOTSTRAP_OWNER_EMAIL", "").strip()
     owner_password = os.getenv("BOOTSTRAP_OWNER_PASSWORD", "")
 
-    missing = [
+    # Developer account is required; owner account is optional until Mike's email is known.
+    missing_dev = [
         name
         for name, value in [
             ("BOOTSTRAP_DEV_EMAIL", dev_email),
             ("BOOTSTRAP_DEV_PASSWORD", dev_password),
-            ("BOOTSTRAP_OWNER_EMAIL", owner_email),
-            ("BOOTSTRAP_OWNER_PASSWORD", owner_password),
         ]
         if not value
     ]
-    if missing:
-        raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
+    if missing_dev:
+        raise ValueError(f"Missing required environment variables: {', '.join(missing_dev)}")
+
+    has_owner_creds = bool(owner_email and owner_password)
 
     conn = get_session_conn()
     try:
@@ -366,19 +367,23 @@ def seed_bootstrap_users() -> None:
                 """,
                 (dev_email.split("@")[0], dev_email.lower(), hash_password(dev_password)),
             )
-            cur.execute(
-                """
-                INSERT INTO users (username, email, password_hash, role, is_active, force_password_change, created_by)
-                VALUES (%s,%s,%s,'owner',true,false,'bootstrap')
-                """,
-                (owner_email.split("@")[0], owner_email.lower(), hash_password(owner_password)),
-            )
+            if has_owner_creds:
+                cur.execute(
+                    """
+                    INSERT INTO users (username, email, password_hash, role, is_active, force_password_change, created_by)
+                    VALUES (%s,%s,%s,'owner',true,false,'bootstrap')
+                    """,
+                    (owner_email.split("@")[0], owner_email.lower(), hash_password(owner_password)),
+                )
         conn.commit()
     finally:
         release_session_conn(conn)
 
 
 def ensure_required_roles_exist() -> None:
+    import logging as _logging
+    _log = _logging.getLogger(__name__)
+
     conn = get_session_conn()
     try:
         with conn.cursor() as cur:
@@ -393,4 +398,4 @@ def ensure_required_roles_exist() -> None:
     if dev_count < 1:
         raise ValueError("No active developer account found")
     if owner_count < 1:
-        raise ValueError("No active owner account found")
+        _log.warning("No active owner account — add BOOTSTRAP_OWNER_EMAIL + BOOTSTRAP_OWNER_PASSWORD and redeploy to create one")
