@@ -1305,7 +1305,11 @@ async function _updateSavedAreaFilters(area, actionBtn) {
     });
     area.filter_state = _normalizeFilterStateForCompare(nextState);
     if (actionBtn) actionBtn.textContent = "✓ Updated";
-    setTimeout(() => renderSavedAreasList(), 500);
+    setTimeout(() => {
+      if (actionBtn) actionBtn.disabled = false;
+      renderSavedAreasList();
+      _updateUpdateAreaButtonVisibility();
+    }, 700);
   } catch (err) {
     console.error("[updateSavedAreaFilters] failed", err);
     if (actionBtn) {
@@ -2018,15 +2022,17 @@ function renderSavedAreasList() {
 function _updateUpdateAreaButtonVisibility() {
   const btn = document.getElementById("btn-update-saved-area");
   if (!btn) return;
-  // Don't override the in-flight Saving.../✓ Updated button text
-  if (btn.disabled || btn.textContent === "✓ Updated") return;
+  // Keep the in-flight Saving... state until request completion.
+  if (btn.disabled) return;
   if (!_currentLoadedAreaId) {
     btn.classList.add("hidden");
+    btn.textContent = "Update";
     return;
   }
   const area = _savedAreasCache.find((a) => a.id === _currentLoadedAreaId && a.type === "area");
   if (!area || !_isLoadedAreaWithFilterDrift(area)) {
     btn.classList.add("hidden");
+    btn.textContent = "Update";
     return;
   }
   btn.classList.remove("hidden");
