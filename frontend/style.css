@@ -119,8 +119,15 @@ h1 {
   padding-bottom: 10px;
 }
 
+.section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
 .section-toggle {
-  width: 100%;
+  flex: 1;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -140,6 +147,39 @@ h1 {
 
 .section-toggle[aria-expanded="false"]::after {
   transform: rotate(-90deg);
+}
+
+.click-mode-toggle {
+  display: flex;
+  gap: 2px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+  padding: 2px;
+}
+
+.click-mode-btn {
+  flex: 1;
+  padding: 4px 8px;
+  border: 0;
+  background: transparent;
+  color: var(--text-soft);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  cursor: pointer;
+  border-radius: 2px;
+  transition: all 0.18s ease;
+  letter-spacing: 0.05em;
+}
+
+.click-mode-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.click-mode-btn.active {
+  background: var(--gold);
+  color: var(--panel-bg);
 }
 
 .collapsible-body {

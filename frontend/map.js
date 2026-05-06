@@ -56,6 +56,7 @@ const SOLD_OUTLINE_COLOR = "#5C2D91";
 const SOLD_FALLBACK_DOT_COLOR = "#004225";
 const SOLD_FALLBACK_DOT_BORDER = "#5C2D91";
 const FILTER_STORAGE_KEY = "lotledger.map.filters.v1";
+const CLICK_MODE_STORAGE_KEY = "lot_ledger_click_mode";
 
 const DEFAULT_FILTERS = {
   active: true,
@@ -189,6 +190,39 @@ function passesNumericFilters(feature) {
 }
 
 const PARCEL_LAYER_KEYS = ["active", "off_market", "vacant", "multifamily", "commercial", "exempt"];
+
+// -- Click mode helpers (Jump vs Stay) --
+let currentClickMode = "jump";
+
+function getClickMode() {
+  return currentClickMode;
+}
+
+function setClickMode(mode) {
+  if (mode !== "stay" && mode !== "jump") mode = "jump";
+  currentClickMode = mode;
+  localStorage.setItem(CLICK_MODE_STORAGE_KEY, mode);
+  updateClickModeButtonState();
+}
+
+function updateClickModeButtonState() {
+  const jumpBtn = document.querySelector(".click-mode-btn.jump-mode");
+  const stayBtn = document.querySelector(".click-mode-btn.stay-mode");
+  if (jumpBtn) jumpBtn.classList.toggle("active", currentClickMode === "jump");
+  if (stayBtn) stayBtn.classList.toggle("active", currentClickMode === "stay");
+}
+
+function isPointInViewport(latlng) {
+  if (!latlng) return false;
+  const bounds = map.getBounds();
+  return bounds.contains(latlng);
+}
+
+function areaBoundsInViewport(bounds) {
+  if (!bounds) return false;
+  const mapBounds = map.getBounds();
+  return mapBounds.intersects(bounds);
+}
 
 // Analysis state is initialized early because zoom-nudge logic references it
 // during startup before the rest of the module wiring runs.
@@ -1620,7 +1654,15 @@ async function restoreSavedArea(area, options = {}) {
   // Location pins (from address search) — just fly there and show the ring.
   if (area.type === "location") {
     const latlng = [area.lat, area.lng];
-    map.flyTo(latlng, 17);
+    const clickMode = getClickMode();
+    if (clickMode === "jump") {
+      map.flyTo(latlng, 17);
+    } else {
+      // Stay mode: only pan if location is off-screen
+      if (!isPointInViewport(latlng)) {
+        map.setView(latlng, Math.max(map.getZoom(), 15));
+      }
+    }
     window._clearSearchHighlight?.();
     if (window._searchMoveEndHandler) map.off("moveend", window._searchMoveEndHandler);
     window._clearSearchHighlight = () => {
@@ -1661,8 +1703,16 @@ async function restoreSavedArea(area, options = {}) {
   }
 
   if (area.type === "parcel") {
-    map.flyTo([area.lat, area.lng], 18);
     _renderSavedParcelOutline(area);
+    const clickMode = getClickMode();
+    if (clickMode === "jump") {
+      map.flyTo([area.lat, area.lng], 18);
+    } else {
+      // Stay mode: only pan if parcel is off-screen
+      if (!isPointInViewport([area.lat, area.lng])) {
+        map.setView([area.lat, area.lng], map.getZoom());
+      }
+    }
     return;
   }
 
@@ -1691,7 +1741,18 @@ async function restoreSavedArea(area, options = {}) {
     interactive: false,
   }).addTo(maskLayer);
   const bounds = area.bounds || _savedAreaBoundsFromLatLngs(area.latlngs || []);
-  if (bounds) map.fitBounds(bounds, { padding: [40, 40] });
+  
+  // Respect click mode: Jump = fitBounds, Stay = auto-pan only if off-screen
+  const clickMode = getClickMode();
+  if (clickMode === "jump") {
+    if (bounds) map.fitBounds(bounds, { padding: [40, 40] });
+  } else {
+    // Stay mode: only auto-pan if bounds are off-screen
+    if (bounds && !areaBoundsInViewport(bounds)) {
+      map.fitBounds(bounds, { padding: [40, 40], maxZoom: map.getZoom() });
+    }
+  }
+  
   document.getElementById("btn-draw-clear")?.classList.remove("hidden");
   document.getElementById("btn-saved-area-clear")?.classList.remove("hidden");
 
@@ -1805,7 +1866,18 @@ async function restoreNamedSession(session, options = {}) {
   const _worldRing = [[-90, -180], [-90, 180], [90, 180], [90, -180], [-90, -180]];
   L.polygon([_worldRing, session.latlngs], { fillColor: "#000000", fillOpacity: 0.32, stroke: false, interactive: false }).addTo(maskLayer);
   const bounds = _savedAreaBoundsFromLatLngs(session.latlngs);
-  if (bounds) map.fitBounds(bounds, { padding: [40, 40] });
+  
+  // Respect click mode: Jump = fitBounds, Stay = auto-pan only if off-screen
+  const clickMode = getClickMode();
+  if (clickMode === "jump") {
+    if (bounds) map.fitBounds(bounds, { padding: [40, 40] });
+  } else {
+    // Stay mode: only auto-pan if bounds are off-screen
+    if (bounds && !areaBoundsInViewport(bounds)) {
+      map.fitBounds(bounds, { padding: [40, 40], maxZoom: map.getZoom() });
+    }
+  }
+  
   document.getElementById("btn-draw-clear")?.classList.remove("hidden");
   document.getElementById("btn-saved-area-clear")?.classList.remove("hidden");
   const polygon = session.latlngs.map(([lat, lng]) => [lng, lat]);
@@ -2629,6 +2701,26 @@ function initSidebarCollapsibles() {
   });
 }
 
+function initClickModeToggle() {
+  // Restore saved mode from localStorage
+  const saved = localStorage.getItem(CLICK_MODE_STORAGE_KEY);
+  currentClickMode = (saved === "stay" || saved === "jump") ? saved : "jump";
+  
+  // Set up button click handlers
+  const jumpBtn = document.querySelector(".click-mode-btn.jump-mode");
+  const stayBtn = document.querySelector(".click-mode-btn.stay-mode");
+  
+  if (jumpBtn) {
+    jumpBtn.addEventListener("click", () => setClickMode("jump"));
+  }
+  if (stayBtn) {
+    stayBtn.addEventListener("click", () => setClickMode("stay"));
+  }
+  
+  // Apply active state to current mode
+  updateClickModeButtonState();
+}
+
 function getPolygonDrawHandler() {
   return drawControl?._toolbars?.draw?._modes?.polygon?.handler || null;
 }
@@ -2651,6 +2743,7 @@ sidebarToggleBtn.addEventListener("click", () => {
 });
 
 initSidebarCollapsibles();
+initClickModeToggle();
 
 function applyMapVisibilityFilters() {
   const previousSoldLayerVisible = soldLayerVisible;

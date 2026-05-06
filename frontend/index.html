@@ -153,9 +153,15 @@
         </div>
       </div>
       <div id="saved-areas" class="sidebar-section hidden collapsible-section">
-        <button class="section-toggle" type="button" data-target="saved-areas-body" aria-expanded="true">
-          <span class="sidebar-label">Saved Areas</span>
-        </button>
+        <div class="section-header">
+          <button class="section-toggle" type="button" data-target="saved-areas-body" aria-expanded="true">
+            <span class="sidebar-label">Saved Areas</span>
+          </button>
+          <div class="click-mode-toggle" id="click-mode-toggle">
+            <button class="click-mode-btn jump-mode" data-mode="jump" type="button" title="Jump and zoom">Jump</button>
+            <button class="click-mode-btn stay-mode" data-mode="stay" type="button" title="Stay zoomed out">Stay</button>
+          </div>
+        </div>
         <div id="saved-areas-body" class="collapsible-body">
           <div id="saved-area-current" class="saved-area-current hidden">
             <span class="sidebar-note">Currently viewing: <strong id="saved-area-current-name"></strong></span>
@@ -166,17 +172,21 @@
         </div>
       </div>
       <div id="saved-parcels" class="sidebar-section hidden collapsible-section">
-        <button class="section-toggle" type="button" data-target="saved-parcels-body" aria-expanded="true">
-          <span class="sidebar-label">Saved Parcels</span>
-        </button>
+        <div class="section-header">
+          <button class="section-toggle" type="button" data-target="saved-parcels-body" aria-expanded="true">
+            <span class="sidebar-label">Saved Parcels</span>
+          </button>
+        </div>
         <div id="saved-parcels-body" class="collapsible-body">
           <div id="saved-parcels-list"></div>
         </div>
       </div>
         <div id="saved-sessions" class="sidebar-section hidden collapsible-section">
-          <button class="section-toggle" type="button" data-target="saved-sessions-body" aria-expanded="true">
-            <span class="sidebar-label">Saved Snapshots</span>
-          </button>
+          <div class="section-header">
+            <button class="section-toggle" type="button" data-target="saved-sessions-body" aria-expanded="true">
+              <span class="sidebar-label">Saved Snapshots</span>
+            </button>
+          </div>
           <div id="saved-sessions-body" class="collapsible-body">
             <div id="saved-sessions-list"></div>
           </div>
