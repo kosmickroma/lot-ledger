@@ -221,6 +221,10 @@ def _ensure_session_schema() -> None:
                 )
                 """
             )
+            cur.execute("ALTER TABLE saved_areas ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)")
+            cur.execute("ALTER TABLE analysis_sessions ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)")
+            cur.execute("ALTER TABLE session_tags ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)")
+            cur.execute("ALTER TABLE saved_parcels ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)")
             cur.execute("ALTER TABLE cached_jobs ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_session_tags_session ON session_tags (session_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_session_tags_user ON session_tags (user_id)")
@@ -251,13 +255,13 @@ def _finalize_user_scoping() -> None:
             cur.execute("UPDATE session_tags SET user_id = %s WHERE user_id IS NULL", (owner_id,))
             cur.execute("UPDATE saved_parcels SET user_id = %s WHERE user_id IS NULL", (owner_id,))
 
-            # SET NOT NULL is idempotent on Postgres (no error if already constrained),
-            # but wrap each in a savepoint so a future driver version never stalls the startup.
             for tbl in ("saved_areas", "analysis_sessions", "session_tags", "saved_parcels"):
                 try:
+                    cur.execute("SAVEPOINT sp_notnull")
                     cur.execute(f"ALTER TABLE {tbl} ALTER COLUMN user_id SET NOT NULL")
+                    cur.execute("RELEASE SAVEPOINT sp_notnull")
                 except Exception:
-                    conn.rollback()
+                    cur.execute("ROLLBACK TO SAVEPOINT sp_notnull")
         conn.commit()
     finally:
         release_session_conn(conn)
