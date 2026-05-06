@@ -388,6 +388,8 @@ let _activeUndoSnapshot = null;
 let _undoPillTimer = null;
 let _savedAreasCache = [];
 let _savedParcelsCache = [];
+let _currentSessionIsNamed = false;
+let _savedSessionsCache = [];
 
 const HOA_COLOR = "#b8860b";
 
@@ -1134,14 +1136,42 @@ function _normalizeSavedParcelRow(parcel) {
 }
 
 async function _reloadSavedResources() {
-  const [areasData, parcelsData] = await Promise.all([
+function _normalizeSessionRow(session) {
+  return {
+    id: String(session.session_id || ""),
+    session_id: String(session.session_id || ""),
+    name: String(session.name || "Untitled Session"),
+    parcel_count: parseInt(session.parcel_count, 10) || 0,
+    county_coverage: Array.isArray(session.county_coverage) ? session.county_coverage : [],
+    latlngs: Array.isArray(session.latlngs) ? session.latlngs : [],
+    filter_state: session.filter_state && typeof session.filter_state === "object" ? session.filter_state : null,
+    savedAt: session.created_at || new Date().toISOString(),
+  };
+}
+
+function _updateSaveSessionButtonState() {
+  const btn = document.getElementById("btn-save-session");
+  if (!btn) return;
+  if (_currentSessionIsNamed) {
+    btn.classList.add("hidden");
+  } else {
+    btn.classList.remove("hidden");
+    btn.disabled = !currentJobId;
+  }
+}
+
+async function _reloadSavedResources() {
+  const [areasData, parcelsData, sessionsData] = await Promise.all([
     _apiJson("/api/areas"),
     _apiJson("/api/parcels").catch(() => ({ parcels: [] })),
+    _apiJson("/api/sessions").catch(() => ({ sessions: [] })),
   ]);
   _savedAreasCache = Array.isArray(areasData.areas) ? areasData.areas.map(_normalizeSavedAreaRow) : [];
   _savedParcelsCache = Array.isArray(parcelsData.parcels) ? parcelsData.parcels.map(_normalizeSavedParcelRow) : [];
+  _savedSessionsCache = Array.isArray(sessionsData.sessions) ? sessionsData.sessions.map(_normalizeSessionRow) : [];
   _restoreAllSavedParcelOutlines();
   renderSavedAreasList();
+  renderSavedSessionsList();
 }
 
 function _savedAreaBoundsFromLatLngs(latlngs) {
@@ -1213,6 +1243,88 @@ async function saveSearchLocation(name, lat, lng) {
   });
   _savedAreasCache.unshift(_normalizeSavedAreaRow(created));
   renderSavedAreasList();
+}
+
+async function saveCurrentSession(name) {
+  if (!currentJobId) return;
+  const trimmed = String(name || "").trim();
+  if (!trimmed) return;
+  bumpUndoPillVersion();
+  const created = await _apiJson(`/api/sessions/${encodeURIComponent(currentJobId)}/save`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ name: trimmed, filter_state: captureFilterState() }),
+  });
+  const normalized = _normalizeSessionRow(created);
+  _savedSessionsCache = _savedSessionsCache.filter((s) => s.session_id !== normalized.session_id);
+  _savedSessionsCache.unshift(normalized);
+  _currentSessionIsNamed = true;
+  _updateSaveSessionButtonState();
+  renderSavedSessionsList();
+}
+
+async function deleteSession(session) {
+  if (!session) return;
+  bumpUndoPillVersion();
+  // Optimistic: remove from cache immediately, roll back on failure
+  _savedSessionsCache = _savedSessionsCache.filter((s) => s.session_id !== session.session_id);
+  if (_currentSessionIsNamed && currentJobId === session.session_id) {
+    _currentSessionIsNamed = false;
+    _updateSaveSessionButtonState();
+  }
+  renderSavedSessionsList();
+  try {
+    await _apiJson(`/api/sessions/${encodeURIComponent(session.session_id)}`, {
+      method: "DELETE",
+      headers: { ...authHeaders() },
+    });
+  } catch (err) {
+    console.error("[deleteSession] failed, rolling back", err);
+    _savedSessionsCache.push(session);
+    _savedSessionsCache.sort((a, b) => new Date(b.savedAt) - new Date(a.savedAt));
+    renderSavedSessionsList();
+  }
+}
+
+async function _renameSavedSessionInline(session, rowEl) {
+  if (!session) return;
+  const nameEl = rowEl.querySelector(".saved-area-name");
+  if (!nameEl) return;
+  const input = document.createElement("input");
+  input.className = "saved-area-rename-input";
+  input.value = session.name || "";
+  nameEl.replaceWith(input);
+  input.focus();
+  input.select();
+
+  const cancel = () => renderSavedSessionsList();
+  const save = async () => {
+    const nextName = String(input.value || "").trim();
+    if (!nextName || nextName === session.name) {
+      cancel();
+      return;
+    }
+    bumpUndoPillVersion();
+    // Optimistic: update cache immediately, reload on failure
+    session.name = nextName;
+    renderSavedSessionsList();
+    try {
+      await _apiJson(`/api/sessions/${encodeURIComponent(session.session_id)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ name: nextName }),
+      });
+    } catch (err) {
+      console.error("[renameSavedSession] failed, reloading", err);
+      await _reloadSavedResources();
+    }
+  };
+
+  input.addEventListener("keydown", async (e) => {
+    if (e.key === "Escape") { e.preventDefault(); cancel(); }
+    else if (e.key === "Enter") { e.preventDefault(); await save(); }
+  });
+  input.addEventListener("blur", () => { if (!input.value.trim()) cancel(); });
 }
 
 const SAVED_PARCEL_COLOR = "#e67e22";
@@ -1515,6 +1627,116 @@ async function restoreSavedArea(area, options = {}) {
 }
 
 function _formatFilterDiffChip(area) {
+async function restoreNamedSession(session, options = {}) {
+  const rowEl = options.rowEl || null;
+  if (!session.latlngs || session.latlngs.length < 3) {
+    console.warn("[restoreNamedSession] session has no polygon", session);
+    return;
+  }
+  if (rowEl) rowEl.classList.add("row-shimmer");
+  if (session.filter_state && typeof session.filter_state === "object") {
+    restoreFilterState(session.filter_state);
+  }
+  clearDrawResults();
+  drawLayer.clearLayers();
+  L.polygon(session.latlngs, { color: "#f1c40f", weight: 2.5, fill: false, interactive: false }).addTo(drawLayer);
+  maskLayer.clearLayers();
+  const _worldRing = [[-90, -180], [-90, 180], [90, 180], [90, -180], [-90, -180]];
+  L.polygon([_worldRing, session.latlngs], { fillColor: "#000000", fillOpacity: 0.32, stroke: false, interactive: false }).addTo(maskLayer);
+  const bounds = _savedAreaBoundsFromLatLngs(session.latlngs);
+  if (bounds) map.fitBounds(bounds, { padding: [40, 40] });
+  document.getElementById("btn-draw-clear")?.classList.remove("hidden");
+  document.getElementById("btn-saved-area-clear")?.classList.remove("hidden");
+  const polygon = session.latlngs.map(([lat, lng]) => [lng, lat]);
+  lastDrawnLatLngs = session.latlngs;
+  lastPolygon = polygon;
+  if (map.hasLayer(browseLayer)) browseLayer.remove();
+  const includeSold = Boolean(filterState.sold);
+  document.getElementById("sidebar-instructions")?.classList.add("hidden");
+  document.getElementById("sidebar-results")?.classList.add("hidden");
+  document.getElementById("sidebar-loading")?.classList.remove("hidden");
+  document.getElementById("redfin-status").textContent = "Loading session…";
+  const analysisRequest = beginLatestAnalysisRequest();
+  if (options.undoSnapshot) options.undoSnapshot.abortCtrl = _activeAnalysisAbortController;
+
+  try {
+    let data;
+    // Try cached_jobs first (named sessions are pinned; avoids a fresh CAD query)
+    try {
+      data = await _apiJson(`/api/sessions/${encodeURIComponent(session.session_id)}/data`);
+    } catch (_cacheErr) {
+      if (analysisRequest.signal.aborted) return;
+      // Cache miss — fall back to fresh analysis
+      data = await runAnalysis(polygon, true, includeSold, { signal: analysisRequest.signal });
+    }
+    if (analysisRequest.signal.aborted) return;
+    if (!isActiveAnalysisRequest(analysisRequest.requestId)) return;
+
+    currentJobId = data.job_id;
+    _currentSessionIsNamed = true;
+    _updateSaveSessionButtonState();
+
+    data.features.forEach((feature) => {
+      const p = feature.properties || {};
+      if (!p.account_num) return;
+      const normalized = normalizeVerificationValue(p.verified_vacant);
+      verificationByAccount.set(p.account_num, normalized);
+      p.verified_vacant = normalized;
+      const potential = String(p.potential_target || "").trim().toLowerCase() === "yes" ? "Yes" : "";
+      potentialTargetByAccount.set(p.account_num, potential);
+      p.potential_target = potential;
+    });
+    lastIncludedRedfin = false;
+    lastIncludedSold = includeSold;
+    lastSoldPoints = Array.isArray(data.sold_points) ? data.sold_points : [];
+    allSoldPointsRef = [...lastSoldPoints];
+    lastAnalysisGeojson = data;
+    lastAnalysisCounts = data.counts;
+    allAnalysisFeatures = data.features;
+    if (data.features.length <= BROWSE_ONLY_THRESHOLD) {
+      const soldJoin = attachSoldCompsToFeatures(allAnalysisFeatures, lastSoldPoints);
+      lastSoldPoints = soldJoin.unmatchedSoldPoints;
+      matchedSoldLabelPoints = soldJoin.matchedLabelPoints || [];
+      data.sold_points = lastSoldPoints;
+    } else {
+      matchedSoldLabelPoints = [];
+    }
+    redfinLayerVisible = false;
+    soldLayerVisible = Boolean(filterState.sold);
+    map.removeLayer(redfinLayer);
+    if (soldLayerVisible) soldLayer.addTo(map); else map.removeLayer(soldLayer);
+    applyAndRenderSoldFilters();
+    const soldStatus = document.getElementById("sold-toggle-status");
+    if (soldStatus) updateSoldStatusText();
+    let markers;
+    if (data.features.length > BROWSE_ONLY_THRESHOLD) {
+      viewportRenderMode = false;
+      markers = {};
+    } else {
+      if (map.hasLayer(browseLayer)) browseLayer.remove();
+      if (data.features.length > LARGE_DRAW_THRESHOLD) {
+        viewportRenderMode = true;
+        renderViewportFeatures();
+        markers = {};
+      } else {
+        viewportRenderMode = false;
+        markers = renderFeatures(data);
+      }
+    }
+    renderSidebar(data.counts, markers);
+    applyResultTags(data);
+  } catch (err) {
+    if (isAbortError(err) || !isActiveAnalysisRequest(analysisRequest.requestId)) return;
+    console.error("[restoreNamedSession] failed:", err);
+    document.getElementById("redfin-status").textContent = getAnalysisErrorMessage(err, "Session load failed. Please try again.");
+    document.getElementById("sidebar-loading")?.classList.add("hidden");
+    document.getElementById("sidebar-instructions")?.classList.remove("hidden");
+  } finally {
+    if (rowEl) rowEl.classList.remove("row-shimmer");
+  }
+}
+
+function _formatFilterDiffChip(area) {
   const st = area?.filter_state;
   if (!st || st.v !== 1) return "";
   const chips = [];
@@ -1622,6 +1844,61 @@ function _renderList(sectionId, listId, items) {
 function renderSavedAreasList() {
   _renderList("saved-areas", "saved-areas-list", _savedAreasCache.filter((a) => a.type === "area"));
   _renderList("saved-parcels", "saved-parcels-list", [..._savedAreasCache.filter((a) => a.type === "location"), ..._savedParcelsCache]);
+}
+
+function _renderSessionsList(sectionId, listId, items) {
+  const section = document.getElementById(sectionId);
+  const list = document.getElementById(listId);
+  if (!section || !list) return;
+  section.classList.toggle("hidden", items.length === 0);
+  list.innerHTML = items.map((session) => {
+    const date = new Date(session.savedAt).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+    const chip = _formatFilterDiffChip(session);
+    const counties = session.county_coverage && session.county_coverage.length
+      ? session.county_coverage.map((c) => c.toUpperCase()).join(" + ")
+      : "";
+    const meta = [session.parcel_count ? `${session.parcel_count} parcels` : "", counties].filter(Boolean).join(" · ");
+    return `
+      <div class="saved-area-row" tabindex="0" data-session-id="${session.session_id}">
+        <div class="saved-area-main">
+          <span class="saved-area-name">${session.name}</span>
+          <span class="saved-area-date">${date}</span>
+          <span class="saved-area-actions">
+            <button type="button" class="saved-area-action-btn rename" data-action="rename" title="Rename">✎</button>
+            <button type="button" class="saved-area-action-btn delete" data-action="delete" title="Delete">×</button>
+          </span>
+        </div>
+        ${meta ? `<div class="saved-item-meta">${meta}</div>` : ""}
+        ${chip ? `<div class="saved-row-filter-chip">${chip}</div>` : ""}
+      </div>`;
+  }).join("");
+  list.querySelectorAll(".saved-area-row").forEach((row) => {
+    row.addEventListener("click", async (e) => {
+      const actionEl = e.target.closest("[data-action]");
+      const sid = row.dataset.sessionId;
+      const session = _savedSessionsCache.find((s) => s.session_id === sid);
+      if (!session) return;
+      if (actionEl?.dataset.action === "delete") {
+        e.stopPropagation();
+        await deleteSession(session);
+        return;
+      }
+      if (actionEl?.dataset.action === "rename") {
+        e.stopPropagation();
+        await _renameSavedSessionInline(session, row);
+        return;
+      }
+      bumpUndoPillVersion();
+      const snapshot = _createUndoSnapshot();
+      await restoreNamedSession(session, { rowEl: row, undoSnapshot: snapshot });
+      const restoredCount = _countRestoredFilterKeys(session.filter_state);
+      _showUndoPill(snapshot, restoredCount);
+    });
+  });
+}
+
+function renderSavedSessionsList() {
+  _renderSessionsList("saved-sessions", "saved-sessions-list", _savedSessionsCache);
 }
 
 function _readLegacySavedItems() {
@@ -3488,6 +3765,7 @@ map.on("draw:created", async (e) => {
   bumpUndoPillVersion();
   closeTransientSoldSidebarPopup();
   map.getContainer().classList.remove("drawing-active");
+  _currentSessionIsNamed = false;
   drawLayer.clearLayers();
   PARCEL_LAYER_KEYS.forEach((key) => parcelTypeLayers[key]?.clearLayers());
   redfinLayer.clearLayers();
@@ -3540,6 +3818,7 @@ map.on("draw:created", async (e) => {
       p.potential_target = potential;
     });
     document.getElementById("redfin-status").textContent = "Analysis complete";
+    _updateSaveSessionButtonState();
     redfinLayerVisible = false;
     soldLayerVisible = Boolean(filterState.sold);
     map.removeLayer(redfinLayer);
@@ -3619,6 +3898,8 @@ function clearDrawResults() {
   currentJobId = null;
   lastPolygon = null;
   lastDrawnLatLngs = null;
+  _currentSessionIsNamed = false;
+  _updateSaveSessionButtonState();
   lastAnalysisGeojson = null;
   lastAnalysisCounts = null;
   lastIncludedRedfin = false;
@@ -3652,6 +3933,8 @@ map.on("draw:drawstart", () => {
   // CSS pointer-events:none (drawing-active class) blocks parcel layer clicks
   // so vertices never get swallowed by underlying markers.
   map.getContainer().classList.add("drawing-active");
+  _currentSessionIsNamed = false;
+  _updateSaveSessionButtonState();
 });
 
 map.on("draw:drawstop", () => {
@@ -3782,8 +4065,101 @@ document.getElementById("btn-save-area")?.addEventListener("click", () => {
   _openSaveAreaInlineInput();
 });
 
+function _openSaveSessionInlineInput() {
+  if (!currentJobId) { _flashSaveSessionHint(); return; }
+  if (_currentSessionIsNamed) { _openRenameForCurrentSession(); return; }
+  const btn = document.getElementById("btn-save-session");
+  if (!btn) return;
+  const parent = btn.parentElement;
+  if (!parent || parent.querySelector(".save-session-inline")) return;
+
+  const wrap = document.createElement("div");
+  wrap.className = "save-session-inline";
+  wrap.style.display = "inline-flex";
+  wrap.style.gap = "6px";
+  wrap.style.alignItems = "center";
+  wrap.style.flex = "1";
+
+  const input = document.createElement("input");
+  input.type = "text";
+  input.placeholder = "Name this session\u2026";
+  input.className = "saved-area-rename-input";
+  input.style.minWidth = "140px";
+
+  const cancelBtn = document.createElement("button");
+  cancelBtn.type = "button";
+  cancelBtn.className = "saved-area-action-btn";
+  cancelBtn.textContent = "\u00d7";
+
+  const finish = () => { wrap.remove(); btn.classList.remove("hidden"); };
+
+  const submit = async () => {
+    const name = String(input.value || "").trim();
+    if (!name) { finish(); return; }
+    input.disabled = true;
+    try {
+      await saveCurrentSession(name);
+      // Show brief success state on the button
+      btn.textContent = "\u2713 Saved";
+      btn.classList.remove("hidden");
+      wrap.remove();
+      setTimeout(() => { if (btn.textContent === "\u2713 Saved") btn.textContent = "Save Session"; }, 1500);
+    } catch (err) {
+      console.error("save session failed", err);
+      finish();
+    }
+  };
+
+  cancelBtn.addEventListener("click", finish);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { e.preventDefault(); finish(); }
+    if (e.key === "Enter") { e.preventDefault(); void submit(); }
+  });
+  input.addEventListener("blur", () => { if (!input.value.trim()) finish(); });
+
+  wrap.appendChild(input);
+  wrap.appendChild(cancelBtn);
+  parent.appendChild(wrap);
+  btn.classList.add("hidden");
+  requestAnimationFrame(() => input.focus());
+}
+
+document.getElementById("btn-save-session")?.addEventListener("click", () => {
+  _openSaveSessionInlineInput();
+});
+
 document.getElementById("btn-clear").addEventListener("click", () => {
   clearDrawResults();
+});
+
+// ── Save Session helpers ─────────────────────────────────────────────────────
+
+function _flashSaveSessionHint() {
+  const btn = document.getElementById("btn-save-session");
+  if (!btn) return;
+  btn.classList.add("flash-hint");
+  setTimeout(() => btn.classList.remove("flash-hint"), 1500);
+}
+
+function _openRenameForCurrentSession() {
+  if (!currentJobId) return;
+  const session = _savedSessionsCache.find((s) => s.session_id === currentJobId);
+  if (!session) return;
+  const row = document.querySelector(`[data-session-id="${CSS.escape(session.session_id)}"]`);
+  if (!row) return;
+  void _renameSavedSessionInline(session, row);
+}
+
+// Cmd/Ctrl+S — save or rename the current session
+document.addEventListener("keydown", (e) => {
+  const isSave = (e.metaKey || e.ctrlKey) && e.key === "s" && !e.shiftKey && !e.altKey;
+  if (!isSave) return;
+  e.preventDefault(); // always — prevents "Save Page As…" in Chrome
+  const ae = document.activeElement;
+  if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.isContentEditable)) return;
+  if (!currentJobId) { _flashSaveSessionHint(); return; }
+  if (_currentSessionIsNamed) { _openRenameForCurrentSession(); return; }
+  _openSaveSessionInlineInput();
 });
 
 // Legacy Redfin source-toggle flow (archived): retained for rollback safety.

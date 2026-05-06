@@ -1520,4 +1520,19 @@ h1 {
 }
 .admin-msg.ok  { color: #5dbb7e; }
 .admin-msg.err { color: #e07070; }
+
+/* ── Phase 2: Named Sessions ─────────────────────────────────── */
+.saved-item-meta {
+  font-size: 11px;
+  color: var(--text-soft);
+  margin-left: 0;
+  margin-top: 2px;
+  margin-bottom: 1px;
+}
+
+.btn-save-session.flash-hint {
+  border-color: rgba(201, 162, 79, 0.6);
+  box-shadow: 0 0 0 2px rgba(201, 162, 79, 0.25);
+  transition: box-shadow 0.15s ease, border-color 0.15s ease;
+}
 }

@@ -135,8 +135,9 @@
         <div id="sold-comps-panel"></div>
         <div class="sidebar-actions">
           <button id="btn-download" class="btn-primary">Download CSV</button>
+          <button id="btn-save-session" class="btn-secondary" disabled>Save Session</button>
           <button id="btn-clear" class="btn-secondary">Clear</button>
-            <button id="btn-save-area" class="btn-secondary">Save Area</button>
+          <button id="btn-save-area" class="btn-secondary">Save Area</button>
         </div>
       </div>
       <div id="saved-areas" class="sidebar-section hidden collapsible-section">
@@ -156,6 +157,14 @@
           <div id="saved-parcels-list"></div>
         </div>
       </div>
+        <div id="saved-sessions" class="sidebar-section hidden collapsible-section">
+          <button class="section-toggle" type="button" data-target="saved-sessions-body" aria-expanded="true">
+            <span class="sidebar-label">Saved Sessions</span>
+          </button>
+          <div id="saved-sessions-body" class="collapsible-body">
+            <div id="saved-sessions-list"></div>
+          </div>
+        </div>
     </aside>
     <main class="map-panel">
       <button id="sidebar-toggle" class="sidebar-toggle" aria-expanded="true" aria-controls="sidebar">
