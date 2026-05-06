@@ -876,7 +876,7 @@ function _renderSavedParcelOutline(area) {
   if (savedParcelLayers[area.account_num]) return; // already on map
   if (!area.geometry || !["Polygon", "MultiPolygon"].includes(area.geometry.type)) return;
   const layer = L.geoJSON({ type: "Feature", geometry: area.geometry, properties: {} }, {
-    style: { color: SAVED_PARCEL_COLOR, weight: 3, fill: false, interactive: false },
+    style: { color: SAVED_PARCEL_COLOR, weight: 3, fill: true, fillColor: SAVED_PARCEL_COLOR, fillOpacity: 0.28, interactive: false },
     interactive: false,
   }).addTo(savedParcelLayer);
   savedParcelLayers[area.account_num] = layer;
@@ -2027,8 +2027,8 @@ function renderFeatures(geojson) {
         bubblingMouseEvents: false,
         style: {
           color: parcelBorderColor,
-          fillColor: color,
-          fillOpacity: 0.12,
+          fillColor: hasVisibleSoldComp ? SOLD_OUTLINE_COLOR : (p.on_redfin ? COLORS.active : color),
+          fillOpacity: (hasVisibleSoldComp || p.on_redfin) ? 0.28 : 0.12,
           weight: parcelBorderWeight,
           opacity: 0.85,
         },
@@ -2050,7 +2050,7 @@ function renderFeatures(geojson) {
       layer = L.circleMarker([p.lat, p.lng], {
         renderer: MAP_SVG_RENDERER,
         radius: p.on_redfin ? 7 : 5,
-        fillColor: color,
+        fillColor: hasVisibleSoldComp ? SOLD_OUTLINE_COLOR : (p.on_redfin ? COLORS.active : color),
         color: parcelBorderColor,
         weight: 1.5,
         opacity: 1,
