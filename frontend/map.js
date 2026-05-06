@@ -111,10 +111,17 @@ function _clearNumericInputs() {
 
 function passesNumericFilters(feature) {
   const p = feature?.properties || {};
-  const lot = asNumber(p.lot_sqft);
-  const val = asNumber(p.appraised_val_current);
-  const yr = asNumber(p.yr_built);
-  const sqft = asNumber(p.sqft);
+  // Display strings need parsing — asNumber() alone won't handle "7,500 sf" or "$250,000"
+  const lotRaw = String(p.lot_sqft || "").replace(/,/g, "").match(/^[\d.]+/);
+  const lot = lotRaw ? Number(lotRaw[0]) : null;
+
+  const valRaw = String(p.tot_val || "").replace(/[$,]/g, "").match(/^[\d.]+/);
+  const val = valRaw ? Number(valRaw[0]) : null;
+
+  const yr = asNumber(p.yr_built); // "1972" -> 1972 — Number() handles plain strings fine
+
+  const sqftRaw = String(p.sqft || "").replace(/,/g, "").match(/^[\d.]+/);
+  const sqft = sqftRaw ? Number(sqftRaw[0]) : null;
 
   if (numericFilters.lot_sqft_min != null && (lot == null || lot < numericFilters.lot_sqft_min)) return false;
   if (numericFilters.lot_sqft_max != null && (lot == null || lot > numericFilters.lot_sqft_max)) return false;
