@@ -1018,14 +1018,16 @@ h1 {
   background: none;
   border: none;
   color: var(--text-soft);
-  font-size: 12px;
+  font-size: 16px;
   cursor: pointer;
   line-height: 1;
-  padding: 0 3px;
+  padding: 4px 6px;
+  border-radius: 4px;
 }
 
 .saved-area-action-btn:hover {
   color: var(--text-main);
+  background: rgba(255, 255, 255, 0.06);
 }
 
 .saved-area-action-btn.delete:hover {

@@ -4157,12 +4157,7 @@ function _openSaveAreaInlineInput() {
 
   const wrap = document.createElement("div");
   wrap.className = "save-area-inline";
-  wrap.style.display = "inline-flex";
-  wrap.style.gap = "6px";
-  wrap.style.alignItems = "center";
-  wrap.style.flex = "1";
-  wrap.style.minWidth = "0";
-  wrap.style.width = "100%";
+  // Class handles layout (flex: 1 1 100% to wrap onto its own row in .sidebar-actions)
 
   const input = document.createElement("input");
   input.type = "text";
@@ -4234,10 +4229,7 @@ function _openSaveSessionInlineInput() {
 
   const wrap = document.createElement("div");
   wrap.className = "save-session-inline";
-  wrap.style.display = "inline-flex";
-  wrap.style.gap = "6px";
-  wrap.style.alignItems = "center";
-  wrap.style.flex = "1";
+  // Class handles layout (flex: 1 1 100% to wrap onto its own row in .sidebar-actions)
   wrap.style.minWidth = "0";
   wrap.style.width = "100%";
 
