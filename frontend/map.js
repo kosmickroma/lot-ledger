@@ -390,6 +390,7 @@ let _savedAreasCache = [];
 let _savedParcelsCache = [];
 let _currentSessionIsNamed = false;
 let _savedSessionsCache = [];
+let _currentLoadedAreaId = null;
 
 const HOA_COLOR = "#b8860b";
 
@@ -435,6 +436,69 @@ function captureFilterState() {
   };
 }
 
+function _normalizeFilterStateForCompare(state) {
+  if (!state || typeof state !== "object") {
+    return { v: 1, checkboxes: {}, numeric: {}, sold: {} };
+  }
+  const sold = state.sold && typeof state.sold === "object" ? state.sold : {};
+  return {
+    v: 1,
+    checkboxes: { ...(state.checkboxes || {}) },
+    numeric: { ...(state.numeric || {}) },
+    sold: {
+      maxDaysAgo: sold.maxDaysAgo ?? DEFAULT_SOLD_COMPS_FILTER.maxDaysAgo,
+      minPrice: sold.minPrice ?? null,
+      maxPrice: sold.maxPrice ?? null,
+      minYearBuilt: sold.minYearBuilt ?? null,
+      maxYearBuilt: sold.maxYearBuilt ?? null,
+    },
+  };
+}
+
+function _filterStatesEqual(a, b) {
+  const left = _normalizeFilterStateForCompare(a);
+  const right = _normalizeFilterStateForCompare(b);
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function _renderCurrentViewingArea() {
+  const host = document.getElementById("saved-area-current");
+  const nameEl = document.getElementById("saved-area-current-name");
+  if (!host || !nameEl) return;
+  if (!_currentLoadedAreaId) {
+    host.classList.add("hidden");
+    nameEl.textContent = "";
+    return;
+  }
+  const area = _savedAreasCache.find((a) => a.id === _currentLoadedAreaId && a.type === "area");
+  if (!area) {
+    host.classList.add("hidden");
+    nameEl.textContent = "";
+    _currentLoadedAreaId = null;
+    return;
+  }
+  nameEl.textContent = area.name || "Saved area";
+  host.classList.remove("hidden");
+}
+
+function _refreshLoadedAreaUi() {
+  if (!_currentLoadedAreaId) return;
+  renderSavedAreasList();
+}
+
+function _setSessionCacheNote(message) {
+  const note = document.getElementById("session-cache-note");
+  if (!note) return;
+  const text = String(message || "").trim();
+  if (!text) {
+    note.classList.add("hidden");
+    note.textContent = "";
+    return;
+  }
+  note.textContent = text;
+  note.classList.remove("hidden");
+}
+
 function _hydrateNumericInputsFromState() {
   NUMERIC_FILTER_INPUTS.forEach(({ id, key }) => {
     const el = document.getElementById(id);
@@ -474,15 +538,20 @@ function restoreFilterState(state) {
       maxYearBuilt: state.sold.maxYearBuilt ?? null,
     });
   }
+  console.debug("[restoreFilterState] restored", {
+    checkboxes: { ...filterState },
+    numeric: { ...numericFilters },
+    sold: { ...soldCompsFilter },
+  });
   syncFilterInputs();
   _hydrateNumericInputsFromState();
-  _readNumericInputs();
   if (lastAnalysisGeojson) {
     applyAndRenderSoldFilters();
     const markers = viewportRenderMode ? renderViewportFeatures() : renderFeatures(lastAnalysisGeojson);
     const counts = getVisibleFeatureCounts(lastAnalysisGeojson.features || []);
     if (lastAnalysisCounts) renderSidebar(counts, markers || {});
   }
+  _refreshLoadedAreaUi();
 }
 
 function bumpUndoPillVersion() {
@@ -936,6 +1005,7 @@ function renderSoldCompsPanel() {
     soldCompsFilter.minYearBuilt = parseIntegerInput(soldYrMinInput);
     soldCompsFilter.maxYearBuilt = parseIntegerInput(soldYrMaxInput);
     applyAndRenderSoldFilters();
+    _refreshLoadedAreaUi();
   };
 
   soldDaysMaxInput?.addEventListener("blur", applySoldCompInputFilters);
@@ -1135,7 +1205,6 @@ function _normalizeSavedParcelRow(parcel) {
   };
 }
 
-async function _reloadSavedResources() {
 function _normalizeSessionRow(session) {
   return {
     id: String(session.session_id || ""),
@@ -1172,6 +1241,43 @@ async function _reloadSavedResources() {
   _restoreAllSavedParcelOutlines();
   renderSavedAreasList();
   renderSavedSessionsList();
+}
+
+function _isLoadedAreaWithFilterDrift(area) {
+  if (!area || area.type !== "area") return false;
+  if (area.id !== _currentLoadedAreaId) return false;
+  return !_filterStatesEqual(captureFilterState(), area.filter_state);
+}
+
+async function _updateSavedAreaFilters(area, actionBtn) {
+  if (!area || area.type !== "area") return;
+  const nextState = captureFilterState();
+  if (_filterStatesEqual(nextState, area.filter_state)) {
+    renderSavedAreasList();
+    return;
+  }
+  bumpUndoPillVersion();
+  if (actionBtn) {
+    actionBtn.disabled = true;
+    actionBtn.textContent = "Saving...";
+  }
+  try {
+    await _apiJson(`/api/areas/${encodeURIComponent(area.id)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify({ filter_state: nextState }),
+    });
+    area.filter_state = _normalizeFilterStateForCompare(nextState);
+    if (actionBtn) actionBtn.textContent = "✓ Updated";
+    setTimeout(() => renderSavedAreasList(), 500);
+  } catch (err) {
+    console.error("[updateSavedAreaFilters] failed", err);
+    if (actionBtn) {
+      actionBtn.disabled = false;
+      actionBtn.textContent = "Update";
+    }
+    await _reloadSavedResources();
+  }
 }
 
 function _savedAreaBoundsFromLatLngs(latlngs) {
@@ -1224,6 +1330,7 @@ async function deleteSavedArea(item) {
       headers: { ...authHeaders() },
     });
     _savedAreasCache = _savedAreasCache.filter((a) => a.id !== item.id);
+    if (_currentLoadedAreaId === item.id) _currentLoadedAreaId = null;
   }
   renderSavedAreasList();
 }
@@ -1419,13 +1526,13 @@ function _restoreUndoSnapshot(snapshot) {
   }
   syncFilterInputs();
   _hydrateNumericInputsFromState();
-  _readNumericInputs();
   if (lastAnalysisGeojson) {
     applyAndRenderSoldFilters();
     const markers = viewportRenderMode ? renderViewportFeatures() : renderFeatures(lastAnalysisGeojson);
     const counts = getVisibleFeatureCounts(lastAnalysisGeojson.features || []);
     if (lastAnalysisCounts) renderSidebar(counts, markers || {});
   }
+  _refreshLoadedAreaUi();
   _dismissUndoPill();
 }
 
@@ -1515,6 +1622,7 @@ async function restoreSavedArea(area, options = {}) {
   }
 
   if (rowEl) rowEl.classList.add("row-shimmer");
+  _setSessionCacheNote("");
   if (area.filter_state && typeof area.filter_state === "object") {
     restoreFilterState(area.filter_state);
   }
@@ -1615,6 +1723,8 @@ async function restoreSavedArea(area, options = {}) {
     }
     renderSidebar(data.counts, markers);
     applyResultTags(data);
+    _currentLoadedAreaId = area.id;
+    renderSavedAreasList();
   } catch (err) {
     if (isAbortError(err) || !isActiveAnalysisRequest(analysisRequest.requestId)) return;
     console.error("[restoreSavedArea] Analysis failed:", err);
@@ -1634,6 +1744,8 @@ async function restoreNamedSession(session, options = {}) {
     return;
   }
   if (rowEl) rowEl.classList.add("row-shimmer");
+  _currentLoadedAreaId = null;
+  renderSavedAreasList();
   if (session.filter_state && typeof session.filter_state === "object") {
     restoreFilterState(session.filter_state);
   }
@@ -1661,9 +1773,11 @@ async function restoreNamedSession(session, options = {}) {
 
   try {
     let data;
+    let loadedFromSessionCache = false;
     // Try cached_jobs first (named sessions are pinned; avoids a fresh CAD query)
     try {
       data = await _apiJson(`/api/sessions/${encodeURIComponent(session.session_id)}/data`);
+      loadedFromSessionCache = true;
     } catch (_cacheErr) {
       if (analysisRequest.signal.aborted) return;
       // Cache miss — fall back to fresh analysis
@@ -1725,12 +1839,18 @@ async function restoreNamedSession(session, options = {}) {
     }
     renderSidebar(data.counts, markers);
     applyResultTags(data);
+    if (loadedFromSessionCache && data.redfin_skipped === true) {
+      _setSessionCacheNote("Active listings not shown - re-analyze for current");
+    } else {
+      _setSessionCacheNote("");
+    }
   } catch (err) {
     if (isAbortError(err) || !isActiveAnalysisRequest(analysisRequest.requestId)) return;
     console.error("[restoreNamedSession] failed:", err);
     document.getElementById("redfin-status").textContent = getAnalysisErrorMessage(err, "Session load failed. Please try again.");
     document.getElementById("sidebar-loading")?.classList.add("hidden");
     document.getElementById("sidebar-instructions")?.classList.remove("hidden");
+    _setSessionCacheNote("");
   } finally {
     if (rowEl) rowEl.classList.remove("row-shimmer");
   }
@@ -1796,19 +1916,23 @@ function _renderList(sectionId, listId, items) {
   const list = document.getElementById(listId);
   if (!section || !list) return;
   section.classList.toggle("hidden", items.length === 0);
+  _renderCurrentViewingArea();
   list.innerHTML = items.map((area) => {
     const date = new Date(area.savedAt).toLocaleDateString(undefined, { month: "short", day: "numeric" });
     const icon = area.type === "parcel" ? "📌" : area.type === "location" ? "📍" : "▭";
     const chip = _formatFilterDiffChip(area);
     const canRename = area.type !== "parcel";
+    const canUpdateFilters = _isLoadedAreaWithFilterDrift(area);
+    const activeClass = area.id === _currentLoadedAreaId ? " saved-area-row-active" : "";
     return `
-      <div class="saved-area-row" tabindex="0" data-id="${area.id}" data-type="${area.type}">
+      <div class="saved-area-row${activeClass}" tabindex="0" data-id="${area.id}" data-type="${area.type}">
         <div class="saved-area-main">
           <span class="saved-area-icon">${icon}</span>
           <span class="saved-area-name">${area.name}</span>
           <span class="saved-area-date">${date}</span>
           <span class="saved-area-actions">
             ${canRename ? `<button type="button" class="saved-area-action-btn rename" data-action="rename" title="Rename">✎</button>` : ""}
+            ${canUpdateFilters ? `<button type="button" class="saved-area-action-btn update" data-action="update-filters" title="Update saved filters">⟳</button>` : ""}
             <button type="button" class="saved-area-action-btn delete" data-action="delete" title="Delete">×</button>
           </span>
         </div>
@@ -1832,6 +1956,11 @@ function _renderList(sectionId, listId, items) {
         await _renameSavedItemInline(area, row);
         return;
       }
+      if (actionEl?.dataset.action === "update-filters") {
+        e.stopPropagation();
+        await _updateSavedAreaFilters(area, actionEl);
+        return;
+      }
       bumpUndoPillVersion();
       const snapshot = _createUndoSnapshot();
       await restoreSavedArea(area, { rowEl: row, undoSnapshot: snapshot });
@@ -1842,6 +1971,7 @@ function _renderList(sectionId, listId, items) {
 }
 
 function renderSavedAreasList() {
+  _renderCurrentViewingArea();
   _renderList("saved-areas", "saved-areas-list", _savedAreasCache.filter((a) => a.type === "area"));
   _renderList("saved-parcels", "saved-parcels-list", [..._savedAreasCache.filter((a) => a.type === "location"), ..._savedParcelsCache]);
 }
@@ -2504,6 +2634,7 @@ function _applyNumericFilters() {
     : renderFeatures(lastAnalysisGeojson);
   const counts = getVisibleFeatureCounts(lastAnalysisGeojson.features || []);
   if (lastAnalysisCounts) renderSidebar(counts, markers || {});
+  _refreshLoadedAreaUi();
 }
 
 NUMERIC_FILTER_INPUTS.forEach(({ id }) => {
@@ -2551,6 +2682,7 @@ Object.entries(FILTER_INPUT_IDS).forEach(([key, id]) => {
     filterState[key] = Boolean(input.checked);
     saveFilters();
     applyMapVisibilityFilters();
+    _refreshLoadedAreaUi();
   });
 });
 
@@ -2560,6 +2692,7 @@ document.getElementById("btn-filters-reset")?.addEventListener("click", () => {
   saveFilters();
   syncFilterInputs();
   applyMapVisibilityFilters();
+  _refreshLoadedAreaUi();
 });
 
 applyMapVisibilityFilters();
@@ -3766,6 +3899,9 @@ map.on("draw:created", async (e) => {
   closeTransientSoldSidebarPopup();
   map.getContainer().classList.remove("drawing-active");
   _currentSessionIsNamed = false;
+  _currentLoadedAreaId = null;
+  _setSessionCacheNote("");
+  renderSavedAreasList();
   drawLayer.clearLayers();
   PARCEL_LAYER_KEYS.forEach((key) => parcelTypeLayers[key]?.clearLayers());
   redfinLayer.clearLayers();
@@ -3899,7 +4035,9 @@ function clearDrawResults() {
   lastPolygon = null;
   lastDrawnLatLngs = null;
   _currentSessionIsNamed = false;
+  _currentLoadedAreaId = null;
   _updateSaveSessionButtonState();
+  _setSessionCacheNote("");
   lastAnalysisGeojson = null;
   lastAnalysisCounts = null;
   lastIncludedRedfin = false;
@@ -3922,6 +4060,7 @@ function clearDrawResults() {
   document.getElementById("sidebar-loading")?.classList.add("hidden");
   document.getElementById("btn-draw-clear")?.classList.add("hidden");
   document.getElementById("btn-saved-area-clear")?.classList.add("hidden");
+  renderSavedAreasList();
 }
 
 map.on("draw:drawstart", () => {
@@ -3934,6 +4073,9 @@ map.on("draw:drawstart", () => {
   // so vertices never get swallowed by underlying markers.
   map.getContainer().classList.add("drawing-active");
   _currentSessionIsNamed = false;
+  _currentLoadedAreaId = null;
+  _setSessionCacheNote("");
+  renderSavedAreasList();
   _updateSaveSessionButtonState();
 });
 
@@ -4006,12 +4148,16 @@ function _openSaveAreaInlineInput() {
   wrap.style.gap = "6px";
   wrap.style.alignItems = "center";
   wrap.style.flex = "1";
+  wrap.style.minWidth = "0";
+  wrap.style.width = "100%";
 
   const input = document.createElement("input");
   input.type = "text";
   input.placeholder = "Name this area...";
   input.className = "saved-area-rename-input";
-  input.style.minWidth = "140px";
+  input.style.minWidth = "0";
+  input.style.maxWidth = "100%";
+  input.style.flex = "1 1 auto";
 
   const cancel = document.createElement("button");
   cancel.type = "button";
@@ -4079,12 +4225,16 @@ function _openSaveSessionInlineInput() {
   wrap.style.gap = "6px";
   wrap.style.alignItems = "center";
   wrap.style.flex = "1";
+  wrap.style.minWidth = "0";
+  wrap.style.width = "100%";
 
   const input = document.createElement("input");
   input.type = "text";
   input.placeholder = "Name this session\u2026";
   input.className = "saved-area-rename-input";
-  input.style.minWidth = "140px";
+  input.style.minWidth = "0";
+  input.style.maxWidth = "100%";
+  input.style.flex = "1 1 auto";
 
   const cancelBtn = document.createElement("button");
   cancelBtn.type = "button";
@@ -4126,6 +4276,12 @@ function _openSaveSessionInlineInput() {
 
 document.getElementById("btn-save-session")?.addEventListener("click", () => {
   _openSaveSessionInlineInput();
+});
+
+document.getElementById("btn-saved-area-current-clear")?.addEventListener("click", () => {
+  bumpUndoPillVersion();
+  _currentLoadedAreaId = null;
+  renderSavedAreasList();
 });
 
 document.getElementById("btn-clear").addEventListener("click", () => {
