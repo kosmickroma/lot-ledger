@@ -597,6 +597,11 @@ h1 {
   color: #fff !important;
 }
 
+#btn-county-toggle {
+  font-size: 9px;
+  letter-spacing: 0.04em;
+}
+
 .address-search {
   display: flex;
   flex-direction: column;

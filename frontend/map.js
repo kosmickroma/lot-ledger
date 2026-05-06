@@ -226,6 +226,8 @@ let targetBadgeLayer = L.layerGroup().addTo(map);
 // Persistent saved-parcel outlines (cyan). Keyed by account_num for dedup + removal.
 const savedParcelLayer = L.layerGroup().addTo(map);
 const savedParcelLayers = {};
+let countyLayer = null;
+let countyVisible = false;
 let hoaLayer = null;
 let hoaVisible = false;
 let currentJobId = null;
@@ -812,6 +814,45 @@ async function toggleHoaLayer() {
   }
 }
 
+async function toggleCountyLayer() {
+  const btn = document.getElementById("btn-county-toggle");
+  if (countyVisible && countyLayer) {
+    map.removeLayer(countyLayer);
+    countyVisible = false;
+    btn?.classList.remove("active");
+    return;
+  }
+  if (countyLayer) {
+    countyLayer.addTo(map);
+    countyVisible = true;
+    btn?.classList.add("active");
+    return;
+  }
+
+  if (btn) btn.textContent = "...";
+  try {
+    const res = await fetch("/api/counties/boundaries");
+    const geojson = await res.json();
+    countyLayer = L.geoJSON(geojson, {
+      style: {
+        color: "#e8c96a",
+        weight: 2,
+        opacity: 0.95,
+        fill: false,
+      },
+      interactive: false,
+    }).addTo(map);
+    countyVisible = true;
+    if (btn) {
+      btn.textContent = "CNTY";
+      btn.classList.add("active");
+    }
+  } catch (e) {
+    if (btn) btn.textContent = "CNTY";
+    console.error("County layer load failed", e);
+  }
+}
+
 function _loadSavedAreas() {
   try { return JSON.parse(localStorage.getItem("lot_ledger_saved_areas") || "[]"); }
   catch { return []; }
@@ -1151,6 +1192,16 @@ const MapToolbar = L.Control.extend({
     L.DomEvent.on(hoaBtn, "click", (e) => {
       L.DomEvent.preventDefault(e);
       toggleHoaLayer();
+    });
+
+    const countyBtn = L.DomUtil.create("a", "", container);
+    countyBtn.id = "btn-county-toggle";
+    countyBtn.href = "#";
+    countyBtn.title = "Toggle county boundary lines";
+    countyBtn.textContent = "CNTY";
+    L.DomEvent.on(countyBtn, "click", (e) => {
+      L.DomEvent.preventDefault(e);
+      toggleCountyLayer();
     });
 
     return container;
