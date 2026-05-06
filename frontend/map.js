@@ -4235,7 +4235,7 @@ function _openSaveSessionInlineInput() {
 
   const input = document.createElement("input");
   input.type = "text";
-  input.placeholder = "Name this session\u2026";
+  input.placeholder = "Name this snapshot\u2026";
   input.className = "saved-area-rename-input";
   input.style.minWidth = "0";
   input.style.maxWidth = "100%";
@@ -4258,7 +4258,7 @@ function _openSaveSessionInlineInput() {
       btn.textContent = "\u2713 Saved";
       btn.classList.remove("hidden");
       wrap.remove();
-      setTimeout(() => { if (btn.textContent === "\u2713 Saved") btn.textContent = "Save Session"; }, 1500);
+      setTimeout(() => { if (btn.textContent === "\u2713 Saved") btn.textContent = "Save Snapshot"; }, 1500);
     } catch (err) {
       console.error("save session failed", err);
       finish();
