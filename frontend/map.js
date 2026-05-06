@@ -2184,22 +2184,24 @@ function renderFeatures(geojson) {
     const circleLayer = targetLayer;
 
     let layer;
-    if (renderCondoOutline) {
-      // Non-interactive visual outline for condo building footprints.
+    const condoNeedsFullRender = renderCondoOutline && (hasVisibleSoldComp || p.on_redfin);
+
+    if (renderCondoOutline && !condoNeedsFullRender) {
+      // Non-interactive visual outline for condo building footprints (no active status).
       L.geoJSON(feature, {
         renderer: MAP_CANVAS_RENDERER,
         interactive: false,
         style: {
           color: parcelBorderColor,
           fill: false,
-          weight: hasVisibleSoldComp ? 2.2 : 1.2,
+          weight: 1.2,
           opacity: 0.75,
         },
       })
         .addTo(targetLayer);
     }
 
-    if (renderPolygon) {
+    if (renderPolygon || condoNeedsFullRender) {
       layer = L.geoJSON(feature, {
         renderer: MAP_SVG_RENDERER,
         bubblingMouseEvents: false,
