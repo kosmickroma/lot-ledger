@@ -39,8 +39,8 @@ from api.counties.dcad import SPTD_LABELS, _estimate_front_depth, build_feature,
 from api.counties.denton import _classify_denton, _normalize_denton_row, query_denton_parcels
 from api.counties.tad import _normalize_tad_row, _classify_tad, query_tad_parcels
 from api.geo import polygon_bbox
-from api.redfin import normalize_addr_key, pull_grid
-from api.sold import log_redfin_sold_row_count, query_sold_parcels
+from api.redfin import normalize_addr_key
+from api.sold import log_redfin_sold_row_count, query_active_listings, query_sold_parcels
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -48,7 +48,6 @@ FRONTEND_DIR = BASE_DIR / "frontend"
 _job_store: dict[str, dict[str, Any]] = {}
 _JOB_TTL_SECONDS = 7200    # 2-hour sliding-window TTL per session
 _JOB_MAX = 50              # max jobs held in memory at once
-_REDFIN_ROW_THRESHOLD = 15_000  # auto-disable Redfin above this parcel count
 _SESSION_RETENTION_DAYS = 30
 logger = logging.getLogger(__name__)
 
@@ -1354,13 +1353,6 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
 
     redfin_data: dict[str, dict] = {}
 
-    # Start Redfin task and county DB queries all in parallel.
-    # DCAD now uses a single JOIN query (not 5 sequential round trips), so each
-    # county only holds one connection — well within the 20-connection pool limit.
-    redfin_task = None
-    if include_redfin:
-        redfin_task = asyncio.create_task(pull_grid(min_lng, min_lat, max_lng, max_lat))
-
     dcad_result = None
     tad_result = None
     collin_result = None
@@ -1375,8 +1367,17 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
         asyncio.to_thread(query_collin_parcels, polygon),
         asyncio.to_thread(query_denton_parcels, polygon),
     ]
+
+    sold_task_idx: int | None = None
+    active_task_idx: int | None = None
+
     if include_sold:
+        sold_task_idx = len(tasks)
         tasks.append(asyncio.to_thread(query_sold_parcels, polygon))
+
+    if include_redfin:
+        active_task_idx = len(tasks)
+        tasks.append(asyncio.to_thread(query_active_listings, polygon))
 
     raw_results = await asyncio.gather(*tasks, return_exceptions=True)
     if isinstance(raw_results[0], Exception):
@@ -1396,19 +1397,25 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
     else:
         denton_result = raw_results[3]
 
-    if include_sold and len(raw_results) > 4:
-        sold_result = raw_results[4]
+    if sold_task_idx is not None:
+        sold_result = raw_results[sold_task_idx]
         if isinstance(sold_result, Exception):
             logger.warning("Sold points query failed; continuing without sold overlay: %s", sold_result)
             sold_points = []
         else:
             sold_points = sold_result or []
 
+    if active_task_idx is not None:
+        active_result = raw_results[active_task_idx]
+        if isinstance(active_result, Exception):
+            logger.warning("Active listings query failed; continuing without active overlay: %s", active_result)
+            redfin_data = {}
+        else:
+            redfin_data = active_result or {}
+            redfin_fetch_ok = bool(redfin_data)
+
     # Never return silent partial county coverage; fail loudly instead.
-    # Cancel any pending Redfin task before raising to avoid a dangling coroutine.
     if failed_sources:
-        if redfin_task is not None and not redfin_task.done():
-            redfin_task.cancel()
         raise HTTPException(
             status_code=502,
             detail=f"County query failed for: {', '.join(failed_sources)}. No partial results returned.",
@@ -1428,8 +1435,6 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
         all_rows.extend(denton_result.parcels)
 
     if not all_rows:
-        if redfin_task is not None and not redfin_task.done():
-            redfin_task.cancel()
         _evict_stale_jobs()
         empty_job_id = str(uuid.uuid4())
         _job_store[empty_job_id] = {
@@ -1461,19 +1466,7 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
             },
         }
 
-    # Auto-disable Redfin for large area draws — prevents timeouts and memory pressure.
     redfin_skipped = False
-    if redfin_task is not None and len(all_rows) > _REDFIN_ROW_THRESHOLD:
-        if not redfin_task.done():
-            redfin_task.cancel()
-        redfin_skipped = True
-    elif redfin_task is not None:
-        try:
-            redfin_data = await redfin_task or {}
-            redfin_fetch_ok = True
-        except Exception:
-            redfin_data = {}
-
     rows = all_rows
     features: list[dict[str, Any]] = []
     counts = {

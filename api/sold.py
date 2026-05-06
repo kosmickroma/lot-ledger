@@ -21,6 +21,52 @@ from api.config import get_conn, release_conn
 logger = logging.getLogger(__name__)
 
 
+def query_active_listings(polygon: list[list[float]]) -> dict[str, dict]:
+    """Return active listings within the polygon from the redfin_active DB table.
+
+    Returns same shape as pull_grid(): {addr_key: {price, url, beds, baths, sqft, dom}}
+    """
+    if len(polygon) < 3:
+        return {}
+
+    ring = [list(pt) for pt in polygon]
+    if ring[0] != ring[-1]:
+        ring.append(ring[0])
+
+    polygon_geojson = json.dumps({"type": "Polygon", "coordinates": [ring]})
+
+    conn = get_conn()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT addr_key, price, listing_url, beds, baths, sqft, dom
+                FROM redfin_active
+                WHERE geom IS NOT NULL
+                  AND ST_Within(
+                      geom,
+                      ST_SetSRID(ST_GeomFromGeoJSON(%s), 4326)
+                  )
+                """,
+                (polygon_geojson,),
+            )
+            result: dict[str, dict] = {}
+            for row in cur.fetchall():
+                key = row["addr_key"]
+                if key:
+                    result[key] = {
+                        "price": row["price"],
+                        "url": row["listing_url"],
+                        "beds": row["beds"],
+                        "baths": row["baths"],
+                        "sqft": row["sqft"],
+                        "dom": row["dom"],
+                    }
+            return result
+    finally:
+        release_conn(conn)
+
+
 def log_redfin_sold_row_count() -> None:
     """Log redfin_sold row count once at startup for visibility."""
     conn = get_conn()
