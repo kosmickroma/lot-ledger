@@ -27,12 +27,34 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote_plus
 
-from fastapi import Body, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import Body, Depends, FastAPI, HTTPException, Request, Response
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from psycopg2.extras import Json, execute_values
 from pydantic import BaseModel
 
+from api.auth import (
+    AuthError,
+    clear_auth_cookies,
+    clear_login_failures,
+    ensure_auth_settings,
+    ensure_required_roles_exist,
+    generate_csrf_token,
+    get_client_ip,
+    get_current_user,
+    get_user_by_email,
+    get_user_by_id,
+    hash_password,
+    login_allowed,
+    record_login_failure,
+    refresh_session_cookie,
+    require_csrf,
+    require_role,
+    seed_bootstrap_users,
+    set_auth_cookies,
+    verify_password,
+    write_auth_audit_log,
+)
 from api.config import get_conn, get_session_conn, get_settings, release_conn, release_session_conn
 from api.counties.collin import _classify_collin, _normalize_collin_row, query_collin_parcels
 from api.counties.dcad import SPTD_LABELS, _estimate_front_depth, build_feature, classify_parcel, query_parcels
@@ -101,10 +123,45 @@ def _ensure_session_schema() -> None:
             cur.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto")
             cur.execute(
                 """
+                CREATE TABLE IF NOT EXISTS users (
+                    id SERIAL PRIMARY KEY,
+                    username TEXT NOT NULL,
+                    email TEXT NOT NULL,
+                    password_hash TEXT NOT NULL,
+                    role TEXT NOT NULL CHECK (role IN ('developer', 'owner', 'member')),
+                    is_active BOOLEAN NOT NULL DEFAULT true,
+                    force_password_change BOOLEAN NOT NULL DEFAULT false,
+                    session_version INTEGER NOT NULL DEFAULT 1,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    created_by TEXT
+                )
+                """
+            )
+            cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS users_username_lower_uq ON users (LOWER(username))")
+            cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS users_email_lower_uq ON users (LOWER(email))")
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS auth_audit_log (
+                    id SERIAL PRIMARY KEY,
+                    actor TEXT NOT NULL,
+                    actor_user_id INTEGER,
+                    action TEXT NOT NULL,
+                    target_user TEXT,
+                    target_user_id INTEGER,
+                    detail TEXT,
+                    ip TEXT,
+                    user_agent TEXT,
+                    ts TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+            cur.execute(
+                """
                 CREATE TABLE IF NOT EXISTS saved_areas (
                     area_id     TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
                     name        TEXT NOT NULL,
                     polygon     JSONB NOT NULL,
+                    user_id     INTEGER REFERENCES users(id),
                     created_at  TIMESTAMPTZ DEFAULT now(),
                     updated_at  TIMESTAMPTZ DEFAULT now()
                 )
@@ -118,6 +175,7 @@ def _ensure_session_schema() -> None:
                     parcel_count    INTEGER,
                     county_coverage TEXT[],
                     saved_area_id   TEXT REFERENCES saved_areas(area_id) ON DELETE SET NULL,
+                    user_id         INTEGER REFERENCES users(id),
                     created_at      TIMESTAMPTZ DEFAULT now(),
                     last_accessed   TIMESTAMPTZ DEFAULT now(),
                     expires_at      TIMESTAMPTZ DEFAULT (now() + interval '{_SESSION_RETENTION_DAYS} days')
@@ -132,8 +190,21 @@ def _ensure_session_schema() -> None:
                     county      TEXT NOT NULL,
                     tag_type    TEXT NOT NULL,
                     tag_value   TEXT NOT NULL,
+                    user_id     INTEGER REFERENCES users(id),
                     updated_at  TIMESTAMPTZ DEFAULT now(),
                     PRIMARY KEY (session_id, account_num, county, tag_type)
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS saved_parcels (
+                    id BIGSERIAL PRIMARY KEY,
+                    account_num TEXT NOT NULL,
+                    county TEXT NOT NULL DEFAULT 'dcad',
+                    payload JSONB,
+                    user_id INTEGER REFERENCES users(id),
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 )
                 """
             )
@@ -141,6 +212,7 @@ def _ensure_session_schema() -> None:
                 f"""
                 CREATE TABLE IF NOT EXISTS cached_jobs (
                     job_id       TEXT PRIMARY KEY,
+                    user_id      INTEGER REFERENCES users(id),
                     created_at   TIMESTAMPTZ DEFAULT now(),
                     expires_at   TIMESTAMPTZ DEFAULT (now() + interval '{_JOB_TTL_SECONDS} seconds'),
                     rows         JSONB NOT NULL,
@@ -149,10 +221,40 @@ def _ensure_session_schema() -> None:
                 )
                 """
             )
+            cur.execute("ALTER TABLE cached_jobs ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_session_tags_session ON session_tags (session_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_session_tags_user ON session_tags (user_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_expires ON analysis_sessions (expires_at)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_saved_area ON analysis_sessions (saved_area_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user ON analysis_sessions (user_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_saved_areas_user ON saved_areas (user_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_saved_parcels_user ON saved_parcels (user_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_cached_jobs_expires ON cached_jobs (expires_at)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_cached_jobs_user ON cached_jobs (user_id)")
+        conn.commit()
+    finally:
+        release_session_conn(conn)
+
+
+def _finalize_user_scoping() -> None:
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM users WHERE role = 'owner' ORDER BY id ASC LIMIT 1")
+            row = cur.fetchone()
+            if row is None:
+                return
+            owner_id = int(row[0])
+
+            cur.execute("UPDATE saved_areas SET user_id = %s WHERE user_id IS NULL", (owner_id,))
+            cur.execute("UPDATE analysis_sessions SET user_id = %s WHERE user_id IS NULL", (owner_id,))
+            cur.execute("UPDATE session_tags SET user_id = %s WHERE user_id IS NULL", (owner_id,))
+            cur.execute("UPDATE saved_parcels SET user_id = %s WHERE user_id IS NULL", (owner_id,))
+
+            cur.execute("ALTER TABLE saved_areas ALTER COLUMN user_id SET NOT NULL")
+            cur.execute("ALTER TABLE analysis_sessions ALTER COLUMN user_id SET NOT NULL")
+            cur.execute("ALTER TABLE session_tags ALTER COLUMN user_id SET NOT NULL")
+            cur.execute("ALTER TABLE saved_parcels ALTER COLUMN user_id SET NOT NULL")
         conn.commit()
     finally:
         release_session_conn(conn)
@@ -160,6 +262,7 @@ def _ensure_session_schema() -> None:
 
 def _persist_cached_job_sync(
     job_id: str,
+    user_id: int,
     rows: list[dict[str, Any]],
     sold_points: list[dict[str, Any]],
     polygon: list[list[float]],
@@ -169,15 +272,16 @@ def _persist_cached_job_sync(
         with conn.cursor() as cur:
             cur.execute(
                 f"""
-                INSERT INTO cached_jobs (job_id, rows, sold_points, polygon, expires_at)
-                VALUES (%s, %s, %s, %s, now() + interval '{_JOB_TTL_SECONDS} seconds')
+                INSERT INTO cached_jobs (job_id, user_id, rows, sold_points, polygon, expires_at)
+                VALUES (%s, %s, %s, %s, %s, now() + interval '{_JOB_TTL_SECONDS} seconds')
                 ON CONFLICT (job_id) DO UPDATE SET
+                    user_id = EXCLUDED.user_id,
                     rows = EXCLUDED.rows,
                     sold_points = EXCLUDED.sold_points,
                     polygon = EXCLUDED.polygon,
                     expires_at = now() + interval '{_JOB_TTL_SECONDS} seconds'
                 """,
-                (job_id, Json(rows), Json(sold_points), Json(polygon)),
+                (job_id, int(user_id), Json(rows), Json(sold_points), Json(polygon)),
             )
         conn.commit()
     finally:
@@ -190,7 +294,7 @@ def _load_cached_job(job_id: str) -> dict[str, Any] | None:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT rows, sold_points, polygon
+                                SELECT rows, sold_points, polygon, user_id
                 FROM cached_jobs
                 WHERE job_id = %s
                   AND expires_at > now()
@@ -209,12 +313,13 @@ def _load_cached_job(job_id: str) -> dict[str, Any] | None:
                 (job_id,),
             )
         conn.commit()
-        rows, sold_points, polygon = row
+        rows, sold_points, polygon, user_id = row
         return {
             "rows": rows if isinstance(rows, list) else [],
             "redfin_data": {},
             "sold_points": sold_points if isinstance(sold_points, list) else [],
             "polygon": polygon if isinstance(polygon, list) else [],
+            "user_id": int(user_id or 0),
             "created_at": time.monotonic(),
             "last_accessed": time.monotonic(),
         }
@@ -242,6 +347,7 @@ def _persist_session_sync(
     polygon: list[list[float]],
     parcel_count: int,
     county_coverage: list[str],
+    user_id: int,
     saved_area_id: str | None = None,
 ) -> None:
     conn = get_session_conn()
@@ -251,13 +357,14 @@ def _persist_session_sync(
                 f"""
                 INSERT INTO analysis_sessions (
                     session_id, polygon, parcel_count, county_coverage, saved_area_id,
-                    last_accessed, expires_at
-                ) VALUES (%s, %s, %s, %s, %s, now(), now() + interval '{_SESSION_RETENTION_DAYS} days')
+                    user_id, last_accessed, expires_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, now(), now() + interval '{_SESSION_RETENTION_DAYS} days')
                 ON CONFLICT (session_id) DO UPDATE SET
                     polygon = EXCLUDED.polygon,
                     parcel_count = EXCLUDED.parcel_count,
                     county_coverage = EXCLUDED.county_coverage,
                     saved_area_id = COALESCE(EXCLUDED.saved_area_id, analysis_sessions.saved_area_id),
+                    user_id = EXCLUDED.user_id,
                     last_accessed = now(),
                     expires_at = now() + interval '{_SESSION_RETENTION_DAYS} days'
                 """,
@@ -267,6 +374,7 @@ def _persist_session_sync(
                     int(parcel_count),
                     county_coverage,
                     saved_area_id,
+                    int(user_id),
                 ),
             )
         conn.commit()
@@ -279,6 +387,7 @@ async def _persist_session_async(
     polygon: list[list[float]],
     parcel_count: int,
     county_coverage: list[str],
+    user_id: int,
 ) -> None:
     try:
         await asyncio.to_thread(
@@ -287,13 +396,14 @@ async def _persist_session_async(
             polygon,
             parcel_count,
             county_coverage,
+            user_id,
             None,
         )
     except Exception as exc:
         print(f"[session] persist failed for {session_id}: {exc}")
 
 
-def _load_session_tags(session_id: str) -> dict[tuple[str, str], dict[str, str]]:
+def _load_session_tags(session_id: str, user_id: int) -> dict[tuple[str, str], dict[str, str]]:
     conn = get_session_conn()
     try:
         with conn.cursor() as cur:
@@ -302,8 +412,9 @@ def _load_session_tags(session_id: str) -> dict[tuple[str, str], dict[str, str]]
                 SELECT account_num, county, tag_type, tag_value
                 FROM session_tags
                 WHERE session_id = %s
+                                    AND user_id = %s
                 """,
-                (session_id,),
+                                (session_id, int(user_id)),
             )
             out: dict[tuple[str, str], dict[str, str]] = {}
             for account_num, county, tag_type, tag_value in cur.fetchall():
@@ -325,8 +436,8 @@ def _row_county(row: dict[str, Any]) -> str:
     return "dcad"
 
 
-def _apply_session_tags(session_id: str, rows: list[dict[str, Any]]) -> None:
-    tags = _load_session_tags(session_id)
+def _apply_session_tags(session_id: str, user_id: int, rows: list[dict[str, Any]]) -> None:
+    tags = _load_session_tags(session_id, user_id)
     for row in rows:
         account_num = str(row.get("account_num", "") or "")
         county = _row_county(row)
@@ -335,7 +446,7 @@ def _apply_session_tags(session_id: str, rows: list[dict[str, Any]]) -> None:
         row["potential_target"] = payload.get("target", "")
 
 
-def _load_session_polygon(session_id: str) -> list[list[float]] | None:
+def _load_session_polygon(session_id: str, user_id: int) -> list[list[float]] | None:
     conn = get_session_conn()
     try:
         with conn.cursor() as cur:
@@ -344,9 +455,10 @@ def _load_session_polygon(session_id: str) -> list[list[float]] | None:
                 SELECT polygon
                 FROM analysis_sessions
                 WHERE session_id = %s
+                                    AND user_id = %s
                   AND expires_at > now()
                 """,
-                (session_id,),
+                                (session_id, int(user_id)),
             )
             row = cur.fetchone()
             if row is None:
@@ -367,18 +479,18 @@ def _load_session_polygon(session_id: str) -> list[list[float]] | None:
         release_session_conn(conn)
 
 
-def _session_exists(session_id: str) -> bool:
+def _session_exists(session_id: str, user_id: int) -> bool:
     conn = get_session_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT 1 FROM analysis_sessions WHERE session_id = %s LIMIT 1", (session_id,))
+            cur.execute("SELECT 1 FROM analysis_sessions WHERE session_id = %s AND user_id = %s LIMIT 1", (session_id, int(user_id)))
             return cur.fetchone() is not None
     finally:
         release_session_conn(conn)
 
 
-def _restore_job_from_session(session_id: str) -> dict[str, Any] | None:
-    polygon = _load_session_polygon(session_id)
+def _restore_job_from_session(session_id: str, user_id: int) -> dict[str, Any] | None:
+    polygon = _load_session_polygon(session_id, user_id)
     if not polygon or len(polygon) < 3:
         return None
 
@@ -411,8 +523,8 @@ def _restore_job_from_session(session_id: str) -> dict[str, Any] | None:
     if denton_result:
         rows.extend(denton_result.parcels)
 
-    _apply_session_tags(session_id, rows)
-    raw_tags = _load_session_tags(session_id)
+    _apply_session_tags(session_id, user_id, rows)
+    raw_tags = _load_session_tags(session_id, user_id)
     tags: dict[str, dict[str, Any]] = {}
     for (account_num, _county), payload in raw_tags.items():
         verified_raw = str(payload.get("verification", "") or "").strip().lower()
@@ -433,21 +545,24 @@ def _restore_job_from_session(session_id: str) -> dict[str, Any] | None:
         "sold_points": [],
         "tags": tags,
         "polygon": polygon,
+        "user_id": int(user_id),
         "created_at": time.monotonic(),
         "last_accessed": time.monotonic(),
     }
 
 
-def _get_job(job_id: str) -> dict[str, Any] | None:
+    def _get_job(job_id: str, user_id: int | None = None) -> dict[str, Any] | None:
     """Return job if it exists and has not expired; evicts on TTL miss. Touching last_accessed keeps the session alive as long as the user is active."""
     job = _job_store.get(job_id)
+    if job is not None and user_id is not None and int(job.get("user_id", -1)) != int(user_id):
+        return None
     if job is None:
         cached = _load_cached_job(job_id)
-        if cached is not None:
+        if cached is not None and (user_id is None or int(cached.get("user_id", -1)) == int(user_id)):
             _evict_stale_jobs()
             _job_store[job_id] = cached
             return cached
-        restored = _restore_job_from_session(job_id)
+        restored = _restore_job_from_session(job_id, int(user_id)) if user_id is not None else None
         if restored is None:
             return None
         _evict_stale_jobs()
@@ -457,11 +572,11 @@ def _get_job(job_id: str) -> dict[str, Any] | None:
     if now - job.get("last_accessed", job.get("created_at", 0)) > _JOB_TTL_SECONDS:
         _job_store.pop(job_id, None)
         cached = _load_cached_job(job_id)
-        if cached is not None:
+        if cached is not None and (user_id is None or int(cached.get("user_id", -1)) == int(user_id)):
             _evict_stale_jobs()
             _job_store[job_id] = cached
             return cached
-        restored = _restore_job_from_session(job_id)
+        restored = _restore_job_from_session(job_id, int(user_id)) if user_id is not None else None
         if restored is None:
             return None
         _evict_stale_jobs()
@@ -493,6 +608,89 @@ class SavedAreaCreateRequest(BaseModel):
 
 class SavedAreaRenameRequest(BaseModel):
     name: str
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+    confirm_password: str
+
+
+class AdminCreateUserRequest(BaseModel):
+    username: str
+    email: str
+    temp_password: str
+    role: str = "member"
+
+
+class AdminResetPasswordRequest(BaseModel):
+    temp_password: str
+
+
+def _password_valid(password: str) -> bool:
+    return len(str(password or "")) >= 10
+
+
+def _serialize_user(user: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": int(user["id"]),
+        "username": str(user["username"]),
+        "email": str(user["email"]),
+        "role": str(user["role"]),
+        "is_active": bool(user.get("is_active")),
+        "force_password_change": bool(user.get("force_password_change")),
+    }
+
+
+def _require_target_user(cur, target_user_id: int) -> dict[str, Any]:
+    cur.execute(
+        """
+        SELECT id, username, email, role, is_active, force_password_change, session_version, created_by
+        FROM users
+        WHERE id = %s
+        LIMIT 1
+        """,
+        (int(target_user_id),),
+    )
+    row = cur.fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    return {
+        "id": int(row[0]),
+        "username": str(row[1]),
+        "email": str(row[2]),
+        "role": str(row[3]),
+        "is_active": bool(row[4]),
+        "force_password_change": bool(row[5]),
+        "session_version": int(row[6] or 1),
+        "created_by": str(row[7] or ""),
+    }
+
+
+def _enforce_admin_target_rules(actor: dict[str, Any], target: dict[str, Any], action: str) -> None:
+    actor_role = str(actor.get("role") or "")
+    target_role = str(target.get("role") or "")
+    if target_role == "developer":
+        raise HTTPException(status_code=403, detail="Developer accounts cannot be modified via admin endpoints")
+    if actor_role == "owner" and target_role != "member":
+        raise HTTPException(status_code=403, detail="Owner can manage member accounts only")
+    if action == "disable" and target_role == "owner":
+        # Keep at least one active owner account.
+        conn = get_session_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM users WHERE role = 'owner' AND is_active = true")
+                active_owners = int(cur.fetchone()[0] or 0)
+            conn.commit()
+        finally:
+            release_session_conn(conn)
+        if active_owners <= 1 and bool(target.get("is_active")):
+            raise HTTPException(status_code=403, detail="Cannot disable the last active owner account")
 
 
 def _normalize_csv_filename(raw: str | None) -> str:
@@ -558,12 +756,371 @@ get_settings()
 app = FastAPI(title="LotLedger")
 
 
+_FORCE_PASSWORD_CHANGE_ALLOWED_PATHS = {
+    "/auth/me",
+    "/auth/change-password",
+    "/auth/logout",
+}
+
+
+def _is_public_path(path: str) -> bool:
+    if path in {"/", "/health", "/health/db", "/auth/login"}:
+        return True
+    if path.startswith("/auth/"):
+        return False
+    if path.startswith("/admin/"):
+        return False
+    if path.startswith("/api/"):
+        return False
+    # Static frontend assets remain public; app is logically gated by auth UI.
+    return True
+
+
 @app.middleware("http")
-async def no_cache_frontend(request: Request, call_next):
+async def auth_gate(request: Request, call_next):
+    path = request.url.path
+    is_protected = not _is_public_path(path)
+    user: dict[str, Any] | None = None
+
+    if is_protected or path.startswith("/api/") or path.startswith("/auth/") or path.startswith("/admin/"):
+        try:
+            user = get_current_user(request)
+            request.state.current_user = user
+        except AuthError:
+            user = None
+
+    if path.startswith("/api/") and user is None:
+        response = JSONResponse({"detail": "Authentication required"}, status_code=401)
+        clear_auth_cookies(response)
+        return response
+
+    if path.startswith("/admin/") and user is None:
+        response = JSONResponse({"detail": "Authentication required"}, status_code=401)
+        clear_auth_cookies(response)
+        return response
+
+    if path.startswith("/auth/") and path not in {"/auth/login"} and user is None:
+        response = JSONResponse({"detail": "Authentication required"}, status_code=401)
+        clear_auth_cookies(response)
+        return response
+
+    if user and bool(user.get("force_password_change")):
+        if path.startswith("/api/") or path.startswith("/admin/") or path.startswith("/auth/"):
+            if path not in _FORCE_PASSWORD_CHANGE_ALLOWED_PATHS and path != "/auth/login":
+                return JSONResponse(
+                    {"detail": "Password change required", "code": "FORCE_PASSWORD_CHANGE_REQUIRED"},
+                    status_code=403,
+                )
+
     response = await call_next(request)
+
+    # Rolling refresh for authenticated requests, except explicit logout.
+    if user and path != "/auth/logout":
+        refresh_session_cookie(response, user, request)
+
     if request.url.path.endswith((".js", ".css", ".html")):
         response.headers["Cache-Control"] = "no-cache, must-revalidate"
+    if not request.cookies.get("ll_csrf"):
+        response.set_cookie(
+            "ll_csrf",
+            generate_csrf_token(),
+            max_age=8 * 60 * 60,
+            httponly=False,
+            secure=os.getenv("AUTH_COOKIE_SECURE", "true").strip().lower() not in {"0", "false", "no"},
+            samesite="lax",
+            path="/",
+        )
     return response
+
+
+@app.middleware("http")
+async def no_cache_frontend(request: Request, call_next):
+    return await call_next(request)
+
+
+@app.post("/auth/login")
+async def auth_login(request: Request, payload: LoginRequest, response: Response) -> dict[str, Any]:
+    require_csrf(request)
+    ip = get_client_ip(request)
+    allowed, retry_after = login_allowed(ip)
+    if not allowed:
+        raise HTTPException(status_code=429, detail=f"Too many failed attempts. Retry in {retry_after}s")
+
+    email = str(payload.email or "").strip().lower()
+    password = str(payload.password or "")
+    user = get_user_by_email(email)
+    if user is None or not verify_password(password, str(user.get("password_hash") or "")):
+        record_login_failure(ip)
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    if not bool(user.get("is_active")):
+        raise HTTPException(status_code=403, detail="Account disabled")
+
+    clear_login_failures(ip)
+    set_auth_cookies(response, user)
+    return {"user": _serialize_user(user)}
+
+
+@app.post("/auth/logout")
+async def auth_logout(request: Request, response: Response) -> dict[str, bool]:
+    if request.cookies.get("ll_session"):
+        require_csrf(request)
+    clear_auth_cookies(response)
+    return {"ok": True}
+
+
+@app.get("/auth/me")
+async def auth_me(user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
+    return {"user": _serialize_user(user)}
+
+
+@app.post("/auth/change-password")
+async def auth_change_password(
+    request: Request,
+    payload: ChangePasswordRequest,
+    response: Response,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    require_csrf(request)
+    current_password = str(payload.current_password or "")
+    new_password = str(payload.new_password or "")
+    confirm_password = str(payload.confirm_password or "")
+
+    if not verify_password(current_password, str(user.get("password_hash") or "")):
+        raise HTTPException(status_code=401, detail="Current password is incorrect")
+    if new_password != confirm_password:
+        raise HTTPException(status_code=422, detail="Password confirmation does not match")
+    if not _password_valid(new_password):
+        raise HTTPException(status_code=422, detail="Password must be at least 10 characters")
+
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE users
+                SET password_hash = %s,
+                    force_password_change = false,
+                    session_version = session_version + 1
+                WHERE id = %s
+                RETURNING id, username, email, role, is_active, force_password_change, session_version
+                """,
+                (hash_password(new_password), int(user["id"])),
+            )
+            row = cur.fetchone()
+        conn.commit()
+    finally:
+        release_session_conn(conn)
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    refreshed_user = {
+        "id": int(row[0]),
+        "username": str(row[1]),
+        "email": str(row[2]),
+        "role": str(row[3]),
+        "is_active": bool(row[4]),
+        "force_password_change": bool(row[5]),
+        "session_version": int(row[6] or 1),
+    }
+    set_auth_cookies(response, refreshed_user)
+    return {"ok": True, "user": _serialize_user(refreshed_user)}
+
+
+@app.get("/admin/users")
+async def admin_list_users(user: dict[str, Any] = Depends(require_role("owner", "developer"))) -> dict[str, Any]:
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, username, email, role, is_active, force_password_change, created_at, created_by
+                FROM users
+                ORDER BY created_at ASC
+                """
+            )
+            users = [
+                {
+                    "id": int(row[0]),
+                    "username": str(row[1]),
+                    "email": str(row[2]),
+                    "role": str(row[3]),
+                    "is_active": bool(row[4]),
+                    "force_password_change": bool(row[5]),
+                    "created_at": row[6].isoformat() if row[6] else None,
+                    "created_by": str(row[7] or ""),
+                }
+                for row in cur.fetchall()
+            ]
+    finally:
+        release_session_conn(conn)
+    return {"users": users}
+
+
+@app.post("/admin/users")
+async def admin_create_user(
+    request: Request,
+    payload: AdminCreateUserRequest,
+    actor: dict[str, Any] = Depends(require_role("owner", "developer")),
+) -> dict[str, Any]:
+    require_csrf(request)
+    username = str(payload.username or "").strip()
+    email = str(payload.email or "").strip().lower()
+    temp_password = str(payload.temp_password or "")
+    role = str(payload.role or "member").strip().lower()
+
+    if not username or not email:
+        raise HTTPException(status_code=422, detail="Username and email are required")
+    if not _password_valid(temp_password):
+        raise HTTPException(status_code=422, detail="Password must be at least 10 characters")
+
+    if actor["role"] == "owner":
+        role = "member"
+    elif role not in {"owner", "member"}:
+        raise HTTPException(status_code=422, detail="Developer may create owner or member users only")
+
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO users (username, email, password_hash, role, is_active, force_password_change, created_by)
+                VALUES (%s, %s, %s, %s, true, true, %s)
+                RETURNING id, username, email, role, is_active, force_password_change
+                """,
+                (username, email, hash_password(temp_password), role, actor["username"]),
+            )
+            row = cur.fetchone()
+            write_auth_audit_log(
+                actor=actor["username"],
+                actor_user_id=int(actor["id"]),
+                action="create_user",
+                target_user=username,
+                target_user_id=int(row[0]),
+                detail=f"role={role}",
+                ip=get_client_ip(request),
+                user_agent=request.headers.get("user-agent", ""),
+            )
+        conn.commit()
+    except Exception as exc:
+        conn.rollback()
+        if "users_username_lower_uq" in str(exc) or "users_email_lower_uq" in str(exc):
+            raise HTTPException(status_code=409, detail="Username or email already exists")
+        raise
+    finally:
+        release_session_conn(conn)
+
+    return {
+        "user": {
+            "id": int(row[0]),
+            "username": str(row[1]),
+            "email": str(row[2]),
+            "role": str(row[3]),
+            "is_active": bool(row[4]),
+            "force_password_change": bool(row[5]),
+        }
+    }
+
+
+@app.post("/admin/users/{user_id}/disable")
+async def admin_disable_user(
+    user_id: int,
+    request: Request,
+    actor: dict[str, Any] = Depends(require_role("owner", "developer")),
+) -> dict[str, Any]:
+    require_csrf(request)
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            target = _require_target_user(cur, user_id)
+            _enforce_admin_target_rules(actor, target, "disable")
+            cur.execute("UPDATE users SET is_active = false WHERE id = %s", (int(user_id),))
+            write_auth_audit_log(
+                actor=actor["username"],
+                actor_user_id=int(actor["id"]),
+                action="disable_user",
+                target_user=target["username"],
+                target_user_id=int(target["id"]),
+                detail="",
+                ip=get_client_ip(request),
+                user_agent=request.headers.get("user-agent", ""),
+            )
+        conn.commit()
+    finally:
+        release_session_conn(conn)
+    return {"ok": True}
+
+
+@app.post("/admin/users/{user_id}/enable")
+async def admin_enable_user(
+    user_id: int,
+    request: Request,
+    actor: dict[str, Any] = Depends(require_role("owner", "developer")),
+) -> dict[str, Any]:
+    require_csrf(request)
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            target = _require_target_user(cur, user_id)
+            _enforce_admin_target_rules(actor, target, "enable")
+            cur.execute("UPDATE users SET is_active = true WHERE id = %s", (int(user_id),))
+            write_auth_audit_log(
+                actor=actor["username"],
+                actor_user_id=int(actor["id"]),
+                action="enable_user",
+                target_user=target["username"],
+                target_user_id=int(target["id"]),
+                detail="",
+                ip=get_client_ip(request),
+                user_agent=request.headers.get("user-agent", ""),
+            )
+        conn.commit()
+    finally:
+        release_session_conn(conn)
+    return {"ok": True}
+
+
+@app.post("/admin/users/{user_id}/reset-password")
+async def admin_reset_password(
+    user_id: int,
+    request: Request,
+    payload: AdminResetPasswordRequest,
+    actor: dict[str, Any] = Depends(require_role("owner", "developer")),
+) -> dict[str, Any]:
+    require_csrf(request)
+    temp_password = str(payload.temp_password or "")
+    if not _password_valid(temp_password):
+        raise HTTPException(status_code=422, detail="Password must be at least 10 characters")
+
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            target = _require_target_user(cur, user_id)
+            _enforce_admin_target_rules(actor, target, "reset")
+            cur.execute(
+                """
+                UPDATE users
+                SET password_hash = %s,
+                    force_password_change = true,
+                    session_version = session_version + 1
+                WHERE id = %s
+                """,
+                (hash_password(temp_password), int(user_id)),
+            )
+            write_auth_audit_log(
+                actor=actor["username"],
+                actor_user_id=int(actor["id"]),
+                action="reset_password",
+                target_user=target["username"],
+                target_user_id=int(target["id"]),
+                detail="force_password_change=true",
+                ip=get_client_ip(request),
+                user_agent=request.headers.get("user-agent", ""),
+            )
+        conn.commit()
+    finally:
+        release_session_conn(conn)
+    return {"ok": True}
 
 
 @app.get("/health")
@@ -1342,10 +1899,11 @@ async def get_parcel_detail(county: str, account_num: str) -> dict[str, Any]:
 
 
 @app.post("/api/analyze")
-async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
+async def analyze(request: AnalyzeRequest, user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
     polygon = request.polygon
     include_redfin = bool(request.include_redfin)
     include_sold = bool(request.include_sold)
+    user_id = int(user["id"])
     if len(polygon) < 3:
         raise HTTPException(status_code=400, detail="Polygon must have at least 3 points")
 
@@ -1442,11 +2000,12 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
             "redfin_data": {},
             "sold_points": sold_points,
             "polygon": polygon,
+            "user_id": user_id,
             "created_at": time.monotonic(),
             "last_accessed": time.monotonic(),
         }
         try:
-            await asyncio.to_thread(_persist_cached_job_sync, empty_job_id, [], sold_points, polygon)
+            await asyncio.to_thread(_persist_cached_job_sync, empty_job_id, user_id, [], sold_points, polygon)
         except Exception as exc:
             logger.warning("Failed to persist job to cache (non-fatal): %s", exc)
         return {
@@ -1534,11 +2093,12 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
         "redfin_data": redfin_data,
         "sold_points": sold_points,
         "polygon": polygon,
+        "user_id": user_id,
         "created_at": time.monotonic(),
         "last_accessed": time.monotonic(),
     }
     try:
-        await asyncio.to_thread(_persist_cached_job_sync, job_id, rows, sold_points, polygon)
+        await asyncio.to_thread(_persist_cached_job_sync, job_id, user_id, rows, sold_points, polygon)
     except Exception as exc:
         logger.warning("Failed to persist job to cache (non-fatal): %s", exc)
     asyncio.create_task(
@@ -1547,6 +2107,7 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
             polygon,
             len(rows),
             county_coverage,
+            user_id,
         )
     )
     return {
@@ -1568,15 +2129,16 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
 
 
 @app.post("/api/merge-jobs")
-async def merge_jobs(request: MergeJobsRequest) -> dict[str, Any]:
+async def merge_jobs(request: MergeJobsRequest, user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
     """Merge rows from multiple tile job_ids into a single exportable job."""
     merged_rows: list[dict[str, Any]] = []
     merged_redfin: dict[str, Any] = {}
     merged_sold_points: list[dict[str, Any]] = []
     seen_keys: set[str] = set()
     seen_sold_keys: set[str] = set()
+    user_id = int(user["id"])
     for job_id in request.job_ids:
-        job = _get_job(job_id)
+        job = _get_job(job_id, user_id)
         if job is None:
             continue
         for row in job.get("rows", []):
@@ -1607,19 +2169,20 @@ async def merge_jobs(request: MergeJobsRequest) -> dict[str, Any]:
         "redfin_data": merged_redfin,
         "sold_points": merged_sold_points,
         "polygon": [],
+        "user_id": user_id,
         "created_at": time.monotonic(),
         "last_accessed": time.monotonic(),
     }
     try:
-        await asyncio.to_thread(_persist_cached_job_sync, new_job_id, merged_rows, merged_sold_points, [])
+        await asyncio.to_thread(_persist_cached_job_sync, new_job_id, user_id, merged_rows, merged_sold_points, [])
     except Exception as exc:
         logger.warning("Failed to persist job to cache (non-fatal): %s", exc)
     return {"job_id": new_job_id}
 
 
 @app.post("/api/job/{job_id}/verification")
-async def save_verification(job_id: str, request: VerificationRequest) -> dict[str, Any]:
-    job = _get_job(job_id)
+async def save_verification(job_id: str, request: VerificationRequest, user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
+    job = _get_job(job_id, int(user["id"]))
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
 
@@ -1647,6 +2210,7 @@ async def save_verification(job_id: str, request: VerificationRequest) -> dict[s
             polygon,
             len(rows),
             _counties_from_rows(rows),
+            int(user["id"]),
             None,
         )
 
@@ -1680,13 +2244,13 @@ async def save_verification(job_id: str, request: VerificationRequest) -> dict[s
                     execute_values(
                         cur,
                         """
-                        INSERT INTO session_tags (session_id, account_num, county, tag_type, tag_value)
+                        INSERT INTO session_tags (session_id, account_num, county, tag_type, tag_value, user_id)
                         VALUES %s
                         ON CONFLICT (session_id, account_num, county, tag_type)
                         DO UPDATE SET tag_value = EXCLUDED.tag_value, updated_at = now()
                         """,
-                        list(upsert_rows.values()),
-                        template="(%s,%s,%s,%s,%s)",
+                        [(*vals, int(user["id"])) for vals in upsert_rows.values()],
+                        template="(%s,%s,%s,%s,%s,%s)",
                         page_size=500,
                     )
                 if delete_rows:
@@ -1697,8 +2261,9 @@ async def save_verification(job_id: str, request: VerificationRequest) -> dict[s
                           AND account_num = %s
                           AND county = %s
                           AND tag_type = %s
+                                                    AND user_id = %s
                         """,
-                        [(job_id, account_num, county, tag_type) for account_num, county, tag_type in delete_rows],
+                                                [(job_id, account_num, county, tag_type, int(user["id"])) for account_num, county, tag_type in delete_rows],
                     )
             conn.commit()
         except Exception:
@@ -1726,7 +2291,7 @@ async def save_verification(job_id: str, request: VerificationRequest) -> dict[s
 
 
 @app.post("/api/tags/set")
-async def set_tag(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+async def set_tag(payload: dict[str, Any] = Body(...), user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
     job_id = str(payload.get("job_id") or "").strip()
     account_num = str(payload.get("account_num") or "").strip()
     field = str(payload.get("field") or "").strip()
@@ -1735,7 +2300,7 @@ async def set_tag(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
     if not job_id or not account_num or field not in {"verified_vacant", "potential_target"}:
         raise HTTPException(status_code=400, detail="Invalid payload")
 
-    job = _get_job(job_id)
+    job = _get_job(job_id, int(user["id"]))
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
 
@@ -1771,19 +2336,19 @@ async def set_tag(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
             raise HTTPException(status_code=400, detail="Invalid target value")
 
     try:
-        _persist_session_sync(job_id, polygon, len(rows), _counties_from_rows(rows), None)
+        _persist_session_sync(job_id, polygon, len(rows), _counties_from_rows(rows), int(user["id"]), None)
         conn = get_session_conn()
         try:
             with conn.cursor() as cur:
                 if tag_value:
                     cur.execute(
                         """
-                        INSERT INTO session_tags (session_id, account_num, county, tag_type, tag_value)
-                        VALUES (%s, %s, %s, %s, %s)
+                        INSERT INTO session_tags (session_id, account_num, county, tag_type, tag_value, user_id)
+                        VALUES (%s, %s, %s, %s, %s, %s)
                         ON CONFLICT (session_id, account_num, county, tag_type)
                         DO UPDATE SET tag_value = EXCLUDED.tag_value, updated_at = now()
                         """,
-                        (job_id, account_num, county, tag_type, tag_value),
+                        (job_id, account_num, county, tag_type, tag_value, int(user["id"])),
                     )
                 else:
                     cur.execute(
@@ -1793,8 +2358,9 @@ async def set_tag(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
                           AND account_num = %s
                           AND county = %s
                           AND tag_type = %s
+                                                    AND user_id = %s
                         """,
-                        (job_id, account_num, county, tag_type),
+                                                (job_id, account_num, county, tag_type, int(user["id"])),
                     )
             conn.commit()
         except Exception:
@@ -1817,8 +2383,8 @@ async def set_tag(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
 
 
 @app.get("/api/download/{job_id}")
-async def download(job_id: str, filename: str | None = None) -> StreamingResponse:
-    job = _get_job(job_id)
+async def download(job_id: str, filename: str | None = None, user: dict[str, Any] = Depends(get_current_user)) -> StreamingResponse:
+    job = _get_job(job_id, int(user["id"]))
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
 
@@ -2153,7 +2719,11 @@ async def _cleanup_expired_sessions_loop() -> None:
 
 @app.on_event("startup")
 async def _startup_session_storage() -> None:
+    ensure_auth_settings()
     await asyncio.to_thread(_ensure_session_schema)
+    await asyncio.to_thread(seed_bootstrap_users)
+    await asyncio.to_thread(_finalize_user_scoping)
+    await asyncio.to_thread(ensure_required_roles_exist)
     await asyncio.to_thread(log_redfin_sold_row_count)
     app.state.session_cleanup_task = asyncio.create_task(_cleanup_expired_sessions_loop())
 
@@ -2168,8 +2738,8 @@ async def _shutdown_session_storage() -> None:
 
 
 @app.get("/api/session/{session_id}")
-async def get_session(session_id: str) -> dict[str, Any]:
-    job = _get_job(session_id)
+async def get_session(session_id: str, user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
+    job = _get_job(session_id, int(user["id"]))
     if job is None:
         raise HTTPException(status_code=404, detail="Session not found")
     return {
@@ -2181,7 +2751,7 @@ async def get_session(session_id: str) -> dict[str, Any]:
 
 
 @app.get("/api/areas")
-async def list_saved_areas() -> dict[str, Any]:
+async def list_saved_areas(user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
     conn = get_session_conn()
     try:
         with conn.cursor() as cur:
@@ -2189,8 +2759,11 @@ async def list_saved_areas() -> dict[str, Any]:
                 """
                 SELECT area_id, name, polygon, created_at, updated_at
                 FROM saved_areas
+                WHERE user_id = %s
                 ORDER BY created_at DESC
                 """
+                ,
+                (int(user["id"]),)
             )
             areas = [
                 {
@@ -2208,7 +2781,7 @@ async def list_saved_areas() -> dict[str, Any]:
 
 
 @app.post("/api/areas")
-async def create_saved_area(request: SavedAreaCreateRequest) -> dict[str, Any]:
+async def create_saved_area(request: SavedAreaCreateRequest, user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
     name = str(request.name or "").strip()
     if not name:
         raise HTTPException(status_code=400, detail="Area name is required")
@@ -2220,11 +2793,11 @@ async def create_saved_area(request: SavedAreaCreateRequest) -> dict[str, Any]:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO saved_areas (name, polygon)
-                VALUES (%s, %s)
+                INSERT INTO saved_areas (name, polygon, user_id)
+                VALUES (%s, %s, %s)
                 RETURNING area_id, created_at, updated_at
                 """,
-                (name, Json(request.polygon)),
+                (name, Json(request.polygon), int(user["id"])),
             )
             row = cur.fetchone()
         conn.commit()
@@ -2244,7 +2817,7 @@ async def create_saved_area(request: SavedAreaCreateRequest) -> dict[str, Any]:
 
 
 @app.put("/api/areas/{area_id}")
-async def rename_saved_area(area_id: str, request: SavedAreaRenameRequest) -> dict[str, Any]:
+async def rename_saved_area(area_id: str, request: SavedAreaRenameRequest, user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
     name = str(request.name or "").strip()
     if not name:
         raise HTTPException(status_code=400, detail="Area name is required")
@@ -2256,10 +2829,10 @@ async def rename_saved_area(area_id: str, request: SavedAreaRenameRequest) -> di
                 """
                 UPDATE saved_areas
                 SET name = %s, updated_at = now()
-                WHERE area_id = %s
+                WHERE area_id = %s AND user_id = %s
                 RETURNING area_id, name, updated_at
                 """,
-                (name, area_id),
+                (name, area_id, int(user["id"])),
             )
             row = cur.fetchone()
         conn.commit()
@@ -2279,11 +2852,11 @@ async def rename_saved_area(area_id: str, request: SavedAreaRenameRequest) -> di
 
 
 @app.delete("/api/areas/{area_id}")
-async def delete_saved_area(area_id: str) -> dict[str, Any]:
+async def delete_saved_area(area_id: str, user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
     conn = get_session_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM saved_areas WHERE area_id = %s", (area_id,))
+            cur.execute("DELETE FROM saved_areas WHERE area_id = %s AND user_id = %s", (area_id, int(user["id"])))
             deleted = cur.rowcount or 0
         conn.commit()
     except Exception:
