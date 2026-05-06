@@ -1987,6 +1987,25 @@ function renderSavedAreasList() {
   _renderCurrentViewingArea();
   _renderList("saved-areas", "saved-areas-list", _savedAreasCache.filter((a) => a.type === "area"));
   _renderList("saved-parcels", "saved-parcels-list", [..._savedAreasCache.filter((a) => a.type === "location"), ..._savedParcelsCache]);
+  _updateUpdateAreaButtonVisibility();
+}
+
+function _updateUpdateAreaButtonVisibility() {
+  const btn = document.getElementById("btn-update-saved-area");
+  if (!btn) return;
+  // Don't override the in-flight Saving.../✓ Updated button text
+  if (btn.disabled || btn.textContent === "✓ Updated") return;
+  if (!_currentLoadedAreaId) {
+    btn.classList.add("hidden");
+    return;
+  }
+  const area = _savedAreasCache.find((a) => a.id === _currentLoadedAreaId && a.type === "area");
+  if (!area || !_isLoadedAreaWithFilterDrift(area)) {
+    btn.classList.add("hidden");
+    return;
+  }
+  btn.classList.remove("hidden");
+  btn.textContent = "Update";
 }
 
 function _renderSessionsList(sectionId, listId, items) {
@@ -4281,6 +4300,13 @@ function _openSaveSessionInlineInput() {
 
 document.getElementById("btn-save-session")?.addEventListener("click", () => {
   _openSaveSessionInlineInput();
+});
+
+document.getElementById("btn-update-saved-area")?.addEventListener("click", async (e) => {
+  if (!_currentLoadedAreaId) return;
+  const area = _savedAreasCache.find((a) => a.id === _currentLoadedAreaId && a.type === "area");
+  if (!area) return;
+  await _updateSavedAreaFilters(area, e.currentTarget);
 });
 
 document.getElementById("btn-saved-area-current-clear")?.addEventListener("click", () => {
