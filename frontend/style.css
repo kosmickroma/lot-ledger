@@ -1596,7 +1596,7 @@ h1 {
 
 .admin-add-form {
   display: grid;
-  grid-template-columns: 1fr 1fr auto;
+  grid-template-columns: repeat(4, 1fr);
   gap: 8px;
   align-items: end;
   margin-top: 12px;

@@ -5053,6 +5053,7 @@ async function _showAdminPanel() {
     <div class="admin-add-form">
       <input type="email" id="admin-new-email" placeholder="Email" autocomplete="off">
       <input type="text"  id="admin-new-username" placeholder="Username" autocomplete="off">
+      <input type="password" id="admin-new-temp-password" placeholder="Temp Password (10+ chars)" autocomplete="off">
       <select id="admin-new-role">
         <option value="member">Member</option>
         <option value="owner">Owner</option>
@@ -5150,11 +5151,17 @@ async function _adminAction(action, uid, uname, btn) {
 async function _adminAddUser() {
   const email    = document.getElementById("admin-new-email")?.value.trim();
   const username = document.getElementById("admin-new-username")?.value.trim();
+  const tempPassword = document.getElementById("admin-new-temp-password")?.value;
   const role     = document.getElementById("admin-new-role")?.value;
   const msgEl    = document.getElementById("admin-add-msg");
 
-  if (!email || !username) {
-    if (msgEl) { msgEl.textContent = "Email and username are required."; msgEl.className = "admin-msg err"; }
+  if (!email || !username || !tempPassword) {
+    if (msgEl) { msgEl.textContent = "Email, username, and temporary password are required."; msgEl.className = "admin-msg err"; }
+    return;
+  }
+
+  if (tempPassword.length < 10) {
+    if (msgEl) { msgEl.textContent = "Temporary password must be at least 10 characters."; msgEl.className = "admin-msg err"; }
     return;
   }
 
@@ -5166,7 +5173,7 @@ async function _adminAddUser() {
     const resp = await fetch("/admin/users", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...authHeaders() },
-      body: JSON.stringify({ email, username, role }),
+      body: JSON.stringify({ email, username, temp_password: tempPassword, role }),
       credentials: "same-origin",
     });
     const data = await resp.json().catch(() => ({}));
@@ -5175,14 +5182,10 @@ async function _adminAddUser() {
       if (btn) btn.disabled = false;
       return;
     }
-    const tmpPw = data.temp_password || data.user?.temp_password;
-    if (tmpPw) {
-      alert(`User created.\n\nTemporary password for ${username}:\n\n${tmpPw}\n\nShare this with the user; they must change it on first login.`);
-    } else {
-      if (msgEl) { msgEl.textContent = `User ${username} added.`; msgEl.className = "admin-msg ok"; }
-    }
+    if (msgEl) { msgEl.textContent = `User ${username} created. They must change the password on first login.`; msgEl.className = "admin-msg ok"; }
     document.getElementById("admin-new-email").value = "";
     document.getElementById("admin-new-username").value = "";
+    document.getElementById("admin-new-temp-password").value = "";
     await _adminRefreshTable();
   } catch {
     if (msgEl) { msgEl.textContent = "Network error. Please try again."; msgEl.className = "admin-msg err"; }
