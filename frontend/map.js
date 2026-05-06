@@ -1070,6 +1070,12 @@ function renderSoldCompsPanel() {
       map.flyTo([lat, lng], Math.max(map.getZoom(), 17), { duration: 0.6 });
     });
   });
+
+  // Hydrate sold-comp filter inputs from current state. Required because the
+  // sold comps panel renders dynamically — restoring a saved area sets the
+  // soldCompsFilter state before this panel exists, so we have to push state
+  // to DOM here, every time the panel mounts.
+  _hydrateSoldCompInputsFromState();
 }
 
 async function toggleHoaLayer() {
@@ -1334,7 +1340,11 @@ async function saveCurrentArea(name) {
       filter_state: captureFilterState(),
     }),
   });
-  _savedAreasCache.unshift(_normalizeSavedAreaRow(created));
+  const normalized = _normalizeSavedAreaRow(created);
+  _savedAreasCache.unshift(normalized);
+  // Mark the just-saved area as the currently-loaded one so the Update button
+  // becomes available the moment the user tweaks any filter after saving.
+  _currentLoadedAreaId = normalized.id;
   renderSavedAreasList();
 }
 
@@ -2796,16 +2806,13 @@ function makePopupHtml(p) {
   const potentialTarget = String(potentialTargetByAccount.get(p.account_num) || p.potential_target || "").trim();
   const row = (label, val) => `<tr><td class="popup-label">${label}</td><td class="popup-val">${val || "N/A"}</td></tr>`;
 
-  let redfinListingFooter = "";
-
-  // Redfin price row + delta (active parcels only)
+  // Redfin price row + delta + listing link (active parcels only)
   let redfinPriceRow = "";
   if (p.on_redfin && p.redfin_price) {
     const urlWrap = p.redfin_url
       ? `<a href="${p.redfin_url}" target="_blank" rel="noopener noreferrer">${p.redfin_price}</a>`
       : p.redfin_price;
     redfinPriceRow = row("Redfin List Price", urlWrap);
-    if (p.redfin_url) redfinListingFooter = `<div class="popup-listing-footer"><a href="${p.redfin_url}" target="_blank" rel="noopener noreferrer">View listing</a></div>`;
 
     // Numeric delta: parse both values
     const rfNum = parseInt(String(p.redfin_price).replace(/[^0-9]/g, ""), 10);
@@ -2817,6 +2824,11 @@ function makePopupHtml(p) {
       const sign = delta >= 0 ? "+" : "";
       const color = delta >= 0 ? "#27ae60" : "#e74c3c";
       redfinPriceRow += `<tr><td class="popup-label">vs DCAD Value</td><td class="popup-val" style="color:${color}">${sign}$${Math.abs(delta).toLocaleString()} (${sign}${pct}%)</td></tr>`;
+    }
+
+    // "Listing | View listing" row to match the sold-comp section format
+    if (p.redfin_url) {
+      redfinPriceRow += row("Listing", `<a href="${p.redfin_url}" target="_blank" rel="noopener noreferrer">View listing</a>`);
     }
   }
 
@@ -2883,7 +2895,6 @@ function makePopupHtml(p) {
             <a href="#" class="parcel-target-off" data-account="${p.account_num}" style="color:#aaa;text-decoration:none;">· Clear</a>
           </div>
         </div>` : ""}
-        ${redfinListingFooter}
       </div>`;
 }
 
