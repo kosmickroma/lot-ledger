@@ -1662,11 +1662,13 @@ async function restoreSavedArea(area, options = {}) {
 
   if (rowEl) rowEl.classList.add("row-shimmer");
   _setSessionCacheNote("");
-  if (area.filter_state && typeof area.filter_state === "object") {
-    restoreFilterState(area.filter_state);
-  }
-
+  const savedFilterState = area.filter_state && typeof area.filter_state === "object"
+    ? area.filter_state
+    : null;
   clearDrawResults();
+  if (savedFilterState) {
+    restoreFilterState(savedFilterState);
+  }
   drawLayer.clearLayers();
   L.polygon(area.latlngs, {
     color: "#f1c40f",
@@ -1784,10 +1786,13 @@ async function restoreNamedSession(session, options = {}) {
   if (rowEl) rowEl.classList.add("row-shimmer");
   _currentLoadedAreaId = null;
   renderSavedAreasList();
-  if (session.filter_state && typeof session.filter_state === "object") {
-    restoreFilterState(session.filter_state);
-  }
+  const savedFilterState = session.filter_state && typeof session.filter_state === "object"
+    ? session.filter_state
+    : null;
   clearDrawResults();
+  if (savedFilterState) {
+    restoreFilterState(savedFilterState);
+  }
   drawLayer.clearLayers();
   L.polygon(session.latlngs, { color: "#f1c40f", weight: 2.5, fill: false, interactive: false }).addTo(drawLayer);
   maskLayer.clearLayers();
