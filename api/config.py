@@ -52,9 +52,11 @@ def get_settings() -> Settings:
     session_database_url = os.getenv("SESSION_DATABASE_URL", "").strip()
 
     unix_socket = os.environ.get("INSTANCE_UNIX_SOCKET", "").strip()
-    required = [("DB_NAME", db_name), ("DB_USER", db_user), ("DB_PASSWORD", db_password)]
-    if not unix_socket:
-        required.insert(0, ("DB_HOST", db_host))
+    if unix_socket:
+        # Cloud Run unix socket: DB_PASSWORD is optional (Cloud SQL Auth Proxy handles auth)
+        required = [("DB_NAME", db_name), ("DB_USER", db_user)]
+    else:
+        required = [("DB_HOST", db_host), ("DB_NAME", db_name), ("DB_USER", db_user), ("DB_PASSWORD", db_password)]
     missing = [k for k, v in required if not v]
 
     if missing:
