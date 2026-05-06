@@ -1,0 +1,50 @@
+# cloudbuild-preview.yaml
+# Manual branch preview deploy. Run from a feature-branch checkout:
+#
+#   gcloud builds submit --config cloudbuild-preview.yaml --project=lot-ledger
+#
+# Builds and deploys to the `lot-ledger-preview` Cloud Run service.
+# `lot-ledger-dev` (develop branch) is untouched.
+#
+# Prereqs (one-time): the `lot-ledger-preview` Cloud Run service must exist with
+# env vars + Cloud SQL connections matching `lot-ledger-dev`.
+# See README → "Deploying a Branch Preview" for setup.
+
+steps:
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: bash
+    args:
+      - '-c'
+      - 'gcloud auth configure-docker us-central1-docker.pkg.dev --quiet'
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - build
+      - '-t'
+      - 'us-central1-docker.pkg.dev/lot-ledger/lot-ledger-api/api:preview-$SHORT_SHA'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/lot-ledger/lot-ledger-api/api:preview'
+      - '.'
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - push
+      - '--all-tags'
+      - 'us-central1-docker.pkg.dev/lot-ledger/lot-ledger-api/api'
+
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - lot-ledger-preview
+      - '--image=us-central1-docker.pkg.dev/lot-ledger/lot-ledger-api/api:preview-$SHORT_SHA'
+      - '--region=us-central1'
+      - '--platform=managed'
+      - '--project=lot-ledger'
+      - '--timeout=3600'
+      - '--memory=1Gi'
+      - '--quiet'
+
+options:
+  logging: CLOUD_LOGGING_ONLY

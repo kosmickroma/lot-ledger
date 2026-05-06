@@ -18,7 +18,8 @@ LotLedger is a Dallas–Fort Worth parcel intelligence tool for real estate acqu
 8. [Annual Data Refresh](#annual-data-refresh)
 9. [Transferring to a New Machine](#transferring-to-a-new-machine)
 10. [Transferring to a New Google Cloud Account](#transferring-to-a-new-google-cloud-account)
-11. [Developer Reference](#developer-reference)
+11. [Deploying a Branch Preview](#deploying-a-branch-preview)
+12. [Developer Reference](#developer-reference)
 
 ---
 
@@ -344,6 +345,144 @@ psql -h NEW_HOST -U postgres -d lotledger_sessions < sessions_backup.sql
 Update `DATABASE_URL` and `SESSION_DATABASE_URL` in `.env` to point to the new host. If running on Cloud Run, update the environment variables in the Cloud Run service settings.
 
 Zero code changes required.
+
+---
+
+## Deploying a Branch Preview
+
+> Use this when you want to test a feature branch on Cloud Run without merging it to `develop`.
+> The preview lives at its own URL and runs alongside `lot-ledger-dev` (which keeps tracking `develop`).
+
+### How it works
+
+| Service | Branch | URL pattern | Auto-deploys? |
+|---|---|---|---|
+| `lot-ledger-dev` | `develop` | `https://lot-ledger-dev-…run.app` | yes (Cloud Build trigger on push) |
+| `lot-ledger-preview` | any feature branch | `https://lot-ledger-preview-…run.app` | no (manual `gcloud builds submit`) |
+
+Both services share the same Cloud SQL database. Schema migrations run on startup via `_ensure_session_schema()`, so additive migrations on a preview branch will be visible to `lot-ledger-dev` after its next pod restart. **Do not preview a branch with destructive migrations against the shared DB** — spin up a separate Cloud SQL instance first or run the migration only against a throwaway DB.
+
+### One-time setup — create the preview service
+
+You only do this once. After that, every preview deploy is a single command.
+
+#### Step 1 — Make sure you're authenticated
+
+```bash
+gcloud auth login
+gcloud config set project lot-ledger
+```
+
+#### Step 2 — Export the dev service config
+
+This grabs all the env vars, secrets, Cloud SQL connections, and IAM bindings from `lot-ledger-dev` so the preview service mirrors it exactly:
+
+```bash
+gcloud run services describe lot-ledger-dev \
+  --region us-central1 \
+  --format=export \
+  > /tmp/preview-svc.yaml
+```
+
+#### Step 3 — Edit the exported file
+
+Open `/tmp/preview-svc.yaml` in your editor and change **only** these fields:
+
+```yaml
+metadata:
+  name: lot-ledger-preview        # was: lot-ledger-dev
+spec:
+  template:
+    metadata:
+      name: lot-ledger-preview-00001-xxx   # if present, change the prefix to lot-ledger-preview-
+```
+
+Leave everything else untouched (env vars, Cloud SQL annotations, image, service account).
+
+#### Step 4 — Create the service
+
+```bash
+gcloud run services replace /tmp/preview-svc.yaml --region us-central1
+```
+
+This creates `lot-ledger-preview` with a temporary placeholder image (whatever was on `lot-ledger-dev` at export time). The first real deploy in the next section will replace that image.
+
+#### Step 5 — Make the preview URL accessible
+
+By default the new service is private. To match `lot-ledger-dev` (which is publicly reachable behind the app's own auth):
+
+```bash
+gcloud run services add-iam-policy-binding lot-ledger-preview \
+  --region us-central1 \
+  --member=allUsers \
+  --role=roles/run.invoker
+```
+
+(Skip this step if your `lot-ledger-dev` service is already locked down to specific IAM members — copy the same binding instead.)
+
+#### Step 6 — Get the preview URL
+
+```bash
+gcloud run services describe lot-ledger-preview \
+  --region us-central1 \
+  --format='value(status.url)'
+```
+
+Bookmark the URL. It stays the same across every preview deploy.
+
+### Deploying a branch — the everyday command
+
+After the one-time setup is done, this is the only thing you run:
+
+```bash
+git checkout feat/your-branch-name
+gcloud builds submit --config cloudbuild-preview.yaml --project=lot-ledger
+```
+
+Cloud Build:
+1. Builds a fresh container from the working tree
+2. Tags it `:preview-<short-sha>` and `:preview`
+3. Pushes it to Artifact Registry
+4. Deploys it to `lot-ledger-preview`
+
+Takes ~3–5 minutes. The preview URL serves the new build immediately on completion.
+
+### Checking what's currently deployed
+
+```bash
+gcloud run services describe lot-ledger-preview \
+  --region us-central1 \
+  --format='value(spec.template.spec.containers[0].image)'
+```
+
+The trailing `:preview-<sha>` tells you which commit is live.
+
+### Rolling back
+
+Either redeploy a different branch (`git checkout main && gcloud builds submit …`) or pin to a previous image:
+
+```bash
+gcloud run services update lot-ledger-preview \
+  --region us-central1 \
+  --image us-central1-docker.pkg.dev/lot-ledger/lot-ledger-api/api:preview-<old-sha>
+```
+
+### Tearing it down
+
+When you're done with branch previews for a while:
+
+```bash
+gcloud run services delete lot-ledger-preview --region us-central1
+```
+
+The service is gone, no ongoing cost. Recreate it via the one-time setup steps next time you need it.
+
+### Gotchas
+
+- **Shared DB**: see the warning above. Phase 1 of the saved-sessions feature is additive and safe. Phase 3's `session_tags` PK migration is destructive — do not preview Phase 3 against the shared DB.
+- **Env vars drift**: if you add a new env var to `lot-ledger-dev` (via the Cloud Run console or `gcloud run services update`), the preview service won't pick it up automatically. Re-run Steps 2–4 to refresh the preview's config.
+- **Auth cookies**: preview and dev have different domains, so a session cookie from one does not work on the other. Log in fresh on the preview URL.
+- **Cost**: preview is a real Cloud Run service. Idle, it's near-free. Active, it bills like dev. If you forget to tear it down, it costs the same as keeping a second dev environment around — usually pennies a day at this scale, but worth knowing.
 
 ---
 
