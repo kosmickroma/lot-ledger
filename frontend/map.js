@@ -75,6 +75,58 @@ const FILTER_INPUT_IDS = {
   exempt: "filter-exempt",
 };
 
+const NUMERIC_FILTER_INPUTS = [
+  { id: "nf-lot-min",  key: "lot_sqft_min" },
+  { id: "nf-lot-max",  key: "lot_sqft_max" },
+  { id: "nf-val-min",  key: "appr_val_min" },
+  { id: "nf-val-max",  key: "appr_val_max" },
+  { id: "nf-yr-min",   key: "yr_built_min" },
+  { id: "nf-yr-max",   key: "yr_built_max" },
+  { id: "nf-sqft-min", key: "sqft_min" },
+  { id: "nf-sqft-max", key: "sqft_max" },
+];
+
+const numericFilters = {
+  lot_sqft_min: null, lot_sqft_max: null,
+  appr_val_min: null, appr_val_max: null,
+  yr_built_min: null, yr_built_max: null,
+  sqft_min: null,     sqft_max: null,
+};
+
+function _readNumericInputs() {
+  NUMERIC_FILTER_INPUTS.forEach(({ id, key }) => {
+    const el = document.getElementById(id);
+    const raw = el ? el.value.trim() : "";
+    numericFilters[key] = raw === "" ? null : Number(raw);
+  });
+}
+
+function _clearNumericInputs() {
+  NUMERIC_FILTER_INPUTS.forEach(({ id, key }) => {
+    const el = document.getElementById(id);
+    if (el) el.value = "";
+    numericFilters[key] = null;
+  });
+}
+
+function passesNumericFilters(feature) {
+  const p = feature?.properties || {};
+  const lot = asNumber(p.lot_sqft);
+  const val = asNumber(p.appraised_val_current);
+  const yr = asNumber(p.yr_built);
+  const sqft = asNumber(p.sqft);
+
+  if (numericFilters.lot_sqft_min != null && (lot == null || lot < numericFilters.lot_sqft_min)) return false;
+  if (numericFilters.lot_sqft_max != null && (lot == null || lot > numericFilters.lot_sqft_max)) return false;
+  if (numericFilters.appr_val_min != null && (val == null || val < numericFilters.appr_val_min)) return false;
+  if (numericFilters.appr_val_max != null && (val == null || val > numericFilters.appr_val_max)) return false;
+  if (numericFilters.yr_built_min != null && (yr == null || yr < numericFilters.yr_built_min)) return false;
+  if (numericFilters.yr_built_max != null && (yr == null || yr > numericFilters.yr_built_max)) return false;
+  if (numericFilters.sqft_min != null && (sqft == null || sqft < numericFilters.sqft_min)) return false;
+  if (numericFilters.sqft_max != null && (sqft == null || sqft > numericFilters.sqft_max)) return false;
+  return true;
+}
+
 const PARCEL_LAYER_KEYS = ["active", "off_market", "vacant", "multifamily", "commercial", "exempt"];
 
 // Analysis state is initialized early because zoom-nudge logic references it
@@ -349,7 +401,8 @@ function classifyFeatureForFilter(feature) {
 
 function isFeatureVisible(feature) {
   const bucket = classifyFeatureForFilter(feature);
-  return Boolean(filterState[bucket]);
+  if (!filterState[bucket]) return false;
+  return passesNumericFilters(feature);
 }
 
 function getVisibleFeatureCounts(features) {
@@ -641,7 +694,7 @@ function renderSoldCompsPanel() {
       const bedBathText = `${beds != null ? beds : "?"}bd/${baths != null ? baths : "?"}ba`;
       const yearText = yrBuilt != null ? `${Math.round(yrBuilt)}` : "N/A";
       return `
-        <div class="sold-row" data-sold-idx="${idx}">
+        <div class="sold-row" data-sold-idx="${idx}" data-lat="${point.lat ?? ""}" data-lng="${point.lng ?? ""}">
           <div class="sold-row-top">
             <span class="sold-row-price">${price}</span>
             <span>${ppsfText}</span>
@@ -772,6 +825,15 @@ function renderSoldCompsPanel() {
       const idx = Number(rowEl.getAttribute("data-sold-idx"));
       const point = sortedForClick[idx];
       if (point) zoomToSoldComp(point);
+    });
+  });
+
+  panel.querySelectorAll(".sold-row").forEach((row) => {
+    row.addEventListener("click", () => {
+      const lat = parseFloat(row.dataset.lat);
+      const lng = parseFloat(row.dataset.lng);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+      map.flyTo([lat, lng], Math.max(map.getZoom(), 17), { duration: 0.6 });
     });
   });
 }
@@ -953,7 +1015,7 @@ function _renderSavedParcelOutline(area) {
   if (savedParcelLayers[area.account_num]) return; // already on map
   if (!area.geometry || !["Polygon", "MultiPolygon"].includes(area.geometry.type)) return;
   const layer = L.geoJSON({ type: "Feature", geometry: area.geometry, properties: {} }, {
-    style: { color: SAVED_PARCEL_COLOR, weight: 3, fill: true, fillColor: SAVED_PARCEL_COLOR, fillOpacity: 0.65, interactive: false },
+    style: { color: SAVED_PARCEL_COLOR, weight: 3, fill: false, interactive: false },
     interactive: false,
   }).addTo(savedParcelLayer);
   savedParcelLayers[area.account_num] = layer;
@@ -1658,6 +1720,26 @@ function applyMapVisibilityFilters() {
 
 loadFilters();
 syncFilterInputs();
+
+function _applyNumericFilters() {
+  _readNumericInputs();
+  if (!lastAnalysisGeojson) return;
+  const markers = viewportRenderMode
+    ? renderViewportFeatures()
+    : renderFeatures(lastAnalysisGeojson);
+  const counts = getVisibleFeatureCounts(lastAnalysisGeojson.features || []);
+  if (lastAnalysisCounts) renderSidebar(counts, markers || {});
+}
+
+NUMERIC_FILTER_INPUTS.forEach(({ id }) => {
+  document.getElementById(id)?.addEventListener("input", _applyNumericFilters);
+});
+
+document.getElementById("btn-numeric-reset")?.addEventListener("click", () => {
+  _clearNumericInputs();
+  _applyNumericFilters();
+});
+
 Object.entries(FILTER_INPUT_IDS).forEach(([key, id]) => {
   const input = document.getElementById(id);
   if (!input) return;
@@ -2054,12 +2136,13 @@ function renderFeatures(geojson) {
   geojson.features.forEach((feature) => {
     const p = feature.properties;
     const bucket = classifyFeatureForFilter(feature);
+    if (!passesNumericFilters(feature)) return;
     const targetLayer = parcelTypeLayers[bucket] || markerLayer;
     const color = getColor(feature);
     const borderColor = getBorderColor(feature);
     const hasVisibleSoldComp = Boolean(p.sold_comp) && soldLayerVisible;
     const parcelBorderColor = hasVisibleSoldComp ? SOLD_OUTLINE_COLOR : borderColor;
-    const parcelBorderWeight = hasVisibleSoldComp ? (p.on_redfin ? 2.8 : 2.4) : (p.on_redfin ? 2.2 : 1.5);
+    const parcelBorderWeight = hasVisibleSoldComp ? 3.2 : (p.on_redfin ? 2.8 : 1.5);
     if (p.lat == null || p.lng == null) return;
     const hasPolygonGeometry =
       feature.geometry?.type === "Polygon" || feature.geometry?.type === "MultiPolygon";

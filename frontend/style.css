@@ -297,6 +297,63 @@ h1 {
   accent-color: var(--gold);
 }
 
+.numeric-filter-list {
+  display: grid;
+  gap: 8px;
+}
+
+.numeric-filter-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.numeric-filter-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  letter-spacing: 0.02em;
+}
+
+.numeric-filter-inputs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.nf-input {
+  flex: 1;
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid rgba(201, 162, 79, 0.22);
+  border-radius: 6px;
+  color: #dbe0e7;
+  font-size: 11px;
+  padding: 4px 7px;
+  width: 0;
+  min-width: 0;
+  -moz-appearance: textfield;
+}
+
+.nf-input:focus {
+  outline: none;
+  border-color: rgba(201, 162, 79, 0.55);
+}
+
+.nf-input::placeholder {
+  color: rgba(255, 255, 255, 0.25);
+}
+
+.nf-input::-webkit-outer-spin-button,
+.nf-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.nf-sep {
+  color: var(--text-muted);
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
 .sold-price-label {
   background: rgba(0, 66, 37, 0.9);
   color: #f7e3a1;

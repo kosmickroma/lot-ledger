@@ -65,6 +65,46 @@
         </div>
         <p id="sold-toggle-status" class="sidebar-note"></p>
       </div>
+      <div id="numeric-filters" class="filter-card">
+        <div class="filter-card-head">
+          <p class="sidebar-label">Property Filters</p>
+          <button id="btn-numeric-reset" class="filter-reset-btn" type="button">Reset</button>
+        </div>
+        <div class="numeric-filter-list">
+          <div class="numeric-filter-row">
+            <span class="numeric-filter-label">Lot Size (sqft)</span>
+            <div class="numeric-filter-inputs">
+              <input type="number" id="nf-lot-min" placeholder="Min" class="nf-input" min="0">
+              <span class="nf-sep">–</span>
+              <input type="number" id="nf-lot-max" placeholder="Max" class="nf-input" min="0">
+            </div>
+          </div>
+          <div class="numeric-filter-row">
+            <span class="numeric-filter-label">Appraised Value</span>
+            <div class="numeric-filter-inputs">
+              <input type="number" id="nf-val-min" placeholder="Min" class="nf-input" min="0">
+              <span class="nf-sep">–</span>
+              <input type="number" id="nf-val-max" placeholder="Max" class="nf-input" min="0">
+            </div>
+          </div>
+          <div class="numeric-filter-row">
+            <span class="numeric-filter-label">Year Built</span>
+            <div class="numeric-filter-inputs">
+              <input type="number" id="nf-yr-min" placeholder="Min" class="nf-input" min="1800" max="2030">
+              <span class="nf-sep">–</span>
+              <input type="number" id="nf-yr-max" placeholder="Max" class="nf-input" min="1800" max="2030">
+            </div>
+          </div>
+          <div class="numeric-filter-row">
+            <span class="numeric-filter-label">Building Sqft</span>
+            <div class="numeric-filter-inputs">
+              <input type="number" id="nf-sqft-min" placeholder="Min" class="nf-input" min="0">
+              <span class="nf-sep">–</span>
+              <input type="number" id="nf-sqft-max" placeholder="Max" class="nf-input" min="0">
+            </div>
+          </div>
+        </div>
+      </div>
       <div class="hidden" aria-hidden="true">
         <input type="checkbox" id="toggle-redfin">
         <p id="redfin-toggle-status"></p>
