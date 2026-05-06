@@ -116,6 +116,18 @@ function formatNumberWithCommas(value) {
   return Math.round(n).toLocaleString("en-US");
 }
 
+// -- Auth helpers ----------------------------------------------------------
+// Reads the ll_csrf cookie set by the server middleware.
+// The double-submit pattern: send the same value in X-CSRF-Token header.
+function getCsrfToken() {
+  const match = document.cookie.match(/(?:^|;\s*)ll_csrf=([^;]+)/);
+  return match ? decodeURIComponent(match[1]) : "";
+}
+
+function authHeaders() {
+  return { "X-CSRF-Token": getCsrfToken() };
+}
+
 function _readNumericInputs() {
   NUMERIC_FILTER_INPUTS.forEach(({ id, key }) => {
     const el = document.getElementById(id);
@@ -2409,7 +2421,7 @@ function persistSingleTag(accountNum, field, value) {
   if (!currentJobId || !accountNum) return;
   fetch("/api/tags/set", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify({
       job_id: currentJobId,
       account_num: accountNum,
@@ -2714,7 +2726,7 @@ async function postJsonWithRetry(endpoint, payload, options = {}) {
     try {
       resp = await fetch(endpoint, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...authHeaders() },
         body: JSON.stringify(payload),
         signal,
       });
@@ -2977,7 +2989,7 @@ async function persistTagStateForExport() {
   try {
     resp = await fetch(`/api/job/${currentJobId}/verification`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...authHeaders() },
       body: JSON.stringify({ verifications: payload, potential_targets: targetPayload }),
     });
   } catch {
@@ -3001,7 +3013,7 @@ async function persistTagStateForExport() {
     try {
       const retry = await fetch(`/api/job/${currentJobId}/verification`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...authHeaders() },
         body: JSON.stringify({ verifications: payload, potential_targets: targetPayload }),
       });
       return retry.ok;
@@ -3558,3 +3570,468 @@ map.on("popupopen", (e) => {
 
 renderSavedAreasList();
 _restoreAllSavedParcelOutlines();
+
+// =============================================================================
+// Auth UI — login modal, user bar, admin panel
+// All state changes from the server (401, 403 FORCE_PASSWORD_CHANGE) are handled
+// globally here. Existing API calls just throw/catch normally; this layer catches
+// the signals and reroutes to the correct modal state.
+// =============================================================================
+
+let _currentUser = null;        // null = not logged in, object = logged-in user dict
+let _authDropdownOpen = false;  // tracks whether the username dropdown is expanded
+
+// ---------------------------------------------------------------------------
+// Helpers to show/hide the modal
+// ---------------------------------------------------------------------------
+function _showAuthModal() {
+  document.getElementById("auth-modal").classList.remove("hidden");
+}
+
+function _hideAuthModal() {
+  document.getElementById("auth-modal").classList.add("hidden");
+  document.getElementById("auth-modal-box").innerHTML = "";
+}
+
+// Render an error string into an .auth-error element (by id).
+function _setAuthError(elId, msg) {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  el.textContent = msg || "";
+  el.classList.toggle("hidden", !msg);
+}
+
+// Set a submit button's disabled+text state during async work.
+function _setAuthBusy(btnId, busy, label = "Sign In") {
+  const btn = document.getElementById(btnId);
+  if (!btn) return;
+  btn.disabled = busy;
+  btn.textContent = busy ? "Please wait…" : label;
+}
+
+// ---------------------------------------------------------------------------
+// Show login form (modal state 1)
+// ---------------------------------------------------------------------------
+function _showLoginForm(errorMsg = "") {
+  const box = document.getElementById("auth-modal-box");
+  box.className = "auth-modal-box";
+  box.innerHTML = `
+    <span class="auth-modal-title">Sign In to Lot Ledger</span>
+    <span class="auth-modal-subtitle">Enter your credentials to continue.</span>
+    <form id="auth-login-form" class="auth-form" autocomplete="on">
+      <div class="auth-field">
+        <label for="auth-email">Email</label>
+        <input type="email" id="auth-email" name="email" autocomplete="username" required placeholder="you@example.com">
+      </div>
+      <div class="auth-field">
+        <label for="auth-password">Password</label>
+        <input type="password" id="auth-password" name="password" autocomplete="current-password" required>
+      </div>
+      <p id="auth-login-error" class="auth-error${errorMsg ? "" : " hidden"}">${errorMsg}</p>
+      <button type="submit" id="auth-login-btn" class="auth-submit-btn">Sign In</button>
+    </form>`;
+  _showAuthModal();
+
+  document.getElementById("auth-login-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const email = document.getElementById("auth-email").value.trim();
+    const password = document.getElementById("auth-password").value;
+    _setAuthError("auth-login-error", "");
+    _setAuthBusy("auth-login-btn", true, "Sign In");
+
+    try {
+      const resp = await fetch("/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ email, password }),
+        credentials: "same-origin",
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (resp.ok) {
+        _hideAuthModal();
+        _currentUser = data.user || data;
+        _renderUserBar(_currentUser);
+        if (data.force_password_change) {
+          _showChangePasswordForm(true);
+        }
+      } else {
+        const msg = data?.detail || "Login failed. Check your credentials.";
+        _setAuthError("auth-login-error", msg);
+        _setAuthBusy("auth-login-btn", false, "Sign In");
+      }
+    } catch {
+      _setAuthError("auth-login-error", "Network error. Please try again.");
+      _setAuthBusy("auth-login-btn", false, "Sign In");
+    }
+  });
+
+  // Autofocus email field
+  requestAnimationFrame(() => document.getElementById("auth-email")?.focus());
+}
+
+// ---------------------------------------------------------------------------
+// Show change-password form (modal state 2)
+// forced=true → no close button, app is locked until done
+// ---------------------------------------------------------------------------
+function _showChangePasswordForm(forced = false) {
+  const box = document.getElementById("auth-modal-box");
+  box.className = "auth-modal-box";
+  box.innerHTML = `
+    ${forced ? "" : `<div class="auth-modal-close-row">
+      <button class="auth-modal-close-btn" id="auth-close-chpw" title="Cancel">×</button>
+    </div>`}
+    <span class="auth-modal-title">${forced ? "Set a New Password" : "Change Password"}</span>
+    <span class="auth-modal-subtitle">${forced ? "You must set a new password before continuing." : "Choose a new password for your account."}</span>
+    <form id="auth-chpw-form" class="auth-form" autocomplete="off">
+      <div class="auth-field">
+        <label>Current Password</label>
+        <input type="password" id="auth-chpw-current" autocomplete="current-password" required>
+      </div>
+      <div class="auth-field">
+        <label>New Password</label>
+        <input type="password" id="auth-chpw-new" autocomplete="new-password" required>
+      </div>
+      <div class="auth-field">
+        <label>Confirm New Password</label>
+        <input type="password" id="auth-chpw-confirm" autocomplete="new-password" required>
+      </div>
+      <p id="auth-chpw-error" class="auth-error hidden"></p>
+      <button type="submit" id="auth-chpw-btn" class="auth-submit-btn">Update Password</button>
+    </form>`;
+  _showAuthModal();
+
+  document.getElementById("auth-close-chpw")?.addEventListener("click", () => {
+    _hideAuthModal();
+  });
+
+  document.getElementById("auth-chpw-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const current_password = document.getElementById("auth-chpw-current").value;
+    const new_password = document.getElementById("auth-chpw-new").value;
+    const confirm = document.getElementById("auth-chpw-confirm").value;
+
+    if (new_password !== confirm) {
+      _setAuthError("auth-chpw-error", "New passwords do not match.");
+      return;
+    }
+    if (new_password.length < 10) {
+      _setAuthError("auth-chpw-error", "New password must be at least 10 characters.");
+      return;
+    }
+
+    _setAuthError("auth-chpw-error", "");
+    _setAuthBusy("auth-chpw-btn", true, "Update Password");
+
+    try {
+      const resp = await fetch("/auth/change-password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ current_password, new_password }),
+        credentials: "same-origin",
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (resp.ok) {
+        _currentUser = data.user || _currentUser;
+        if (_currentUser) _currentUser.force_password_change = false;
+        _renderUserBar(_currentUser);
+        _hideAuthModal();
+      } else {
+        _setAuthError("auth-chpw-error", data?.detail || "Password change failed. Please try again.");
+        _setAuthBusy("auth-chpw-btn", false, "Update Password");
+      }
+    } catch {
+      _setAuthError("auth-chpw-error", "Network error. Please try again.");
+      _setAuthBusy("auth-chpw-btn", false, "Update Password");
+    }
+  });
+
+  requestAnimationFrame(() => document.getElementById("auth-chpw-current")?.focus());
+}
+
+// ---------------------------------------------------------------------------
+// Show admin user management panel (modal state 3)
+// ---------------------------------------------------------------------------
+async function _showAdminPanel() {
+  const box = document.getElementById("auth-modal-box");
+  box.className = "auth-modal-box wide";
+  box.innerHTML = `
+    <div class="auth-modal-close-row">
+      <button class="auth-modal-close-btn" id="auth-close-admin" title="Close">×</button>
+    </div>
+    <span class="auth-modal-title">User Management</span>
+    <p class="admin-section-title">Members</p>
+    <div id="admin-user-table-wrap">Loading…</div>
+    <p class="admin-section-title">Add New User</p>
+    <div class="admin-add-form">
+      <input type="email" id="admin-new-email" placeholder="Email" autocomplete="off">
+      <input type="text"  id="admin-new-username" placeholder="Username" autocomplete="off">
+      <select id="admin-new-role">
+        <option value="member">Member</option>
+        <option value="owner">Owner</option>
+      </select>
+    </div>
+    <div style="margin-top:8px; display:flex; gap:8px; align-items:center;">
+      <button id="admin-add-btn" class="admin-add-btn">+ Add User</button>
+      <p id="admin-add-msg" class="admin-msg"></p>
+    </div>`;
+  _showAuthModal();
+
+  document.getElementById("auth-close-admin").addEventListener("click", _hideAuthModal);
+  document.getElementById("admin-add-btn").addEventListener("click", _adminAddUser);
+
+  await _adminRefreshTable();
+}
+
+async function _adminRefreshTable() {
+  const wrap = document.getElementById("admin-user-table-wrap");
+  if (!wrap) return;
+  try {
+    const resp = await fetch("/admin/users", { credentials: "same-origin" });
+    if (!resp.ok) { wrap.textContent = "Failed to load users."; return; }
+    const data = await resp.json();
+    const users = Array.isArray(data.users) ? data.users : [];
+    if (!users.length) { wrap.textContent = "No users found."; return; }
+
+    const isSelf = (u) => u.id === _currentUser?.id;
+    const isDev  = (u) => u.role === "developer";
+    const selfRole = _currentUser?.role || "";
+
+    const rows = users.map(u => {
+      const statusDot = `<span class="admin-status-dot ${u.is_active ? "active" : "disabled"}"></span>`;
+      const roleBadge = `<span class="role-badge ${u.role}">${u.role}</span>`;
+      let actions = "—";
+      if (!isDev(u)) {
+        const disableBtn = selfRole === "developer" || (selfRole === "owner" && !isSelf(u))
+          ? `<button class="admin-action-btn danger" data-action="${u.is_active ? "disable" : "enable"}" data-uid="${u.id}" data-uname="${_esc(u.username)}">${u.is_active ? "Disable" : "Enable"}</button>`
+          : "";
+        const resetBtn = selfRole === "developer" || (selfRole === "owner" && !isSelf(u))
+          ? `<button class="admin-action-btn" data-action="reset" data-uid="${u.id}" data-uname="${_esc(u.username)}">Reset Pw</button>`
+          : "";
+        actions = (disableBtn + resetBtn) || "—";
+      }
+      return `<tr>
+        <td>${statusDot}${_esc(u.username)}</td>
+        <td>${_esc(u.email)}</td>
+        <td>${roleBadge}</td>
+        <td>${actions}</td>
+      </tr>`;
+    }).join("");
+
+    wrap.innerHTML = `
+      <table class="admin-user-table">
+        <thead><tr><th>User</th><th>Email</th><th>Role</th><th>Actions</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+
+    wrap.querySelectorAll("[data-action]").forEach(btn => {
+      btn.addEventListener("click", () => _adminAction(btn.dataset.action, btn.dataset.uid, btn.dataset.uname, btn));
+    });
+  } catch {
+    wrap.textContent = "Error loading users.";
+  }
+}
+
+async function _adminAction(action, uid, uname, btn) {
+  btn.disabled = true;
+  const endpoint = action === "reset"
+    ? `/admin/users/${uid}/reset-password`
+    : `/admin/users/${uid}/${action}`;
+
+  try {
+    const resp = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      credentials: "same-origin",
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      alert(data?.detail || `Action failed.`);
+      btn.disabled = false;
+      return;
+    }
+    if (action === "reset" && data.temp_password) {
+      alert(`Temporary password for ${uname}:\n\n${data.temp_password}\n\nShare this with the user; they must change it on first login.`);
+    }
+    await _adminRefreshTable();
+  } catch {
+    alert("Network error. Please try again.");
+    btn.disabled = false;
+  }
+}
+
+async function _adminAddUser() {
+  const email    = document.getElementById("admin-new-email")?.value.trim();
+  const username = document.getElementById("admin-new-username")?.value.trim();
+  const role     = document.getElementById("admin-new-role")?.value;
+  const msgEl    = document.getElementById("admin-add-msg");
+
+  if (!email || !username) {
+    if (msgEl) { msgEl.textContent = "Email and username are required."; msgEl.className = "admin-msg err"; }
+    return;
+  }
+
+  if (msgEl) { msgEl.textContent = ""; msgEl.className = "admin-msg"; }
+  const btn = document.getElementById("admin-add-btn");
+  if (btn) btn.disabled = true;
+
+  try {
+    const resp = await fetch("/admin/users", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify({ email, username, role }),
+      credentials: "same-origin",
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      if (msgEl) { msgEl.textContent = data?.detail || "Failed to add user."; msgEl.className = "admin-msg err"; }
+      if (btn) btn.disabled = false;
+      return;
+    }
+    const tmpPw = data.temp_password || data.user?.temp_password;
+    if (tmpPw) {
+      alert(`User created.\n\nTemporary password for ${username}:\n\n${tmpPw}\n\nShare this with the user; they must change it on first login.`);
+    } else {
+      if (msgEl) { msgEl.textContent = `User ${username} added.`; msgEl.className = "admin-msg ok"; }
+    }
+    document.getElementById("admin-new-email").value = "";
+    document.getElementById("admin-new-username").value = "";
+    await _adminRefreshTable();
+  } catch {
+    if (msgEl) { msgEl.textContent = "Network error. Please try again."; msgEl.className = "admin-msg err"; }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// User bar in sidebar header
+// ---------------------------------------------------------------------------
+function _renderUserBar(user) {
+  const bar = document.getElementById("auth-user-bar");
+  if (!bar) return;
+  if (!user) {
+    bar.innerHTML = `<button class="auth-signin-btn" id="auth-open-login">Sign In</button>`;
+    bar.querySelector("#auth-open-login").addEventListener("click", () => _showLoginForm());
+    return;
+  }
+  const canManage = user.role === "developer" || user.role === "owner";
+  bar.innerHTML = `
+    <div style="position:relative;">
+      <button class="auth-username-btn" id="auth-user-menu-btn" title="Account menu">${_esc(user.username)}</button>
+      <div id="auth-dropdown" class="auth-dropdown hidden">
+        <button class="auth-dropdown-item" id="auth-menu-chpw">Change Password</button>
+        ${canManage ? `<button class="auth-dropdown-item" id="auth-menu-admin">Manage Users</button>` : ""}
+        <div class="auth-dropdown-divider"></div>
+        <button class="auth-dropdown-item danger" id="auth-menu-signout">Sign Out</button>
+      </div>
+    </div>`;
+
+  const menuBtn = bar.querySelector("#auth-user-menu-btn");
+  const dropdown = bar.querySelector("#auth-dropdown");
+
+  menuBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    _authDropdownOpen = !_authDropdownOpen;
+    dropdown.classList.toggle("hidden", !_authDropdownOpen);
+  });
+
+  document.addEventListener("click", function _closeDropdown() {
+    if (!document.getElementById("auth-dropdown")) {
+      // bar was re-rendered; remove stale listener
+      document.removeEventListener("click", _closeDropdown);
+      return;
+    }
+    dropdown.classList.add("hidden");
+    _authDropdownOpen = false;
+  }, { once: false });
+
+  bar.querySelector("#auth-menu-chpw")?.addEventListener("click", () => {
+    dropdown.classList.add("hidden");
+    _showChangePasswordForm(false);
+  });
+  bar.querySelector("#auth-menu-admin")?.addEventListener("click", () => {
+    dropdown.classList.add("hidden");
+    _showAdminPanel();
+  });
+  bar.querySelector("#auth-menu-signout")?.addEventListener("click", () => {
+    dropdown.classList.add("hidden");
+    _doSignOut();
+  });
+}
+
+async function _doSignOut() {
+  try {
+    await fetch("/auth/logout", {
+      method: "POST",
+      headers: { ...authHeaders() },
+      credentials: "same-origin",
+    });
+  } catch { /* ignore */ }
+  _currentUser = null;
+  _renderUserBar(null);
+  _showLoginForm();
+}
+
+// ---------------------------------------------------------------------------
+// Handle 401 / FORCE_PASSWORD_CHANGE from any API response
+// Call this from any catch block where you receive a 401 resp.
+// ---------------------------------------------------------------------------
+function _handle401() {
+  _currentUser = null;
+  _renderUserBar(null);
+  _showLoginForm("Your session expired. Please sign in again.");
+}
+
+function _handleForcePasswordChange() {
+  _showChangePasswordForm(true);
+}
+
+// ---------------------------------------------------------------------------
+// Startup — check if already logged in
+// ---------------------------------------------------------------------------
+(async function initAuth() {
+  // Render the "Sign In" button immediately while we check.
+  _renderUserBar(null);
+
+  try {
+    const resp = await fetch("/auth/me", { credentials: "same-origin" });
+    if (resp.status === 401) {
+      _showLoginForm();
+      return;
+    }
+    if (resp.status === 403) {
+      const data = await resp.json().catch(() => ({}));
+      if (data?.code === "FORCE_PASSWORD_CHANGE_REQUIRED") {
+        _showLoginForm("Your session is active but requires a password change.");
+      } else {
+        _showLoginForm();
+      }
+      return;
+    }
+    if (resp.ok) {
+      const data = await resp.json().catch(() => ({}));
+      _currentUser = data.user || data;
+      _renderUserBar(_currentUser);
+      if (_currentUser?.force_password_change) {
+        _showChangePasswordForm(true);
+      }
+    } else {
+      _showLoginForm();
+    }
+  } catch {
+    // Offline/network error — show login form so user knows something is wrong.
+    _showLoginForm("Could not reach server. Check your connection.");
+  }
+})();
+
+// ---------------------------------------------------------------------------
+// Tiny XSS-safe string escape for dynamic HTML above
+// ---------------------------------------------------------------------------
+function _esc(str) {
+  return String(str || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}

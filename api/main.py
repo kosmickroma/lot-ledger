@@ -251,10 +251,13 @@ def _finalize_user_scoping() -> None:
             cur.execute("UPDATE session_tags SET user_id = %s WHERE user_id IS NULL", (owner_id,))
             cur.execute("UPDATE saved_parcels SET user_id = %s WHERE user_id IS NULL", (owner_id,))
 
-            cur.execute("ALTER TABLE saved_areas ALTER COLUMN user_id SET NOT NULL")
-            cur.execute("ALTER TABLE analysis_sessions ALTER COLUMN user_id SET NOT NULL")
-            cur.execute("ALTER TABLE session_tags ALTER COLUMN user_id SET NOT NULL")
-            cur.execute("ALTER TABLE saved_parcels ALTER COLUMN user_id SET NOT NULL")
+            # SET NOT NULL is idempotent on Postgres (no error if already constrained),
+            # but wrap each in a savepoint so a future driver version never stalls the startup.
+            for tbl in ("saved_areas", "analysis_sessions", "session_tags", "saved_parcels"):
+                try:
+                    cur.execute(f"ALTER TABLE {tbl} ALTER COLUMN user_id SET NOT NULL")
+                except Exception:
+                    conn.rollback()
         conn.commit()
     finally:
         release_session_conn(conn)
@@ -1899,7 +1902,8 @@ async def get_parcel_detail(county: str, account_num: str) -> dict[str, Any]:
 
 
 @app.post("/api/analyze")
-async def analyze(request: AnalyzeRequest, user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
+async def analyze(request: AnalyzeRequest, req: Request, user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
+    require_csrf(req)
     polygon = request.polygon
     include_redfin = bool(request.include_redfin)
     include_sold = bool(request.include_sold)
@@ -2129,8 +2133,9 @@ async def analyze(request: AnalyzeRequest, user: dict[str, Any] = Depends(get_cu
 
 
 @app.post("/api/merge-jobs")
-async def merge_jobs(request: MergeJobsRequest, user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
+async def merge_jobs(request: MergeJobsRequest, req: Request, user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
     """Merge rows from multiple tile job_ids into a single exportable job."""
+    require_csrf(req)
     merged_rows: list[dict[str, Any]] = []
     merged_redfin: dict[str, Any] = {}
     merged_sold_points: list[dict[str, Any]] = []
@@ -2181,7 +2186,8 @@ async def merge_jobs(request: MergeJobsRequest, user: dict[str, Any] = Depends(g
 
 
 @app.post("/api/job/{job_id}/verification")
-async def save_verification(job_id: str, request: VerificationRequest, user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
+async def save_verification(job_id: str, request: VerificationRequest, req: Request, user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
+    require_csrf(req)
     job = _get_job(job_id, int(user["id"]))
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -2291,7 +2297,8 @@ async def save_verification(job_id: str, request: VerificationRequest, user: dic
 
 
 @app.post("/api/tags/set")
-async def set_tag(payload: dict[str, Any] = Body(...), user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
+async def set_tag(req: Request, payload: dict[str, Any] = Body(...), user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
+    require_csrf(req)
     job_id = str(payload.get("job_id") or "").strip()
     account_num = str(payload.get("account_num") or "").strip()
     field = str(payload.get("field") or "").strip()
@@ -2781,7 +2788,8 @@ async def list_saved_areas(user: dict[str, Any] = Depends(get_current_user)) -> 
 
 
 @app.post("/api/areas")
-async def create_saved_area(request: SavedAreaCreateRequest, user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
+async def create_saved_area(request: SavedAreaCreateRequest, req: Request, user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
+    require_csrf(req)
     name = str(request.name or "").strip()
     if not name:
         raise HTTPException(status_code=400, detail="Area name is required")

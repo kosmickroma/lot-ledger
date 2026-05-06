@@ -18,7 +18,10 @@
   <div class="app-shell">
     <aside class="sidebar" id="sidebar">
       <div class="sidebar-header">
-        <p class="eyebrow">Lot Ledger</p>
+        <div class="sidebar-header-row">
+          <p class="eyebrow">Lot Ledger</p>
+          <div id="auth-user-bar" class="auth-user-bar"></div>
+        </div>
         <h1>Parcel Analysis</h1>
       </div>
       <div id="map-filters" class="filter-card">
@@ -162,5 +165,10 @@
   <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js" crossorigin=""></script>
   <script src="https://unpkg.com/protomaps-leaflet@3.1.2/dist/protomaps-leaflet.min.js"></script>
   <script src="/map.js"></script>
+
+  <!-- Auth modal — rendered / populated entirely by map.js -->
+  <div id="auth-modal" class="auth-modal-overlay hidden" role="dialog" aria-modal="true">
+    <div id="auth-modal-box" class="auth-modal-box"></div>
+  </div>
 </body>
 </html>
