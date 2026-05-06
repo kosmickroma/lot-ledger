@@ -18,7 +18,7 @@ const COLORS = {
   single_family: "#2980b9",
   off_market: "#2980b9",
   vacant: "#27ae60",
-  multifamily: "#6B7E8F",
+  multifamily: "#7B68A0",
   commercial: "#8B7355",
   exempt: "#95a5a6",
   active: "#D92228",
@@ -28,7 +28,7 @@ const BORDER_COLORS = {
   single_family: "#1a6a9a",
   off_market: "#1a6a9a",
   vacant: "#1e8449",
-  multifamily: "#566a77",
+  multifamily: "#5C4D7A",
   commercial: "#6e5c42",
   exempt: "#7f8c8d",
   active: "#a3161a",
@@ -2075,7 +2075,7 @@ function renderVerificationBadge(accountNum, lat, lng, status) {
     html: status === "Yes" ? "✓" : "✗",
     iconSize: [24, 24],
   });
-  const marker = L.marker([lat, lng], { icon: badgeIcon }).addTo(verificationBadgeLayer);
+  const marker = L.marker([lat, lng], { icon: badgeIcon, interactive: false }).addTo(verificationBadgeLayer);
   verificationBadgeMarkers.set(accountNum, marker);
 }
 
@@ -2094,7 +2094,7 @@ function renderTargetBadge(accountNum, lat, lng) {
     html: "★",
     iconSize: [24, 24],
   });
-  const marker = L.marker([lat, lng], { icon: badgeIcon }).addTo(targetBadgeLayer);
+  const marker = L.marker([lat, lng], { icon: badgeIcon, interactive: false }).addTo(targetBadgeLayer);
   targetBadgeMarkers.set(accountNum, marker);
 }
 
