@@ -3932,8 +3932,13 @@ async function refreshExpiredJob() {
   }
 }
 
-async function persistTagStateForExport() {
+async function persistTagStateForExport(statusUpdater = null) {
+  const setStatus = (text) => {
+    if (typeof statusUpdater === "function") statusUpdater(text);
+  };
+
   if (!currentJobId) return false;
+  setStatus("Saving tags…");
 
   const payload = {};
   verificationByAccount.forEach((value, accountNum) => {
@@ -3958,16 +3963,12 @@ async function persistTagStateForExport() {
   if (resp.ok) return true;
   if (resp.status !== 404) return false;
 
-  const downloadBtn = document.getElementById("btn-download");
-  const previousLabel = downloadBtn?.textContent || "Download CSV";
-  if (downloadBtn) {
-    downloadBtn.disabled = true;
-    downloadBtn.textContent = "Re-fetching results, please wait…";
-  }
+  setStatus("Session expired - re-running analysis…");
 
   try {
     const refreshed = await refreshExpiredJob();
     if (!refreshed) return false;
+    setStatus("Saving tags…");
 
     try {
       const retry = await fetch(`/api/job/${currentJobId}/verification`, {
@@ -3979,12 +3980,23 @@ async function persistTagStateForExport() {
     } catch {
       return false;
     }
-  } finally {
-    if (downloadBtn) {
-      downloadBtn.disabled = false;
-      downloadBtn.textContent = previousLabel;
-    }
   }
+}
+
+let _downloadInFlight = false;
+
+function _setDownloadButtonState(label, disabled = true) {
+  const btn = document.getElementById("btn-download");
+  if (!btn) return;
+  btn.textContent = label;
+  btn.disabled = disabled;
+}
+
+function _resetDownloadButtonState() {
+  const btn = document.getElementById("btn-download");
+  if (!btn) return;
+  btn.textContent = "Download CSV";
+  btn.disabled = false;
 }
 
 map.on("draw:created", async (e) => {
@@ -4211,22 +4223,46 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
-document.getElementById("btn-download").addEventListener("click", () => {
-  (async () => {
-    if (!currentJobId) return;
+document.getElementById("btn-download").addEventListener("click", async () => {
+  if (_downloadInFlight) return;
+  if (!currentJobId) return;
 
-    const persisted = await persistTagStateForExport();
+  _downloadInFlight = true;
+  let downloadTriggered = false;
+  try {
+    _setDownloadButtonState("Preparing CSV…", true);
+
+    const persisted = await persistTagStateForExport((statusText) => {
+      _setDownloadButtonState(statusText, true);
+    });
     if (!persisted) {
+      _resetDownloadButtonState();
       alert("Your analysis session expired. Please re-run the draw/analyze step, then export again.");
       return;
     }
 
+    _setDownloadButtonState("Name export…", true);
     const suggested = makeDefaultCsvName();
     const entered = window.prompt("Name this CSV export:", suggested);
-    if (entered === null) return;
+    if (entered === null) {
+      _resetDownloadButtonState();
+      return;
+    }
+
     const filename = normalizeCsvFilename(entered);
+    _setDownloadButtonState("Starting download…", true);
     window.location.href = `/api/download/${currentJobId}?filename=${encodeURIComponent(filename)}`;
-  })();
+    downloadTriggered = true;
+    setTimeout(() => {
+      _downloadInFlight = false;
+      _resetDownloadButtonState();
+    }, 4000);
+  } finally {
+    if (!downloadTriggered) {
+      _downloadInFlight = false;
+      _resetDownloadButtonState();
+    }
+  }
 });
 
 function _openSaveAreaInlineInput() {
