@@ -840,13 +840,14 @@ function renderSoldCompsPanel() {
     applyAndRenderSoldFilters();
   };
 
-  soldDaysMaxInput?.addEventListener("input", applySoldCompInputFilters);
+  soldDaysMaxInput?.addEventListener("blur", applySoldCompInputFilters);
   soldDaysMaxInput?.addEventListener("change", applySoldCompInputFilters);
-  soldYrMinInput?.addEventListener("input", applySoldCompInputFilters);
-  soldYrMaxInput?.addEventListener("input", applySoldCompInputFilters);
+  soldYrMinInput?.addEventListener("blur", applySoldCompInputFilters);
+  soldYrMaxInput?.addEventListener("blur", applySoldCompInputFilters);
+  soldYrMinInput?.addEventListener("change", applySoldCompInputFilters);
+  soldYrMaxInput?.addEventListener("change", applySoldCompInputFilters);
 
   [soldPriceMinInput, soldPriceMaxInput].forEach((inputEl) => {
-    inputEl?.addEventListener("input", applySoldCompInputFilters);
     inputEl?.addEventListener("blur", () => {
       normalizeShorthandInput(inputEl);
       applySoldCompInputFilters();
@@ -1160,7 +1161,7 @@ async function restoreSavedArea(area) {
 
   if (map.hasLayer(browseLayer)) browseLayer.remove();
 
-  const includeRedfin = false;
+  const includeRedfin = true;
   const includeSold = Boolean(filterState.sold);
   document.getElementById("sidebar-instructions")?.classList.add("hidden");
   document.getElementById("sidebar-results")?.classList.add("hidden");
@@ -2943,7 +2944,7 @@ async function runAnalysis(polygon, includeRedfin, includeSold, options = {}) {
 
 async function refreshExpiredJob() {
   if (!lastPolygon || lastPolygon.length < 3) return false;
-  const includeRedfin = false;
+  const includeRedfin = true;
   const includeSold = Boolean(filterState.sold);
   try {
     const data = await runAnalysis(lastPolygon, includeRedfin, includeSold);
@@ -3028,7 +3029,7 @@ map.on("draw:created", async (e) => {
   document.getElementById("sidebar-instructions").classList.add("hidden");
   document.getElementById("sidebar-results").classList.add("hidden");
   document.getElementById("sidebar-loading").classList.remove("hidden");
-  const includeRedfin = false;
+  const includeRedfin = true;
   const includeSold = Boolean(filterState.sold);
   document.getElementById("redfin-status").textContent = "Running analysis...";
   drawLayer.addLayer(e.layer);
@@ -3075,7 +3076,7 @@ map.on("draw:created", async (e) => {
     } else {
       map.removeLayer(soldLayer);
     }
-    lastIncludedRedfin = false;
+    lastIncludedRedfin = true;
     lastIncludedSold = includeSold;
     lastSoldPoints = Array.isArray(data.sold_points) ? data.sold_points : [];
     allSoldPointsRef = [...lastSoldPoints];
