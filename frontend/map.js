@@ -1737,6 +1737,19 @@ async function restoreSavedArea(area, options = {}) {
 }
 
 function _formatFilterDiffChip(area) {
+  const st = area?.filter_state;
+  if (!st || st.v !== 1) return "";
+  const chips = [];
+  const n = st.numeric || {};
+  if (n.lot_sqft_min != null) chips.push(`Lot ≥ ${(Number(n.lot_sqft_min) / 43560).toFixed(2)}ac`);
+  if (n.yr_built_min != null || n.yr_built_max != null) chips.push(`Built ${n.yr_built_min ?? "?"}–${n.yr_built_max ?? "?"}`);
+  const s = st.sold || {};
+  if (s.maxDaysAgo != null && s.maxDaysAgo !== DEFAULT_SOLD_COMPS_FILTER.maxDaysAgo) chips.push(`Sold ${s.maxDaysAgo}d`);
+  if (!chips.length) return "";
+  const extraCount = Object.values(n).filter((v) => v != null).length + Object.values(s).filter((v) => v != null).length - chips.length;
+  return `${chips.slice(0, 2).join(" · ")}${extraCount > 0 ? ` · +${extraCount}` : ""}`;
+}
+
 async function restoreNamedSession(session, options = {}) {
   const rowEl = options.rowEl || null;
   if (!session.latlngs || session.latlngs.length < 3) {
