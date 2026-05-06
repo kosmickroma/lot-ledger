@@ -25,7 +25,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote_plus
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Request, Response
@@ -162,6 +162,8 @@ def _ensure_session_schema() -> None:
                     area_id     TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
                     name        TEXT NOT NULL,
                     polygon     JSONB NOT NULL,
+                    filter_state JSONB,
+                    type        TEXT NOT NULL DEFAULT 'area' CHECK (type IN ('area', 'location')),
                     user_id     INTEGER REFERENCES users(id),
                     created_at  TIMESTAMPTZ DEFAULT now(),
                     updated_at  TIMESTAMPTZ DEFAULT now()
@@ -176,6 +178,8 @@ def _ensure_session_schema() -> None:
                     parcel_count    INTEGER,
                     county_coverage TEXT[],
                     saved_area_id   TEXT REFERENCES saved_areas(area_id) ON DELETE SET NULL,
+                    name            TEXT,
+                    filter_state    JSONB,
                     user_id         INTEGER REFERENCES users(id),
                     created_at      TIMESTAMPTZ DEFAULT now(),
                     last_accessed   TIMESTAMPTZ DEFAULT now(),
@@ -223,7 +227,30 @@ def _ensure_session_schema() -> None:
                 """
             )
             cur.execute("ALTER TABLE saved_areas ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)")
+            cur.execute("ALTER TABLE saved_areas ADD COLUMN IF NOT EXISTS filter_state JSONB")
+            cur.execute("ALTER TABLE saved_areas ADD COLUMN IF NOT EXISTS type TEXT")
+            cur.execute("UPDATE saved_areas SET type = 'area' WHERE type IS NULL OR type = ''")
+            cur.execute("ALTER TABLE saved_areas ALTER COLUMN type SET DEFAULT 'area'")
+            cur.execute("ALTER TABLE saved_areas ALTER COLUMN type SET NOT NULL")
+            cur.execute(
+                """
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1
+                        FROM pg_constraint
+                        WHERE conname = 'saved_areas_type_check'
+                    ) THEN
+                        ALTER TABLE saved_areas
+                        ADD CONSTRAINT saved_areas_type_check CHECK (type IN ('area', 'location'));
+                    END IF;
+                END$$;
+                """
+            )
             cur.execute("ALTER TABLE analysis_sessions ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)")
+            cur.execute("ALTER TABLE analysis_sessions ADD COLUMN IF NOT EXISTS name TEXT")
+            cur.execute("ALTER TABLE analysis_sessions ADD COLUMN IF NOT EXISTS filter_state JSONB")
+            cur.execute("ALTER TABLE analysis_sessions ALTER COLUMN expires_at DROP NOT NULL")
             cur.execute("ALTER TABLE session_tags ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)")
             cur.execute("ALTER TABLE saved_parcels ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)")
             cur.execute("ALTER TABLE cached_jobs ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)")
@@ -232,6 +259,13 @@ def _ensure_session_schema() -> None:
             cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_expires ON analysis_sessions (expires_at)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_saved_area ON analysis_sessions (saved_area_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user ON analysis_sessions (user_id)")
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_sessions_named
+                ON analysis_sessions (user_id, name)
+                WHERE name IS NOT NULL
+                """
+            )
             cur.execute("CREATE INDEX IF NOT EXISTS idx_saved_areas_user ON saved_areas (user_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_saved_parcels_user ON saved_parcels (user_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_cached_jobs_expires ON cached_jobs (expires_at)")
@@ -287,7 +321,10 @@ def _persist_cached_job_sync(
                     rows = EXCLUDED.rows,
                     sold_points = EXCLUDED.sold_points,
                     polygon = EXCLUDED.polygon,
-                    expires_at = now() + interval '{_JOB_TTL_SECONDS} seconds'
+                    expires_at = CASE
+                        WHEN cached_jobs.expires_at IS NULL THEN NULL
+                        ELSE now() + interval '{_JOB_TTL_SECONDS} seconds'
+                    END
                 """,
                 (job_id, int(user_id), Json(rows), Json(sold_points), Json(polygon)),
             )
@@ -305,7 +342,7 @@ def _load_cached_job(job_id: str) -> dict[str, Any] | None:
                                 SELECT rows, sold_points, polygon, user_id
                 FROM cached_jobs
                 WHERE job_id = %s
-                  AND expires_at > now()
+                                    AND (expires_at IS NULL OR expires_at > now())
                 """,
                 (job_id,),
             )
@@ -315,7 +352,10 @@ def _load_cached_job(job_id: str) -> dict[str, Any] | None:
             cur.execute(
                 f"""
                 UPDATE cached_jobs
-                SET expires_at = now() + interval '{_JOB_TTL_SECONDS} seconds'
+                SET expires_at = CASE
+                    WHEN expires_at IS NULL THEN NULL
+                    ELSE now() + interval '{_JOB_TTL_SECONDS} seconds'
+                END
                 WHERE job_id = %s
                 """,
                 (job_id,),
@@ -374,7 +414,10 @@ def _persist_session_sync(
                     saved_area_id = COALESCE(EXCLUDED.saved_area_id, analysis_sessions.saved_area_id),
                     user_id = EXCLUDED.user_id,
                     last_accessed = now(),
-                    expires_at = now() + interval '{_SESSION_RETENTION_DAYS} days'
+                    expires_at = CASE
+                        WHEN analysis_sessions.expires_at IS NULL THEN NULL
+                        ELSE now() + interval '{_SESSION_RETENTION_DAYS} days'
+                    END
                 """,
                 (
                     session_id,
@@ -464,7 +507,7 @@ def _load_session_polygon(session_id: str, user_id: int) -> list[list[float]] | 
                 FROM analysis_sessions
                 WHERE session_id = %s
                                     AND user_id = %s
-                  AND expires_at > now()
+                                    AND (expires_at IS NULL OR expires_at > now())
                 """,
                                 (session_id, int(user_id)),
             )
@@ -475,7 +518,10 @@ def _load_session_polygon(session_id: str, user_id: int) -> list[list[float]] | 
                 f"""
                 UPDATE analysis_sessions
                 SET last_accessed = now(),
-                    expires_at = now() + interval '{_SESSION_RETENTION_DAYS} days'
+                    expires_at = CASE
+                        WHEN expires_at IS NULL THEN NULL
+                        ELSE now() + interval '{_SESSION_RETENTION_DAYS} days'
+                    END
                 WHERE session_id = %s
                 """,
                 (session_id,),
@@ -611,11 +657,19 @@ class VerificationRequest(BaseModel):
 
 class SavedAreaCreateRequest(BaseModel):
     name: str
-    polygon: list[list[float]]
+    polygon: list[list[float]] | None = None
+    filter_state: dict[str, Any] | None = None
+    type: Literal["area", "location"] = "area"
+    lat: float | None = None
+    lng: float | None = None
 
 
-class SavedAreaRenameRequest(BaseModel):
-    name: str
+class SavedAreaUpdateRequest(BaseModel):
+    name: str | None = None
+    filter_state: dict[str, Any] | None = None
+    type: Literal["area", "location"] | None = None
+    lat: float | None = None
+    lng: float | None = None
 
 
 class LoginRequest(BaseModel):
@@ -653,6 +707,60 @@ def _serialize_user(user: dict[str, Any]) -> dict[str, Any]:
         "is_active": bool(user.get("is_active")),
         "force_password_change": bool(user.get("force_password_change")),
     }
+
+
+def _to_geojson_polygon(latlngs: list[list[float]]) -> list[list[float]]:
+    out: list[list[float]] = []
+    for pair in latlngs:
+        if not isinstance(pair, (list, tuple)) or len(pair) < 2:
+            continue
+        lat = float(pair[0])
+        lng = float(pair[1])
+        out.append([lng, lat])
+    return out
+
+
+def _to_leaflet_polygon(geojson_pairs: Any) -> list[list[float]]:
+    if not isinstance(geojson_pairs, list):
+        return []
+    out: list[list[float]] = []
+    for pair in geojson_pairs:
+        if not isinstance(pair, (list, tuple)) or len(pair) < 2:
+            continue
+        lng = float(pair[0])
+        lat = float(pair[1])
+        out.append([lat, lng])
+    return out
+
+
+def _normalize_saved_area_payload(request: SavedAreaCreateRequest | SavedAreaUpdateRequest) -> tuple[str | None, list[list[float]] | None, float | None, float | None]:
+    area_type = str(request.type or "area") if getattr(request, "type", None) else None
+    if area_type is not None and area_type not in {"area", "location"}:
+        raise HTTPException(status_code=400, detail="Invalid area type")
+
+    raw_polygon = request.polygon if isinstance(getattr(request, "polygon", None), list) else None
+    polygon_geojson: list[list[float]] | None = None
+    lat: float | None = getattr(request, "lat", None)
+    lng: float | None = getattr(request, "lng", None)
+
+    if area_type == "location":
+        if lat is not None and lng is not None:
+            polygon_geojson = [[float(lng), float(lat)]]
+        elif raw_polygon and len(raw_polygon) >= 1:
+            polygon_geojson = _to_geojson_polygon(raw_polygon)
+            if polygon_geojson:
+                lng = float(polygon_geojson[0][0])
+                lat = float(polygon_geojson[0][1])
+        else:
+            raise HTTPException(status_code=400, detail="Location requires lat/lng")
+    elif area_type == "area":
+        if raw_polygon is None or len(raw_polygon) < 3:
+            raise HTTPException(status_code=400, detail="Polygon must have at least 3 points")
+        polygon_geojson = _to_geojson_polygon(raw_polygon)
+        lat = None
+        lng = None
+
+    return area_type, polygon_geojson, lat, lng
 
 
 def _require_target_user(cur, target_user_id: int) -> dict[str, Any]:
@@ -2769,7 +2877,7 @@ async def list_saved_areas(user: dict[str, Any] = Depends(get_current_user)) -> 
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT area_id, name, polygon, created_at, updated_at
+                SELECT area_id, name, polygon, filter_state, type, created_at, updated_at
                 FROM saved_areas
                 WHERE user_id = %s
                 ORDER BY created_at DESC
@@ -2781,9 +2889,13 @@ async def list_saved_areas(user: dict[str, Any] = Depends(get_current_user)) -> 
                 {
                     "area_id": row[0],
                     "name": row[1],
-                    "polygon": row[2],
-                    "created_at": row[3].isoformat() if row[3] else None,
-                    "updated_at": row[4].isoformat() if row[4] else None,
+                    "polygon": _to_leaflet_polygon(row[2]),
+                    "filter_state": row[3] if isinstance(row[3], dict) else None,
+                    "type": str(row[4] or "area"),
+                    "lat": (float(row[2][0][1]) if isinstance(row[2], list) and row[2] and len(row[2][0]) >= 2 else None) if str(row[4] or "area") == "location" else None,
+                    "lng": (float(row[2][0][0]) if isinstance(row[2], list) and row[2] and len(row[2][0]) >= 2 else None) if str(row[4] or "area") == "location" else None,
+                    "created_at": row[5].isoformat() if row[5] else None,
+                    "updated_at": row[6].isoformat() if row[6] else None,
                 }
                 for row in cur.fetchall()
             ]
@@ -2798,19 +2910,18 @@ async def create_saved_area(request: SavedAreaCreateRequest, req: Request, user:
     name = str(request.name or "").strip()
     if not name:
         raise HTTPException(status_code=400, detail="Area name is required")
-    if len(request.polygon) < 3:
-        raise HTTPException(status_code=400, detail="Polygon must have at least 3 points")
+    area_type, polygon_geojson, lat, lng = _normalize_saved_area_payload(request)
 
     conn = get_session_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO saved_areas (name, polygon, user_id)
-                VALUES (%s, %s, %s)
+                INSERT INTO saved_areas (name, polygon, filter_state, type, user_id)
+                VALUES (%s, %s, %s, %s, %s)
                 RETURNING area_id, created_at, updated_at
                 """,
-                (name, Json(request.polygon), int(user["id"])),
+                (name, Json(polygon_geojson), Json(request.filter_state) if isinstance(request.filter_state, dict) else None, area_type, int(user["id"])),
             )
             row = cur.fetchone()
         conn.commit()
@@ -2823,29 +2934,56 @@ async def create_saved_area(request: SavedAreaCreateRequest, req: Request, user:
     return {
         "area_id": row[0],
         "name": name,
-        "polygon": request.polygon,
+        "polygon": _to_leaflet_polygon(polygon_geojson),
+        "filter_state": request.filter_state if isinstance(request.filter_state, dict) else None,
+        "type": area_type,
+        "lat": lat,
+        "lng": lng,
         "created_at": row[1].isoformat() if row[1] else None,
         "updated_at": row[2].isoformat() if row[2] else None,
     }
 
 
 @app.put("/api/areas/{area_id}")
-async def rename_saved_area(area_id: str, request: SavedAreaRenameRequest, user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
-    name = str(request.name or "").strip()
-    if not name:
-        raise HTTPException(status_code=400, detail="Area name is required")
+async def update_saved_area(area_id: str, request: SavedAreaUpdateRequest, req: Request, user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
+    require_csrf(req)
+    if request.name is None and request.filter_state is None and request.type is None and request.lat is None and request.lng is None:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+
+    update_cols: list[str] = ["updated_at = now()"]
+    params: list[Any] = []
+
+    if request.name is not None:
+        name = str(request.name or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Area name is required")
+        update_cols.append("name = %s")
+        params.append(name)
+
+    if request.filter_state is not None:
+        update_cols.append("filter_state = %s")
+        params.append(Json(request.filter_state) if isinstance(request.filter_state, dict) else None)
+
+    if request.type is not None or request.lat is not None or request.lng is not None:
+        area_type, polygon_geojson, _, _ = _normalize_saved_area_payload(request)
+        if area_type is not None:
+            update_cols.append("type = %s")
+            params.append(area_type)
+        if polygon_geojson is not None:
+            update_cols.append("polygon = %s")
+            params.append(Json(polygon_geojson))
 
     conn = get_session_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(
-                """
+                f"""
                 UPDATE saved_areas
-                SET name = %s, updated_at = now()
+                SET {', '.join(update_cols)}
                 WHERE area_id = %s AND user_id = %s
-                RETURNING area_id, name, updated_at
+                RETURNING area_id, name, polygon, filter_state, type, updated_at
                 """,
-                (name, area_id, int(user["id"])),
+                (*params, area_id, int(user["id"])),
             )
             row = cur.fetchone()
         conn.commit()
@@ -2860,7 +2998,12 @@ async def rename_saved_area(area_id: str, request: SavedAreaRenameRequest, user:
     return {
         "area_id": row[0],
         "name": row[1],
-        "updated_at": row[2].isoformat() if row[2] else None,
+        "polygon": _to_leaflet_polygon(row[2]),
+        "filter_state": row[3] if isinstance(row[3], dict) else None,
+        "type": str(row[4] or "area"),
+        "lat": (float(row[2][0][1]) if isinstance(row[2], list) and row[2] and len(row[2][0]) >= 2 else None) if str(row[4] or "area") == "location" else None,
+        "lng": (float(row[2][0][0]) if isinstance(row[2], list) and row[2] and len(row[2][0]) >= 2 else None) if str(row[4] or "area") == "location" else None,
+        "updated_at": row[5].isoformat() if row[5] else None,
     }
 
 
