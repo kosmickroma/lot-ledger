@@ -72,19 +72,19 @@
         </div>
         <div class="numeric-filter-list">
           <div class="numeric-filter-row">
-            <span class="numeric-filter-label">Lot Size (sqft)</span>
+            <span class="numeric-filter-label">Lot Size (acres)</span>
             <div class="numeric-filter-inputs">
-              <input type="number" id="nf-lot-min" placeholder="Min" class="nf-input" min="0">
+              <input type="number" id="nf-lot-min" placeholder="Min acres" class="nf-input" min="0" step="0.01">
               <span class="nf-sep">–</span>
-              <input type="number" id="nf-lot-max" placeholder="Max" class="nf-input" min="0">
+              <input type="number" id="nf-lot-max" placeholder="Max acres" class="nf-input" min="0" step="0.01">
             </div>
           </div>
           <div class="numeric-filter-row">
             <span class="numeric-filter-label">Appraised Value</span>
             <div class="numeric-filter-inputs">
-              <input type="number" id="nf-val-min" placeholder="Min" class="nf-input" min="0">
+              <input type="text" id="nf-val-min" placeholder="Min (500k)" class="nf-input" inputmode="decimal">
               <span class="nf-sep">–</span>
-              <input type="number" id="nf-val-max" placeholder="Max" class="nf-input" min="0">
+              <input type="text" id="nf-val-max" placeholder="Max (1m)" class="nf-input" inputmode="decimal">
             </div>
           </div>
           <div class="numeric-filter-row">

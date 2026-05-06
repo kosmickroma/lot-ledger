@@ -1489,7 +1489,9 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
     for row in rows:
         parcel_key = str(row.get("parcel_key", "") or "")
         account_num = str(row.get("account_num", "") or "")
-        direct_match = parcel_key == account_num if parcel_key else True
+        # TAD stores parcel_key as "account:000"; Collin as "account:R-XXXX-...".
+        # Both start with account_num + ":" — treat those as a direct match too.
+        direct_match = (not parcel_key) or (parcel_key == account_num) or parcel_key.startswith(account_num + ":")
         addr_key = normalize_addr_key(str(row.get("property_address", "") or ""))
         on_redfin = addr_key in redfin_data and direct_match
         redfin_listing = redfin_data.get(addr_key) if on_redfin else None
@@ -1975,7 +1977,7 @@ async def download(job_id: str, filename: str | None = None) -> StreamingRespons
         for row in sorted_rows:
             parcel_key = str(row.get("parcel_key", "") or "")
             account_num = str(row.get("account_num", "") or "")
-            direct_match = parcel_key == account_num if parcel_key else True
+            direct_match = (not parcel_key) or (parcel_key == account_num) or parcel_key.startswith(account_num + ":")
             addr_key = normalize_addr_key(str(row.get("property_address", "") or ""))
             on_redfin = addr_key in redfin_data and direct_match
             redfin_listing = redfin_data.get(addr_key) if on_redfin else None

@@ -93,11 +93,51 @@ const numericFilters = {
   sqft_min: null,     sqft_max: null,
 };
 
+function parseShorthand(str) {
+  const raw = String(str || "").trim();
+  if (!raw) return null;
+  const cleaned = raw.replace(/[,$\s]/g, "").toLowerCase();
+  const match = cleaned.match(/^(-?\d+(?:\.\d+)?)([mk])?$/);
+  if (!match) {
+    const plain = Number(cleaned);
+    return Number.isFinite(plain) ? plain : null;
+  }
+  const base = Number(match[1]);
+  if (!Number.isFinite(base)) return null;
+  const suffix = match[2] || "";
+  if (suffix === "m") return base * 1_000_000;
+  if (suffix === "k") return base * 1_000;
+  return base;
+}
+
+function formatNumberWithCommas(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "";
+  return Math.round(n).toLocaleString("en-US");
+}
+
 function _readNumericInputs() {
   NUMERIC_FILTER_INPUTS.forEach(({ id, key }) => {
     const el = document.getElementById(id);
     const raw = el ? el.value.trim() : "";
-    numericFilters[key] = raw === "" ? null : Number(raw);
+    if (raw === "") {
+      numericFilters[key] = null;
+      return;
+    }
+
+    if (key === "appr_val_min" || key === "appr_val_max") {
+      numericFilters[key] = parseShorthand(raw);
+      return;
+    }
+
+    if (key === "lot_sqft_min" || key === "lot_sqft_max") {
+      const acres = Number(raw);
+      numericFilters[key] = Number.isFinite(acres) ? acres * 43_560 : null;
+      return;
+    }
+
+    const n = Number(raw);
+    numericFilters[key] = Number.isFinite(n) ? n : null;
   });
 }
 
@@ -309,25 +349,16 @@ let soldMarkers = [];
 let transientSoldSidebarPopup = null;
 let soldCompsSortMode = "price";
 let soldCompsCollapsed = true;
-let soldCompsFilter = { dateWindow: "1yr", prices: null, yearBuilts: null };
+const DEFAULT_SOLD_COMPS_FILTER = {
+  maxDaysAgo: 365,
+  minPrice: null,
+  maxPrice: null,
+  minYearBuilt: null,
+  maxYearBuilt: null,
+};
+let soldCompsFilter = { ...DEFAULT_SOLD_COMPS_FILTER };
 let allSoldPointsRef = [];
 let filterState = { ...DEFAULT_FILTERS };
-const SOLD_PRICE_BUCKETS = ["u200", "200-400", "400-800", "800-1000", "1000-3000", "3000+"];
-const SOLD_PRICE_LABELS = {
-  "u200": "<$200K",
-  "200-400": "$200-400K",
-  "400-800": "$400-800K",
-  "800-1000": "$800K-1M",
-  "1000-3000": "$1M-3M",
-  "3000+": "$3M+",
-};
-const SOLD_YEAR_BUCKETS = ["pre1960", "1960-1980", "1980-2000", "2000+"];
-const SOLD_YEAR_LABELS = {
-  "pre1960": "<1960",
-  "1960-1980": "1960-80",
-  "1980-2000": "1980-2000",
-  "2000+": "2000+",
-};
 const verificationByAccount = new Map();
 const potentialTargetByAccount = new Map();
 const verificationBadgeMarkers = new Map();
@@ -548,54 +579,34 @@ function zoomToSoldComp(point) {
 
 // --- Sold comps filter helpers ---
 
-function _getSoldCompsFilterCutoff() {
-  const dw = soldCompsFilter.dateWindow;
-  if (dw === "all") return null;
-  const days = { "3mo": 90, "6mo": 180, "1yr": 365, "2yr": 730 }[dw];
-  return days ? new Date(Date.now() - days * 86_400_000) : null;
-}
-
-function _getSoldPriceBucket(price) {
-  if (price < 200_000) return "u200";
-  if (price < 400_000) return "200-400";
-  if (price < 800_000) return "400-800";
-  if (price < 1_000_000) return "800-1000";
-  if (price < 3_000_000) return "1000-3000";
-  return "3000+";
-}
-
-function _getYearBuiltBucket(yr) {
-  if (yr < 1960) return "pre1960";
-  if (yr < 1980) return "1960-1980";
-  if (yr < 2000) return "1980-2000";
-  return "2000+";
-}
-
-function _soldPointPassesFilter(p, cutoff, prices, yearBuilts) {
-  if (cutoff && p.sold_date) {
+function _soldPointPassesFilter(p, filter) {
+  if (filter.maxDaysAgo != null) {
     const d = new Date(p.sold_date);
-    if (!isNaN(d.getTime()) && d < cutoff) return false;
+    if (isNaN(d.getTime())) return false;
+    const ageDays = (Date.now() - d.getTime()) / 86_400_000;
+    if (ageDays > filter.maxDaysAgo) return false;
   }
-  if (prices !== null) {
-    const price = asNumber(p.sold_price);
-    if (price == null) return false;
-    if (!prices.has(_getSoldPriceBucket(price))) return false;
-  }
-  if (yearBuilts !== null) {
-    const yr = asNumber(p.yr_built);
-    if (yr == null) return false;
-    if (!yearBuilts.has(_getYearBuiltBucket(yr))) return false;
-  }
+
+  const price = asNumber(p.sold_price);
+  if (filter.minPrice != null && (price == null || price < filter.minPrice)) return false;
+  if (filter.maxPrice != null && (price == null || price > filter.maxPrice)) return false;
+
+  const yr = asNumber(p.yr_built);
+  if (filter.minYearBuilt != null && (yr == null || yr < filter.minYearBuilt)) return false;
+  if (filter.maxYearBuilt != null && (yr == null || yr > filter.maxYearBuilt)) return false;
+
   return true;
 }
 
 function soldCompsFiltersAreActive() {
-  return soldCompsFilter.prices !== null
-    || soldCompsFilter.yearBuilts !== null
-    || soldCompsFilter.dateWindow !== "1yr";
+  return soldCompsFilter.maxDaysAgo !== DEFAULT_SOLD_COMPS_FILTER.maxDaysAgo
+    || soldCompsFilter.minPrice != null
+    || soldCompsFilter.maxPrice != null
+    || soldCompsFilter.minYearBuilt != null
+    || soldCompsFilter.maxYearBuilt != null;
 }
 
-function updateMatchedSoldCompVisibility(cutoff, prices, yearBuilts) {
+function updateMatchedSoldCompVisibility(filter) {
   const features = Array.isArray(allAnalysisFeatures) ? allAnalysisFeatures : [];
   const nextMatchedLabelPoints = [];
 
@@ -604,7 +615,7 @@ function updateMatchedSoldCompVisibility(cutoff, prices, yearBuilts) {
     if (!props) return;
 
     const source = props._sold_comp_source;
-    if (!source || !_soldPointPassesFilter(source, cutoff, prices, yearBuilts)) {
+    if (!source || !_soldPointPassesFilter(source, filter)) {
       delete props.sold_comp;
       return;
     }
@@ -643,15 +654,13 @@ function updateSoldStatusText() {
 }
 
 function applyAndRenderSoldFilters() {
-  const { prices, yearBuilts } = soldCompsFilter;
-  const cutoff = _getSoldCompsFilterCutoff();
   lastSoldPanelPoints = allSoldPointsRef.filter((p) =>
-    _soldPointPassesFilter(p, cutoff, prices, yearBuilts)
+    _soldPointPassesFilter(p, soldCompsFilter)
   );
-  updateMatchedSoldCompVisibility(cutoff, prices, yearBuilts);
+  updateMatchedSoldCompVisibility(soldCompsFilter);
   // Re-render map dots respecting filters (renderSoldPoints clears layer if sold is off)
   const filteredMap = lastSoldPoints.filter((p) =>
-    _soldPointPassesFilter(p, cutoff, prices, yearBuilts)
+    _soldPointPassesFilter(p, soldCompsFilter)
   );
   renderSoldPoints(filteredMap);
   if (lastAnalysisGeojson && Array.isArray(lastAnalysisGeojson.features) && lastAnalysisGeojson.features.length <= BROWSE_ONLY_THRESHOLD) {
@@ -718,22 +727,30 @@ function renderSoldCompsPanel() {
     .slice(0, 5);
 
   // --- Filter bar ---
-  const datePills = ["3mo", "6mo", "1yr", "2yr", "all"].map((dw) =>
-    `<button type="button" class="sold-sort-btn${soldCompsFilter.dateWindow === dw ? " active" : ""}" data-date-window="${dw}">${dw === "all" ? "All" : dw}</button>`
-  ).join("");
-  const pricePills = SOLD_PRICE_BUCKETS.map((b) => {
-    const isActive = soldCompsFilter.prices === null || soldCompsFilter.prices.has(b);
-    return `<button type="button" class="sold-sort-btn${isActive ? " active" : ""}" data-price-bucket="${b}">${SOLD_PRICE_LABELS[b]}</button>`;
-  }).join("");
-  const yearPills = SOLD_YEAR_BUCKETS.map((b) => {
-    const isActive = soldCompsFilter.yearBuilts === null || soldCompsFilter.yearBuilts.has(b);
-    return `<button type="button" class="sold-sort-btn${isActive ? " active" : ""}" data-year-bucket="${b}">${SOLD_YEAR_LABELS[b]}</button>`;
-  }).join("");
   const filterBar = `
     <div class="sold-filter-bar">
-      <div class="sold-filter-row"><span class="sold-filter-label">Sold</span><div class="sold-filter-pills">${datePills}</div></div>
-      <div class="sold-filter-row"><span class="sold-filter-label">Price</span><div class="sold-filter-pills">${pricePills}</div></div>
-      <div class="sold-filter-row"><span class="sold-filter-label">Built</span><div class="sold-filter-pills">${yearPills}</div></div>
+      <div class="numeric-filter-row">
+        <span class="numeric-filter-label">Sold Within (days)</span>
+        <div class="numeric-filter-inputs">
+          <input type="number" id="sold-days-max" placeholder="365" class="nf-input" min="1" value="${soldCompsFilter.maxDaysAgo ?? 365}">
+        </div>
+      </div>
+      <div class="numeric-filter-row">
+        <span class="numeric-filter-label">Price ($)</span>
+        <div class="numeric-filter-inputs">
+          <input type="text" id="sold-price-min" placeholder="Min (500k)" class="nf-input" value="${soldCompsFilter.minPrice ?? ""}">
+          <span class="nf-sep">–</span>
+          <input type="text" id="sold-price-max" placeholder="Max (1m)" class="nf-input" value="${soldCompsFilter.maxPrice ?? ""}">
+        </div>
+      </div>
+      <div class="numeric-filter-row">
+        <span class="numeric-filter-label">Year Built</span>
+        <div class="numeric-filter-inputs">
+          <input type="number" id="sold-yr-min" placeholder="Min" class="nf-input" min="1800" max="2030" value="${soldCompsFilter.minYearBuilt ?? ""}">
+          <span class="nf-sep">–</span>
+          <input type="number" id="sold-yr-max" placeholder="Max" class="nf-input" min="1800" max="2030" value="${soldCompsFilter.maxYearBuilt ?? ""}">
+        </div>
+      </div>
     </div>`;
   // --- End filter bar ---
 
@@ -780,50 +797,63 @@ function renderSoldCompsPanel() {
     });
   });
 
-  panel.querySelectorAll("[data-date-window]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      soldCompsFilter.dateWindow = btn.dataset.dateWindow;
-      applyAndRenderSoldFilters();
-    });
-  });
+  const soldDaysMaxInput = panel.querySelector("#sold-days-max");
+  const soldPriceMinInput = panel.querySelector("#sold-price-min");
+  const soldPriceMaxInput = panel.querySelector("#sold-price-max");
+  const soldYrMinInput = panel.querySelector("#sold-yr-min");
+  const soldYrMaxInput = panel.querySelector("#sold-yr-max");
 
-  const ALL_PRICE_BUCKET_SET = new Set(SOLD_PRICE_BUCKETS);
-  panel.querySelectorAll("[data-price-bucket]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const b = btn.dataset.priceBucket;
-      if (soldCompsFilter.prices === null) {
-        const updated = new Set(ALL_PRICE_BUCKET_SET);
-        updated.delete(b);
-        soldCompsFilter.prices = updated.size < ALL_PRICE_BUCKET_SET.size ? updated : null;
-      } else {
-        if (soldCompsFilter.prices.has(b)) {
-          if (soldCompsFilter.prices.size > 1) soldCompsFilter.prices.delete(b);
-        } else {
-          soldCompsFilter.prices.add(b);
-          if (soldCompsFilter.prices.size === ALL_PRICE_BUCKET_SET.size) soldCompsFilter.prices = null;
-        }
-      }
-      applyAndRenderSoldFilters();
-    });
-  });
+  const normalizeShorthandInput = (inputEl) => {
+    if (!inputEl) return null;
+    const raw = String(inputEl.value || "").trim();
+    if (!raw) {
+      inputEl.value = "";
+      return null;
+    }
+    const parsed = parseShorthand(raw);
+    if (parsed == null) {
+      inputEl.value = "";
+      return null;
+    }
+    const rounded = Math.round(parsed);
+    inputEl.value = formatNumberWithCommas(rounded);
+    return rounded;
+  };
 
-  const ALL_YEAR_BUCKET_SET = new Set(SOLD_YEAR_BUCKETS);
-  panel.querySelectorAll("[data-year-bucket]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const b = btn.dataset.yearBucket;
-      if (soldCompsFilter.yearBuilts === null) {
-        const updated = new Set(ALL_YEAR_BUCKET_SET);
-        updated.delete(b);
-        soldCompsFilter.yearBuilts = updated.size < ALL_YEAR_BUCKET_SET.size ? updated : null;
-      } else {
-        if (soldCompsFilter.yearBuilts.has(b)) {
-          if (soldCompsFilter.yearBuilts.size > 1) soldCompsFilter.yearBuilts.delete(b);
-        } else {
-          soldCompsFilter.yearBuilts.add(b);
-          if (soldCompsFilter.yearBuilts.size === ALL_YEAR_BUCKET_SET.size) soldCompsFilter.yearBuilts = null;
-        }
-      }
-      applyAndRenderSoldFilters();
+  const parseIntegerInput = (inputEl) => {
+    if (!inputEl) return null;
+    const raw = String(inputEl.value || "").trim();
+    if (!raw) return null;
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) ? Math.round(parsed) : null;
+  };
+
+  const applySoldCompInputFilters = () => {
+    const maxDays = parseIntegerInput(soldDaysMaxInput);
+    soldCompsFilter.maxDaysAgo = maxDays == null ? DEFAULT_SOLD_COMPS_FILTER.maxDaysAgo : Math.max(1, maxDays);
+    if (soldDaysMaxInput) soldDaysMaxInput.value = String(soldCompsFilter.maxDaysAgo);
+
+    soldCompsFilter.minPrice = parseShorthand(soldPriceMinInput?.value);
+    soldCompsFilter.maxPrice = parseShorthand(soldPriceMaxInput?.value);
+    soldCompsFilter.minYearBuilt = parseIntegerInput(soldYrMinInput);
+    soldCompsFilter.maxYearBuilt = parseIntegerInput(soldYrMaxInput);
+    applyAndRenderSoldFilters();
+  };
+
+  soldDaysMaxInput?.addEventListener("input", applySoldCompInputFilters);
+  soldDaysMaxInput?.addEventListener("change", applySoldCompInputFilters);
+  soldYrMinInput?.addEventListener("input", applySoldCompInputFilters);
+  soldYrMaxInput?.addEventListener("input", applySoldCompInputFilters);
+
+  [soldPriceMinInput, soldPriceMaxInput].forEach((inputEl) => {
+    inputEl?.addEventListener("input", applySoldCompInputFilters);
+    inputEl?.addEventListener("blur", () => {
+      normalizeShorthandInput(inputEl);
+      applySoldCompInputFilters();
+    });
+    inputEl?.addEventListener("change", () => {
+      normalizeShorthandInput(inputEl);
+      applySoldCompInputFilters();
     });
   });
 
@@ -1740,6 +1770,28 @@ function _applyNumericFilters() {
 
 NUMERIC_FILTER_INPUTS.forEach(({ id }) => {
   document.getElementById(id)?.addEventListener("input", _applyNumericFilters);
+});
+
+["nf-val-min", "nf-val-max"].forEach((id) => {
+  const inputEl = document.getElementById(id);
+  if (!inputEl) return;
+  const normalize = () => {
+    const raw = String(inputEl.value || "").trim();
+    if (!raw) {
+      inputEl.value = "";
+      return;
+    }
+    const parsed = parseShorthand(raw);
+    inputEl.value = parsed == null ? "" : formatNumberWithCommas(parsed);
+  };
+  inputEl.addEventListener("blur", () => {
+    normalize();
+    _applyNumericFilters();
+  });
+  inputEl.addEventListener("change", () => {
+    normalize();
+    _applyNumericFilters();
+  });
 });
 
 document.getElementById("btn-numeric-reset")?.addEventListener("click", () => {
@@ -3101,8 +3153,12 @@ function clearDrawResults() {
   lastSoldPoints = [];
   lastSoldPanelPoints = [];
   allSoldPointsRef = [];
-  soldCompsFilter = { dateWindow: "1yr", prices: null, yearBuilts: null };
+  soldCompsFilter = { ...DEFAULT_SOLD_COMPS_FILTER };
   matchedSoldLabelPoints = [];
+  ["sold-days-max", "sold-price-min", "sold-price-max", "sold-yr-min", "sold-yr-max"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.value = "";
+  });
   const soldCompsPanel = document.getElementById("sold-comps-panel");
   if (soldCompsPanel) soldCompsPanel.innerHTML = "";
   document.getElementById("redfin-toggle-status").textContent = "";
