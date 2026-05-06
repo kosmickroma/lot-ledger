@@ -554,7 +554,7 @@ def _restore_job_from_session(session_id: str, user_id: int) -> dict[str, Any] |
     }
 
 
-    def _get_job(job_id: str, user_id: int | None = None) -> dict[str, Any] | None:
+def _get_job(job_id: str, user_id: int | None = None) -> dict[str, Any] | None:
     """Return job if it exists and has not expired; evicts on TTL miss. Touching last_accessed keeps the session alive as long as the user is active."""
     job = _job_store.get(job_id)
     if job is not None and user_id is not None and int(job.get("user_id", -1)) != int(user_id):
