@@ -32,86 +32,96 @@
           <button id="btn-dismiss-import" type="button">Dismiss</button>
         </div>
       </div>
-      <div id="map-filters" class="filter-card">
-        <div class="filter-card-head">
-          <p class="sidebar-label">Map Filters</p>
-          <button id="btn-filters-reset" class="filter-reset-btn" type="button">Reset</button>
+      <div id="map-filters" class="filter-card collapsible-section">
+        <button class="section-toggle" type="button" data-target="map-filters-body" aria-expanded="true">
+          <span class="sidebar-label">Map Filters</span>
+        </button>
+        <div id="map-filters-body" class="collapsible-body">
+          <div class="filter-card-head">
+            <p class="sidebar-label">Map Filters</p>
+            <button id="btn-filters-reset" class="filter-reset-btn" type="button">Reset</button>
+          </div>
+          <div class="filter-list" id="filter-list">
+            <label class="filter-row">
+              <span class="filter-swatch" style="--sw:#D92228"></span>
+              <span class="filter-name">Listings</span>
+              <input type="checkbox" id="filter-active" checked>
+            </label>
+            <label class="filter-row">
+              <span class="filter-swatch" style="--sw:#5C2D91"></span>
+              <span class="filter-name">Sold</span>
+              <input type="checkbox" id="filter-sold" checked>
+            </label>
+            <label class="filter-row">
+              <span class="filter-swatch" style="--sw:#2980b9"></span>
+              <span class="filter-name">Off Market</span>
+              <input type="checkbox" id="filter-off-market" checked>
+            </label>
+            <label class="filter-row">
+              <span class="filter-swatch" style="--sw:#27ae60"></span>
+              <span class="filter-name">Vacant</span>
+              <input type="checkbox" id="filter-vacant" checked>
+            </label>
+            <label class="filter-row">
+              <span class="filter-swatch" style="--sw:#7B68A0"></span>
+              <span class="filter-name">Multifamily</span>
+              <input type="checkbox" id="filter-multifamily" checked>
+            </label>
+            <label class="filter-row">
+              <span class="filter-swatch" style="--sw:#8B7355"></span>
+              <span class="filter-name">Commercial</span>
+              <input type="checkbox" id="filter-commercial" checked>
+            </label>
+            <label class="filter-row">
+              <span class="filter-swatch" style="--sw:#95a5a6"></span>
+              <span class="filter-name">Exempt</span>
+              <input type="checkbox" id="filter-exempt" checked>
+            </label>
+          </div>
+          <p id="sold-toggle-status" class="sidebar-note"></p>
         </div>
-        <div class="filter-list" id="filter-list">
-          <label class="filter-row">
-            <span class="filter-swatch" style="--sw:#D92228"></span>
-            <span class="filter-name">Listings</span>
-            <input type="checkbox" id="filter-active" checked>
-          </label>
-          <label class="filter-row">
-            <span class="filter-swatch" style="--sw:#5C2D91"></span>
-            <span class="filter-name">Sold</span>
-            <input type="checkbox" id="filter-sold" checked>
-          </label>
-          <label class="filter-row">
-            <span class="filter-swatch" style="--sw:#2980b9"></span>
-            <span class="filter-name">Off Market</span>
-            <input type="checkbox" id="filter-off-market" checked>
-          </label>
-          <label class="filter-row">
-            <span class="filter-swatch" style="--sw:#27ae60"></span>
-            <span class="filter-name">Vacant</span>
-            <input type="checkbox" id="filter-vacant" checked>
-          </label>
-          <label class="filter-row">
-            <span class="filter-swatch" style="--sw:#7B68A0"></span>
-            <span class="filter-name">Multifamily</span>
-            <input type="checkbox" id="filter-multifamily" checked>
-          </label>
-          <label class="filter-row">
-            <span class="filter-swatch" style="--sw:#8B7355"></span>
-            <span class="filter-name">Commercial</span>
-            <input type="checkbox" id="filter-commercial" checked>
-          </label>
-          <label class="filter-row">
-            <span class="filter-swatch" style="--sw:#95a5a6"></span>
-            <span class="filter-name">Exempt</span>
-            <input type="checkbox" id="filter-exempt" checked>
-          </label>
-        </div>
-        <p id="sold-toggle-status" class="sidebar-note"></p>
       </div>
-      <div id="numeric-filters" class="filter-card">
-        <div class="filter-card-head">
-          <p class="sidebar-label">Property Filters</p>
-          <button id="btn-numeric-reset" class="filter-reset-btn" type="button">Reset</button>
-        </div>
-        <div class="numeric-filter-list">
-          <div class="numeric-filter-row">
-            <span class="numeric-filter-label">Lot Size (acres)</span>
-            <div class="numeric-filter-inputs">
-              <input type="number" id="nf-lot-min" placeholder="Min acres" class="nf-input" min="0" step="0.01">
-              <span class="nf-sep">–</span>
-              <input type="number" id="nf-lot-max" placeholder="Max acres" class="nf-input" min="0" step="0.01">
-            </div>
+      <div id="numeric-filters" class="filter-card collapsible-section">
+        <button class="section-toggle" type="button" data-target="numeric-filters-body" aria-expanded="true">
+          <span class="sidebar-label">Property Filters</span>
+        </button>
+        <div id="numeric-filters-body" class="collapsible-body">
+          <div class="filter-card-head">
+            <p class="sidebar-label">Property Filters</p>
+            <button id="btn-numeric-reset" class="filter-reset-btn" type="button">Reset</button>
           </div>
-          <div class="numeric-filter-row">
-            <span class="numeric-filter-label">Appraised Value</span>
-            <div class="numeric-filter-inputs">
-              <input type="text" id="nf-val-min" placeholder="Min (500k)" class="nf-input" inputmode="decimal">
-              <span class="nf-sep">–</span>
-              <input type="text" id="nf-val-max" placeholder="Max (1m)" class="nf-input" inputmode="decimal">
+          <div class="numeric-filter-list">
+            <div class="numeric-filter-row">
+              <span class="numeric-filter-label">Lot Size (acres)</span>
+              <div class="numeric-filter-inputs">
+                <input type="number" id="nf-lot-min" placeholder="Min acres" class="nf-input" min="0" step="0.01">
+                <span class="nf-sep">–</span>
+                <input type="number" id="nf-lot-max" placeholder="Max acres" class="nf-input" min="0" step="0.01">
+              </div>
             </div>
-          </div>
-          <div class="numeric-filter-row">
-            <span class="numeric-filter-label">Year Built</span>
-            <div class="numeric-filter-inputs">
-              <input type="number" id="nf-yr-min" placeholder="Min" class="nf-input" min="1800" max="2030">
-              <span class="nf-sep">–</span>
-              <input type="number" id="nf-yr-max" placeholder="Max" class="nf-input" min="1800" max="2030">
+            <div class="numeric-filter-row">
+              <span class="numeric-filter-label">Appraised Value</span>
+              <div class="numeric-filter-inputs">
+                <input type="text" id="nf-val-min" placeholder="Min (500k)" class="nf-input" inputmode="decimal">
+                <span class="nf-sep">–</span>
+                <input type="text" id="nf-val-max" placeholder="Max (1m)" class="nf-input" inputmode="decimal">
+              </div>
             </div>
-          </div>
-          <div class="numeric-filter-row">
-            <span class="numeric-filter-label">Building Sqft</span>
-            <div class="numeric-filter-inputs">
-              <input type="number" id="nf-sqft-min" placeholder="Min" class="nf-input" min="0">
-              <span class="nf-sep">–</span>
-              <input type="number" id="nf-sqft-max" placeholder="Max" class="nf-input" min="0">
+            <div class="numeric-filter-row">
+              <span class="numeric-filter-label">Year Built</span>
+              <div class="numeric-filter-inputs">
+                <input type="number" id="nf-yr-min" placeholder="Min" class="nf-input" min="1800" max="2030">
+                <span class="nf-sep">–</span>
+                <input type="number" id="nf-yr-max" placeholder="Max" class="nf-input" min="1800" max="2030">
+              </div>
+            </div>
+            <div class="numeric-filter-row">
+              <span class="numeric-filter-label">Building Sqft</span>
+              <div class="numeric-filter-inputs">
+                <input type="number" id="nf-sqft-min" placeholder="Min" class="nf-input" min="0">
+                <span class="nf-sep">–</span>
+                <input type="number" id="nf-sqft-max" placeholder="Max" class="nf-input" min="0">
+              </div>
             </div>
           </div>
         </div>

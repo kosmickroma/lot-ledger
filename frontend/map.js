@@ -520,6 +520,30 @@ function _hydrateNumericInputsFromState() {
   });
 }
 
+function _hydrateSoldCompInputsFromState() {
+  const soldDaysMax = document.getElementById("sold-days-max");
+  const soldPriceMin = document.getElementById("sold-price-min");
+  const soldPriceMax = document.getElementById("sold-price-max");
+  const soldYrMin = document.getElementById("sold-yr-min");
+  const soldYrMax = document.getElementById("sold-yr-max");
+
+  if (soldDaysMax) {
+    soldDaysMax.value = String(soldCompsFilter.maxDaysAgo ?? DEFAULT_SOLD_COMPS_FILTER.maxDaysAgo);
+  }
+  if (soldPriceMin) {
+    soldPriceMin.value = soldCompsFilter.minPrice == null ? "" : formatNumberWithCommas(soldCompsFilter.minPrice);
+  }
+  if (soldPriceMax) {
+    soldPriceMax.value = soldCompsFilter.maxPrice == null ? "" : formatNumberWithCommas(soldCompsFilter.maxPrice);
+  }
+  if (soldYrMin) {
+    soldYrMin.value = soldCompsFilter.minYearBuilt == null ? "" : String(soldCompsFilter.minYearBuilt);
+  }
+  if (soldYrMax) {
+    soldYrMax.value = soldCompsFilter.maxYearBuilt == null ? "" : String(soldCompsFilter.maxYearBuilt);
+  }
+}
+
 function restoreFilterState(state) {
   if (!state || typeof state !== "object") return;
   if (Number(state.v || 0) > 1) {
@@ -545,6 +569,7 @@ function restoreFilterState(state) {
   });
   syncFilterInputs();
   _hydrateNumericInputsFromState();
+  _hydrateSoldCompInputsFromState();
   if (lastAnalysisGeojson) {
     applyAndRenderSoldFilters();
     const markers = viewportRenderMode ? renderViewportFeatures() : renderFeatures(lastAnalysisGeojson);
@@ -845,9 +870,11 @@ function applyAndRenderSoldFilters() {
 function renderSoldCompsPanel() {
   const panel = document.getElementById("sold-comps-panel");
   if (!panel) return;
+  const totalSoldCount = Array.isArray(allSoldPointsRef) ? allSoldPointsRef.length : 0;
+  const soldCountNote = `<p class="sidebar-note sold-comps-count-note">${totalSoldCount} sold comp${totalSoldCount === 1 ? "" : "s"} in this area</p>`;
 
   if (!Array.isArray(allSoldPointsRef) || allSoldPointsRef.length === 0) {
-    panel.innerHTML = "";
+    panel.innerHTML = soldCountNote;
     return;
   }
 
@@ -925,6 +952,7 @@ function renderSoldCompsPanel() {
     : `${lastSoldPanelPoints.length} comps`;
 
   panel.innerHTML = `
+    ${soldCountNote}
     <div class="sold-comps-panel">
       <button class="section-toggle" type="button" id="sold-comps-toggle" aria-expanded="${!soldCompsCollapsed}">
         <span class="sidebar-label">Sold Comps</span>
@@ -1526,6 +1554,7 @@ function _restoreUndoSnapshot(snapshot) {
   }
   syncFilterInputs();
   _hydrateNumericInputsFromState();
+  _hydrateSoldCompInputsFromState();
   if (lastAnalysisGeojson) {
     applyAndRenderSoldFilters();
     const markers = viewportRenderMode ? renderViewportFeatures() : renderFeatures(lastAnalysisGeojson);
@@ -1736,20 +1765,6 @@ async function restoreSavedArea(area, options = {}) {
   }
 }
 
-function _formatFilterDiffChip(area) {
-  const st = area?.filter_state;
-  if (!st || st.v !== 1) return "";
-  const chips = [];
-  const n = st.numeric || {};
-  if (n.lot_sqft_min != null) chips.push(`Lot ≥ ${(Number(n.lot_sqft_min) / 43560).toFixed(2)}ac`);
-  if (n.yr_built_min != null || n.yr_built_max != null) chips.push(`Built ${n.yr_built_min ?? "?"}–${n.yr_built_max ?? "?"}`);
-  const s = st.sold || {};
-  if (s.maxDaysAgo != null && s.maxDaysAgo !== DEFAULT_SOLD_COMPS_FILTER.maxDaysAgo) chips.push(`Sold ${s.maxDaysAgo}d`);
-  if (!chips.length) return "";
-  const extraCount = Object.values(n).filter((v) => v != null).length + Object.values(s).filter((v) => v != null).length - chips.length;
-  return `${chips.slice(0, 2).join(" · ")}${extraCount > 0 ? ` · +${extraCount}` : ""}`;
-}
-
 async function restoreNamedSession(session, options = {}) {
   const rowEl = options.rowEl || null;
   if (!session.latlngs || session.latlngs.length < 3) {
@@ -1935,7 +1950,6 @@ function _renderList(sectionId, listId, items) {
     const icon = area.type === "parcel" ? "📌" : area.type === "location" ? "📍" : "▭";
     const chip = _formatFilterDiffChip(area);
     const canRename = area.type !== "parcel";
-    const canUpdateFilters = _isLoadedAreaWithFilterDrift(area);
     const activeClass = area.id === _currentLoadedAreaId ? " saved-area-row-active" : "";
     return `
       <div class="saved-area-row${activeClass}" tabindex="0" data-id="${area.id}" data-type="${area.type}">
@@ -1943,13 +1957,12 @@ function _renderList(sectionId, listId, items) {
           <span class="saved-area-icon">${icon}</span>
           <span class="saved-area-name">${area.name}</span>
           <span class="saved-area-date">${date}</span>
-          <span class="saved-area-actions">
-            ${canRename ? `<button type="button" class="saved-area-action-btn rename" data-action="rename" title="Rename">✎</button>` : ""}
-            ${canUpdateFilters ? `<button type="button" class="saved-area-action-btn update" data-action="update-filters" title="Update saved filters">⟳</button>` : ""}
-            <button type="button" class="saved-area-action-btn delete" data-action="delete" title="Delete">×</button>
-          </span>
         </div>
-        <div class="saved-row-filter-chip">${chip}</div>
+        ${chip ? `<div class="saved-row-filter-chip">${chip}</div>` : ""}
+        <div class="saved-area-row-actions">
+          ${canRename ? `<button type="button" class="saved-area-action-btn rename" data-action="rename" title="Rename">✎ Rename</button>` : "<span></span>"}
+          <button type="button" class="saved-area-action-btn delete" data-action="delete" title="Delete">🗑 Delete</button>
+        </div>
       </div>`;
   }).join("");
   list.querySelectorAll(".saved-area-row").forEach(row => {
@@ -1967,11 +1980,6 @@ function _renderList(sectionId, listId, items) {
       if (actionEl?.dataset.action === "rename") {
         e.stopPropagation();
         await _renameSavedItemInline(area, row);
-        return;
-      }
-      if (actionEl?.dataset.action === "update-filters") {
-        e.stopPropagation();
-        await _updateSavedAreaFilters(area, actionEl);
         return;
       }
       bumpUndoPillVersion();
@@ -2025,13 +2033,13 @@ function _renderSessionsList(sectionId, listId, items) {
         <div class="saved-area-main">
           <span class="saved-area-name">${session.name}</span>
           <span class="saved-area-date">${date}</span>
-          <span class="saved-area-actions">
-            <button type="button" class="saved-area-action-btn rename" data-action="rename" title="Rename">✎</button>
-            <button type="button" class="saved-area-action-btn delete" data-action="delete" title="Delete">×</button>
-          </span>
         </div>
         ${meta ? `<div class="saved-item-meta">${meta}</div>` : ""}
         ${chip ? `<div class="saved-row-filter-chip">${chip}</div>` : ""}
+        <div class="saved-area-row-actions">
+          <button type="button" class="saved-area-action-btn rename" data-action="rename" title="Rename">✎ Rename</button>
+          <button type="button" class="saved-area-action-btn delete" data-action="delete" title="Delete">🗑 Delete</button>
+        </div>
       </div>`;
   }).join("");
   list.querySelectorAll(".saved-area-row").forEach((row) => {
@@ -2788,6 +2796,8 @@ function makePopupHtml(p) {
   const potentialTarget = String(potentialTargetByAccount.get(p.account_num) || p.potential_target || "").trim();
   const row = (label, val) => `<tr><td class="popup-label">${label}</td><td class="popup-val">${val || "N/A"}</td></tr>`;
 
+  let redfinListingFooter = "";
+
   // Redfin price row + delta (active parcels only)
   let redfinPriceRow = "";
   if (p.on_redfin && p.redfin_price) {
@@ -2795,9 +2805,7 @@ function makePopupHtml(p) {
       ? `<a href="${p.redfin_url}" target="_blank" rel="noopener noreferrer">${p.redfin_price}</a>`
       : p.redfin_price;
     redfinPriceRow = row("Redfin List Price", urlWrap);
-    if (p.redfin_url) {
-      redfinPriceRow += row("Listing", `<a href="${p.redfin_url}" target="_blank" rel="noopener noreferrer">View listing</a>`);
-    }
+    if (p.redfin_url) redfinListingFooter = `<div class="popup-listing-footer"><a href="${p.redfin_url}" target="_blank" rel="noopener noreferrer">View listing</a></div>`;
 
     // Numeric delta: parse both values
     const rfNum = parseInt(String(p.redfin_price).replace(/[^0-9]/g, ""), 10);
@@ -2875,6 +2883,7 @@ function makePopupHtml(p) {
             <a href="#" class="parcel-target-off" data-account="${p.account_num}" style="color:#aaa;text-decoration:none;">· Clear</a>
           </div>
         </div>` : ""}
+        ${redfinListingFooter}
       </div>`;
 }
 
@@ -3064,7 +3073,12 @@ function renderSoldPoints(points) {
       opacity: 1,
       fillOpacity: 0.85,
       bubblingMouseEvents: false,
-    }).bindPopup(() => makeSoldPopupHtml(point), { maxWidth: 300 }).addTo(soldLayer);
+    }).bindPopup(() => makeSoldPopupHtml(point), {
+      maxWidth: 300,
+      autoPan: true,
+      autoPanPadding: [10, 50],
+      keepInView: true,
+    }).addTo(soldLayer);
     soldMarkers.push({
       marker,
       priceLabel: null,
@@ -3178,7 +3192,12 @@ function renderFeatures(geojson) {
           weight: parcelBorderWeight,
           opacity: 0.85,
         },
-      }).bindPopup(() => makePopupHtml(p), { maxWidth: 280, autoPan: false });
+      }).bindPopup(() => makePopupHtml(p), {
+        maxWidth: 280,
+        autoPan: true,
+        autoPanPadding: [10, 50],
+        keepInView: true,
+      });
       layer.addTo(targetLayer);
       // No circle marker rendered when polygon geometry exists — polygon fill IS the click target.
       if (p.account_num) accountRenderedAsPolygon.add(p.account_num);
@@ -3202,7 +3221,12 @@ function renderFeatures(geojson) {
         opacity: 1,
         fillOpacity: 0.9,
         bubblingMouseEvents: false,
-      }).bindPopup(() => makePopupHtml(p), { maxWidth: 280, autoPan: false });
+      }).bindPopup(() => makePopupHtml(p), {
+        maxWidth: 280,
+        autoPan: true,
+        autoPanPadding: [10, 50],
+        keepInView: true,
+      });
       layer.addTo(circleLayer);
     }
 
@@ -3378,6 +3402,7 @@ function renderSidebar(counts, markers) {
       exempt: counts.exempt,
     };
   countsPanel.innerHTML = Object.entries(visibleCounts)
+    .filter(([key]) => key !== "sold")
     .filter(([, v]) => v > 0)
     .map(
       ([key, val]) => `

@@ -956,6 +956,18 @@ h1 {
   font-weight: 500;
 }
 
+.popup-listing-footer {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid #e2e8f0;
+  font-size: 11px;
+}
+
+.popup-listing-footer a {
+  color: #1f2937;
+  text-decoration: underline;
+}
+
 .saved-area-row {
   display: flex;
   align-items: center;
@@ -1001,17 +1013,15 @@ h1 {
   display: block;
 }
 
-.saved-area-actions {
-  display: none;
-  align-items: center;
-  gap: 2px;
-  margin-left: auto;
-  flex-shrink: 0;
+.saved-area-row-active .saved-row-filter-chip {
+  display: block;
 }
 
-.saved-area-row:hover .saved-area-actions,
-.saved-area-row:focus-within .saved-area-actions {
-  display: inline-flex;
+.saved-area-row-actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 4px;
 }
 
 .saved-area-action-btn {
@@ -1030,8 +1040,28 @@ h1 {
   background: rgba(255, 255, 255, 0.06);
 }
 
-.saved-area-action-btn.delete:hover {
+.saved-area-row-actions .saved-area-action-btn {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 12px;
+  padding: 5px 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  flex: 1 1 0;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.saved-area-row-actions .saved-area-action-btn.delete {
   color: #e74c3c;
+  border-color: rgba(231, 76, 60, 0.3);
+}
+
+.saved-area-row-actions .saved-area-action-btn.delete:hover {
+  color: #ff8a80;
+  background: rgba(231, 76, 60, 0.12);
 }
 
 .saved-area-rename-input {
