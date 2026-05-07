@@ -550,24 +550,18 @@ function _filterStatesEqual(a, b) {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
-function _renderCurrentViewingArea() {
-  const host = document.getElementById("saved-area-current");
-  const nameEl = document.getElementById("saved-area-current-name");
-  if (!host || !nameEl) return;
-  if (!_currentLoadedAreaId) {
-    host.classList.add("hidden");
-    nameEl.textContent = "";
-    return;
-  }
-  const area = _savedAreasCache.find((a) => a.id === _currentLoadedAreaId && a.type === "area");
-  if (!area) {
-    host.classList.add("hidden");
-    nameEl.textContent = "";
-    _currentLoadedAreaId = null;
-    return;
-  }
-  nameEl.textContent = area.name || "Saved area";
-  host.classList.remove("hidden");
+function setActiveItem(type, name) {
+  const slot = document.getElementById("active-item-slot");
+  const typeEl = document.getElementById("active-item-type");
+  const nameEl = document.getElementById("active-item-name");
+  if (!slot || !typeEl || !nameEl) return;
+  typeEl.textContent = type || "";
+  nameEl.textContent = name || "";
+  slot.classList.remove("is-collapsed");
+}
+
+function clearActiveItem() {
+  document.getElementById("active-item-slot")?.classList.add("is-collapsed");
 }
 
 function _refreshLoadedAreaUi() {
@@ -1100,7 +1094,7 @@ function renderSoldCompsPanel() {
     ${soldCountNote}
     <div class="sold-comps-panel">
       <button class="section-toggle" type="button" id="sold-comps-toggle" aria-expanded="${!soldCompsCollapsed}">
-        <span class="sidebar-label">Sold Comp + Listings</span>
+        <span class="sidebar-label">Sold Comps + Listings</span>
       </button>
       <div id="sold-comps-body" class="collapsible-body${soldCompsCollapsed ? " hidden" : ""}">
         <div class="sold-comps-summary">
@@ -1507,6 +1501,7 @@ async function saveCurrentArea(name) {
   // Mark the just-saved area as the currently-loaded one so the Update button
   // becomes available the moment the user tweaks any filter after saving.
   _currentLoadedAreaId = normalized.id;
+  setActiveItem("Workspace", normalized.name);
   renderSavedAreasList();
 }
 
@@ -1567,6 +1562,7 @@ async function saveCurrentSession(name) {
   _savedSessionsCache.unshift(normalized);
   _currentSessionIsNamed = true;
   _updateSaveSessionButtonState();
+  setActiveItem("Snapshot", normalized.name);
   renderSavedSessionsList();
 }
 
@@ -1670,6 +1666,7 @@ async function saveParcel(account_num, county, addr, lat, lng, geometry) {
   _savedParcelsCache.unshift(row);
   renderSavedAreasList();
   _renderSavedParcelOutline(row);
+  setActiveItem("Target", row.name);
 }
 
 function _restoreAllSavedParcelOutlines() {
@@ -1845,6 +1842,7 @@ async function restoreSavedArea(area, options = {}) {
       })();
     };
     map.once("moveend", window._searchMoveEndHandler);
+    setActiveItem("Location", area.name);
     return;
   }
 
@@ -1859,6 +1857,7 @@ async function restoreSavedArea(area, options = {}) {
         map.setView([area.lat, area.lng], map.getZoom());
       }
     }
+    setActiveItem("Target", area.name);
     return;
   }
 
@@ -1977,6 +1976,7 @@ async function restoreSavedArea(area, options = {}) {
     renderSidebar(data.counts, markers);
     applyResultTags(data);
     _currentLoadedAreaId = area.id;
+    setActiveItem("Workspace", area.name);
     renderSavedAreasList();
     // Debug: sold-count restore diagnostics (remove after Bug 2 confirmed fixed)
     console.debug("[restoreSavedArea] post-render sold state — allSoldPointsRef:", allSoldPointsRef.length, "lastSoldPanelPoints:", lastSoldPanelPoints.length, "soldCompsFilter:", JSON.stringify(soldCompsFilter), "filterState.sold:", filterState.sold);
@@ -2033,7 +2033,6 @@ async function restoreNamedSession(session, options = {}) {
   lastPolygon = polygon;
   if (map.hasLayer(browseLayer)) browseLayer.remove();
   const includeSold = Boolean(filterState.sold);
-  document.getElementById("sidebar-instructions")?.classList.add("hidden");
   document.getElementById("sidebar-loading")?.classList.remove("hidden");
   document.getElementById("redfin-status").textContent = "Loading session…";
   const analysisRequest = beginLatestAnalysisRequest();
@@ -2107,6 +2106,7 @@ async function restoreNamedSession(session, options = {}) {
     }
     renderSidebar(data.counts, markers);
     applyResultTags(data);
+    setActiveItem("Snapshot", session.name);
     if (loadedFromSessionCache && data.redfin_skipped === true) {
       _setSessionCacheNote("Active listings not shown - re-analyze for current");
     } else {
@@ -2185,7 +2185,6 @@ function _renderList(sectionId, listId, items) {
   const list = document.getElementById(listId);
   if (!section || !list) return;
   section.classList.toggle("hidden", items.length === 0);
-  _renderCurrentViewingArea();
   list.innerHTML = items.map((area) => {
     const date = new Date(area.savedAt).toLocaleDateString(undefined, { month: "short", day: "numeric" });
     const icon = area.type === "parcel" ? "📌" : area.type === "location" ? "📍" : "▭";
@@ -2281,7 +2280,6 @@ function _renderList(sectionId, listId, items) {
 }
 
 function renderSavedAreasList() {
-  _renderCurrentViewingArea();
   _renderList("saved-areas", "saved-areas-list", _savedAreasCache.filter((a) => a.type === "area"));
   _renderList("saved-parcels", "saved-parcels-list", [..._savedAreasCache.filter((a) => a.type === "location"), ..._savedParcelsCache]);
   _updateUpdateAreaButtonVisibility();
@@ -4523,6 +4521,7 @@ map.on("draw:created", async (e) => {
     });
     document.getElementById("redfin-status").textContent = "Analysis complete";
     _updateSaveSessionButtonState();
+    setActiveItem("Unsaved area", "Unsaved");
     redfinLayerVisible = false;
     soldLayerVisible = Boolean(filterState.sold);
     map.removeLayer(redfinLayer);
@@ -4626,9 +4625,9 @@ function clearDrawResults() {
   document.getElementById("redfin-toggle-status").textContent = "";
   document.getElementById("sold-toggle-status").textContent = "";
   document.getElementById("sidebar-results")?.classList.add("hidden");
-  document.getElementById("sidebar-instructions")?.classList.remove("hidden");
   document.getElementById("sidebar-loading")?.classList.add("hidden");
   document.getElementById("btn-drawd-area-clear")?.classList.add("hidden");
+  clearActiveItem();
   renderSavedAreasList();
 }
 
@@ -4868,12 +4867,6 @@ document.getElementById("btn-update-saved-area")?.addEventListener("click", asyn
   const area = _savedAreasCache.find((a) => a.id === _currentLoadedAreaId && a.type === "area");
   if (!area) return;
   await _updateSavedAreaFilters(area, e.currentTarget);
-});
-
-document.getElementById("btn-saved-area-current-clear")?.addEventListener("click", () => {
-  bumpUndoPillVersion();
-  _currentLoadedAreaId = null;
-  renderSavedAreasList();
 });
 
 document.getElementById("btn-clear").addEventListener("click", () => {
