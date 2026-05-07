@@ -1877,6 +1877,10 @@ async function restoreSavedArea(area, options = {}) {
     applyResultTags(data);
     _currentLoadedAreaId = area.id;
     renderSavedAreasList();
+    // Debug: sold-count restore diagnostics (remove after Bug 2 confirmed fixed)
+    console.debug("[restoreSavedArea] post-render sold state — allSoldPointsRef:", allSoldPointsRef.length, "lastSoldPanelPoints:", lastSoldPanelPoints.length, "soldCompsFilter:", JSON.stringify(soldCompsFilter), "filterState.sold:", filterState.sold);
+    applyAndRenderSoldFilters();
+    applyMapVisibilityFilters();
   } catch (err) {
     if (isAbortError(err) || !isActiveAnalysisRequest(analysisRequest.requestId)) return;
     console.error("[restoreSavedArea] Analysis failed:", err);
@@ -2009,6 +2013,8 @@ async function restoreNamedSession(session, options = {}) {
     } else {
       _setSessionCacheNote("");
     }
+    applyAndRenderSoldFilters();
+    applyMapVisibilityFilters();
   } catch (err) {
     if (isAbortError(err) || !isActiveAnalysisRequest(analysisRequest.requestId)) return;
     console.error("[restoreNamedSession] failed:", err);
@@ -4355,6 +4361,8 @@ map.on("draw:created", async (e) => {
     applyResultTags(data);
     const soldStatus = document.getElementById("sold-toggle-status");
     if (soldStatus) updateSoldStatusText();
+    applyAndRenderSoldFilters();
+    applyMapVisibilityFilters();
   } catch (err) {
     if (isAbortError(err) || !isActiveAnalysisRequest(analysisRequest.requestId)) return;
     console.error("[draw:created] Analysis failed:", err);
@@ -4746,6 +4754,8 @@ async function rerunWithRedfin() {
         statusEl.textContent = `${data.counts.active} active listing${data.counts.active !== 1 ? "s" : ""} found`;
       }
     }
+    applyAndRenderSoldFilters();
+    applyMapVisibilityFilters();
   } catch (err) {
     if (statusEl) statusEl.textContent = "Redfin fetch failed";
     console.error("Redfin re-fetch failed", err);
@@ -4781,6 +4791,8 @@ document.getElementById("toggle-redfin")?.addEventListener("change", async (e) =
     if (lastAnalysisCounts) {
       renderSidebar(lastAnalysisCounts, markers);
     }
+    applyAndRenderSoldFilters();
+    applyMapVisibilityFilters();
   }
 });
 
@@ -4819,6 +4831,8 @@ async function rerunWithSold() {
     }
 
     if (statusEl) updateSoldStatusText();
+    applyAndRenderSoldFilters();
+    applyMapVisibilityFilters();
   } catch (err) {
     if (statusEl) statusEl.textContent = "Sold comps unavailable";
     console.error("Sold re-fetch failed", err);
