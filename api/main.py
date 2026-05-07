@@ -838,6 +838,10 @@ class SavedAreaCreateRequest(BaseModel):
     type: Literal["area", "location"] = "area"
     lat: float | None = None
     lng: float | None = None
+    # Optional: the job_id the user was analyzing when they clicked Save Area.
+    # Backfills cached_jobs.saved_area_id and analysis_sessions.saved_area_id so
+    # the next CSV download from this job carries the new area's share_id.
+    job_id: str | None = None
 
 
 class SavedAreaUpdateRequest(BaseModel):
@@ -3411,6 +3415,20 @@ async def create_saved_area(request: SavedAreaCreateRequest, req: Request, user:
                     continue
             if row is None:
                 raise HTTPException(status_code=503, detail="Failed to allocate unique share_id")
+            # Backfill linkage: if the user was analyzing a job when they hit Save,
+            # link that job (and its session) to the new area so CSV exports from
+            # this point on carry the correct share_id.
+            inflight_job_id = str(request.job_id or "").strip()
+            if inflight_job_id:
+                new_area_id = row[0]
+                cur.execute(
+                    "UPDATE cached_jobs SET saved_area_id = %s WHERE job_id = %s AND saved_area_id IS NULL AND user_id = %s",
+                    (new_area_id, inflight_job_id, int(user["id"])),
+                )
+                cur.execute(
+                    "UPDATE analysis_sessions SET saved_area_id = %s WHERE session_id = %s AND saved_area_id IS NULL AND user_id = %s",
+                    (new_area_id, inflight_job_id, int(user["id"])),
+                )
         conn.commit()
     except HTTPException:
         conn.rollback()

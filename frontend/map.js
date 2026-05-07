@@ -1391,6 +1391,7 @@ async function saveCurrentArea(name) {
       type: "area",
       polygon: lastDrawnLatLngs,
       filter_state: captureFilterState(),
+      job_id: currentJobId || null,
     }),
   });
   const normalized = _normalizeSavedAreaRow(created);
