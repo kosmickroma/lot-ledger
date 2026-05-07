@@ -557,6 +557,28 @@ function _filterStatesEqual(a, b) {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+function _slotState(label) {
+  const slot = document.getElementById("active-item-slot");
+  if (!slot) { console.warn(`[slot/${label}] NOT IN DOM`); return; }
+  const cs = getComputedStyle(slot);
+  const rect = slot.getBoundingClientRect();
+  console.debug(`[slot/${label}]`, {
+    classes: slot.className,
+    inlineStyle: slot.getAttribute("style") || "",
+    maxHeight: cs.maxHeight,
+    opacity: cs.opacity,
+    display: cs.display,
+    visibility: cs.visibility,
+    offsetHeight: slot.offsetHeight,
+    boundingHeight: rect.height,
+    boundingTop: rect.top,
+    inDom: document.contains(slot),
+    sidebarClasses: document.querySelector(".sidebar")?.className || "",
+    bodyClasses: document.body.className || "",
+    appShellClasses: document.querySelector(".app-shell")?.className || "",
+  });
+}
+
 function setActiveItem(type, name) {
   const slot = document.getElementById("active-item-slot");
   const typeEl = document.getElementById("active-item-type");
@@ -565,34 +587,40 @@ function setActiveItem(type, name) {
   typeEl.textContent = type || "";
   nameEl.textContent = name || "";
   slot.classList.remove("is-collapsed");
-  const cs = getComputedStyle(slot);
-  console.debug("[slot] setActiveItem", type, name, {
-    classes: slot.className,
-    maxHeight: cs.maxHeight,
-    opacity: cs.opacity,
-    display: cs.display,
-    height: slot.offsetHeight,
-    inDom: document.contains(slot),
+  console.debug("[slot] setActiveItem CALL", type, name);
+  _slotState("immediate");
+  // Schedule delayed checks to catch anything that hides the slot post-analysis
+  const tag = `${type}-${Date.now() % 100000}`;
+  [250, 1000, 2500, 5000].forEach((ms) => {
+    setTimeout(() => _slotState(`${tag}@${ms}ms`), ms);
   });
-  // Install a MutationObserver once to log any future attribute or DOM changes
-  if (!window.__slotObserverInstalled) {
-    window.__slotObserverInstalled = true;
-    const obs = new MutationObserver((mutations) => {
+}
+
+function clearActiveItem() {
+  const slot = document.getElementById("active-item-slot");
+  if (!slot) return;
+  slot.classList.add("is-collapsed");
+  console.trace("[slot] clearActiveItem called - stack trace ↑");
+}
+
+// Install observers IMMEDIATELY at startup, not lazily inside setActiveItem,
+// so we catch every mutation including the very first one.
+(function _installSlotDiagnostics() {
+  const ready = () => {
+    const slot = document.getElementById("active-item-slot");
+    if (!slot) return false;
+    new MutationObserver((mutations) => {
       for (const m of mutations) {
-        const cs2 = getComputedStyle(slot);
         console.warn("[slot] MUTATION", m.type, m.attributeName || "", {
+          oldValue: m.oldValue,
           newClassName: slot.className,
           inlineStyle: slot.getAttribute("style") || "",
-          maxHeight: cs2.maxHeight,
-          opacity: cs2.opacity,
-          display: cs2.display,
-          height: slot.offsetHeight,
+          offsetHeight: slot.offsetHeight,
         });
         console.trace("[slot] mutation stack ↑");
       }
-    });
-    obs.observe(slot, { attributes: true, attributeOldValue: true });
-    // Also observe parent for childList changes (in case slot gets removed)
+    }).observe(slot, { attributes: true, attributeOldValue: true });
+
     const parent = slot.parentElement;
     if (parent) {
       new MutationObserver((mutations) => {
@@ -604,16 +632,28 @@ function setActiveItem(type, name) {
         }
       }).observe(parent, { childList: true });
     }
-    console.debug("[slot] observers installed");
-  }
-}
 
-function clearActiveItem() {
-  const slot = document.getElementById("active-item-slot");
-  if (!slot) return;
-  slot.classList.add("is-collapsed");
-  console.trace("[slot] clearActiveItem called - stack trace ↑");
-}
+    // Watch sidebar + app-shell + body for class changes that could cascade-hide
+    [".sidebar", ".app-shell", "body"].forEach((sel) => {
+      const el = sel === "body" ? document.body : document.querySelector(sel);
+      if (!el) return;
+      new MutationObserver((mutations) => {
+        for (const m of mutations) {
+          if (m.attributeName === "class") {
+            console.warn(`[slot/ancestor:${sel}] class changed`, {
+              oldValue: m.oldValue,
+              newClassName: el.className,
+              slotHeight: document.getElementById("active-item-slot")?.offsetHeight,
+            });
+          }
+        }
+      }).observe(el, { attributes: true, attributeOldValue: true, attributeFilter: ["class"] });
+    });
+    console.debug("[slot] diagnostics installed");
+    return true;
+  };
+  if (!ready()) document.addEventListener("DOMContentLoaded", ready);
+})();
 
 function _refreshLoadedAreaUi() {
   if (!_currentLoadedAreaId) return;
