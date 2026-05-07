@@ -902,18 +902,18 @@ function applyAndRenderSoldFilters() {
     _soldPointPassesFilter(p, soldCompsFilter)
   );
   updateMatchedSoldCompVisibility(soldCompsFilter);
-  // Order matters: renderFeatures clears parcelTypeLayers.sold (which now hosts
-  // sold-matched parcels AND the invisible anchor markers used for price labels).
-  // We must run renderFeatures FIRST, then add anchors via renderSoldPoints, so
-  // the anchors aren't wiped immediately after creation.
+  // renderFeatures auto-runs renderSoldPoints at its end, so anchors stay in sync.
+  // For paths that don't re-render features (e.g., sold-only filter input changes
+  // when no analysis is loaded), call renderSoldPoints directly as a fallback.
   if (lastAnalysisGeojson && Array.isArray(lastAnalysisGeojson.features) && lastAnalysisGeojson.features.length <= BROWSE_ONLY_THRESHOLD) {
     if (viewportRenderMode) {
       renderViewportFeatures();
     } else {
       renderFeatures(lastAnalysisGeojson);
     }
+  } else {
+    renderSoldPoints();
   }
-  renderSoldPoints();
   renderSoldCompsPanel();
   updateSoldStatusText();
 }
@@ -3502,6 +3502,11 @@ function renderFeatures(geojson) {
   if (shouldRestorePopup) {
     _restoreActiveParcelPopup();
   }
+  // After re-render the parcelTypeLayers.sold layer was cleared, so the anchor
+  // markers that price labels bind to are gone. Re-create them here so price
+  // labels survive every render pass (including viewport re-renders triggered
+  // by zoom/pan events).
+  renderSoldPoints();
   return markers;
 }
 
