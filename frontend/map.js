@@ -978,9 +978,9 @@ function renderSoldCompsPanel() {
       <div class="numeric-filter-row">
         <span class="numeric-filter-label">Lot Size (acres)</span>
         <div class="numeric-filter-inputs">
-          <input type="number" id="nf-lot-min" placeholder="Min acres" class="nf-input" min="0" step="0.01" value="${numericFilters.lot_sqft_min == null ? "" : (numericFilters.lot_sqft_min / 43560).toFixed(2).replace(/\.00$/, "")}">
+          <input type="text" inputmode="decimal" id="nf-lot-min" placeholder="Min acres" class="nf-input" value="${numericFilters.lot_sqft_min == null ? "" : (numericFilters.lot_sqft_min / 43560).toFixed(2).replace(/\.00$/, "")}">
           <span class="nf-sep">–</span>
-          <input type="number" id="nf-lot-max" placeholder="Max acres" class="nf-input" min="0" step="0.01" value="${numericFilters.lot_sqft_max == null ? "" : (numericFilters.lot_sqft_max / 43560).toFixed(2).replace(/\.00$/, "")}">
+          <input type="text" inputmode="decimal" id="nf-lot-max" placeholder="Max acres" class="nf-input" value="${numericFilters.lot_sqft_max == null ? "" : (numericFilters.lot_sqft_max / 43560).toFixed(2).replace(/\.00$/, "")}">
         </div>
       </div>
       <div class="numeric-filter-row">
@@ -3337,6 +3337,13 @@ function attachSoldCompsToFeatures(features, soldPoints) {
 }
 
 function renderSoldPoints() {
+  // Unbind tooltips from prior anchor markers BEFORE clearing the array.
+  // Otherwise when sold filter toggles off, the old markers retain their
+  // bound tooltips and the price labels stay rendered on the map even
+  // though the parcels are hidden.
+  soldMarkers.forEach(({ marker }) => {
+    try { marker.unbindTooltip(); } catch {}
+  });
   soldMarkers = [];
   if (!filterState.sold) return;
   const soldParcelLayer = parcelTypeLayers.sold;
