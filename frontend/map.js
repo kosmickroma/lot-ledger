@@ -3055,8 +3055,9 @@ function geometryKey(geometry) {
 
 function makePopupHtml(p) {
   const pseudoFeature = { properties: p };
-  const statusColor = getColor(pseudoFeature);
-  const statusText = getStatusLabel(pseudoFeature);
+  const hasVisibleSoldComp = Boolean(p?.sold_comp);
+  const statusColor = hasVisibleSoldComp ? SOLD_MARKER_COLOR : getColor(pseudoFeature);
+  const statusText = hasVisibleSoldComp ? "SOLD COMP" : getStatusLabel(pseudoFeature);
   const verifiedVacant = normalizeVerificationValue(
     verificationByAccount.get(p.account_num) || p.verified_vacant
   );
