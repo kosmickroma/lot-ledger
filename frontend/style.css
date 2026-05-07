@@ -1602,9 +1602,11 @@ h1 {
   border-radius: 999px;
   letter-spacing: 0.04em;
 }
-.role-badge.developer { background: rgba(92,45,145,0.35); color: #c4a0f0; border: 1px solid rgba(92,45,145,0.7); }
-.role-badge.owner     { background: rgba(201,162,79,0.2);  color: var(--gold); border: 1px solid rgba(201,162,79,0.5); }
-.role-badge.member    { background: rgba(41,128,185,0.22); color: #7ec8f7; border: 1px solid rgba(41,128,185,0.5); }
+.role-badge.developer  { background: rgba(92,45,145,0.35);  color: #c4a0f0; border: 1px solid rgba(92,45,145,0.7); }
+.role-badge.owner      { background: rgba(201,162,79,0.2);   color: var(--gold); border: 1px solid rgba(201,162,79,0.5); }
+.role-badge.power_user { background: rgba(0,168,168,0.22);   color: #4dd9d9; border: 1px solid rgba(0,168,168,0.5); }
+.role-badge.user       { background: rgba(120,120,130,0.22); color: #a8a8b4; border: 1px solid rgba(120,120,130,0.45); }
+.role-badge.member     { background: rgba(41,128,185,0.22);  color: #7ec8f7; border: 1px solid rgba(41,128,185,0.5); }
 
 .admin-action-btn {
   background: none;
@@ -1644,10 +1646,9 @@ h1 {
 .admin-status-dot.disabled { background: #e74c3c; }
 
 .admin-add-form {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  display: flex;
+  flex-direction: column;
   gap: 8px;
-  align-items: end;
   margin-top: 12px;
 }
 .admin-add-form input,

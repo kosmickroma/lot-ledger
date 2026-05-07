@@ -1263,6 +1263,7 @@ function _normalizeSavedAreaRow(area) {
     type: String(area.type || "area"),
     name: String(area.name || "Untitled"),
     share_id: String(area.share_id || ""),
+    user_id: area.user_id != null ? String(area.user_id) : null,
     latlngs: polygon,
     bounds: polygon.length >= 2 ? _savedAreaBoundsFromLatLngs(polygon) : null,
     savedAt: area.updated_at || area.created_at || new Date().toISOString(),
@@ -2084,6 +2085,13 @@ function _renderList(sectionId, listId, items) {
     const canShare = area.type === "area" && Boolean(String(area.share_id || "").trim());
     const activeClass = area.id === _currentLoadedAreaId ? " saved-area-row-active" : "";
     const secondaryLine = [chip, `saved ${date}`].filter(Boolean).join(" · ");
+
+    // Ownership + role gating for Rename / Delete / Fork
+    const isOwn = area.user_id != null
+      ? String(area.user_id) === String(_currentUser?.id || "")
+      : true; // no user_id on row → treat as own (legacy safe)
+    const showFullControls = isOwn || _canEditAnyArea();
+
     return `
       <div class="saved-area-row${activeClass}" tabindex="0" data-id="${area.id}" data-type="${area.type}">
         <div class="saved-area-main">
@@ -2095,8 +2103,9 @@ function _renderList(sectionId, listId, items) {
         <div class="saved-area-row-secondary-actions">
           <hr class="saved-area-actions-divider">
           <div class="saved-area-secondary-btns">
-            ${canRename ? `<button type="button" class="saved-area-action-btn rename" data-action="rename" title="Rename">✎ Rename</button>` : ""}
-            <button type="button" class="saved-area-action-btn delete" data-action="delete" title="Delete">🗑 Delete</button>
+            ${!showFullControls && canShare ? `<button type="button" class="saved-area-action-btn" data-action="fork" data-share-id="${_esc(area.share_id)}" title="Make my own copy">📋 Make my copy</button>` : ""}
+            ${showFullControls && canRename ? `<button type="button" class="saved-area-action-btn rename" data-action="rename" title="Rename">✎ Rename</button>` : ""}
+            ${showFullControls ? `<button type="button" class="saved-area-action-btn delete" data-action="delete" title="Delete">🗑 Delete</button>` : ""}
           </div>
         </div>
       </div>`;
@@ -2121,6 +2130,25 @@ function _renderList(sectionId, listId, items) {
           _showToast("Link copied");
         } catch {
           _showToast("Copy failed - try again", "error");
+        }
+        return;
+      }
+      if (actionEl?.dataset.action === "fork") {
+        e.stopPropagation();
+        const shareId = String(actionEl.dataset.shareId || "").trim();
+        if (!shareId) return;
+        try {
+          const cloned = await _apiJson("/api/areas/from-share-id/" + encodeURIComponent(shareId), {
+            method: "POST",
+            headers: { "Content-Type": "application/json", ...authHeaders() },
+            body: "{}",
+          });
+          _savedAreasCache.unshift(_normalizeSavedAreaRow(cloned));
+          _currentLoadedAreaId = cloned.area_id;
+          renderSavedAreasList();
+          _showToast(`Forked → "${cloned.name}"`);
+        } catch {
+          _showToast("Could not fork area", "error");
         }
         return;
       }
@@ -4993,6 +5021,12 @@ map.on("popupclose", (e) => {
 let _currentUser = null;        // null = not logged in, object = logged-in user dict
 let _authDropdownOpen = false;  // tracks whether the username dropdown is expanded
 
+// Role helpers — always read from _currentUser so they stay in sync with server state
+const _currentRole    = () => (_currentUser?.role || "").toLowerCase();
+const _isAdmin        = () => ["owner", "developer"].includes(_currentRole());
+const _canDownloadCsv = () => _currentRole() !== "user";
+const _canEditAnyArea = () => _currentRole() === "developer";
+
 // ---------------------------------------------------------------------------
 // Helpers to show/hide the modal
 // ---------------------------------------------------------------------------
@@ -5210,13 +5244,12 @@ async function _showAdminPanel() {
     <div class="admin-add-form">
       <input type="email" id="admin-new-email" placeholder="Email" autocomplete="off">
       <input type="text"  id="admin-new-username" placeholder="Username" autocomplete="off">
-      <input type="password" id="admin-new-temp-password" placeholder="Temp Password (10+ chars)" autocomplete="off">
+      <input type="password" id="admin-new-temp-password" placeholder="Temp Password (10+ chars)" autocomplete="new-password">
       <select id="admin-new-role">
-        <option value="member">Member</option>
-        <option value="owner">Owner</option>
+        <option value="user">User</option>
+        <option value="power_user">Power User</option>
+        ${_currentRole() === "developer" ? `<option value="owner">Owner</option>` : ""}
       </select>
-    </div>
-    <div style="margin-top:8px; display:flex; gap:8px; align-items:center;">
       <button id="admin-add-btn" class="admin-add-btn">+ Add User</button>
       <p id="admin-add-msg" class="admin-msg"></p>
     </div>`;
@@ -5362,13 +5395,16 @@ function _renderUserBar(user) {
     bar.querySelector("#auth-open-login").addEventListener("click", () => _showLoginForm());
     return;
   }
-  const canManage = user.role === "developer" || user.role === "owner";
+  // Gate CSV download button visibility by role
+  const dlBtn = document.getElementById("btn-download");
+  if (dlBtn) dlBtn.classList.toggle("hidden", !_canDownloadCsv());
+
   bar.innerHTML = `
     <div style="position:relative;">
       <button class="auth-username-btn" id="auth-user-menu-btn" title="Account menu">${_esc(user.username)}</button>
       <div id="auth-dropdown" class="auth-dropdown hidden">
         <button class="auth-dropdown-item" id="auth-menu-chpw">Change Password</button>
-        ${canManage ? `<button class="auth-dropdown-item" id="auth-menu-admin">Manage Users</button>` : ""}
+        ${_isAdmin() ? `<button class="auth-dropdown-item" id="auth-menu-admin">Manage Users</button>` : ""}
         <div class="auth-dropdown-divider"></div>
         <button class="auth-dropdown-item danger" id="auth-menu-signout">Sign Out</button>
       </div>
