@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import quote_plus
 
-from fastapi import Body, Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Body, Depends, FastAPI, HTTPException, Path as FastAPIPath, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from psycopg2.errors import UniqueViolation
@@ -3393,6 +3393,48 @@ async def get_saved_area(area_id: str, user: dict[str, Any] = Depends(get_curren
         "lng": (float(row[2][0][0]) if isinstance(row[2], list) and row[2] and len(row[2][0]) >= 2 else None) if str(row[4] or "area") == "location" else None,
         "created_at": row[7].isoformat() if row[7] else None,
         "updated_at": row[8].isoformat() if row[8] else None,
+    }
+
+
+@app.get("/api/area/by-share-id/{share_id}")
+async def get_saved_area_by_share_id(
+    share_id: str = FastAPIPath(..., regex=r"^area_[A-Za-z0-9]{10}$"),
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT area_id, name, polygon, filter_state, type, share_id, created_at, updated_at,
+                       COUNT(*) OVER() AS match_count
+                FROM saved_areas
+                WHERE share_id = %s
+                LIMIT 1
+                """,
+                (share_id,),
+            )
+            row = cur.fetchone()
+    finally:
+        release_session_conn(conn)
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="Saved area not found")
+
+    if int(row[8] or 0) > 1:
+        logger.warning("Multiple saved_areas rows found for share_id=%s", share_id)
+
+    return {
+        "area_id": row[0],
+        "name": row[1],
+        "polygon": _to_leaflet_polygon(row[2]),
+        "filter_state": row[3] if isinstance(row[3], dict) else None,
+        "type": str(row[4] or "area"),
+        "share_id": str(row[5] or ""),
+        "lat": (float(row[2][0][1]) if isinstance(row[2], list) and row[2] and len(row[2][0]) >= 2 else None) if str(row[4] or "area") == "location" else None,
+        "lng": (float(row[2][0][0]) if isinstance(row[2], list) and row[2] and len(row[2][0]) >= 2 else None) if str(row[4] or "area") == "location" else None,
+        "created_at": row[6].isoformat() if row[6] else None,
+        "updated_at": row[7].isoformat() if row[7] else None,
     }
 
 
