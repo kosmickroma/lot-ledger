@@ -621,6 +621,11 @@ function restoreFilterState(state) {
   if (lastAnalysisGeojson) {
     applyAndRenderSoldFilters();
     const markers = viewportRenderMode ? renderViewportFeatures() : renderFeatures(lastAnalysisGeojson);
+    // After re-render, parcel-type layers are all attached to the map. Re-apply
+    // the visibility filter so the restored checkbox state actually hides the
+    // correct categories on the map. Without this, the checkboxes show "off"
+    // but the highlights remain visible.
+    applyMapVisibilityFilters();
     const counts = getVisibleFeatureCounts(lastAnalysisGeojson.features || []);
     if (lastAnalysisCounts) renderSidebar(counts, markers || {});
   }
