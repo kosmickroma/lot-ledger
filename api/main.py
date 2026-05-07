@@ -930,6 +930,23 @@ def _google_maps_link(row: dict[str, Any]) -> str:
     return "https://maps.google.com"
 
 
+def _parcel_addr_match_key(row: dict[str, Any]) -> str:
+    """Return a normalized parcel address key suitable for Redfin joins.
+
+    County ingest sources are inconsistent. Some rows store full display strings
+    like "123 MAIN ST\nCITY, TX 75000" while redfin_active.addr_key is street-only.
+    Use only the first line and first comma-delimited segment before normalization
+    so matching is resilient across counties.
+    """
+    raw = str(row.get("property_address", "") or "").strip()
+    if not raw:
+        return ""
+    first_line = raw.splitlines()[0].strip()
+    street_only = first_line.split(",", 1)[0].strip() if first_line else ""
+    candidate = street_only or first_line or raw
+    return normalize_addr_key(candidate)
+
+
 # Validate required runtime settings at startup.
 get_settings()
 
@@ -2238,7 +2255,7 @@ async def analyze(request: AnalyzeRequest, req: Request, user: dict[str, Any] = 
         # TAD stores parcel_key as "account:000"; Collin as "account:R-XXXX-...".
         # Both start with account_num + ":" — treat those as a direct match too.
         direct_match = (not parcel_key) or (parcel_key == account_num) or parcel_key.startswith(account_num + ":")
-        addr_key = normalize_addr_key(str(row.get("property_address", "") or ""))
+        addr_key = _parcel_addr_match_key(row)
         on_redfin = addr_key in redfin_data and direct_match
         redfin_listing = redfin_data.get(addr_key) if on_redfin else None
         # TAD rows carry division_cd="TAD" — use TAD classifier; DCAD rows use existing classifier.
@@ -2734,7 +2751,7 @@ async def download(job_id: str, filename: str | None = None, user: dict[str, Any
             parcel_key = str(row.get("parcel_key", "") or "")
             account_num = str(row.get("account_num", "") or "")
             direct_match = (not parcel_key) or (parcel_key == account_num) or parcel_key.startswith(account_num + ":")
-            addr_key = normalize_addr_key(str(row.get("property_address", "") or ""))
+            addr_key = _parcel_addr_match_key(row)
             on_redfin = addr_key in redfin_data and direct_match
             redfin_listing = redfin_data.get(addr_key) if on_redfin else None
 

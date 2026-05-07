@@ -416,6 +416,10 @@ let viewportRenderMode = false;   // true when feature count exceeds render thre
 let _vpRenderTimeout = null;      // debounce handle for viewport re-render
 const LARGE_DRAW_THRESHOLD = 500;  // viewport-only rendering above this count
 const BROWSE_ONLY_THRESHOLD = 30000; // skip all polygon rendering above this; use browse layer
+let _activeParcelPopupState = null;
+let _isRefreshingParcelLayers = false;
+let _suspendViewportRenderUntil = 0;
+const _renderedParcelPopupLayers = new Map();
 let _analysisRequestSeq = 0;
 let _activeAnalysisRequestId = 0;
 let _activeAnalysisAbortController = null;
@@ -1647,6 +1651,30 @@ function _showUndoPill(snapshot, restoredCount) {
       undoPillVersion += 1;
     }
   }, 6000);
+}
+
+function _suspendViewportRender(ms = 700) {
+  _suspendViewportRenderUntil = Math.max(_suspendViewportRenderUntil, Date.now() + ms);
+}
+
+function _captureParcelPopupState(meta) {
+  if (!meta?.accountNum) return;
+  _activeParcelPopupState = {
+    accountNum: String(meta.accountNum),
+  };
+}
+
+function _restoreActiveParcelPopup() {
+  if (!_activeParcelPopupState?.accountNum) return;
+  const layer = _renderedParcelPopupLayers.get(_activeParcelPopupState.accountNum);
+  if (!layer) return;
+  _suspendViewportRender();
+  setTimeout(() => {
+    if (!_activeParcelPopupState?.accountNum) return;
+    const nextLayer = _renderedParcelPopupLayers.get(_activeParcelPopupState.accountNum);
+    if (!nextLayer || !map.hasLayer(nextLayer)) return;
+    nextLayer.openPopup();
+  }, 0);
 }
 
 async function restoreSavedArea(area, options = {}) {
@@ -3229,6 +3257,9 @@ function renderSoldPoints(points) {
 }
 
 function renderFeatures(geojson) {
+  const shouldRestorePopup = Boolean(_activeParcelPopupState?.accountNum);
+  _isRefreshingParcelLayers = shouldRestorePopup;
+  _renderedParcelPopupLayers.clear();
   PARCEL_LAYER_KEYS.forEach((key) => parcelTypeLayers[key]?.clearLayers());
   redfinLayer.clearLayers();
   verificationBadgeLayer.clearLayers();
@@ -3317,7 +3348,11 @@ function renderFeatures(geojson) {
         autoPanPadding: [10, 50],
         keepInView: true,
       });
+      layer._lotLedgerPopupMeta = { type: "parcel", accountNum: String(p.account_num || "") };
       layer.addTo(targetLayer);
+      if (p.account_num) {
+        _renderedParcelPopupLayers.set(String(p.account_num), layer);
+      }
       // No circle marker rendered when polygon geometry exists — polygon fill IS the click target.
       if (p.account_num) accountRenderedAsPolygon.add(p.account_num);
     } else {
@@ -3346,11 +3381,19 @@ function renderFeatures(geojson) {
         autoPanPadding: [10, 50],
         keepInView: true,
       });
+      layer._lotLedgerPopupMeta = { type: "parcel", accountNum: String(p.account_num || "") };
       layer.addTo(circleLayer);
+      if (p.account_num) {
+        _renderedParcelPopupLayers.set(String(p.account_num), layer);
+      }
     }
 
     markers[p.addr] = { layer, feature };
   });
+  _isRefreshingParcelLayers = false;
+  if (shouldRestorePopup) {
+    _restoreActiveParcelPopup();
+  }
   return markers;
 }
 
@@ -3502,7 +3545,8 @@ function renderViewportFeatures() {
 // Debounced wrapper so pan/zoom events don't fire renderViewportFeatures dozens of times.
 function _scheduleViewportRender() {
   clearTimeout(_vpRenderTimeout);
-  _vpRenderTimeout = setTimeout(renderViewportFeatures, 150);
+  const delay = Math.max(150, _suspendViewportRenderUntil - Date.now());
+  _vpRenderTimeout = setTimeout(renderViewportFeatures, delay);
 }
 
 function renderSidebar(counts, markers) {
@@ -4752,6 +4796,11 @@ map.on("click", async (ev) => {
 
 // Wire up "Save parcel" link in any popup — uses data attributes from makePopupHtml.
 map.on("popupopen", (e) => {
+  const popupMeta = e.popup?._source?._lotLedgerPopupMeta;
+  if (popupMeta?.type === "parcel") {
+    _captureParcelPopupState(popupMeta);
+    _suspendViewportRender();
+  }
   const el = e.popup.getElement();
   if (!el) return;
 
@@ -4848,6 +4897,15 @@ map.on("popupopen", (e) => {
       persistSingleTag(account, "potential_target", null);
       e.popup.close();
     });
+  }
+});
+
+map.on("popupclose", (e) => {
+  const popupMeta = e.popup?._source?._lotLedgerPopupMeta;
+  if (popupMeta?.type !== "parcel") return;
+  if (_isRefreshingParcelLayers) return;
+  if (_activeParcelPopupState?.accountNum === String(popupMeta.accountNum || "")) {
+    _activeParcelPopupState = null;
   }
 });
 
