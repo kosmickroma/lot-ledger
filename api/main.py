@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -28,9 +29,10 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import quote_plus
 
-from fastapi import Body, Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Body, Depends, FastAPI, HTTPException, Path as FastAPIPath, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from psycopg2.errors import UniqueViolation
 from psycopg2.extras import Json, execute_values
 from pydantic import BaseModel
 
@@ -78,6 +80,7 @@ _FILENAME_SAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
 _ADDRESS_SUGGEST_CACHE_TTL_SECONDS = 45
 _ADDRESS_SUGGEST_CACHE_MAX = 512
 _address_suggest_cache: dict[tuple[str, int], tuple[float, list[dict[str, Any]]]] = {}
+_SHARE_ID_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 
 
 def _normalize_suggest_query(raw: str) -> str:
@@ -115,6 +118,55 @@ def _evict_stale_jobs() -> None:
     while len(_job_store) >= _JOB_MAX:
         oldest = min(_job_store, key=lambda jid: _job_store[jid].get("created_at", 0))
         _job_store.pop(oldest, None)
+
+
+def _is_idempotent_schema_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return "already exists" in msg or "duplicate" in msg
+
+
+def _run_schema_steps(cur: Any, steps: list[tuple[str, str]]) -> None:
+    for step_id, sql in steps:
+        try:
+            cur.execute(sql)
+        except Exception as exc:
+            if _is_idempotent_schema_error(exc):
+                print(f"[session-schema] step skipped (already applied): {step_id}")
+                continue
+            print(f"[session-schema] step failed: {step_id} ({exc})")
+            raise
+
+
+def _generate_share_id() -> str:
+    return "area_" + "".join(secrets.choice(_SHARE_ID_ALPHABET) for _ in range(10))
+
+
+def _backfill_saved_area_share_ids(cur: Any) -> None:
+    cur.execute("SELECT area_id FROM saved_areas WHERE share_id IS NULL ORDER BY created_at ASC")
+    rows = cur.fetchall() or []
+    if not rows:
+        return
+
+    updated = 0
+    for (area_id,) in rows:
+        assigned = False
+        for _ in range(100):
+            candidate = _generate_share_id()
+            cur.execute("SELECT 1 FROM saved_areas WHERE share_id = %s LIMIT 1", (candidate,))
+            if cur.fetchone() is not None:
+                continue
+            cur.execute(
+                "UPDATE saved_areas SET share_id = %s WHERE area_id = %s AND share_id IS NULL",
+                (candidate, area_id),
+            )
+            if cur.rowcount:
+                updated += 1
+            assigned = True
+            break
+        if not assigned:
+            raise RuntimeError(f"Unable to backfill share_id for saved area {area_id}")
+
+    print(f"[session-schema] backfilled share_id for {updated} saved areas")
 
 
 def _ensure_session_schema() -> None:
@@ -218,6 +270,7 @@ def _ensure_session_schema() -> None:
                 CREATE TABLE IF NOT EXISTS cached_jobs (
                     job_id       TEXT PRIMARY KEY,
                     user_id      INTEGER REFERENCES users(id),
+                    saved_area_id TEXT REFERENCES saved_areas(area_id) ON DELETE SET NULL,
                     created_at   TIMESTAMPTZ DEFAULT now(),
                     expires_at   TIMESTAMPTZ DEFAULT (now() + interval '{_JOB_TTL_SECONDS} seconds'),
                     rows         JSONB NOT NULL,
@@ -226,51 +279,76 @@ def _ensure_session_schema() -> None:
                 )
                 """
             )
-            cur.execute("ALTER TABLE saved_areas ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)")
-            cur.execute("ALTER TABLE saved_areas ADD COLUMN IF NOT EXISTS filter_state JSONB")
-            cur.execute("ALTER TABLE saved_areas ADD COLUMN IF NOT EXISTS type TEXT")
-            cur.execute("UPDATE saved_areas SET type = 'area' WHERE type IS NULL OR type = ''")
-            cur.execute("ALTER TABLE saved_areas ALTER COLUMN type SET DEFAULT 'area'")
-            cur.execute("ALTER TABLE saved_areas ALTER COLUMN type SET NOT NULL")
-            cur.execute(
-                """
-                DO $$
-                BEGIN
-                    IF NOT EXISTS (
-                        SELECT 1
-                        FROM pg_constraint
-                        WHERE conname = 'saved_areas_type_check'
-                    ) THEN
-                        ALTER TABLE saved_areas
-                        ADD CONSTRAINT saved_areas_type_check CHECK (type IN ('area', 'location'));
-                    END IF;
-                END$$;
-                """
+            _run_schema_steps(
+                cur,
+                [
+                    ("saved_areas_user_id", "ALTER TABLE saved_areas ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)"),
+                    ("saved_areas_filter_state", "ALTER TABLE saved_areas ADD COLUMN IF NOT EXISTS filter_state JSONB"),
+                    ("saved_areas_type", "ALTER TABLE saved_areas ADD COLUMN IF NOT EXISTS type TEXT"),
+                    ("saved_areas_share_id", "ALTER TABLE saved_areas ADD COLUMN IF NOT EXISTS share_id VARCHAR(20)"),
+                    (
+                        "saved_areas_public_toggle",
+                        "ALTER TABLE saved_areas ADD COLUMN IF NOT EXISTS is_publicly_viewable BOOLEAN NOT NULL DEFAULT FALSE",
+                    ),
+                    ("saved_areas_type_backfill", "UPDATE saved_areas SET type = 'area' WHERE type IS NULL OR type = ''"),
+                    ("saved_areas_type_default", "ALTER TABLE saved_areas ALTER COLUMN type SET DEFAULT 'area'"),
+                    ("saved_areas_type_not_null", "ALTER TABLE saved_areas ALTER COLUMN type SET NOT NULL"),
+                    (
+                        "saved_areas_type_check",
+                        """
+                        DO $$
+                        BEGIN
+                            IF NOT EXISTS (
+                                SELECT 1
+                                FROM pg_constraint
+                                WHERE conname = 'saved_areas_type_check'
+                            ) THEN
+                                ALTER TABLE saved_areas
+                                ADD CONSTRAINT saved_areas_type_check CHECK (type IN ('area', 'location'));
+                            END IF;
+                        END$$;
+                        """,
+                    ),
+                    ("analysis_sessions_user_id", "ALTER TABLE analysis_sessions ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)"),
+                    ("analysis_sessions_name", "ALTER TABLE analysis_sessions ADD COLUMN IF NOT EXISTS name TEXT"),
+                    ("analysis_sessions_filter_state", "ALTER TABLE analysis_sessions ADD COLUMN IF NOT EXISTS filter_state JSONB"),
+                    ("analysis_sessions_expires_nullable", "ALTER TABLE analysis_sessions ALTER COLUMN expires_at DROP NOT NULL"),
+                    ("session_tags_user_id", "ALTER TABLE session_tags ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)"),
+                    ("saved_parcels_user_id", "ALTER TABLE saved_parcels ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)"),
+                    ("cached_jobs_user_id", "ALTER TABLE cached_jobs ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)"),
+                    ("idx_session_tags_session", "CREATE INDEX IF NOT EXISTS idx_session_tags_session ON session_tags (session_id)"),
+                    ("idx_session_tags_user", "CREATE INDEX IF NOT EXISTS idx_session_tags_user ON session_tags (user_id)"),
+                    ("idx_sessions_expires", "CREATE INDEX IF NOT EXISTS idx_sessions_expires ON analysis_sessions (expires_at)"),
+                    ("idx_sessions_saved_area", "CREATE INDEX IF NOT EXISTS idx_sessions_saved_area ON analysis_sessions (saved_area_id)"),
+                    ("idx_sessions_user", "CREATE INDEX IF NOT EXISTS idx_sessions_user ON analysis_sessions (user_id)"),
+                    (
+                        "idx_sessions_named",
+                        """
+                        CREATE INDEX IF NOT EXISTS idx_sessions_named
+                        ON analysis_sessions (user_id, name)
+                        WHERE name IS NOT NULL
+                        """,
+                    ),
+                    ("idx_saved_areas_user", "CREATE INDEX IF NOT EXISTS idx_saved_areas_user ON saved_areas (user_id)"),
+                    (
+                        "uq_saved_areas_share_id",
+                        "CREATE UNIQUE INDEX IF NOT EXISTS uq_saved_areas_share_id ON saved_areas (share_id) WHERE share_id IS NOT NULL",
+                    ),
+                    ("idx_saved_parcels_user", "CREATE INDEX IF NOT EXISTS idx_saved_parcels_user ON saved_parcels (user_id)"),
+                    (
+                        "uq_saved_parcels_user_account",
+                        "CREATE UNIQUE INDEX IF NOT EXISTS uq_saved_parcels_user_account ON saved_parcels (user_id, county, account_num)",
+                    ),
+                    ("idx_cached_jobs_expires", "CREATE INDEX IF NOT EXISTS idx_cached_jobs_expires ON cached_jobs (expires_at)"),
+                    ("idx_cached_jobs_user", "CREATE INDEX IF NOT EXISTS idx_cached_jobs_user ON cached_jobs (user_id)"),
+                    (
+                        "cached_jobs_saved_area_id",
+                        "ALTER TABLE cached_jobs ADD COLUMN IF NOT EXISTS saved_area_id TEXT REFERENCES saved_areas(area_id) ON DELETE SET NULL",
+                    ),
+                    ("idx_cached_jobs_saved_area", "CREATE INDEX IF NOT EXISTS idx_cached_jobs_saved_area ON cached_jobs (saved_area_id)"),
+                ],
             )
-            cur.execute("ALTER TABLE analysis_sessions ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)")
-            cur.execute("ALTER TABLE analysis_sessions ADD COLUMN IF NOT EXISTS name TEXT")
-            cur.execute("ALTER TABLE analysis_sessions ADD COLUMN IF NOT EXISTS filter_state JSONB")
-            cur.execute("ALTER TABLE analysis_sessions ALTER COLUMN expires_at DROP NOT NULL")
-            cur.execute("ALTER TABLE session_tags ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)")
-            cur.execute("ALTER TABLE saved_parcels ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)")
-            cur.execute("ALTER TABLE cached_jobs ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_session_tags_session ON session_tags (session_id)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_session_tags_user ON session_tags (user_id)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_expires ON analysis_sessions (expires_at)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_saved_area ON analysis_sessions (saved_area_id)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user ON analysis_sessions (user_id)")
-            cur.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_sessions_named
-                ON analysis_sessions (user_id, name)
-                WHERE name IS NOT NULL
-                """
-            )
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_saved_areas_user ON saved_areas (user_id)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_saved_parcels_user ON saved_parcels (user_id)")
-            cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_saved_parcels_user_account ON saved_parcels (user_id, county, account_num)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_cached_jobs_expires ON cached_jobs (expires_at)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_cached_jobs_user ON cached_jobs (user_id)")
+            _backfill_saved_area_share_ids(cur)
         conn.commit()
     finally:
         release_session_conn(conn)
@@ -309,16 +387,18 @@ def _persist_cached_job_sync(
     rows: list[dict[str, Any]],
     sold_points: list[dict[str, Any]],
     polygon: list[list[float]],
+    saved_area_id: str | None = None,
 ) -> None:
     conn = get_session_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(
                 f"""
-                INSERT INTO cached_jobs (job_id, user_id, rows, sold_points, polygon, expires_at)
-                VALUES (%s, %s, %s, %s, %s, now() + interval '{_JOB_TTL_SECONDS} seconds')
+                INSERT INTO cached_jobs (job_id, user_id, saved_area_id, rows, sold_points, polygon, expires_at)
+                VALUES (%s, %s, %s, %s, %s, %s, now() + interval '{_JOB_TTL_SECONDS} seconds')
                 ON CONFLICT (job_id) DO UPDATE SET
                     user_id = EXCLUDED.user_id,
+                    saved_area_id = COALESCE(EXCLUDED.saved_area_id, cached_jobs.saved_area_id),
                     rows = EXCLUDED.rows,
                     sold_points = EXCLUDED.sold_points,
                     polygon = EXCLUDED.polygon,
@@ -327,7 +407,7 @@ def _persist_cached_job_sync(
                         ELSE now() + interval '{_JOB_TTL_SECONDS} seconds'
                     END
                 """,
-                (job_id, int(user_id), Json(rows), Json(sold_points), Json(polygon)),
+                (job_id, int(user_id), saved_area_id, Json(rows), Json(sold_points), Json(polygon)),
             )
         conn.commit()
     finally:
@@ -340,7 +420,7 @@ def _load_cached_job(job_id: str) -> dict[str, Any] | None:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                                SELECT rows, sold_points, polygon, user_id
+                                SELECT rows, sold_points, polygon, user_id, saved_area_id
                 FROM cached_jobs
                 WHERE job_id = %s
                                     AND (expires_at IS NULL OR expires_at > now())
@@ -362,13 +442,14 @@ def _load_cached_job(job_id: str) -> dict[str, Any] | None:
                 (job_id,),
             )
         conn.commit()
-        rows, sold_points, polygon, user_id = row
+        rows, sold_points, polygon, user_id, saved_area_id = row
         return {
             "rows": rows if isinstance(rows, list) else [],
             "redfin_data": {},
             "sold_points": sold_points if isinstance(sold_points, list) else [],
             "polygon": polygon if isinstance(polygon, list) else [],
             "user_id": int(user_id or 0),
+            "saved_area_id": str(saved_area_id or "").strip() or None,
             "created_at": time.monotonic(),
             "last_accessed": time.monotonic(),
         }
@@ -389,6 +470,50 @@ def _counties_from_rows(rows: list[dict[str, Any]]) -> list[str]:
         else:
             seen.add("dcad")
     return sorted(seen)
+
+
+def _saved_area_exists(area_id: str) -> bool:
+    normalized = str(area_id or "").strip()
+    if not normalized:
+        return False
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM saved_areas WHERE area_id = %s LIMIT 1", (normalized,))
+            return cur.fetchone() is not None
+    finally:
+        release_session_conn(conn)
+
+
+def _job_share_id(job_id: str, fallback_saved_area_id: str | None = None) -> str:
+    saved_area_id = str(fallback_saved_area_id or "").strip()
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            if not saved_area_id:
+                cur.execute(
+                    "SELECT saved_area_id FROM cached_jobs WHERE job_id = %s LIMIT 1",
+                    (job_id,),
+                )
+                row = cur.fetchone()
+                saved_area_id = str(row[0] or "").strip() if row else ""
+            if not saved_area_id:
+                cur.execute(
+                    "SELECT saved_area_id FROM analysis_sessions WHERE session_id = %s LIMIT 1",
+                    (job_id,),
+                )
+                row = cur.fetchone()
+                saved_area_id = str(row[0] or "").strip() if row else ""
+            if not saved_area_id:
+                return ""
+            cur.execute(
+                "SELECT share_id FROM saved_areas WHERE area_id = %s LIMIT 1",
+                (saved_area_id,),
+            )
+            row = cur.fetchone()
+            return str(row[0] or "").strip() if row else ""
+    finally:
+        release_session_conn(conn)
 
 
 def _persist_session_sync(
@@ -440,6 +565,7 @@ async def _persist_session_async(
     parcel_count: int,
     county_coverage: list[str],
     user_id: int,
+    saved_area_id: str | None = None,
 ) -> None:
     try:
         await asyncio.to_thread(
@@ -449,7 +575,7 @@ async def _persist_session_async(
             parcel_count,
             county_coverage,
             user_id,
-            None,
+            saved_area_id,
         )
     except Exception as exc:
         print(f"[session] persist failed for {session_id}: {exc}")
@@ -692,10 +818,12 @@ class AnalyzeRequest(BaseModel):
     polygon: list[list[float]]
     include_redfin: bool = False
     include_sold: bool = False
+    area_id: str | None = None
 
 
 class MergeJobsRequest(BaseModel):
     job_ids: list[str]
+    area_id: str | None = None
 
 
 class VerificationRequest(BaseModel):
@@ -710,6 +838,10 @@ class SavedAreaCreateRequest(BaseModel):
     type: Literal["area", "location"] = "area"
     lat: float | None = None
     lng: float | None = None
+    # Optional: the job_id the user was analyzing when they clicked Save Area.
+    # Backfills cached_jobs.saved_area_id and analysis_sessions.saved_area_id so
+    # the next CSV download from this job carries the new area's share_id.
+    job_id: str | None = None
 
 
 class SavedAreaUpdateRequest(BaseModel):
@@ -2114,7 +2246,10 @@ async def analyze(request: AnalyzeRequest, req: Request, user: dict[str, Any] = 
     polygon = request.polygon
     include_redfin = bool(request.include_redfin)
     include_sold = bool(request.include_sold)
+    area_id = str(request.area_id or "").strip() or None
     user_id = int(user["id"])
+    if area_id and not _saved_area_exists(area_id):
+        raise HTTPException(status_code=404, detail="Saved area not found")
     if len(polygon) < 3:
         raise HTTPException(status_code=400, detail="Polygon must have at least 3 points")
 
@@ -2212,11 +2347,12 @@ async def analyze(request: AnalyzeRequest, req: Request, user: dict[str, Any] = 
             "sold_points": sold_points,
             "polygon": polygon,
             "user_id": user_id,
+            "saved_area_id": area_id,
             "created_at": time.monotonic(),
             "last_accessed": time.monotonic(),
         }
         try:
-            await asyncio.to_thread(_persist_cached_job_sync, empty_job_id, user_id, [], sold_points, polygon)
+            await asyncio.to_thread(_persist_cached_job_sync, empty_job_id, user_id, [], sold_points, polygon, area_id)
         except Exception as exc:
             logger.warning("Failed to persist job to cache (non-fatal): %s", exc)
         return {
@@ -2305,11 +2441,12 @@ async def analyze(request: AnalyzeRequest, req: Request, user: dict[str, Any] = 
         "sold_points": sold_points,
         "polygon": polygon,
         "user_id": user_id,
+        "saved_area_id": area_id,
         "created_at": time.monotonic(),
         "last_accessed": time.monotonic(),
     }
     try:
-        await asyncio.to_thread(_persist_cached_job_sync, job_id, user_id, rows, sold_points, polygon)
+        await asyncio.to_thread(_persist_cached_job_sync, job_id, user_id, rows, sold_points, polygon, area_id)
     except Exception as exc:
         logger.warning("Failed to persist job to cache (non-fatal): %s", exc)
     asyncio.create_task(
@@ -2319,6 +2456,7 @@ async def analyze(request: AnalyzeRequest, req: Request, user: dict[str, Any] = 
             len(rows),
             county_coverage,
             user_id,
+            area_id,
         )
     )
     return {
@@ -2349,10 +2487,17 @@ async def merge_jobs(request: MergeJobsRequest, req: Request, user: dict[str, An
     seen_keys: set[str] = set()
     seen_sold_keys: set[str] = set()
     user_id = int(user["id"])
+    area_id = str(request.area_id or "").strip() or None
+    if area_id and not _saved_area_exists(area_id):
+        raise HTTPException(status_code=404, detail="Saved area not found")
     for job_id in request.job_ids:
         job = _get_job(job_id, user_id)
         if job is None:
             continue
+        if area_id is None:
+            inferred_area = str(job.get("saved_area_id") or "").strip()
+            if inferred_area:
+                area_id = inferred_area
         for row in job.get("rows", []):
             key = str(row.get("parcel_key") or row.get("account_num") or "")
             if key and key in seen_keys:
@@ -2373,6 +2518,8 @@ async def merge_jobs(request: MergeJobsRequest, req: Request, user: dict[str, An
 
     if not merged_rows:
         raise HTTPException(status_code=404, detail="No valid tile jobs found to merge")
+    if area_id and not _saved_area_exists(area_id):
+        area_id = None
 
     _evict_stale_jobs()
     new_job_id = str(uuid.uuid4())
@@ -2382,11 +2529,12 @@ async def merge_jobs(request: MergeJobsRequest, req: Request, user: dict[str, An
         "sold_points": merged_sold_points,
         "polygon": [],
         "user_id": user_id,
+        "saved_area_id": area_id,
         "created_at": time.monotonic(),
         "last_accessed": time.monotonic(),
     }
     try:
-        await asyncio.to_thread(_persist_cached_job_sync, new_job_id, user_id, merged_rows, merged_sold_points, [])
+        await asyncio.to_thread(_persist_cached_job_sync, new_job_id, user_id, merged_rows, merged_sold_points, [], area_id)
     except Exception as exc:
         logger.warning("Failed to persist job to cache (non-fatal): %s", exc)
     return {"job_id": new_job_id}
@@ -2605,6 +2753,8 @@ async def download(job_id: str, filename: str | None = None, user: dict[str, Any
     rows = job.get("rows", [])
     redfin_data: dict[str, dict] = job.get("redfin_data", {})
     sold_points: list[dict[str, Any]] = job.get("sold_points", []) or []
+    job_saved_area_id = str(job.get("saved_area_id") or "").strip() or None
+    csv_share_id = _job_share_id(job_id, job_saved_area_id)
     logger.info("Download job %s: %d parcel rows, %d sold points", job_id, len(rows), len(sold_points))
 
     def _deg_dist(lat1, lng1, lat2, lng2):
@@ -2730,6 +2880,7 @@ async def download(job_id: str, filename: str | None = None, user: dict[str, Any
                 "Comp Baths",
                 "Comp Days on Market",
                 "Comp Listing URL",
+                "share_id",
             ]
         )
         buffer.seek(0)
@@ -2892,6 +3043,7 @@ async def download(job_id: str, filename: str | None = None, user: dict[str, Any
                     int(_safe_float(comp.get("baths"))) if comp and _safe_float(comp.get("baths")) not in (None, 0.0) else "",
                     int(_safe_float(comp.get("dom"))) if comp and _safe_float(comp.get("dom")) not in (None, 0.0) else "",
                     (comp.get("listing_url", "") or "") if comp else "",
+                    csv_share_id,
                 ]
             )
             buffer.seek(0)
@@ -3195,7 +3347,7 @@ async def list_saved_areas(user: dict[str, Any] = Depends(get_current_user)) -> 
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT area_id, name, polygon, filter_state, type, created_at, updated_at
+                SELECT area_id, name, polygon, filter_state, type, share_id, created_at, updated_at
                 FROM saved_areas
                 WHERE user_id = %s
                 ORDER BY created_at DESC
@@ -3209,10 +3361,11 @@ async def list_saved_areas(user: dict[str, Any] = Depends(get_current_user)) -> 
                     "polygon": _to_leaflet_polygon(row[2]),
                     "filter_state": row[3] if isinstance(row[3], dict) else None,
                     "type": str(row[4] or "area"),
+                    "share_id": str(row[5] or ""),
                     "lat": (float(row[2][0][1]) if isinstance(row[2], list) and row[2] and len(row[2][0]) >= 2 else None) if str(row[4] or "area") == "location" else None,
                     "lng": (float(row[2][0][0]) if isinstance(row[2], list) and row[2] and len(row[2][0]) >= 2 else None) if str(row[4] or "area") == "location" else None,
-                    "created_at": row[5].isoformat() if row[5] else None,
-                    "updated_at": row[6].isoformat() if row[6] else None,
+                    "created_at": row[6].isoformat() if row[6] else None,
+                    "updated_at": row[7].isoformat() if row[7] else None,
                 }
                 for row in cur.fetchall()
             ]
@@ -3232,16 +3385,54 @@ async def create_saved_area(request: SavedAreaCreateRequest, req: Request, user:
     conn = get_session_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO saved_areas (name, polygon, filter_state, type, user_id)
-                VALUES (%s, %s, %s, %s, %s)
-                RETURNING area_id, created_at, updated_at
-                """,
-                (name, Json(polygon_geojson), Json(request.filter_state) if isinstance(request.filter_state, dict) else None, area_type, int(user["id"])),
-            )
-            row = cur.fetchone()
+            row = None
+            share_id = ""
+            for _ in range(10):
+                share_id = _generate_share_id()
+                try:
+                    cur.execute("SAVEPOINT sp_create_saved_area")
+                    cur.execute(
+                        """
+                        INSERT INTO saved_areas (name, polygon, filter_state, type, share_id, user_id)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        RETURNING area_id, created_at, updated_at
+                        """,
+                        (
+                            name,
+                            Json(polygon_geojson),
+                            Json(request.filter_state) if isinstance(request.filter_state, dict) else None,
+                            area_type,
+                            share_id,
+                            int(user["id"]),
+                        ),
+                    )
+                    row = cur.fetchone()
+                    cur.execute("RELEASE SAVEPOINT sp_create_saved_area")
+                    break
+                except UniqueViolation:
+                    cur.execute("ROLLBACK TO SAVEPOINT sp_create_saved_area")
+                    cur.execute("RELEASE SAVEPOINT sp_create_saved_area")
+                    continue
+            if row is None:
+                raise HTTPException(status_code=503, detail="Failed to allocate unique share_id")
+            # Backfill linkage: if the user was analyzing a job when they hit Save,
+            # link that job (and its session) to the new area so CSV exports from
+            # this point on carry the correct share_id.
+            inflight_job_id = str(request.job_id or "").strip()
+            if inflight_job_id:
+                new_area_id = row[0]
+                cur.execute(
+                    "UPDATE cached_jobs SET saved_area_id = %s WHERE job_id = %s AND saved_area_id IS NULL AND user_id = %s",
+                    (new_area_id, inflight_job_id, int(user["id"])),
+                )
+                cur.execute(
+                    "UPDATE analysis_sessions SET saved_area_id = %s WHERE session_id = %s AND saved_area_id IS NULL AND user_id = %s",
+                    (new_area_id, inflight_job_id, int(user["id"])),
+                )
         conn.commit()
+    except HTTPException:
+        conn.rollback()
+        raise
     except Exception:
         conn.rollback()
         raise
@@ -3254,10 +3445,90 @@ async def create_saved_area(request: SavedAreaCreateRequest, req: Request, user:
         "polygon": _to_leaflet_polygon(polygon_geojson),
         "filter_state": request.filter_state if isinstance(request.filter_state, dict) else None,
         "type": area_type,
+        "share_id": share_id,
         "lat": lat,
         "lng": lng,
         "created_at": row[1].isoformat() if row[1] else None,
         "updated_at": row[2].isoformat() if row[2] else None,
+    }
+
+
+@app.get("/api/areas/{area_id}")
+async def get_saved_area(area_id: str, user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT area_id, name, polygon, filter_state, type, share_id, user_id, created_at, updated_at
+                FROM saved_areas
+                WHERE area_id = %s
+                LIMIT 1
+                """,
+                (area_id,),
+            )
+            row = cur.fetchone()
+    finally:
+        release_session_conn(conn)
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="Saved area not found")
+    if int(row[6] or 0) != int(user["id"]):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    return {
+        "area_id": row[0],
+        "name": row[1],
+        "polygon": _to_leaflet_polygon(row[2]),
+        "filter_state": row[3] if isinstance(row[3], dict) else None,
+        "type": str(row[4] or "area"),
+        "share_id": str(row[5] or ""),
+        "lat": (float(row[2][0][1]) if isinstance(row[2], list) and row[2] and len(row[2][0]) >= 2 else None) if str(row[4] or "area") == "location" else None,
+        "lng": (float(row[2][0][0]) if isinstance(row[2], list) and row[2] and len(row[2][0]) >= 2 else None) if str(row[4] or "area") == "location" else None,
+        "created_at": row[7].isoformat() if row[7] else None,
+        "updated_at": row[8].isoformat() if row[8] else None,
+    }
+
+
+@app.get("/api/area/by-share-id/{share_id}")
+async def get_saved_area_by_share_id(
+    share_id: str = FastAPIPath(..., regex=r"^area_[A-Za-z0-9]{10}$"),
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT area_id, name, polygon, filter_state, type, share_id, created_at, updated_at,
+                       COUNT(*) OVER() AS match_count
+                FROM saved_areas
+                WHERE share_id = %s
+                LIMIT 1
+                """,
+                (share_id,),
+            )
+            row = cur.fetchone()
+    finally:
+        release_session_conn(conn)
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="Saved area not found")
+
+    if int(row[8] or 0) > 1:
+        logger.warning("Multiple saved_areas rows found for share_id=%s", share_id)
+
+    return {
+        "area_id": row[0],
+        "name": row[1],
+        "polygon": _to_leaflet_polygon(row[2]),
+        "filter_state": row[3] if isinstance(row[3], dict) else None,
+        "type": str(row[4] or "area"),
+        "share_id": str(row[5] or ""),
+        "lat": (float(row[2][0][1]) if isinstance(row[2], list) and row[2] and len(row[2][0]) >= 2 else None) if str(row[4] or "area") == "location" else None,
+        "lng": (float(row[2][0][0]) if isinstance(row[2], list) and row[2] and len(row[2][0]) >= 2 else None) if str(row[4] or "area") == "location" else None,
+        "created_at": row[6].isoformat() if row[6] else None,
+        "updated_at": row[7].isoformat() if row[7] else None,
     }
 
 

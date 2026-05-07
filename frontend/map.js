@@ -431,6 +431,14 @@ let _savedParcelsCache = [];
 let _currentSessionIsNamed = false;
 let _savedSessionsCache = [];
 let _currentLoadedAreaId = null;
+const _initialAreaShareId = (() => {
+  try {
+    const v = new URLSearchParams(window.location.search).get("area");
+    if (v && /^area_[A-Za-z0-9]{10}$/.test(v)) return v;
+  } catch {}
+  return null;
+})();
+let _pendingAreaShareId = _initialAreaShareId;
 
 const HOA_COLOR = "#b8860b";
 
@@ -1254,6 +1262,7 @@ function _normalizeSavedAreaRow(area) {
     id: String(area.area_id || area.id || ""),
     type: String(area.type || "area"),
     name: String(area.name || "Untitled"),
+    share_id: String(area.share_id || ""),
     latlngs: polygon,
     bounds: polygon.length >= 2 ? _savedAreaBoundsFromLatLngs(polygon) : null,
     savedAt: area.updated_at || area.created_at || new Date().toISOString(),
@@ -1382,6 +1391,7 @@ async function saveCurrentArea(name) {
       type: "area",
       polygon: lastDrawnLatLngs,
       filter_state: captureFilterState(),
+      job_id: currentJobId || null,
     }),
   });
   const normalized = _normalizeSavedAreaRow(created);
@@ -1801,7 +1811,7 @@ async function restoreSavedArea(area, options = {}) {
   if (options.undoSnapshot) options.undoSnapshot.abortCtrl = _activeAnalysisAbortController;
 
   try {
-    const data = await runAnalysis(polygon, includeRedfin, includeSold, { signal: analysisRequest.signal });
+    const data = await runAnalysis(polygon, includeRedfin, includeSold, { signal: analysisRequest.signal, areaId: area.id });
     if (analysisRequest.signal.aborted) return;
     if (!isActiveAnalysisRequest(analysisRequest.requestId)) return;
     if (data.source_status && (!data.source_status.dcad_ok || !data.source_status.tad_ok)) {
@@ -2071,6 +2081,7 @@ function _renderList(sectionId, listId, items) {
     const icon = area.type === "parcel" ? "📌" : area.type === "location" ? "📍" : "▭";
     const chip = _formatFilterDiffChip(area);
     const canRename = area.type !== "parcel";
+    const canShare = area.type === "area" && Boolean(String(area.share_id || "").trim());
     const activeClass = area.id === _currentLoadedAreaId ? " saved-area-row-active" : "";
     return `
       <div class="saved-area-row${activeClass}" tabindex="0" data-id="${area.id}" data-type="${area.type}">
@@ -2081,6 +2092,7 @@ function _renderList(sectionId, listId, items) {
         </div>
         ${chip ? `<div class="saved-row-filter-chip">${chip}</div>` : ""}
         <div class="saved-area-row-actions">
+          ${canShare ? `<button type="button" class="saved-area-action-btn" data-action="share" data-share-id="${_esc(area.share_id)}" title="Share">🔗 Share</button>` : "<span></span>"}
           ${canRename ? `<button type="button" class="saved-area-action-btn rename" data-action="rename" title="Rename">✎ Rename</button>` : "<span></span>"}
           <button type="button" class="saved-area-action-btn delete" data-action="delete" title="Delete">🗑 Delete</button>
         </div>
@@ -2093,6 +2105,22 @@ function _renderList(sectionId, listId, items) {
       const all = [..._savedAreasCache, ..._savedParcelsCache];
       const area = all.find((a) => a.id === id);
       if (!area) return;
+      if (actionEl?.dataset.action === "share") {
+        e.stopPropagation();
+        const shareId = String(actionEl.dataset.shareId || "").trim();
+        if (!shareId) return;
+        const url = `${window.location.origin}/?area=${shareId}`;
+        try {
+          if (!navigator.clipboard || typeof navigator.clipboard.writeText !== "function") {
+            throw new Error("Clipboard API unavailable");
+          }
+          await navigator.clipboard.writeText(url);
+          _showToast("Link copied");
+        } catch {
+          _showToast("Copy failed - try again", "error");
+        }
+        return;
+      }
       if (actionEl?.dataset.action === "delete") {
         e.stopPropagation();
         await deleteSavedArea(area);
@@ -2207,6 +2235,42 @@ function _readLegacySavedItems() {
 
 function _hideImportBanner() {
   document.getElementById("import-banner")?.classList.add("hidden");
+}
+
+let _toastTimer = null;
+function _showToast(message, variant = "ok") {
+  let toast = document.getElementById("ll-toast");
+  if (!toast) {
+    toast = document.createElement("div");
+    toast.id = "ll-toast";
+    toast.style.position = "fixed";
+    toast.style.right = "16px";
+    toast.style.bottom = "16px";
+    toast.style.zIndex = "12000";
+    toast.style.padding = "10px 12px";
+    toast.style.borderRadius = "8px";
+    toast.style.fontSize = "13px";
+    toast.style.boxShadow = "0 10px 24px rgba(0,0,0,0.22)";
+    toast.style.opacity = "0";
+    toast.style.pointerEvents = "none";
+    toast.style.transition = "opacity 150ms ease";
+    document.body.appendChild(toast);
+  }
+  toast.textContent = String(message || "");
+  if (variant === "error") {
+    toast.style.background = "#ffe5e5";
+    toast.style.color = "#7a1111";
+    toast.style.border = "1px solid #ffc9c9";
+  } else {
+    toast.style.background = "#1f2937";
+    toast.style.color = "#ffffff";
+    toast.style.border = "1px solid #111827";
+  }
+  toast.style.opacity = "1";
+  if (_toastTimer) clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => {
+    toast.style.opacity = "0";
+  }, 2000);
 }
 
 async function _importLegacySavedItems() {
@@ -3890,13 +3954,13 @@ async function postJsonWithRetry(endpoint, payload, options = {}) {
 }
 
 async function fetchTileDataRecursive(tilePolygon, includeRedfin, includeSold, depth, tileLabel, options = {}) {
-  const { signal } = options;
+  const { signal, areaId } = options;
   const redfinStatus = document.getElementById("redfin-status");
   let data;
   try {
     data = await postJsonWithRetry(
       "/api/analyze",
-      { polygon: tilePolygon, include_redfin: includeRedfin, include_sold: includeSold },
+      { polygon: tilePolygon, include_redfin: includeRedfin, include_sold: includeSold, area_id: areaId || null },
       {
         signal,
         maxRetries: 2,
@@ -4015,7 +4079,7 @@ async function runTiledAnalysis(polygon, includeRedfin, includeSold, options = {
   // Merge server-side so export + verification have a single stable job_id
   const mergeData = await postJsonWithRetry(
     "/api/merge-jobs",
-    { job_ids: tileJobIds },
+    { job_ids: tileJobIds, area_id: options.areaId || null },
     {
       signal: options.signal,
       maxRetries: 2,
@@ -4040,15 +4104,17 @@ async function runTiledAnalysis(polygon, includeRedfin, includeSold, options = {
 }
 
 async function runAnalysis(polygon, includeRedfin, includeSold, options = {}) {
+  const resolvedAreaId = (Object.prototype.hasOwnProperty.call(options, "areaId") ? options.areaId : _currentLoadedAreaId) || null;
+  const requestOptions = { ...options, areaId: resolvedAreaId };
   const bbox = getPolygonBbox(polygon);
   if (bboxArea(bbox) > TILE_AREA_THRESHOLD) {
-    return runTiledAnalysis(polygon, includeRedfin, includeSold, options);
+    return runTiledAnalysis(polygon, includeRedfin, includeSold, requestOptions);
   }
   return postJsonWithRetry(
     "/api/analyze",
-    { polygon, include_redfin: includeRedfin, include_sold: includeSold },
+    { polygon, include_redfin: includeRedfin, include_sold: includeSold, area_id: resolvedAreaId },
     {
-      signal: options.signal,
+      signal: requestOptions.signal,
       maxRetries: 2,
       statusElement: document.getElementById("redfin-status"),
       retryMessageBuilder: (attempt, total, waitMs, status) =>
@@ -5004,6 +5070,11 @@ function _showLoginForm(errorMsg = "") {
         _renderUserBar(_currentUser);
         await _reloadSavedResources().catch((err) => console.error("load saved resources failed", err));
         _maybeShowImportBanner();
+        const pendingShareId = _pendingAreaShareId;
+        _pendingAreaShareId = null;
+        if (pendingShareId) {
+          await _loadAreaFromShareId(pendingShareId);
+        }
         if (data.force_password_change) {
           _showChangePasswordForm(true);
         }
@@ -5360,6 +5431,27 @@ function _handleForcePasswordChange() {
   _showChangePasswordForm(true);
 }
 
+async function _loadAreaFromShareId(shareId) {
+  try {
+    const resp = await fetch(`/api/area/by-share-id/${encodeURIComponent(shareId)}`, {
+      credentials: "same-origin",
+    });
+    if (!resp.ok) {
+      if (resp.status === 404) {
+        _showToast("Shared link not found - it may have been deleted", "error");
+      } else {
+        _showToast("Could not open shared workspace", "error");
+      }
+      return;
+    }
+    const area = await resp.json();
+    await restoreSavedArea(_normalizeSavedAreaRow(area));
+  } catch (err) {
+    console.error("Deep-link load failed", err);
+    _showToast("Could not open shared workspace", "error");
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Startup — check if already logged in
 // ---------------------------------------------------------------------------
@@ -5388,6 +5480,11 @@ function _handleForcePasswordChange() {
       _renderUserBar(_currentUser);
       await _reloadSavedResources().catch((err) => console.error("load saved resources failed", err));
       _maybeShowImportBanner();
+      const pendingShareId = _pendingAreaShareId;
+      _pendingAreaShareId = null;
+      if (pendingShareId) {
+        await _loadAreaFromShareId(pendingShareId);
+      }
       if (_currentUser?.force_password_change) {
         _showChangePasswordForm(true);
       }

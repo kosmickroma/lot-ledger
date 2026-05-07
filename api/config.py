@@ -20,7 +20,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from functools import lru_cache
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
 import psycopg2
 import psycopg2.pool
@@ -66,14 +66,15 @@ def get_settings() -> Settings:
         # Default session DB target uses same host/user/pass on the same instance.
         # Keeping the database separate makes client data portable via pg_dump.
         session_db_name = os.getenv("SESSION_DB_NAME", "lotledger_sessions").strip() or "lotledger_sessions"
+        encoded_password = quote(db_password, safe="")
         if unix_socket:
             session_database_url = (
-                f"postgresql://{db_user}:{db_password}@/{session_db_name}"
+                f"postgresql://{db_user}:{encoded_password}@/{session_db_name}"
                 f"?host={unix_socket}&connect_timeout=10"
             )
         else:
             session_database_url = (
-                f"postgresql://{db_user}:{db_password}@{db_host}:{db_port_raw}/{session_db_name}"
+                f"postgresql://{db_user}:{encoded_password}@{db_host}:{db_port_raw}/{session_db_name}"
                 f"?connect_timeout=10"
             )
 
