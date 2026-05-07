@@ -2140,7 +2140,6 @@ function _renderList(sectionId, listId, items) {
           <div class="saved-area-secondary-btns">
             ${!showFullControls && canShare ? `<button type="button" class="saved-area-action-btn" data-action="fork" data-share-id="${_esc(area.share_id)}" title="Make my own copy">📋 Make my copy</button>` : ""}
             ${showFullControls && canRename ? `<button type="button" class="saved-area-action-btn rename" data-action="rename" title="Rename">✎ Rename</button>` : ""}
-            ${showFullControls ? `<button type="button" class="saved-area-action-btn delete" data-action="delete" title="Delete">🗑 Delete</button>` : ""}
           </div>
         </div>
       </div>`;
