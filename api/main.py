@@ -22,6 +22,7 @@ import logging
 import os
 import re
 import secrets
+import string
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -997,7 +998,7 @@ def _enforce_admin_target_rules(actor: dict[str, Any], target: dict[str, Any], a
         raise HTTPException(status_code=403, detail="Developer accounts cannot be modified via admin endpoints")
     if actor_role == "owner" and target_role not in {"member", "user", "power_user"}:
         raise HTTPException(status_code=403, detail="Owner can manage user and power_user accounts only")
-    if action == "disable" and target_role == "owner":
+    if action in {"disable", "delete"} and target_role == "owner":
         # Keep at least one active owner account.
         conn = get_session_conn()
         try:
@@ -1440,13 +1441,11 @@ async def admin_enable_user(
 async def admin_reset_password(
     user_id: int,
     request: Request,
-    payload: AdminResetPasswordRequest,
     actor: dict[str, Any] = Depends(require_role("owner", "developer")),
 ) -> dict[str, Any]:
     require_csrf(request)
-    temp_password = str(payload.temp_password or "")
-    if not _password_valid(temp_password):
-        raise HTTPException(status_code=422, detail="Password must be at least 10 characters")
+    alphabet = string.ascii_letters + string.digits
+    temp_password = "".join(secrets.choice(alphabet) for _ in range(14))
 
     conn = get_session_conn()
     try:
@@ -1474,6 +1473,50 @@ async def admin_reset_password(
                 user_agent=request.headers.get("user-agent", ""),
             )
         conn.commit()
+    finally:
+        release_session_conn(conn)
+    return {"ok": True, "temp_password": temp_password}
+
+
+@app.delete("/admin/users/{user_id}")
+async def admin_delete_user(
+    user_id: int,
+    request: Request,
+    actor: dict[str, Any] = Depends(require_role("owner", "developer")),
+) -> dict[str, Any]:
+    require_csrf(request)
+
+    if int(user_id) == int(actor["id"]):
+        raise HTTPException(status_code=403, detail="Cannot delete yourself")
+
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            target = _require_target_user(cur, user_id)
+            _enforce_admin_target_rules(actor, target, "delete")
+            write_auth_audit_log(
+                actor=actor["username"],
+                actor_user_id=int(actor["id"]),
+                action="delete_user",
+                target_user=target["username"],
+                target_user_id=int(target["id"]),
+                detail=f"role={target['role']}",
+                ip=get_client_ip(request),
+                user_agent=request.headers.get("user-agent", ""),
+            )
+            cur.execute("DELETE FROM session_tags WHERE user_id = %s", (int(user_id),))
+            cur.execute("DELETE FROM saved_parcels WHERE user_id = %s", (int(user_id),))
+            cur.execute("DELETE FROM cached_jobs WHERE user_id = %s", (int(user_id),))
+            cur.execute("DELETE FROM analysis_sessions WHERE user_id = %s", (int(user_id),))
+            cur.execute("DELETE FROM saved_areas WHERE user_id = %s", (int(user_id),))
+            cur.execute("DELETE FROM users WHERE id = %s", (int(user_id),))
+        conn.commit()
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         release_session_conn(conn)
     return {"ok": True}

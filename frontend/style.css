@@ -1630,6 +1630,15 @@ h1 {
 .admin-action-btn.danger:hover {
   background: rgba(220,80,80,0.12);
 }
+.admin-action-btn.danger-strong {
+  background: rgba(231, 76, 60, 0.18);
+  color: #ff8a80;
+  border: 1px solid rgba(231, 76, 60, 0.5);
+}
+.admin-action-btn.danger-strong:hover {
+  background: rgba(231, 76, 60, 0.32);
+  border-color: rgba(231, 76, 60, 0.7);
+}
 .admin-action-btn:disabled {
   opacity: 0.35;
   cursor: not-allowed;

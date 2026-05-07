@@ -5286,7 +5286,10 @@ async function _adminRefreshTable() {
         const resetBtn = selfRole === "developer" || (selfRole === "owner" && !isSelf(u))
           ? `<button class="admin-action-btn" data-action="reset" data-uid="${u.id}" data-uname="${_esc(u.username)}">Reset Pw</button>`
           : "";
-        actions = (disableBtn + resetBtn) || "—";
+        const deleteBtn = selfRole === "developer" || (selfRole === "owner" && !isSelf(u))
+          ? `<button class="admin-action-btn danger-strong" data-action="delete" data-uid="${u.id}" data-uname="${_esc(u.username)}">Delete</button>`
+          : "";
+        actions = (disableBtn + resetBtn + deleteBtn) || "—";
       }
       return `<tr>
         <td>${statusDot}${_esc(u.username)}</td>
@@ -5311,20 +5314,37 @@ async function _adminRefreshTable() {
 }
 
 async function _adminAction(action, uid, uname, btn) {
+  if (action === "delete") {
+    const confirmed = confirm(`PERMANENTLY DELETE user '${uname}'?\n\nThis removes their account and ALL their saved areas, parcels, sessions, and tags. Audit history is preserved.\n\nThis cannot be undone.`);
+    if (!confirmed) return;
+  }
+
   btn.disabled = true;
   const endpoint = action === "reset"
     ? `/admin/users/${uid}/reset-password`
-    : `/admin/users/${uid}/${action}`;
+    : action === "delete"
+      ? `/admin/users/${uid}`
+      : `/admin/users/${uid}/${action}`;
+  const method = action === "delete" ? "DELETE" : "POST";
 
   try {
     const resp = await fetch(endpoint, {
-      method: "POST",
+      method,
       headers: { "Content-Type": "application/json", ...authHeaders() },
       credentials: "same-origin",
     });
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) {
-      alert(data?.detail || `Action failed.`);
+      const detail = data?.detail;
+      let msg;
+      if (typeof detail === "string") {
+        msg = detail;
+      } else if (Array.isArray(detail) && detail.length > 0) {
+        msg = "Validation error: " + detail.map(d => d?.msg || "invalid input").join("; ");
+      } else {
+        msg = "Action failed.";
+      }
+      alert(msg);
       btn.disabled = false;
       return;
     }
