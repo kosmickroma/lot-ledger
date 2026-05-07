@@ -1014,10 +1014,11 @@ h1 {
   text-decoration: underline;
 }
 
+/* ── Saved-area rows — two-row hierarchy ─────────────────────────────── */
 .saved-area-row {
   display: flex;
-  align-items: center;
-  gap: 6px;
+  flex-direction: column;
+  gap: 0;
   padding: 7px 0;
   border-bottom: 1px solid var(--panel-border);
   cursor: pointer;
@@ -1037,6 +1038,7 @@ h1 {
   padding: 7px 20px;
 }
 
+/* Row 1: name + Share button on the same line */
 .saved-area-main {
   display: flex;
   align-items: center;
@@ -1045,69 +1047,110 @@ h1 {
   min-width: 0;
 }
 
-.saved-row-filter-chip {
+.saved-area-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+/* Row 2: muted secondary line (chip + date) — always visible */
+.saved-area-secondary-line {
+  font-size: 11px;
+  color: var(--text-soft);
+  margin-left: 20px; /* indent past icon */
+  padding-top: 2px;
+}
+
+/* Row 3: divider + rename/delete — hidden by default, revealed when active */
+.saved-area-row-secondary-actions {
   display: none;
-  font-size: 10px;
-  color: var(--text-soft);
-  margin-left: 18px;
-  margin-top: 3px;
-  margin-bottom: 2px;
+  flex-direction: column;
+  gap: 0;
+  overflow: hidden;
+  max-height: 0;
+  opacity: 0;
+  transition: max-height 0.15s ease, opacity 0.15s ease;
 }
 
-.saved-area-row:hover .saved-row-filter-chip,
-.saved-area-row:focus-within .saved-row-filter-chip {
-  display: block;
-}
-
-.saved-area-row-active .saved-row-filter-chip {
-  display: block;
-}
-
-.saved-area-row-actions {
+.saved-area-row-active .saved-area-row-secondary-actions {
   display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  padding-top: 4px;
+  max-height: 60px;
+  opacity: 1;
 }
 
-.saved-area-action-btn {
-  background: none;
+.saved-area-actions-divider {
   border: none;
-  color: var(--text-soft);
-  font-size: 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  margin: 5px 0 0;
+}
+
+.saved-area-secondary-btns {
+  display: flex;
+  gap: 6px;
+  padding: 4px 0 2px;
+  margin-left: 20px; /* indent past icon */
+}
+
+/* Gold Share button — matches #btn-download primary action styling */
+.saved-area-share-btn {
+  flex-shrink: 0;
+  margin-left: auto;
+  padding: 5px 10px;
+  background: var(--gold);
+  color: #111217;
+  border: none;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
   cursor: pointer;
   line-height: 1;
-  padding: 4px 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  transition: background 0.15s;
+}
+
+.saved-area-share-btn:hover {
+  background: var(--gold-strong);
+}
+
+/* Rename + Delete — muted secondary, border-only */
+.saved-area-action-btn {
+  background: none;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: var(--text-soft);
+  font-size: 12px;
+  cursor: pointer;
+  line-height: 1;
+  padding: 4px 8px;
   border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  transition: background 0.12s, color 0.12s;
 }
 
 .saved-area-action-btn:hover {
   color: var(--text-main);
-  background: rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.07);
 }
 
-.saved-area-row-actions .saved-area-action-btn {
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: rgba(255, 255, 255, 0.04);
-  font-size: 12px;
-  padding: 5px 8px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  flex: 1 1 0;
-  min-width: 0;
-  white-space: nowrap;
+.saved-area-action-btn.delete {
+  color: #c0392b;
+  border-color: rgba(231, 76, 60, 0.25);
 }
 
-.saved-area-row-actions .saved-area-action-btn.delete {
-  color: #e74c3c;
-  border-color: rgba(231, 76, 60, 0.3);
-}
-
-.saved-area-row-actions .saved-area-action-btn.delete:hover {
+.saved-area-action-btn.delete:hover {
   color: #ff8a80;
   background: rgba(231, 76, 60, 0.12);
+  border-color: rgba(231, 76, 60, 0.45);
 }
 
 .saved-area-rename-input {

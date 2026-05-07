@@ -2083,18 +2083,21 @@ function _renderList(sectionId, listId, items) {
     const canRename = area.type !== "parcel";
     const canShare = area.type === "area" && Boolean(String(area.share_id || "").trim());
     const activeClass = area.id === _currentLoadedAreaId ? " saved-area-row-active" : "";
+    const secondaryLine = [chip, `saved ${date}`].filter(Boolean).join(" · ");
     return `
       <div class="saved-area-row${activeClass}" tabindex="0" data-id="${area.id}" data-type="${area.type}">
         <div class="saved-area-main">
           <span class="saved-area-icon">${icon}</span>
           <span class="saved-area-name">${area.name}</span>
-          <span class="saved-area-date">${date}</span>
+          ${canShare ? `<button type="button" class="saved-area-action-btn saved-area-share-btn" data-action="share" data-share-id="${_esc(area.share_id)}" title="Share">🔗 Share</button>` : ""}
         </div>
-        ${chip ? `<div class="saved-row-filter-chip">${chip}</div>` : ""}
-        <div class="saved-area-row-actions">
-          ${canShare ? `<button type="button" class="saved-area-action-btn" data-action="share" data-share-id="${_esc(area.share_id)}" title="Share">🔗 Share</button>` : "<span></span>"}
-          ${canRename ? `<button type="button" class="saved-area-action-btn rename" data-action="rename" title="Rename">✎ Rename</button>` : "<span></span>"}
-          <button type="button" class="saved-area-action-btn delete" data-action="delete" title="Delete">🗑 Delete</button>
+        <div class="saved-area-secondary-line">${secondaryLine}</div>
+        <div class="saved-area-row-secondary-actions">
+          <hr class="saved-area-actions-divider">
+          <div class="saved-area-secondary-btns">
+            ${canRename ? `<button type="button" class="saved-area-action-btn rename" data-action="rename" title="Rename">✎ Rename</button>` : ""}
+            <button type="button" class="saved-area-action-btn delete" data-action="delete" title="Delete">🗑 Delete</button>
+          </div>
         </div>
       </div>`;
   }).join("");
