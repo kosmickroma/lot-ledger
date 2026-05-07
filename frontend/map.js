@@ -1254,6 +1254,7 @@ function _normalizeSavedAreaRow(area) {
     id: String(area.area_id || area.id || ""),
     type: String(area.type || "area"),
     name: String(area.name || "Untitled"),
+    share_id: String(area.share_id || ""),
     latlngs: polygon,
     bounds: polygon.length >= 2 ? _savedAreaBoundsFromLatLngs(polygon) : null,
     savedAt: area.updated_at || area.created_at || new Date().toISOString(),
@@ -2071,6 +2072,7 @@ function _renderList(sectionId, listId, items) {
     const icon = area.type === "parcel" ? "📌" : area.type === "location" ? "📍" : "▭";
     const chip = _formatFilterDiffChip(area);
     const canRename = area.type !== "parcel";
+    const canShare = area.type === "area" && Boolean(String(area.share_id || "").trim());
     const activeClass = area.id === _currentLoadedAreaId ? " saved-area-row-active" : "";
     return `
       <div class="saved-area-row${activeClass}" tabindex="0" data-id="${area.id}" data-type="${area.type}">
@@ -2081,6 +2083,7 @@ function _renderList(sectionId, listId, items) {
         </div>
         ${chip ? `<div class="saved-row-filter-chip">${chip}</div>` : ""}
         <div class="saved-area-row-actions">
+          ${canShare ? `<button type="button" class="saved-area-action-btn" data-action="share" data-share-id="${_esc(area.share_id)}" title="Share">🔗 Share</button>` : "<span></span>"}
           ${canRename ? `<button type="button" class="saved-area-action-btn rename" data-action="rename" title="Rename">✎ Rename</button>` : "<span></span>"}
           <button type="button" class="saved-area-action-btn delete" data-action="delete" title="Delete">🗑 Delete</button>
         </div>
@@ -2093,6 +2096,22 @@ function _renderList(sectionId, listId, items) {
       const all = [..._savedAreasCache, ..._savedParcelsCache];
       const area = all.find((a) => a.id === id);
       if (!area) return;
+      if (actionEl?.dataset.action === "share") {
+        e.stopPropagation();
+        const shareId = String(actionEl.dataset.shareId || "").trim();
+        if (!shareId) return;
+        const url = `${window.location.origin}/?area=${shareId}`;
+        try {
+          if (!navigator.clipboard || typeof navigator.clipboard.writeText !== "function") {
+            throw new Error("Clipboard API unavailable");
+          }
+          await navigator.clipboard.writeText(url);
+          _showToast("Link copied");
+        } catch {
+          _showToast("Copy failed - try again", "error");
+        }
+        return;
+      }
       if (actionEl?.dataset.action === "delete") {
         e.stopPropagation();
         await deleteSavedArea(area);
@@ -2207,6 +2226,42 @@ function _readLegacySavedItems() {
 
 function _hideImportBanner() {
   document.getElementById("import-banner")?.classList.add("hidden");
+}
+
+let _toastTimer = null;
+function _showToast(message, variant = "ok") {
+  let toast = document.getElementById("ll-toast");
+  if (!toast) {
+    toast = document.createElement("div");
+    toast.id = "ll-toast";
+    toast.style.position = "fixed";
+    toast.style.right = "16px";
+    toast.style.bottom = "16px";
+    toast.style.zIndex = "12000";
+    toast.style.padding = "10px 12px";
+    toast.style.borderRadius = "8px";
+    toast.style.fontSize = "13px";
+    toast.style.boxShadow = "0 10px 24px rgba(0,0,0,0.22)";
+    toast.style.opacity = "0";
+    toast.style.pointerEvents = "none";
+    toast.style.transition = "opacity 150ms ease";
+    document.body.appendChild(toast);
+  }
+  toast.textContent = String(message || "");
+  if (variant === "error") {
+    toast.style.background = "#ffe5e5";
+    toast.style.color = "#7a1111";
+    toast.style.border = "1px solid #ffc9c9";
+  } else {
+    toast.style.background = "#1f2937";
+    toast.style.color = "#ffffff";
+    toast.style.border = "1px solid #111827";
+  }
+  toast.style.opacity = "1";
+  if (_toastTimer) clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => {
+    toast.style.opacity = "0";
+  }, 2000);
 }
 
 async function _importLegacySavedItems() {
