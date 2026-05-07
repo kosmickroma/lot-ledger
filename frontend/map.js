@@ -393,6 +393,11 @@ let lastIncludedSold = false;
 let lastSoldPoints = [];
 let lastSoldPanelPoints = [];
 let matchedSoldLabelPoints = [];
+// Tracks account_nums of sold-matched parcels that actually rendered in the
+// current renderFeatures pass (after passesNumericFilters). renderSoldPoints
+// uses this to suppress price labels for parcels filtered out by numeric
+// filters (e.g., lot-size min/max), so labels follow parcel visibility.
+let _currentlyRenderedSoldAccounts = new Set();
 let soldMarkers = [];
 let transientSoldSidebarPopup = null;
 let soldCompsSortMode = "price";
@@ -3325,6 +3330,7 @@ function attachSoldCompsToFeatures(features, soldPoints) {
     const lng = Number(p.lng);
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
     matchedLabelPoints.push({
+      account_num: String(p.account_num || ""),
       lat,
       lng,
       sold_price: p.sold_comp.sold_price,
@@ -3357,8 +3363,13 @@ function renderSoldPoints() {
   if (!soldParcelLayer) return;
 
   // Matched sold comps are represented by sold parcel polygons. Create
-  // invisible anchors only for zoom-gated price labels.
-  matchedSoldLabelPoints.forEach((point) => {
+  // invisible anchors only for zoom-gated price labels — and only for
+  // parcels that ACTUALLY rendered (passed numeric filters like lot-size),
+  // so labels follow the parcel visibility instead of leaking when filtered out.
+  const visibleMatchedPoints = matchedSoldLabelPoints.filter(
+    (point) => !point.account_num || _currentlyRenderedSoldAccounts.has(point.account_num)
+  );
+  visibleMatchedPoints.forEach((point) => {
     const marker = L.circleMarker([point.lat, point.lng], {
       pane: "soldPane",
       radius: 0,
@@ -3383,6 +3394,7 @@ function renderFeatures(geojson) {
   const shouldRestorePopup = Boolean(_activeParcelPopupState?.accountNum);
   _isRefreshingParcelLayers = shouldRestorePopup;
   _renderedParcelPopupLayers.clear();
+  _currentlyRenderedSoldAccounts.clear();
   PARCEL_LAYER_KEYS.forEach((key) => parcelTypeLayers[key]?.clearLayers());
   redfinLayer.clearLayers();
   verificationBadgeLayer.clearLayers();
@@ -3399,6 +3411,9 @@ function renderFeatures(geojson) {
     if (!passesNumericFilters(feature)) return;
     const hasSoldComp = Boolean(p.sold_comp);
     const targetLayer = (hasSoldComp ? parcelTypeLayers.sold : parcelTypeLayers[bucket]) || markerLayer;
+    if (hasSoldComp && p.account_num) {
+      _currentlyRenderedSoldAccounts.add(String(p.account_num));
+    }
     const color = getColor(feature);
     const borderColor = getBorderColor(feature);
     const hasVisibleSoldComp = hasSoldComp;
