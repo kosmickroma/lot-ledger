@@ -565,7 +565,47 @@ function setActiveItem(type, name) {
   typeEl.textContent = type || "";
   nameEl.textContent = name || "";
   slot.classList.remove("is-collapsed");
-  console.debug("[slot] setActiveItem", type, name, "classes:", slot.className);
+  const cs = getComputedStyle(slot);
+  console.debug("[slot] setActiveItem", type, name, {
+    classes: slot.className,
+    maxHeight: cs.maxHeight,
+    opacity: cs.opacity,
+    display: cs.display,
+    height: slot.offsetHeight,
+    inDom: document.contains(slot),
+  });
+  // Install a MutationObserver once to log any future attribute or DOM changes
+  if (!window.__slotObserverInstalled) {
+    window.__slotObserverInstalled = true;
+    const obs = new MutationObserver((mutations) => {
+      for (const m of mutations) {
+        const cs2 = getComputedStyle(slot);
+        console.warn("[slot] MUTATION", m.type, m.attributeName || "", {
+          newClassName: slot.className,
+          inlineStyle: slot.getAttribute("style") || "",
+          maxHeight: cs2.maxHeight,
+          opacity: cs2.opacity,
+          display: cs2.display,
+          height: slot.offsetHeight,
+        });
+        console.trace("[slot] mutation stack ↑");
+      }
+    });
+    obs.observe(slot, { attributes: true, attributeOldValue: true });
+    // Also observe parent for childList changes (in case slot gets removed)
+    const parent = slot.parentElement;
+    if (parent) {
+      new MutationObserver((mutations) => {
+        for (const m of mutations) {
+          if (Array.from(m.removedNodes).includes(slot)) {
+            console.error("[slot] SLOT REMOVED FROM DOM!");
+            console.trace();
+          }
+        }
+      }).observe(parent, { childList: true });
+    }
+    console.debug("[slot] observers installed");
+  }
 }
 
 function clearActiveItem() {
