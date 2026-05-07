@@ -96,6 +96,14 @@ const numericFilters = {
   sqft_min: null,     sqft_max: null,
 };
 
+// Comp Filters: same numeric schema as Property Filters, but applied only to listings + sold-matched
+const compNumericFilters = {
+  lot_sqft_min: null, lot_sqft_max: null,
+  appr_val_min: null, appr_val_max: null,
+  yr_built_min: null, yr_built_max: null,
+  sqft_min: null,     sqft_max: null,
+};
+
 function parseShorthand(str) {
   const raw = String(str || "").trim();
   if (!raw) return null;
@@ -186,6 +194,31 @@ function passesNumericFilters(feature) {
   if (numericFilters.yr_built_max != null && (yr == null || yr > numericFilters.yr_built_max)) return false;
   if (numericFilters.sqft_min != null && (sqft == null || sqft < numericFilters.sqft_min)) return false;
   if (numericFilters.sqft_max != null && (sqft == null || sqft > numericFilters.sqft_max)) return false;
+  return true;
+}
+
+// Comp Filters (applied only to listings + sold-matched): same parsing logic as Property Filters
+function passesCompFilters(feature) {
+  const p = feature?.properties || {};
+  const lotRaw = String(p.lot_sqft || "").replace(/,/g, "").match(/^[\d.]+/);
+  const lot = lotRaw ? Number(lotRaw[0]) : null;
+
+  const valRaw = String(p.tot_val || "").replace(/[$,]/g, "").match(/^[\d.]+/);
+  const val = valRaw ? Number(valRaw[0]) : null;
+
+  const yr = asNumber(p.yr_built);
+
+  const sqftRaw = String(p.sqft || "").replace(/,/g, "").match(/^[\d.]+/);
+  const sqft = sqftRaw ? Number(sqftRaw[0]) : null;
+
+  if (compNumericFilters.lot_sqft_min != null && (lot == null || lot < compNumericFilters.lot_sqft_min)) return false;
+  if (compNumericFilters.lot_sqft_max != null && (lot == null || lot > compNumericFilters.lot_sqft_max)) return false;
+  if (compNumericFilters.appr_val_min != null && (val == null || val < compNumericFilters.appr_val_min)) return false;
+  if (compNumericFilters.appr_val_max != null && (val == null || val > compNumericFilters.appr_val_max)) return false;
+  if (compNumericFilters.yr_built_min != null && (yr == null || yr < compNumericFilters.yr_built_min)) return false;
+  if (compNumericFilters.yr_built_max != null && (yr == null || yr > compNumericFilters.yr_built_max)) return false;
+  if (compNumericFilters.sqft_min != null && (sqft == null || sqft < compNumericFilters.sqft_min)) return false;
+  if (compNumericFilters.sqft_max != null && (sqft == null || sqft > compNumericFilters.sqft_max)) return false;
   return true;
 }
 
@@ -486,12 +519,13 @@ function captureFilterState() {
       minYearBuilt: soldCompsFilter.minYearBuilt,
       maxYearBuilt: soldCompsFilter.maxYearBuilt,
     },
+    comp: { ...compNumericFilters },
   };
 }
 
 function _normalizeFilterStateForCompare(state) {
   if (!state || typeof state !== "object") {
-    return { v: 1, checkboxes: {}, numeric: {}, sold: {} };
+    return { v: 1, checkboxes: {}, numeric: {}, sold: {}, comp: {} };
   }
   const sold = state.sold && typeof state.sold === "object" ? state.sold : {};
   return {
@@ -505,6 +539,7 @@ function _normalizeFilterStateForCompare(state) {
       minYearBuilt: sold.minYearBuilt ?? null,
       maxYearBuilt: sold.maxYearBuilt ?? null,
     },
+    comp: { ...(state.comp || {}) },
   };
 }
 
@@ -597,6 +632,38 @@ function _hydrateSoldCompInputsFromState() {
   }
 }
 
+// Hydrate Comp Filter numeric inputs (similar to Property but with nf-comp- prefix)
+function _hydrateCompNumericInputsFromState() {
+  const compInputs = [
+    { id: "nf-comp-lot-min", key: "lot_sqft_min" },
+    { id: "nf-comp-lot-max", key: "lot_sqft_max" },
+    { id: "nf-comp-val-min", key: "appr_val_min" },
+    { id: "nf-comp-val-max", key: "appr_val_max" },
+    { id: "nf-comp-yr-min", key: "yr_built_min" },
+    { id: "nf-comp-yr-max", key: "yr_built_max" },
+    { id: "nf-comp-sqft-min", key: "sqft_min" },
+    { id: "nf-comp-sqft-max", key: "sqft_max" },
+  ];
+  compInputs.forEach(({ id, key }) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const val = compNumericFilters[key];
+    if (val == null) {
+      el.value = "";
+      return;
+    }
+    if (key === "lot_sqft_min" || key === "lot_sqft_max") {
+      el.value = String((Number(val) / 43560).toFixed(2)).replace(/\.00$/, "");
+      return;
+    }
+    if (key === "appr_val_min" || key === "appr_val_max") {
+      el.value = formatNumberWithCommas(val);
+      return;
+    }
+    el.value = String(val);
+  });
+}
+
 function restoreFilterState(state) {
   if (!state || typeof state !== "object") return;
   if (Number(state.v || 0) > 1) {
@@ -606,6 +673,7 @@ function restoreFilterState(state) {
   if (Number(state.v || 0) !== 1) return;
   if (state.checkboxes && typeof state.checkboxes === "object") Object.assign(filterState, state.checkboxes);
   if (state.numeric && typeof state.numeric === "object") Object.assign(numericFilters, state.numeric);
+  if (state.comp && typeof state.comp === "object") Object.assign(compNumericFilters, state.comp);
   if (state.sold && typeof state.sold === "object") {
     Object.assign(soldCompsFilter, {
       maxDaysAgo: state.sold.maxDaysAgo ?? DEFAULT_SOLD_COMPS_FILTER.maxDaysAgo,
@@ -618,10 +686,12 @@ function restoreFilterState(state) {
   console.debug("[restoreFilterState] restored", {
     checkboxes: { ...filterState },
     numeric: { ...numericFilters },
+    comp: { ...compNumericFilters },
     sold: { ...soldCompsFilter },
   });
   syncFilterInputs();
   _hydrateNumericInputsFromState();
+  _hydrateCompNumericInputsFromState();
   _hydrateSoldCompInputsFromState();
   if (lastAnalysisGeojson) {
     applyAndRenderSoldFilters();
@@ -984,9 +1054,33 @@ function renderSoldCompsPanel() {
       <div class="numeric-filter-row">
         <span class="numeric-filter-label">Lot Size (acres)</span>
         <div class="numeric-filter-inputs">
-          <input type="text" inputmode="decimal" id="nf-lot-min" placeholder="Min acres" class="nf-input" value="${numericFilters.lot_sqft_min == null ? "" : (numericFilters.lot_sqft_min / 43560).toFixed(2).replace(/\.00$/, "")}">
+          <input type="text" inputmode="decimal" id="nf-comp-lot-min" placeholder="Min acres" class="nf-input" value="${compNumericFilters.lot_sqft_min == null ? "" : (compNumericFilters.lot_sqft_min / 43560).toFixed(2).replace(/\.00$/, "")}">
           <span class="nf-sep">–</span>
-          <input type="text" inputmode="decimal" id="nf-lot-max" placeholder="Max acres" class="nf-input" value="${numericFilters.lot_sqft_max == null ? "" : (numericFilters.lot_sqft_max / 43560).toFixed(2).replace(/\.00$/, "")}">
+          <input type="text" inputmode="decimal" id="nf-comp-lot-max" placeholder="Max acres" class="nf-input" value="${compNumericFilters.lot_sqft_max == null ? "" : (compNumericFilters.lot_sqft_max / 43560).toFixed(2).replace(/\.00$/, "")}">
+        </div>
+      </div>
+      <div class="numeric-filter-row">
+        <span class="numeric-filter-label">Year Built</span>
+        <div class="numeric-filter-inputs">
+          <input type="number" id="nf-comp-yr-min" placeholder="Min" class="nf-input" min="1800" max="2030" value="${compNumericFilters.yr_built_min ?? ""}">
+          <span class="nf-sep">–</span>
+          <input type="number" id="nf-comp-yr-max" placeholder="Max" class="nf-input" min="1800" max="2030" value="${compNumericFilters.yr_built_max ?? ""}">
+        </div>
+      </div>
+      <div class="numeric-filter-row">
+        <span class="numeric-filter-label">Appraised Value</span>
+        <div class="numeric-filter-inputs">
+          <input type="text" id="nf-comp-val-min" placeholder="Min (500k)" class="nf-input" inputmode="decimal" value="${compNumericFilters.appr_val_min ?? ""}">
+          <span class="nf-sep">–</span>
+          <input type="text" id="nf-comp-val-max" placeholder="Max (1m)" class="nf-input" inputmode="decimal" value="${compNumericFilters.appr_val_max ?? ""}">
+        </div>
+      </div>
+      <div class="numeric-filter-row">
+        <span class="numeric-filter-label">Building Sqft</span>
+        <div class="numeric-filter-inputs">
+          <input type="number" id="nf-comp-sqft-min" placeholder="Min" class="nf-input" min="0" value="${compNumericFilters.sqft_min ?? ""}">
+          <span class="nf-sep">–</span>
+          <input type="number" id="nf-comp-sqft-max" placeholder="Max" class="nf-input" min="0" value="${compNumericFilters.sqft_max ?? ""}">
         </div>
       </div>
       <div class="numeric-filter-row">
@@ -996,7 +1090,7 @@ function renderSoldCompsPanel() {
         </div>
       </div>
       <div class="numeric-filter-row">
-        <span class="numeric-filter-label">Price ($)</span>
+        <span class="numeric-filter-label">Sold Price ($)</span>
         <div class="numeric-filter-inputs">
           <input type="text" id="sold-price-min" placeholder="Min (500k)" class="nf-input" value="${soldCompsFilter.minPrice ?? ""}">
           <span class="nf-sep">–</span>
@@ -1004,7 +1098,7 @@ function renderSoldCompsPanel() {
         </div>
       </div>
       <div class="numeric-filter-row">
-        <span class="numeric-filter-label">Year Built</span>
+        <span class="numeric-filter-label">Sold Year Built</span>
         <div class="numeric-filter-inputs">
           <input type="number" id="sold-yr-min" placeholder="Min" class="nf-input" min="1800" max="2030" value="${soldCompsFilter.minYearBuilt ?? ""}">
           <span class="nf-sep">–</span>
@@ -1063,8 +1157,14 @@ function renderSoldCompsPanel() {
   const soldPriceMaxInput = panel.querySelector("#sold-price-max");
   const soldYrMinInput = panel.querySelector("#sold-yr-min");
   const soldYrMaxInput = panel.querySelector("#sold-yr-max");
-  const lotMinInput = panel.querySelector("#nf-lot-min");
-  const lotMaxInput = panel.querySelector("#nf-lot-max");
+  const compLotMinInput = panel.querySelector("#nf-comp-lot-min");
+  const compLotMaxInput = panel.querySelector("#nf-comp-lot-max");
+  const compYrMinInput = panel.querySelector("#nf-comp-yr-min");
+  const compYrMaxInput = panel.querySelector("#nf-comp-yr-max");
+  const compValMinInput = panel.querySelector("#nf-comp-val-min");
+  const compValMaxInput = panel.querySelector("#nf-comp-val-max");
+  const compSqftMinInput = panel.querySelector("#nf-comp-sqft-min");
+  const compSqftMaxInput = panel.querySelector("#nf-comp-sqft-max");
 
   const normalizeShorthandInput = (inputEl) => {
     if (!inputEl) return null;
@@ -1105,6 +1205,12 @@ function renderSoldCompsPanel() {
     _refreshLoadedAreaUi();
   };
 
+  const applyCompNumericInputFilters = () => {
+    bumpUndoPillVersion();
+    // Read comp numeric filter inputs  and apply
+    _applyCompNumericFilters();
+  };
+
   soldDaysMaxInput?.addEventListener("blur", applySoldCompInputFilters);
   soldDaysMaxInput?.addEventListener("change", applySoldCompInputFilters);
   soldYrMinInput?.addEventListener("blur", applySoldCompInputFilters);
@@ -1123,17 +1229,21 @@ function renderSoldCompsPanel() {
     });
   });
 
-  // Use blur + change (NOT input) so the panel doesn't re-render mid-keystroke.
-  // _applyNumericFilters → renderFeatures → renderSoldCompsPanel rebuilds the
-  // panel HTML, destroying input elements and stealing focus. Match the same
-  // pattern the sold-price/sold-year-built inputs use above.
-  const applyLotSizeFilter = () => {
-    bumpUndoPillVersion();
-    _applyNumericFilters();
-  };
-  [lotMinInput, lotMaxInput].forEach((inputEl) => {
-    inputEl?.addEventListener("blur", applyLotSizeFilter);
-    inputEl?.addEventListener("change", applyLotSizeFilter);
+  // Comp numeric filter inputs: use blur + change (NOT input) to avoid re-render mid-keystroke
+  [compLotMinInput, compLotMaxInput, compYrMinInput, compYrMaxInput, compSqftMinInput, compSqftMaxInput].forEach((inputEl) => {
+    inputEl?.addEventListener("blur", applyCompNumericInputFilters);
+    inputEl?.addEventListener("change", applyCompNumericInputFilters);
+  });
+
+  [compValMinInput, compValMaxInput].forEach((inputEl) => {
+    inputEl?.addEventListener("blur", () => {
+      normalizeShorthandInput(inputEl);
+      applyCompNumericInputFilters();
+    });
+    inputEl?.addEventListener("change", () => {
+      normalizeShorthandInput(inputEl);
+      applyCompNumericInputFilters();
+    });
   });
 
   panel.querySelectorAll(".sold-row[data-sold-idx]").forEach((rowEl) => {
@@ -3014,6 +3124,93 @@ document.getElementById("btn-filters-reset")?.addEventListener("click", () => {
   _refreshLoadedAreaUi();
 });
 
+// Comp Filters: read from nf-comp-* inputs and apply
+function _readCompNumericInputs() {
+  const compInputs = [
+    { id: "nf-comp-lot-min", key: "lot_sqft_min" },
+    { id: "nf-comp-lot-max", key: "lot_sqft_max" },
+    { id: "nf-comp-val-min", key: "appr_val_min" },
+    { id: "nf-comp-val-max", key: "appr_val_max" },
+    { id: "nf-comp-yr-min", key: "yr_built_min" },
+    { id: "nf-comp-yr-max", key: "yr_built_max" },
+    { id: "nf-comp-sqft-min", key: "sqft_min" },
+    { id: "nf-comp-sqft-max", key: "sqft_max" },
+  ];
+  compInputs.forEach(({ id, key }) => {
+    const el = document.getElementById(id);
+    const raw = el ? el.value.trim() : "";
+    if (raw === "") {
+      compNumericFilters[key] = null;
+      return;
+    }
+    if (key === "appr_val_min" || key === "appr_val_max") {
+      compNumericFilters[key] = parseShorthand(raw);
+      return;
+    }
+    if (key === "lot_sqft_min" || key === "lot_sqft_max") {
+      const acres = Number(raw);
+      compNumericFilters[key] = Number.isFinite(acres) ? acres * 43_560 : null;
+      return;
+    }
+    const n = Number(raw);
+    compNumericFilters[key] = Number.isFinite(n) ? n : null;
+  });
+}
+
+function _applyCompNumericFilters() {
+  _readCompNumericInputs();
+  if (!lastAnalysisGeojson) return;
+  const markers = viewportRenderMode
+    ? renderViewportFeatures()
+    : renderFeatures(lastAnalysisGeojson);
+  const counts = getVisibleFeatureCounts(lastAnalysisGeojson.features || []);
+  if (lastAnalysisCounts) renderSidebar(counts, markers || {});
+  _refreshLoadedAreaUi();
+}
+
+// Set up event listeners for comp numeric filters
+const COMP_NUMERIC_FILTER_INPUTS = [
+  { id: "nf-comp-lot-min", key: "lot_sqft_min" },
+  { id: "nf-comp-lot-max", key: "lot_sqft_max" },
+  { id: "nf-comp-val-min", key: "appr_val_min" },
+  { id: "nf-comp-val-max", key: "appr_val_max" },
+  { id: "nf-comp-yr-min", key: "yr_built_min" },
+  { id: "nf-comp-yr-max", key: "yr_built_max" },
+  { id: "nf-comp-sqft-min", key: "sqft_min" },
+  { id: "nf-comp-sqft-max", key: "sqft_max" },
+];
+
+COMP_NUMERIC_FILTER_INPUTS.forEach(({ id }) => {
+  document.getElementById(id)?.addEventListener("input", () => {
+    bumpUndoPillVersion();
+    _applyCompNumericFilters();
+  });
+});
+
+["nf-comp-val-min", "nf-comp-val-max"].forEach((id) => {
+  const inputEl = document.getElementById(id);
+  if (!inputEl) return;
+  const normalize = () => {
+    const raw = String(inputEl.value || "").trim();
+    if (!raw) {
+      inputEl.value = "";
+      return;
+    }
+    const parsed = parseShorthand(raw);
+    inputEl.value = parsed == null ? "" : formatNumberWithCommas(parsed);
+  };
+  inputEl.addEventListener("blur", () => {
+    bumpUndoPillVersion();
+    normalize();
+    _applyCompNumericFilters();
+  });
+  inputEl.addEventListener("change", () => {
+    bumpUndoPillVersion();
+    normalize();
+    _applyCompNumericFilters();
+  });
+});
+
 applyMapVisibilityFilters();
 
 function isRedfinVisualActive(feature) {
@@ -3409,7 +3606,11 @@ function renderFeatures(geojson) {
   geojson.features.forEach((feature) => {
     const p = feature.properties;
     const bucket = classifyFeatureForFilter(feature);
+    // All parcels must pass Property Filters
     if (!passesNumericFilters(feature)) return;
+    // Listings + sold-matched parcels must ALSO pass Comp Filters
+    const isListingOrSold = Boolean(p.on_redfin || p.sold_comp);
+    if (isListingOrSold && !passesCompFilters(feature)) return;
     const hasSoldComp = Boolean(p.sold_comp);
     const targetLayer = (hasSoldComp ? parcelTypeLayers.sold : parcelTypeLayers[bucket]) || markerLayer;
     if (hasSoldComp && p.account_num) {
