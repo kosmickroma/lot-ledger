@@ -431,6 +431,14 @@ let _savedParcelsCache = [];
 let _currentSessionIsNamed = false;
 let _savedSessionsCache = [];
 let _currentLoadedAreaId = null;
+const _initialAreaShareId = (() => {
+  try {
+    const v = new URLSearchParams(window.location.search).get("area");
+    if (v && /^area_[A-Za-z0-9]{10}$/.test(v)) return v;
+  } catch {}
+  return null;
+})();
+let _pendingAreaShareId = _initialAreaShareId;
 
 const HOA_COLOR = "#b8860b";
 
@@ -5059,6 +5067,11 @@ function _showLoginForm(errorMsg = "") {
         _renderUserBar(_currentUser);
         await _reloadSavedResources().catch((err) => console.error("load saved resources failed", err));
         _maybeShowImportBanner();
+        const pendingShareId = _pendingAreaShareId;
+        _pendingAreaShareId = null;
+        if (pendingShareId) {
+          await _loadAreaFromShareId(pendingShareId);
+        }
         if (data.force_password_change) {
           _showChangePasswordForm(true);
         }
@@ -5415,6 +5428,27 @@ function _handleForcePasswordChange() {
   _showChangePasswordForm(true);
 }
 
+async function _loadAreaFromShareId(shareId) {
+  try {
+    const resp = await fetch(`/api/area/by-share-id/${encodeURIComponent(shareId)}`, {
+      credentials: "same-origin",
+    });
+    if (!resp.ok) {
+      if (resp.status === 404) {
+        _showToast("Shared link not found - it may have been deleted", "error");
+      } else {
+        _showToast("Could not open shared workspace", "error");
+      }
+      return;
+    }
+    const area = await resp.json();
+    await restoreSavedArea(_normalizeSavedAreaRow(area));
+  } catch (err) {
+    console.error("Deep-link load failed", err);
+    _showToast("Could not open shared workspace", "error");
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Startup — check if already logged in
 // ---------------------------------------------------------------------------
@@ -5443,6 +5477,11 @@ function _handleForcePasswordChange() {
       _renderUserBar(_currentUser);
       await _reloadSavedResources().catch((err) => console.error("load saved resources failed", err));
       _maybeShowImportBanner();
+      const pendingShareId = _pendingAreaShareId;
+      _pendingAreaShareId = null;
+      if (pendingShareId) {
+        await _loadAreaFromShareId(pendingShareId);
+      }
       if (_currentUser?.force_password_change) {
         _showChangePasswordForm(true);
       }
