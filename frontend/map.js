@@ -58,7 +58,6 @@ const SOLD_FALLBACK_DOT_BORDER = "#5C2D91";
 const FILTER_STORAGE_KEY = "lotledger.map.filters.v1";
 const CLICK_MODE_STORAGE_KEY = "lot_ledger_click_mode";
 const SIDEBAR_SECTION_STATE_STORAGE_KEY = "lot_ledger_sidebar_sections.v1";
-const SOLD_COMPS_COLLAPSED_STORAGE_KEY = "lot_ledger_sold_comps_collapsed.v1";
 
 const DEFAULT_FILTERS = {
   active: true,
@@ -436,13 +435,7 @@ let _currentlyRenderedSoldAccounts = new Set();
 let soldMarkers = [];
 let transientSoldSidebarPopup = null;
 let soldCompsSortMode = "price";
-let soldCompsCollapsed = (() => {
-  try {
-    return localStorage.getItem(SOLD_COMPS_COLLAPSED_STORAGE_KEY) === "1";
-  } catch (_) {
-    return false;
-  }
-})();
+let soldCompsCollapsed = false;
 const DEFAULT_SOLD_COMPS_FILTER = {
   maxDaysAgo: 365,
   minPrice: null,
@@ -1011,18 +1004,8 @@ function applyAndRenderSoldFilters() {
 function renderSoldCompsPanel() {
   const panel = document.getElementById("sold-comps-panel");
   if (!panel) return;
-  const resultsVisible = !document.getElementById("sidebar-results")?.classList.contains("hidden");
-  if (!resultsVisible) {
-    panel.innerHTML = "";
-    return;
-  }
   const totalSoldCount = Array.isArray(allSoldPointsRef) ? allSoldPointsRef.length : 0;
   const soldCountNote = `<p class="sidebar-note sold-comps-count-note">${totalSoldCount} sold comp${totalSoldCount === 1 ? "" : "s"} in this area</p>`;
-
-  if (!Array.isArray(allSoldPointsRef) || allSoldPointsRef.length === 0) {
-    panel.innerHTML = soldCountNote;
-    return;
-  }
 
   const priceValues = lastSoldPanelPoints.map((p) => asNumber(p.sold_price)).filter((n) => n != null);
   const ppsfValues = lastSoldPanelPoints.map((p) => asNumber(p.price_per_sqft)).filter((n) => n != null);
@@ -1156,9 +1139,6 @@ function renderSoldCompsPanel() {
   const soldBody = document.getElementById("sold-comps-body");
   soldToggle?.addEventListener("click", () => {
     soldCompsCollapsed = !soldCompsCollapsed;
-    try {
-      localStorage.setItem(SOLD_COMPS_COLLAPSED_STORAGE_KEY, soldCompsCollapsed ? "1" : "0");
-    } catch (_) {}
     soldToggle.setAttribute("aria-expanded", String(!soldCompsCollapsed));
     soldBody?.classList.toggle("hidden", soldCompsCollapsed);
   });
