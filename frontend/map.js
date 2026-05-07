@@ -189,7 +189,7 @@ function passesNumericFilters(feature) {
   return true;
 }
 
-const PARCEL_LAYER_KEYS = ["active", "off_market", "vacant", "multifamily", "commercial", "exempt"];
+const PARCEL_LAYER_KEYS = ["active", "sold", "off_market", "vacant", "multifamily", "commercial", "exempt"];
 
 // -- Click mode helpers (Jump vs Stay) --
 let currentClickMode = "jump";
@@ -902,12 +902,10 @@ function applyAndRenderSoldFilters() {
     _soldPointPassesFilter(p, soldCompsFilter)
   );
   updateMatchedSoldCompVisibility(soldCompsFilter);
-  // Re-render map dots from the full sold set so parcel-category toggles do not
-  // suppress sold markers for comps matched to parcel outlines.
-  const filteredMap = allSoldPointsRef.filter((p) =>
+  const filteredMap = lastSoldPoints.filter((p) =>
     _soldPointPassesFilter(p, soldCompsFilter)
   );
-  renderSoldPoints(filteredMap);
+  renderSoldPoints();
   if (lastAnalysisGeojson && Array.isArray(lastAnalysisGeojson.features) && lastAnalysisGeojson.features.length <= BROWSE_ONLY_THRESHOLD) {
     if (viewportRenderMode) {
       renderViewportFeatures();
@@ -3330,39 +3328,14 @@ function attachSoldCompsToFeatures(features, soldPoints) {
   return { unmatchedSoldPoints, matchedLabelPoints };
 }
 
-function renderSoldPoints(points) {
-  soldLayer.clearLayers();
+function renderSoldPoints() {
   soldMarkers = [];
   if (!filterState.sold) return;
-  const soldPoints = Array.isArray(points) ? points : [];
-  soldPoints.forEach((point) => {
-    const lat = Number(point.lat);
-    const lng = Number(point.lng);
-    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
-    const marker = L.circleMarker([lat, lng], {
-      pane: "soldPane",
-      radius: 4,
-      fillColor: SOLD_FALLBACK_DOT_COLOR,
-      color: SOLD_FALLBACK_DOT_BORDER,
-      weight: 1.2,
-      opacity: 1,
-      fillOpacity: 0.85,
-      bubblingMouseEvents: false,
-    }).bindPopup(() => makeSoldPopupHtml(point), {
-      maxWidth: 300,
-      autoPan: true,
-      autoPanPadding: [10, 50],
-      keepInView: true,
-    }).addTo(soldLayer);
-    soldMarkers.push({
-      marker,
-      priceLabel: null,
-      soldDateLabel: null,
-    });
-  });
+  const soldParcelLayer = parcelTypeLayers.sold;
+  if (!soldParcelLayer) return;
 
-  // Matched sold comps are represented by gold parcel outlines. Create
-  // invisible anchor markers so zoomed sold price labels still render.
+  // Matched sold comps are represented by sold parcel polygons. Create
+  // invisible anchors only for zoom-gated price labels.
   matchedSoldLabelPoints.forEach((point) => {
     const marker = L.circleMarker([point.lat, point.lng], {
       pane: "soldPane",
@@ -3373,7 +3346,7 @@ function renderSoldPoints(points) {
       fillOpacity: 0,
       interactive: false,
       bubblingMouseEvents: false,
-    }).addTo(soldLayer);
+    }).addTo(soldParcelLayer);
     soldMarkers.push({
       marker,
       priceLabel: abbreviatePrice(point.sold_price),
@@ -3402,10 +3375,11 @@ function renderFeatures(geojson) {
     const p = feature.properties;
     const bucket = classifyFeatureForFilter(feature);
     if (!passesNumericFilters(feature)) return;
-    const targetLayer = parcelTypeLayers[bucket] || markerLayer;
+    const hasSoldComp = Boolean(p.sold_comp);
+    const targetLayer = (hasSoldComp ? parcelTypeLayers.sold : parcelTypeLayers[bucket]) || markerLayer;
     const color = getColor(feature);
     const borderColor = getBorderColor(feature);
-    const hasVisibleSoldComp = Boolean(p.sold_comp) && soldLayerVisible;
+    const hasVisibleSoldComp = hasSoldComp;
     const parcelBorderColor = hasVisibleSoldComp ? SOLD_OUTLINE_COLOR : borderColor;
     const parcelBorderWeight = hasVisibleSoldComp ? 3.2 : (p.on_redfin ? 2.8 : 1.5);
     if (p.lat == null || p.lng == null) return;
