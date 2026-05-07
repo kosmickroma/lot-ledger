@@ -3348,7 +3348,12 @@ function renderFeatures(geojson) {
         autoPanPadding: [10, 50],
         keepInView: true,
       });
-      layer._lotLedgerPopupMeta = { type: "parcel", accountNum: String(p.account_num || "") };
+      // L.geoJSON returns a FeatureGroup wrapper; click events fire on inner child layers,
+      // so popup._source is the child, not the wrapper. Propagate metadata to children
+      // so the popupopen handler can find it for suspend/restore protection.
+      const polygonPopupMeta = { type: "parcel", accountNum: String(p.account_num || "") };
+      layer._lotLedgerPopupMeta = polygonPopupMeta;
+      layer.eachLayer((child) => { child._lotLedgerPopupMeta = polygonPopupMeta; });
       layer.addTo(targetLayer);
       if (p.account_num) {
         _renderedParcelPopupLayers.set(String(p.account_num), layer);
