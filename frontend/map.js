@@ -3338,12 +3338,20 @@ function attachSoldCompsToFeatures(features, soldPoints) {
 
 function renderSoldPoints() {
   // Unbind tooltips from prior anchor markers BEFORE clearing the array.
-  // Otherwise when sold filter toggles off, the old markers retain their
-  // bound tooltips and the price labels stay rendered on the map even
-  // though the parcels are hidden.
+  // unbindTooltip alone is unreliable when the marker has already been
+  // detached from its layer (which happens because renderFeatures runs
+  // first and clears parcelTypeLayers.sold). Explicitly remove the tooltip
+  // from the map first, THEN unbind the marker — and as a final safety
+  // net, sweep the tooltipPane DOM for any orphaned .sold-price-label
+  // elements that survived the cleanup.
   soldMarkers.forEach(({ marker }) => {
-    try { marker.unbindTooltip(); } catch {}
+    const tooltip = marker?.getTooltip?.();
+    if (tooltip) {
+      try { tooltip.remove(); } catch {}
+    }
+    try { marker?.unbindTooltip?.(); } catch {}
   });
+  document.querySelectorAll(".leaflet-tooltip.sold-price-label").forEach((el) => el.remove());
   soldMarkers = [];
   if (!filterState.sold) return;
   const soldParcelLayer = parcelTypeLayers.sold;
