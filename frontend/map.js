@@ -1068,14 +1068,6 @@ function renderSoldCompsPanel() {
         </div>
       </div>
       <div class="numeric-filter-row">
-        <span class="numeric-filter-label">Appraised Value</span>
-        <div class="numeric-filter-inputs">
-          <input type="text" id="nf-comp-val-min" placeholder="Min (500k)" class="nf-input" inputmode="decimal" value="${compNumericFilters.appr_val_min ?? ""}">
-          <span class="nf-sep">–</span>
-          <input type="text" id="nf-comp-val-max" placeholder="Max (1m)" class="nf-input" inputmode="decimal" value="${compNumericFilters.appr_val_max ?? ""}">
-        </div>
-      </div>
-      <div class="numeric-filter-row">
         <span class="numeric-filter-label">Building Sqft</span>
         <div class="numeric-filter-inputs">
           <input type="number" id="nf-comp-sqft-min" placeholder="Min" class="nf-input" min="0" value="${compNumericFilters.sqft_min ?? ""}">
@@ -1097,14 +1089,6 @@ function renderSoldCompsPanel() {
           <input type="text" id="sold-price-max" placeholder="Max (1m)" class="nf-input" value="${soldCompsFilter.maxPrice ?? ""}">
         </div>
       </div>
-      <div class="numeric-filter-row">
-        <span class="numeric-filter-label">Sold Year Built</span>
-        <div class="numeric-filter-inputs">
-          <input type="number" id="sold-yr-min" placeholder="Min" class="nf-input" min="1800" max="2030" value="${soldCompsFilter.minYearBuilt ?? ""}">
-          <span class="nf-sep">–</span>
-          <input type="number" id="sold-yr-max" placeholder="Max" class="nf-input" min="1800" max="2030" value="${soldCompsFilter.maxYearBuilt ?? ""}">
-        </div>
-      </div>
     </div>`;
   // --- End filter bar ---
 
@@ -1116,7 +1100,7 @@ function renderSoldCompsPanel() {
     ${soldCountNote}
     <div class="sold-comps-panel">
       <button class="section-toggle" type="button" id="sold-comps-toggle" aria-expanded="${!soldCompsCollapsed}">
-        <span class="sidebar-label">Comp Filters</span>
+        <span class="sidebar-label">Sold Comp + Listings</span>
       </button>
       <div id="sold-comps-body" class="collapsible-body${soldCompsCollapsed ? " hidden" : ""}">
         <div class="sold-comps-summary">
@@ -1155,14 +1139,10 @@ function renderSoldCompsPanel() {
   const soldDaysMaxInput = panel.querySelector("#sold-days-max");
   const soldPriceMinInput = panel.querySelector("#sold-price-min");
   const soldPriceMaxInput = panel.querySelector("#sold-price-max");
-  const soldYrMinInput = panel.querySelector("#sold-yr-min");
-  const soldYrMaxInput = panel.querySelector("#sold-yr-max");
   const compLotMinInput = panel.querySelector("#nf-comp-lot-min");
   const compLotMaxInput = panel.querySelector("#nf-comp-lot-max");
   const compYrMinInput = panel.querySelector("#nf-comp-yr-min");
   const compYrMaxInput = panel.querySelector("#nf-comp-yr-max");
-  const compValMinInput = panel.querySelector("#nf-comp-val-min");
-  const compValMaxInput = panel.querySelector("#nf-comp-val-max");
   const compSqftMinInput = panel.querySelector("#nf-comp-sqft-min");
   const compSqftMaxInput = panel.querySelector("#nf-comp-sqft-max");
 
@@ -1199,8 +1179,6 @@ function renderSoldCompsPanel() {
 
     soldCompsFilter.minPrice = parseShorthand(soldPriceMinInput?.value);
     soldCompsFilter.maxPrice = parseShorthand(soldPriceMaxInput?.value);
-    soldCompsFilter.minYearBuilt = parseIntegerInput(soldYrMinInput);
-    soldCompsFilter.maxYearBuilt = parseIntegerInput(soldYrMaxInput);
     applyAndRenderSoldFilters();
     _refreshLoadedAreaUi();
   };
@@ -1213,10 +1191,6 @@ function renderSoldCompsPanel() {
 
   soldDaysMaxInput?.addEventListener("blur", applySoldCompInputFilters);
   soldDaysMaxInput?.addEventListener("change", applySoldCompInputFilters);
-  soldYrMinInput?.addEventListener("blur", applySoldCompInputFilters);
-  soldYrMaxInput?.addEventListener("blur", applySoldCompInputFilters);
-  soldYrMinInput?.addEventListener("change", applySoldCompInputFilters);
-  soldYrMaxInput?.addEventListener("change", applySoldCompInputFilters);
 
   [soldPriceMinInput, soldPriceMaxInput].forEach((inputEl) => {
     inputEl?.addEventListener("blur", () => {
@@ -1233,17 +1207,6 @@ function renderSoldCompsPanel() {
   [compLotMinInput, compLotMaxInput, compYrMinInput, compYrMaxInput, compSqftMinInput, compSqftMaxInput].forEach((inputEl) => {
     inputEl?.addEventListener("blur", applyCompNumericInputFilters);
     inputEl?.addEventListener("change", applyCompNumericInputFilters);
-  });
-
-  [compValMinInput, compValMaxInput].forEach((inputEl) => {
-    inputEl?.addEventListener("blur", () => {
-      normalizeShorthandInput(inputEl);
-      applyCompNumericInputFilters();
-    });
-    inputEl?.addEventListener("change", () => {
-      normalizeShorthandInput(inputEl);
-      applyCompNumericInputFilters();
-    });
   });
 
   panel.querySelectorAll(".sold-row[data-sold-idx]").forEach((rowEl) => {
@@ -3070,7 +3033,32 @@ function applyMapVisibilityFilters() {
     }
   }
 
+  _updateMergedSidebarCounts();
   updateSoldStatusText();
+}
+
+// Light-touch count refresh for the merged Map Filters counts. Avoids the full
+// renderSidebar (which re-renders the sold panel) when all we need is the
+// number next to each checkbox.
+function _updateMergedSidebarCounts() {
+  if (!Array.isArray(allAnalysisFeatures) || !allAnalysisFeatures.length) return;
+  const visibleCounts = getVisibleFeatureCounts(allAnalysisFeatures);
+  const soldCount = Array.isArray(lastSoldPanelPoints) && lastSoldPanelPoints.length
+    ? lastSoldPanelPoints.length
+    : (Array.isArray(allSoldPointsRef) ? allSoldPointsRef.length : 0);
+  const rows = [
+    ["active", visibleCounts.active],
+    ["sold", soldCount],
+    ["off_market", visibleCounts.off_market],
+    ["vacant", visibleCounts.vacant],
+    ["multifamily", visibleCounts.multifamily],
+    ["commercial", visibleCounts.commercial],
+    ["exempt", visibleCounts.exempt],
+  ];
+  rows.forEach(([key, val]) => {
+    const el = document.getElementById(`filter-count-${key}`);
+    if (el) el.textContent = String(Number(val) || 0);
+  });
 }
 
 loadFilters();
