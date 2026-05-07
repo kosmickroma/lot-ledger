@@ -902,8 +902,9 @@ function applyAndRenderSoldFilters() {
     _soldPointPassesFilter(p, soldCompsFilter)
   );
   updateMatchedSoldCompVisibility(soldCompsFilter);
-  // Re-render map dots respecting filters (renderSoldPoints clears layer if sold is off)
-  const filteredMap = lastSoldPoints.filter((p) =>
+  // Re-render map dots from the full sold set so parcel-category toggles do not
+  // suppress sold markers for comps matched to parcel outlines.
+  const filteredMap = allSoldPointsRef.filter((p) =>
     _soldPointPassesFilter(p, soldCompsFilter)
   );
   renderSoldPoints(filteredMap);
