@@ -2566,6 +2566,7 @@ const MapToolbar = L.Control.extend({
     L.DomEvent.on(clearBtn, "click", (e) => {
       L.DomEvent.preventDefault(e);
       clearDrawResults();
+      clearActiveItem();
     });
 
     const hoaBtn = L.DomUtil.create("a", "", container);
@@ -4642,7 +4643,11 @@ function clearDrawResults() {
   document.getElementById("sidebar-results")?.classList.add("hidden");
   document.getElementById("sidebar-loading")?.classList.add("hidden");
   document.getElementById("btn-drawd-area-clear")?.classList.add("hidden");
-  clearActiveItem();
+  // NOTE: clearActiveItem is intentionally NOT called here. Callers that
+  // immediately follow clearDrawResults() with setActiveItem(...) would
+  // otherwise toggle .is-collapsed twice in the same JS tick, which the
+  // browser batches and skips the slide-in animation. Explicit slot
+  // management lives at the Deselect button + the slot × dismiss.
   renderSavedAreasList();
 }
 
@@ -4886,6 +4891,7 @@ document.getElementById("btn-update-saved-area")?.addEventListener("click", asyn
 
 document.getElementById("btn-clear").addEventListener("click", () => {
   clearDrawResults();
+  clearActiveItem();
 });
 
 // ── Save Session helpers ─────────────────────────────────────────────────────
