@@ -333,6 +333,10 @@ h1 {
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.25);
 }
 
+.swatch-multifamily {
+  --sw: #2c2c2c;
+}
+
 .filter-name {
   user-select: none;
 }
@@ -425,6 +429,10 @@ h1 {
   height: 10px;
   border-radius: 50%;
   flex-shrink: 0;
+}
+
+.count-dot.multifamily {
+  background: #2c2c2c;
 }
 
 .count-label {

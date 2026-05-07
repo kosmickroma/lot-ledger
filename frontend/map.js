@@ -19,7 +19,7 @@ const COLORS = {
   single_family: "#2980b9",
   off_market: "#2980b9",
   vacant: "#27ae60",
-  multifamily: "#7B68A0",
+  multifamily: "#2c2c2c",
   commercial: "#8B7355",
   exempt: "#95a5a6",
   active: "#D92228",
@@ -30,7 +30,7 @@ const BORDER_COLORS = {
   single_family: "#1a6a9a",
   off_market: "#1a6a9a",
   vacant: "#1e8449",
-  multifamily: "#5C4D7A",
+  multifamily: "#1f1f1f",
   commercial: "#6e5c42",
   exempt: "#7f8c8d",
   active: "#a3161a",
@@ -3708,7 +3708,7 @@ function renderSidebar(counts, markers) {
   countsPanel.innerHTML = orderedCountRows
     .map(([key, val]) => `
       <div class="count-row">
-        <span class="count-dot" style="background:${COLORS[key] || COLORS.exempt}"></span>
+        <span class="count-dot ${key}" style="background:${COLORS[key] || COLORS.exempt}"></span>
         <span class="count-label">${TYPE_LABELS[key] || key}</span>
         <span class="count-val">${Number(val) || 0}</span>
       </div>`
