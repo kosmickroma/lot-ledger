@@ -308,10 +308,11 @@ map.createPane("countyLabelPane");
 map.getPane("countyLabelPane").style.zIndex = "645";
 map.getPane("countyLabelPane").style.pointerEvents = "none";
 
-// Saved-parcel (Target) pane sits above every other map layer so target
-// orange always wins visually.
+// Saved-parcel (Target) pane sits above parcel fills + markers but below
+// soldPane (640) and tooltipPane (650) so sold-price labels remain readable
+// over orange targets.
 map.createPane("savedParcelPane");
-map.getPane("savedParcelPane").style.zIndex = "655";
+map.getPane("savedParcelPane").style.zIndex = "620";
 map.getPane("savedParcelPane").style.pointerEvents = "none";
 
 // Apply saved basemap BEFORE browseLayer is added. If we switch after protomaps
