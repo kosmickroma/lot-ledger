@@ -1867,6 +1867,7 @@ async function restoreSavedArea(area, options = {}) {
     ? area.filter_state
     : null;
   clearDrawResults();
+  setActiveItem("Workspace", area.name);
   if (savedFilterState) {
     restoreFilterState(savedFilterState);
   }
