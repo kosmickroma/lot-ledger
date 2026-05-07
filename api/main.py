@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -78,6 +79,7 @@ _FILENAME_SAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
 _ADDRESS_SUGGEST_CACHE_TTL_SECONDS = 45
 _ADDRESS_SUGGEST_CACHE_MAX = 512
 _address_suggest_cache: dict[tuple[str, int], tuple[float, list[dict[str, Any]]]] = {}
+_SHARE_ID_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 
 
 def _normalize_suggest_query(raw: str) -> str:
@@ -132,6 +134,38 @@ def _run_schema_steps(cur: Any, steps: list[tuple[str, str]]) -> None:
                 continue
             print(f"[session-schema] step failed: {step_id} ({exc})")
             raise
+
+
+def _generate_share_id() -> str:
+    return "area_" + "".join(secrets.choice(_SHARE_ID_ALPHABET) for _ in range(10))
+
+
+def _backfill_saved_area_share_ids(cur: Any) -> None:
+    cur.execute("SELECT area_id FROM saved_areas WHERE share_id IS NULL ORDER BY created_at ASC")
+    rows = cur.fetchall() or []
+    if not rows:
+        return
+
+    updated = 0
+    for (area_id,) in rows:
+        assigned = False
+        for _ in range(100):
+            candidate = _generate_share_id()
+            cur.execute("SELECT 1 FROM saved_areas WHERE share_id = %s LIMIT 1", (candidate,))
+            if cur.fetchone() is not None:
+                continue
+            cur.execute(
+                "UPDATE saved_areas SET share_id = %s WHERE area_id = %s AND share_id IS NULL",
+                (candidate, area_id),
+            )
+            if cur.rowcount:
+                updated += 1
+            assigned = True
+            break
+        if not assigned:
+            raise RuntimeError(f"Unable to backfill share_id for saved area {area_id}")
+
+    print(f"[session-schema] backfilled share_id for {updated} saved areas")
 
 
 def _ensure_session_schema() -> None:
@@ -249,6 +283,11 @@ def _ensure_session_schema() -> None:
                     ("saved_areas_user_id", "ALTER TABLE saved_areas ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)"),
                     ("saved_areas_filter_state", "ALTER TABLE saved_areas ADD COLUMN IF NOT EXISTS filter_state JSONB"),
                     ("saved_areas_type", "ALTER TABLE saved_areas ADD COLUMN IF NOT EXISTS type TEXT"),
+                    ("saved_areas_share_id", "ALTER TABLE saved_areas ADD COLUMN IF NOT EXISTS share_id VARCHAR(20)"),
+                    (
+                        "saved_areas_public_toggle",
+                        "ALTER TABLE saved_areas ADD COLUMN IF NOT EXISTS is_publicly_viewable BOOLEAN NOT NULL DEFAULT FALSE",
+                    ),
                     ("saved_areas_type_backfill", "UPDATE saved_areas SET type = 'area' WHERE type IS NULL OR type = ''"),
                     ("saved_areas_type_default", "ALTER TABLE saved_areas ALTER COLUMN type SET DEFAULT 'area'"),
                     ("saved_areas_type_not_null", "ALTER TABLE saved_areas ALTER COLUMN type SET NOT NULL"),
@@ -289,6 +328,10 @@ def _ensure_session_schema() -> None:
                         """,
                     ),
                     ("idx_saved_areas_user", "CREATE INDEX IF NOT EXISTS idx_saved_areas_user ON saved_areas (user_id)"),
+                    (
+                        "uq_saved_areas_share_id",
+                        "CREATE UNIQUE INDEX IF NOT EXISTS uq_saved_areas_share_id ON saved_areas (share_id) WHERE share_id IS NOT NULL",
+                    ),
                     ("idx_saved_parcels_user", "CREATE INDEX IF NOT EXISTS idx_saved_parcels_user ON saved_parcels (user_id)"),
                     (
                         "uq_saved_parcels_user_account",
@@ -298,6 +341,7 @@ def _ensure_session_schema() -> None:
                     ("idx_cached_jobs_user", "CREATE INDEX IF NOT EXISTS idx_cached_jobs_user ON cached_jobs (user_id)"),
                 ],
             )
+            _backfill_saved_area_share_ids(cur)
         conn.commit()
     finally:
         release_session_conn(conn)
