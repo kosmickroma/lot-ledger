@@ -117,6 +117,23 @@ def _evict_stale_jobs() -> None:
         _job_store.pop(oldest, None)
 
 
+def _is_idempotent_schema_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return "already exists" in msg or "duplicate" in msg
+
+
+def _run_schema_steps(cur: Any, steps: list[tuple[str, str]]) -> None:
+    for step_id, sql in steps:
+        try:
+            cur.execute(sql)
+        except Exception as exc:
+            if _is_idempotent_schema_error(exc):
+                print(f"[session-schema] step skipped (already applied): {step_id}")
+                continue
+            print(f"[session-schema] step failed: {step_id} ({exc})")
+            raise
+
+
 def _ensure_session_schema() -> None:
     conn = get_session_conn()
     try:
@@ -226,51 +243,61 @@ def _ensure_session_schema() -> None:
                 )
                 """
             )
-            cur.execute("ALTER TABLE saved_areas ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)")
-            cur.execute("ALTER TABLE saved_areas ADD COLUMN IF NOT EXISTS filter_state JSONB")
-            cur.execute("ALTER TABLE saved_areas ADD COLUMN IF NOT EXISTS type TEXT")
-            cur.execute("UPDATE saved_areas SET type = 'area' WHERE type IS NULL OR type = ''")
-            cur.execute("ALTER TABLE saved_areas ALTER COLUMN type SET DEFAULT 'area'")
-            cur.execute("ALTER TABLE saved_areas ALTER COLUMN type SET NOT NULL")
-            cur.execute(
-                """
-                DO $$
-                BEGIN
-                    IF NOT EXISTS (
-                        SELECT 1
-                        FROM pg_constraint
-                        WHERE conname = 'saved_areas_type_check'
-                    ) THEN
-                        ALTER TABLE saved_areas
-                        ADD CONSTRAINT saved_areas_type_check CHECK (type IN ('area', 'location'));
-                    END IF;
-                END$$;
-                """
+            _run_schema_steps(
+                cur,
+                [
+                    ("saved_areas_user_id", "ALTER TABLE saved_areas ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)"),
+                    ("saved_areas_filter_state", "ALTER TABLE saved_areas ADD COLUMN IF NOT EXISTS filter_state JSONB"),
+                    ("saved_areas_type", "ALTER TABLE saved_areas ADD COLUMN IF NOT EXISTS type TEXT"),
+                    ("saved_areas_type_backfill", "UPDATE saved_areas SET type = 'area' WHERE type IS NULL OR type = ''"),
+                    ("saved_areas_type_default", "ALTER TABLE saved_areas ALTER COLUMN type SET DEFAULT 'area'"),
+                    ("saved_areas_type_not_null", "ALTER TABLE saved_areas ALTER COLUMN type SET NOT NULL"),
+                    (
+                        "saved_areas_type_check",
+                        """
+                        DO $$
+                        BEGIN
+                            IF NOT EXISTS (
+                                SELECT 1
+                                FROM pg_constraint
+                                WHERE conname = 'saved_areas_type_check'
+                            ) THEN
+                                ALTER TABLE saved_areas
+                                ADD CONSTRAINT saved_areas_type_check CHECK (type IN ('area', 'location'));
+                            END IF;
+                        END$$;
+                        """,
+                    ),
+                    ("analysis_sessions_user_id", "ALTER TABLE analysis_sessions ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)"),
+                    ("analysis_sessions_name", "ALTER TABLE analysis_sessions ADD COLUMN IF NOT EXISTS name TEXT"),
+                    ("analysis_sessions_filter_state", "ALTER TABLE analysis_sessions ADD COLUMN IF NOT EXISTS filter_state JSONB"),
+                    ("analysis_sessions_expires_nullable", "ALTER TABLE analysis_sessions ALTER COLUMN expires_at DROP NOT NULL"),
+                    ("session_tags_user_id", "ALTER TABLE session_tags ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)"),
+                    ("saved_parcels_user_id", "ALTER TABLE saved_parcels ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)"),
+                    ("cached_jobs_user_id", "ALTER TABLE cached_jobs ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)"),
+                    ("idx_session_tags_session", "CREATE INDEX IF NOT EXISTS idx_session_tags_session ON session_tags (session_id)"),
+                    ("idx_session_tags_user", "CREATE INDEX IF NOT EXISTS idx_session_tags_user ON session_tags (user_id)"),
+                    ("idx_sessions_expires", "CREATE INDEX IF NOT EXISTS idx_sessions_expires ON analysis_sessions (expires_at)"),
+                    ("idx_sessions_saved_area", "CREATE INDEX IF NOT EXISTS idx_sessions_saved_area ON analysis_sessions (saved_area_id)"),
+                    ("idx_sessions_user", "CREATE INDEX IF NOT EXISTS idx_sessions_user ON analysis_sessions (user_id)"),
+                    (
+                        "idx_sessions_named",
+                        """
+                        CREATE INDEX IF NOT EXISTS idx_sessions_named
+                        ON analysis_sessions (user_id, name)
+                        WHERE name IS NOT NULL
+                        """,
+                    ),
+                    ("idx_saved_areas_user", "CREATE INDEX IF NOT EXISTS idx_saved_areas_user ON saved_areas (user_id)"),
+                    ("idx_saved_parcels_user", "CREATE INDEX IF NOT EXISTS idx_saved_parcels_user ON saved_parcels (user_id)"),
+                    (
+                        "uq_saved_parcels_user_account",
+                        "CREATE UNIQUE INDEX IF NOT EXISTS uq_saved_parcels_user_account ON saved_parcels (user_id, county, account_num)",
+                    ),
+                    ("idx_cached_jobs_expires", "CREATE INDEX IF NOT EXISTS idx_cached_jobs_expires ON cached_jobs (expires_at)"),
+                    ("idx_cached_jobs_user", "CREATE INDEX IF NOT EXISTS idx_cached_jobs_user ON cached_jobs (user_id)"),
+                ],
             )
-            cur.execute("ALTER TABLE analysis_sessions ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)")
-            cur.execute("ALTER TABLE analysis_sessions ADD COLUMN IF NOT EXISTS name TEXT")
-            cur.execute("ALTER TABLE analysis_sessions ADD COLUMN IF NOT EXISTS filter_state JSONB")
-            cur.execute("ALTER TABLE analysis_sessions ALTER COLUMN expires_at DROP NOT NULL")
-            cur.execute("ALTER TABLE session_tags ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)")
-            cur.execute("ALTER TABLE saved_parcels ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)")
-            cur.execute("ALTER TABLE cached_jobs ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_session_tags_session ON session_tags (session_id)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_session_tags_user ON session_tags (user_id)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_expires ON analysis_sessions (expires_at)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_saved_area ON analysis_sessions (saved_area_id)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user ON analysis_sessions (user_id)")
-            cur.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_sessions_named
-                ON analysis_sessions (user_id, name)
-                WHERE name IS NOT NULL
-                """
-            )
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_saved_areas_user ON saved_areas (user_id)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_saved_parcels_user ON saved_parcels (user_id)")
-            cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_saved_parcels_user_account ON saved_parcels (user_id, county, account_num)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_cached_jobs_expires ON cached_jobs (expires_at)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_cached_jobs_user ON cached_jobs (user_id)")
         conn.commit()
     finally:
         release_session_conn(conn)
