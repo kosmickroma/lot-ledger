@@ -3063,14 +3063,14 @@ function makePopupHtml(p) {
   const potentialTarget = String(potentialTargetByAccount.get(p.account_num) || p.potential_target || "").trim();
   const row = (label, val) => `<tr><td class="popup-label">${label}</td><td class="popup-val">${val || "N/A"}</td></tr>`;
 
-  // Redfin price row + delta (active parcels only — sits near Total Value)
-  let redfinPriceRow = "";
+  // Active listing price in header + delta row in table.
+  let activeListingPrice = "";
+  let listingDeltaRow = "";
   let redfinListingRow = "";
   if (p.on_redfin && p.redfin_price) {
-    const urlWrap = p.redfin_url
+    activeListingPrice = p.redfin_url
       ? `<a href="${p.redfin_url}" target="_blank" rel="noopener noreferrer">${p.redfin_price}</a>`
       : p.redfin_price;
-    redfinPriceRow = row("Redfin List Price", urlWrap);
 
     // Numeric delta: parse both values
     const rfNum = parseInt(String(p.redfin_price).replace(/[^0-9]/g, ""), 10);
@@ -3081,7 +3081,7 @@ function makePopupHtml(p) {
       const pct = ((delta / dcadNum) * 100).toFixed(1);
       const sign = delta >= 0 ? "+" : "";
       const color = delta >= 0 ? "#27ae60" : "#e74c3c";
-      redfinPriceRow += `<tr><td class="popup-label">vs DCAD Value</td><td class="popup-val" style="color:${color}">${sign}$${Math.abs(delta).toLocaleString()} (${sign}${pct}%)</td></tr>`;
+      listingDeltaRow = `<tr><td class="popup-label">LP vs DCAD</td><td class="popup-val" style="color:${color}">${sign}$${Math.abs(delta).toLocaleString()} (${sign}${pct}%)</td></tr>`;
     }
 
     // Separate "Listing | View listing" row goes immediately under Potential Target
@@ -3112,12 +3112,15 @@ function makePopupHtml(p) {
   return `
       <div class="popup">
         <div class="popup-addr">${p.addr || "Unknown address"}</div>
-        <div class="popup-status" style="color:${statusColor};">${statusText}</div>
+        <div class="popup-status-row">
+          <div class="popup-status" style="color:${statusColor};">${statusText}</div>
+          ${activeListingPrice ? `<div class="popup-list-price">${activeListingPrice}</div>` : ""}
+        </div>
         <table class="popup-table">
           ${row("Owner", p.owner)}
           ${row("Land Value", p.land_val)}
           ${row("Total Value", p.tot_val)}
-          ${redfinPriceRow}
+          ${listingDeltaRow}
           ${row("Land % of Total", p.land_pct)}
           ${row("Lot Size", p.lot_sqft)}
           ${row("Acres", p.lot_acres)}
