@@ -565,10 +565,14 @@ function setActiveItem(type, name) {
   typeEl.textContent = type || "";
   nameEl.textContent = name || "";
   slot.classList.remove("is-collapsed");
+  console.debug("[slot] setActiveItem", type, name, "classes:", slot.className);
 }
 
 function clearActiveItem() {
-  document.getElementById("active-item-slot")?.classList.add("is-collapsed");
+  const slot = document.getElementById("active-item-slot");
+  if (!slot) return;
+  slot.classList.add("is-collapsed");
+  console.trace("[slot] clearActiveItem called - stack trace ↑");
 }
 
 function _refreshLoadedAreaUi() {
