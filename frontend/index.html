@@ -32,6 +32,22 @@
           <button id="btn-dismiss-import" type="button">Dismiss</button>
         </div>
       </div>
+      <div id="sidebar-results" class="sidebar-section hidden">
+        <div id="saved-area-current" class="saved-area-current hidden">
+          <span class="sidebar-note">Active workspace: <strong id="saved-area-current-name"></strong></span>
+          <button id="btn-saved-area-current-clear" type="button" class="saved-area-action-btn" title="Deselect this workspace">×</button>
+        </div>
+        <p id="session-cache-note" class="sidebar-note hidden"></p>
+        <div class="sidebar-actions">
+          <button id="btn-save-area" class="btn-primary">Save Area</button>
+          <button id="btn-download" class="btn-secondary">Download CSV</button>
+          <button id="btn-update-saved-area" class="btn-secondary hidden">Update</button>
+        </div>
+        <div class="sidebar-actions actions-secondary">
+          <button id="btn-save-session" class="btn-tertiary" disabled>Save Snapshot</button>
+          <button id="btn-clear" class="btn-tertiary">Deselect</button>
+        </div>
+      </div>
       <div id="sold-comps-panel"></div>
       <div id="numeric-filters" class="filter-card collapsible-section">
         <button class="section-toggle" type="button" data-target="numeric-filters-body" aria-expanded="true">
@@ -141,22 +157,6 @@
         <div class="spinner"></div>
         <p class="sidebar-copy">Loading parcels...</p>
         <p id="redfin-status" class="sidebar-note">Pulling Redfin listings...</p>
-      </div>
-      <div id="sidebar-results" class="sidebar-section hidden">
-        <div id="saved-area-current" class="saved-area-current hidden">
-          <span class="sidebar-note">Active workspace: <strong id="saved-area-current-name"></strong></span>
-          <button id="btn-saved-area-current-clear" type="button" class="saved-area-action-btn" title="Deselect this workspace">Clear</button>
-        </div>
-        <p id="session-cache-note" class="sidebar-note hidden"></p>
-        <div class="sidebar-actions">
-          <button id="btn-save-area" class="btn-primary">Save Area</button>
-          <button id="btn-download" class="btn-secondary">Download CSV</button>
-          <button id="btn-update-saved-area" class="btn-secondary hidden">Update</button>
-        </div>
-        <div class="sidebar-actions actions-secondary">
-          <button id="btn-save-session" class="btn-tertiary" disabled>Save Snapshot</button>
-          <button id="btn-clear" class="btn-tertiary">Clear Area</button>
-        </div>
       </div>
       <div id="saved-areas" class="sidebar-section hidden collapsible-section">
         <div class="section-header">
