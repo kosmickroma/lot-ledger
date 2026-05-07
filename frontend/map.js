@@ -3306,8 +3306,13 @@ function geometryKey(geometry) {
 function makePopupHtml(p) {
   const pseudoFeature = { properties: p };
   const hasVisibleSoldComp = Boolean(p?.sold_comp);
-  const statusColor = hasVisibleSoldComp ? SOLD_MARKER_COLOR : getColor(pseudoFeature);
-  const statusText = hasVisibleSoldComp ? "SOLD COMP" : getStatusLabel(pseudoFeature);
+  const statusColor = hasVisibleSoldComp ? SOLD_OUTLINE_COLOR : getColor(pseudoFeature);
+  const statusText = hasVisibleSoldComp ? "SOLD" : getStatusLabel(pseudoFeature);
+  const soldHeaderPrice = hasVisibleSoldComp
+    ? (typeof p.sold_comp?.sold_price === "number"
+      ? `$${p.sold_comp.sold_price.toLocaleString()}`
+      : String(p.sold_comp?.sold_price || ""))
+    : "";
   const verifiedVacant = normalizeVerificationValue(
     verificationByAccount.get(p.account_num) || p.verified_vacant
   );
@@ -3365,7 +3370,11 @@ function makePopupHtml(p) {
         <div class="popup-addr">${p.addr || "Unknown address"}</div>
         <div class="popup-status-row">
           <div class="popup-status" style="color:${statusColor};">${statusText}</div>
-          ${activeListingPrice ? `<div class="popup-list-price">${activeListingPrice}</div>` : ""}
+          ${activeListingPrice
+            ? `<div class="popup-list-price">${activeListingPrice}</div>`
+            : soldHeaderPrice
+              ? `<div class="popup-sold-price">${soldHeaderPrice}</div>`
+              : ""}
         </div>
         <table class="popup-table">
           ${row("Owner", p.owner)}
