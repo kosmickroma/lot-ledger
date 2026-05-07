@@ -19,7 +19,7 @@ const COLORS = {
   single_family: "#2980b9",
   off_market: "#2980b9",
   vacant: "#27ae60",
-  multifamily: "#7B68A0",
+  multifamily: "#2c2c2c",
   commercial: "#8B7355",
   exempt: "#95a5a6",
   active: "#D92228",
@@ -30,7 +30,7 @@ const BORDER_COLORS = {
   single_family: "#1a6a9a",
   off_market: "#1a6a9a",
   vacant: "#1e8449",
-  multifamily: "#5C4D7A",
+  multifamily: "#1f1f1f",
   commercial: "#6e5c42",
   exempt: "#7f8c8d",
   active: "#a3161a",
@@ -189,7 +189,7 @@ function passesNumericFilters(feature) {
   return true;
 }
 
-const PARCEL_LAYER_KEYS = ["active", "off_market", "vacant", "multifamily", "commercial", "exempt"];
+const PARCEL_LAYER_KEYS = ["active", "sold", "off_market", "vacant", "multifamily", "commercial", "exempt"];
 
 // -- Click mode helpers (Jump vs Stay) --
 let currentClickMode = "jump";
@@ -902,11 +902,10 @@ function applyAndRenderSoldFilters() {
     _soldPointPassesFilter(p, soldCompsFilter)
   );
   updateMatchedSoldCompVisibility(soldCompsFilter);
-  // Re-render map dots respecting filters (renderSoldPoints clears layer if sold is off)
-  const filteredMap = lastSoldPoints.filter((p) =>
-    _soldPointPassesFilter(p, soldCompsFilter)
-  );
-  renderSoldPoints(filteredMap);
+  // Order matters: renderFeatures clears parcelTypeLayers.sold (which now hosts
+  // sold-matched parcels AND the invisible anchor markers used for price labels).
+  // We must run renderFeatures FIRST, then add anchors via renderSoldPoints, so
+  // the anchors aren't wiped immediately after creation.
   if (lastAnalysisGeojson && Array.isArray(lastAnalysisGeojson.features) && lastAnalysisGeojson.features.length <= BROWSE_ONLY_THRESHOLD) {
     if (viewportRenderMode) {
       renderViewportFeatures();
@@ -914,6 +913,7 @@ function applyAndRenderSoldFilters() {
       renderFeatures(lastAnalysisGeojson);
     }
   }
+  renderSoldPoints();
   renderSoldCompsPanel();
   updateSoldStatusText();
 }
@@ -975,6 +975,14 @@ function renderSoldCompsPanel() {
   // --- Filter bar ---
   const filterBar = `
     <div class="sold-filter-bar">
+      <div class="numeric-filter-row">
+        <span class="numeric-filter-label">Lot Size (acres)</span>
+        <div class="numeric-filter-inputs">
+          <input type="number" id="nf-lot-min" placeholder="Min acres" class="nf-input" min="0" step="0.01" value="${numericFilters.lot_sqft_min == null ? "" : (numericFilters.lot_sqft_min / 43560).toFixed(2).replace(/\.00$/, "")}">
+          <span class="nf-sep">–</span>
+          <input type="number" id="nf-lot-max" placeholder="Max acres" class="nf-input" min="0" step="0.01" value="${numericFilters.lot_sqft_max == null ? "" : (numericFilters.lot_sqft_max / 43560).toFixed(2).replace(/\.00$/, "")}">
+        </div>
+      </div>
       <div class="numeric-filter-row">
         <span class="numeric-filter-label">Sold Within (days)</span>
         <div class="numeric-filter-inputs">
@@ -1049,6 +1057,8 @@ function renderSoldCompsPanel() {
   const soldPriceMaxInput = panel.querySelector("#sold-price-max");
   const soldYrMinInput = panel.querySelector("#sold-yr-min");
   const soldYrMaxInput = panel.querySelector("#sold-yr-max");
+  const lotMinInput = panel.querySelector("#nf-lot-min");
+  const lotMaxInput = panel.querySelector("#nf-lot-max");
 
   const normalizeShorthandInput = (inputEl) => {
     if (!inputEl) return null;
@@ -1104,6 +1114,13 @@ function renderSoldCompsPanel() {
     inputEl?.addEventListener("change", () => {
       normalizeShorthandInput(inputEl);
       applySoldCompInputFilters();
+    });
+  });
+
+  [lotMinInput, lotMaxInput].forEach((inputEl) => {
+    inputEl?.addEventListener("input", () => {
+      bumpUndoPillVersion();
+      _applyNumericFilters();
     });
   });
 
@@ -3038,22 +3055,23 @@ function geometryKey(geometry) {
 
 function makePopupHtml(p) {
   const pseudoFeature = { properties: p };
-  const statusColor = getColor(pseudoFeature);
-  const statusText = getStatusLabel(pseudoFeature);
+  const hasVisibleSoldComp = Boolean(p?.sold_comp);
+  const statusColor = hasVisibleSoldComp ? SOLD_MARKER_COLOR : getColor(pseudoFeature);
+  const statusText = hasVisibleSoldComp ? "SOLD COMP" : getStatusLabel(pseudoFeature);
   const verifiedVacant = normalizeVerificationValue(
     verificationByAccount.get(p.account_num) || p.verified_vacant
   );
   const potentialTarget = String(potentialTargetByAccount.get(p.account_num) || p.potential_target || "").trim();
   const row = (label, val) => `<tr><td class="popup-label">${label}</td><td class="popup-val">${val || "N/A"}</td></tr>`;
 
-  // Redfin price row + delta (active parcels only — sits near Total Value)
-  let redfinPriceRow = "";
+  // Active listing price in header + delta row in table.
+  let activeListingPrice = "";
+  let listingDeltaRow = "";
   let redfinListingRow = "";
   if (p.on_redfin && p.redfin_price) {
-    const urlWrap = p.redfin_url
+    activeListingPrice = p.redfin_url
       ? `<a href="${p.redfin_url}" target="_blank" rel="noopener noreferrer">${p.redfin_price}</a>`
       : p.redfin_price;
-    redfinPriceRow = row("Redfin List Price", urlWrap);
 
     // Numeric delta: parse both values
     const rfNum = parseInt(String(p.redfin_price).replace(/[^0-9]/g, ""), 10);
@@ -3064,7 +3082,7 @@ function makePopupHtml(p) {
       const pct = ((delta / dcadNum) * 100).toFixed(1);
       const sign = delta >= 0 ? "+" : "";
       const color = delta >= 0 ? "#27ae60" : "#e74c3c";
-      redfinPriceRow += `<tr><td class="popup-label">vs DCAD Value</td><td class="popup-val" style="color:${color}">${sign}$${Math.abs(delta).toLocaleString()} (${sign}${pct}%)</td></tr>`;
+      listingDeltaRow = `<tr><td class="popup-label">LP vs DCAD</td><td class="popup-val" style="color:${color}">${sign}$${Math.abs(delta).toLocaleString()} (${sign}${pct}%)</td></tr>`;
     }
 
     // Separate "Listing | View listing" row goes immediately under Potential Target
@@ -3095,12 +3113,15 @@ function makePopupHtml(p) {
   return `
       <div class="popup">
         <div class="popup-addr">${p.addr || "Unknown address"}</div>
-        <div class="popup-status" style="color:${statusColor};">${statusText}</div>
+        <div class="popup-status-row">
+          <div class="popup-status" style="color:${statusColor};">${statusText}</div>
+          ${activeListingPrice ? `<div class="popup-list-price">${activeListingPrice}</div>` : ""}
+        </div>
         <table class="popup-table">
           ${row("Owner", p.owner)}
           ${row("Land Value", p.land_val)}
           ${row("Total Value", p.tot_val)}
-          ${redfinPriceRow}
+          ${listingDeltaRow}
           ${row("Land % of Total", p.land_pct)}
           ${row("Lot Size", p.lot_sqft)}
           ${row("Acres", p.lot_acres)}
@@ -3308,39 +3329,14 @@ function attachSoldCompsToFeatures(features, soldPoints) {
   return { unmatchedSoldPoints, matchedLabelPoints };
 }
 
-function renderSoldPoints(points) {
-  soldLayer.clearLayers();
+function renderSoldPoints() {
   soldMarkers = [];
   if (!filterState.sold) return;
-  const soldPoints = Array.isArray(points) ? points : [];
-  soldPoints.forEach((point) => {
-    const lat = Number(point.lat);
-    const lng = Number(point.lng);
-    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
-    const marker = L.circleMarker([lat, lng], {
-      pane: "soldPane",
-      radius: 4,
-      fillColor: SOLD_FALLBACK_DOT_COLOR,
-      color: SOLD_FALLBACK_DOT_BORDER,
-      weight: 1.2,
-      opacity: 1,
-      fillOpacity: 0.85,
-      bubblingMouseEvents: false,
-    }).bindPopup(() => makeSoldPopupHtml(point), {
-      maxWidth: 300,
-      autoPan: true,
-      autoPanPadding: [10, 50],
-      keepInView: true,
-    }).addTo(soldLayer);
-    soldMarkers.push({
-      marker,
-      priceLabel: null,
-      soldDateLabel: null,
-    });
-  });
+  const soldParcelLayer = parcelTypeLayers.sold;
+  if (!soldParcelLayer) return;
 
-  // Matched sold comps are represented by gold parcel outlines. Create
-  // invisible anchor markers so zoomed sold price labels still render.
+  // Matched sold comps are represented by sold parcel polygons. Create
+  // invisible anchors only for zoom-gated price labels.
   matchedSoldLabelPoints.forEach((point) => {
     const marker = L.circleMarker([point.lat, point.lng], {
       pane: "soldPane",
@@ -3351,7 +3347,7 @@ function renderSoldPoints(points) {
       fillOpacity: 0,
       interactive: false,
       bubblingMouseEvents: false,
-    }).addTo(soldLayer);
+    }).addTo(soldParcelLayer);
     soldMarkers.push({
       marker,
       priceLabel: abbreviatePrice(point.sold_price),
@@ -3380,10 +3376,11 @@ function renderFeatures(geojson) {
     const p = feature.properties;
     const bucket = classifyFeatureForFilter(feature);
     if (!passesNumericFilters(feature)) return;
-    const targetLayer = parcelTypeLayers[bucket] || markerLayer;
+    const hasSoldComp = Boolean(p.sold_comp);
+    const targetLayer = (hasSoldComp ? parcelTypeLayers.sold : parcelTypeLayers[bucket]) || markerLayer;
     const color = getColor(feature);
     const borderColor = getBorderColor(feature);
-    const hasVisibleSoldComp = Boolean(p.sold_comp) && soldLayerVisible;
+    const hasVisibleSoldComp = hasSoldComp;
     const parcelBorderColor = hasVisibleSoldComp ? SOLD_OUTLINE_COLOR : borderColor;
     const parcelBorderWeight = hasVisibleSoldComp ? 3.2 : (p.on_redfin ? 2.8 : 1.5);
     if (p.lat == null || p.lng == null) return;
@@ -3691,7 +3688,7 @@ function renderSidebar(counts, markers) {
   countsPanel.innerHTML = orderedCountRows
     .map(([key, val]) => `
       <div class="count-row">
-        <span class="count-dot" style="background:${COLORS[key] || COLORS.exempt}"></span>
+        <span class="count-dot ${key}" style="background:${COLORS[key] || COLORS.exempt}"></span>
         <span class="count-label">${TYPE_LABELS[key] || key}</span>
         <span class="count-val">${Number(val) || 0}</span>
       </div>`
