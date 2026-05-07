@@ -308,6 +308,12 @@ map.createPane("countyLabelPane");
 map.getPane("countyLabelPane").style.zIndex = "645";
 map.getPane("countyLabelPane").style.pointerEvents = "none";
 
+// Saved-parcel (Target) pane sits above every other map layer so target
+// orange always wins visually.
+map.createPane("savedParcelPane");
+map.getPane("savedParcelPane").style.zIndex = "655";
+map.getPane("savedParcelPane").style.pointerEvents = "none";
+
 // Apply saved basemap BEFORE browseLayer is added. If we switch after protomaps
 // is on the map, the tile layer removal fires viewprereset → _invalidateAll on
 // protomaps → _tileZoom = undefined → browse layer goes blank until next pan/zoom.
@@ -1636,7 +1642,15 @@ function _renderSavedParcelOutline(area) {
   if (savedParcelLayers[area.account_num]) return; // already on map
   if (!area.geometry || !["Polygon", "MultiPolygon"].includes(area.geometry.type)) return;
   const layer = L.geoJSON({ type: "Feature", geometry: area.geometry, properties: {} }, {
-    style: { color: SAVED_PARCEL_COLOR, weight: 3, fill: false, interactive: false },
+    pane: "savedParcelPane",
+    style: {
+      color: SAVED_PARCEL_COLOR,
+      weight: 3,
+      fill: true,
+      fillColor: SAVED_PARCEL_COLOR,
+      fillOpacity: 0.95,
+      interactive: false,
+    },
     interactive: false,
   }).addTo(savedParcelLayer);
   savedParcelLayers[area.account_num] = layer;
