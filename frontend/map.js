@@ -1911,7 +1911,6 @@ async function restoreSavedArea(area, options = {}) {
 
   const includeRedfin = true;
   const includeSold = Boolean(filterState.sold);
-  document.getElementById("sidebar-instructions")?.classList.add("hidden");
   document.getElementById("sidebar-results")?.classList.add("hidden");
   document.getElementById("sidebar-loading")?.classList.remove("hidden");
   document.getElementById("redfin-status").textContent = "Loading area analysis...";
@@ -1988,7 +1987,6 @@ async function restoreSavedArea(area, options = {}) {
     console.error("[restoreSavedArea] Analysis failed:", err);
     document.getElementById("redfin-status").textContent = getAnalysisErrorMessage(err, "Area analysis failed. Please try again.");
     document.getElementById("sidebar-loading")?.classList.add("hidden");
-    document.getElementById("sidebar-instructions")?.classList.remove("hidden");
   } finally {
     if (rowEl) rowEl.classList.remove("row-shimmer");
   }
@@ -2036,7 +2034,6 @@ async function restoreNamedSession(session, options = {}) {
   if (map.hasLayer(browseLayer)) browseLayer.remove();
   const includeSold = Boolean(filterState.sold);
   document.getElementById("sidebar-instructions")?.classList.add("hidden");
-  document.getElementById("sidebar-results")?.classList.add("hidden");
   document.getElementById("sidebar-loading")?.classList.remove("hidden");
   document.getElementById("redfin-status").textContent = "Loading session…";
   const analysisRequest = beginLatestAnalysisRequest();
@@ -2122,7 +2119,6 @@ async function restoreNamedSession(session, options = {}) {
     console.error("[restoreNamedSession] failed:", err);
     document.getElementById("redfin-status").textContent = getAnalysisErrorMessage(err, "Session load failed. Please try again.");
     document.getElementById("sidebar-loading")?.classList.add("hidden");
-    document.getElementById("sidebar-instructions")?.classList.remove("hidden");
     _setSessionCacheNote("");
   } finally {
     if (rowEl) rowEl.classList.remove("row-shimmer");
@@ -4484,7 +4480,7 @@ map.on("draw:created", async (e) => {
   potentialTargetByAccount.clear();
   verificationBadgeMarkers.clear();
   targetBadgeMarkers.clear();
-  document.getElementById("sidebar-instructions").classList.add("hidden");
+  // Instructions section removed; results manage visibility
   document.getElementById("sidebar-results").classList.add("hidden");
   document.getElementById("sidebar-loading").classList.remove("hidden");
   const includeRedfin = true;
@@ -4583,7 +4579,7 @@ map.on("draw:created", async (e) => {
     console.error("[draw:created] Analysis failed:", err);
     document.getElementById("redfin-status").textContent = getAnalysisErrorMessage(err, "Analysis failed. Please try drawing a smaller area.");
     document.getElementById("sidebar-loading").classList.add("hidden");
-    document.getElementById("sidebar-instructions").classList.remove("hidden");
+    // Instructions section removed
     document.getElementById("btn-draw-clear")?.classList.remove("hidden");
   }
 });
@@ -4632,8 +4628,7 @@ function clearDrawResults() {
   document.getElementById("sidebar-results")?.classList.add("hidden");
   document.getElementById("sidebar-instructions")?.classList.remove("hidden");
   document.getElementById("sidebar-loading")?.classList.add("hidden");
-  document.getElementById("btn-draw-clear")?.classList.add("hidden");
-  document.getElementById("btn-saved-area-clear")?.classList.add("hidden");
+  document.getElementById("btn-drawd-area-clear")?.classList.add("hidden");
   renderSavedAreasList();
 }
 

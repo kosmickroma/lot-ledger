@@ -137,23 +137,25 @@
         <p id="redfin-toggle-status"></p>
         <input type="checkbox" id="toggle-sold" checked>
       </div>
-      <div id="sidebar-instructions" class="sidebar-section">
-        <p class="sidebar-copy">Draw a polygon around a target pocket to analyze parcels instantly.</p>
-        <p class="sidebar-note">Shortcuts: Enter or right-click to finish. Esc to cancel.</p>
-      </div>
       <div id="sidebar-loading" class="sidebar-section hidden">
         <div class="spinner"></div>
         <p class="sidebar-copy">Loading parcels...</p>
         <p id="redfin-status" class="sidebar-note">Pulling Redfin listings...</p>
       </div>
       <div id="sidebar-results" class="sidebar-section hidden">
+        <div id="saved-area-current" class="saved-area-current hidden">
+          <span class="sidebar-note">Active workspace: <strong id="saved-area-current-name"></strong></span>
+          <button id="btn-saved-area-current-clear" type="button" class="saved-area-action-btn" title="Deselect this workspace">Clear</button>
+        </div>
         <p id="session-cache-note" class="sidebar-note hidden"></p>
         <div class="sidebar-actions">
-          <button id="btn-download" class="btn-primary">Download CSV</button>
+          <button id="btn-save-area" class="btn-primary">Save Area</button>
+          <button id="btn-download" class="btn-secondary">Download CSV</button>
           <button id="btn-update-saved-area" class="btn-secondary hidden">Update</button>
-          <button id="btn-save-session" class="btn-secondary" disabled>Save Snapshot</button>
-          <button id="btn-clear" class="btn-secondary">Clear</button>
-          <button id="btn-save-area" class="btn-secondary">Save Area</button>
+        </div>
+        <div class="sidebar-actions actions-secondary">
+          <button id="btn-save-session" class="btn-tertiary" disabled>Save Snapshot</button>
+          <button id="btn-clear" class="btn-tertiary">Clear Area</button>
         </div>
       </div>
       <div id="saved-areas" class="sidebar-section hidden collapsible-section">
@@ -167,12 +169,8 @@
           </div>
         </div>
         <div id="saved-areas-body" class="collapsible-body">
-          <div id="saved-area-current" class="saved-area-current hidden">
-            <span class="sidebar-note">Currently viewing: <strong id="saved-area-current-name"></strong></span>
-            <button id="btn-saved-area-current-clear" type="button" class="saved-area-action-btn" title="Clear current saved area">×</button>
-          </div>
           <div id="saved-areas-list"></div>
-          <button id="btn-saved-area-clear" class="hidden" onclick="clearDrawResults()" style="margin-top:8px;width:100%;padding:5px 0;background:transparent;border:1px solid #555;border-radius:4px;color:#aaa;font-size:11px;cursor:pointer;">× Back to Browse</button>
+          <button id="btn-saved-area-clear" class="hidden" onclick="clearDrawResults()" style="margin-top:8px;width:100%;padding:5px 0;background:transparent;border:1px solid #555;border-radius:4px;color:#aaa;font-size:11px;cursor:pointer;">← Back to Browse</button>
         </div>
       </div>
       <div id="saved-parcels" class="sidebar-section hidden collapsible-section">
