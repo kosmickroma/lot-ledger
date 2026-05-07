@@ -1117,11 +1117,17 @@ function renderSoldCompsPanel() {
     });
   });
 
+  // Use blur + change (NOT input) so the panel doesn't re-render mid-keystroke.
+  // _applyNumericFilters → renderFeatures → renderSoldCompsPanel rebuilds the
+  // panel HTML, destroying input elements and stealing focus. Match the same
+  // pattern the sold-price/sold-year-built inputs use above.
+  const applyLotSizeFilter = () => {
+    bumpUndoPillVersion();
+    _applyNumericFilters();
+  };
   [lotMinInput, lotMaxInput].forEach((inputEl) => {
-    inputEl?.addEventListener("input", () => {
-      bumpUndoPillVersion();
-      _applyNumericFilters();
-    });
+    inputEl?.addEventListener("blur", applyLotSizeFilter);
+    inputEl?.addEventListener("change", applyLotSizeFilter);
   });
 
   panel.querySelectorAll(".sold-row[data-sold-idx]").forEach((rowEl) => {
