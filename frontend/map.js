@@ -874,6 +874,7 @@ function updateMatchedSoldCompVisibility(filter) {
     const lng = Number(props.lng);
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
     nextMatchedLabelPoints.push({
+      account_num: String(props.account_num || ""),
       lat,
       lng,
       sold_price: source.sold_price,
