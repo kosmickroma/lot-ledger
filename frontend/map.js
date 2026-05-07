@@ -3189,48 +3189,12 @@ function _applyCompNumericFilters() {
   _refreshLoadedAreaUi();
 }
 
-// Set up event listeners for comp numeric filters
-const COMP_NUMERIC_FILTER_INPUTS = [
-  { id: "nf-comp-lot-min", key: "lot_sqft_min" },
-  { id: "nf-comp-lot-max", key: "lot_sqft_max" },
-  { id: "nf-comp-val-min", key: "appr_val_min" },
-  { id: "nf-comp-val-max", key: "appr_val_max" },
-  { id: "nf-comp-yr-min", key: "yr_built_min" },
-  { id: "nf-comp-yr-max", key: "yr_built_max" },
-  { id: "nf-comp-sqft-min", key: "sqft_min" },
-  { id: "nf-comp-sqft-max", key: "sqft_max" },
-];
-
-COMP_NUMERIC_FILTER_INPUTS.forEach(({ id }) => {
-  document.getElementById(id)?.addEventListener("input", () => {
-    bumpUndoPillVersion();
-    _applyCompNumericFilters();
-  });
-});
-
-["nf-comp-val-min", "nf-comp-val-max"].forEach((id) => {
-  const inputEl = document.getElementById(id);
-  if (!inputEl) return;
-  const normalize = () => {
-    const raw = String(inputEl.value || "").trim();
-    if (!raw) {
-      inputEl.value = "";
-      return;
-    }
-    const parsed = parseShorthand(raw);
-    inputEl.value = parsed == null ? "" : formatNumberWithCommas(parsed);
-  };
-  inputEl.addEventListener("blur", () => {
-    bumpUndoPillVersion();
-    normalize();
-    _applyCompNumericFilters();
-  });
-  inputEl.addEventListener("change", () => {
-    bumpUndoPillVersion();
-    normalize();
-    _applyCompNumericFilters();
-  });
-});
+// Comp numeric filter event listeners are wired INSIDE renderSoldCompsPanel
+// (using blur + change) since the inputs are part of dynamically rendered
+// HTML. Don't re-attach at module level — the renderSoldCompsPanel-internal
+// setup is correct and complete. Module-level attachment with an `input`
+// event would also re-introduce the focus-stealing-mid-keystroke regression
+// we just fixed for the lot-size filter.
 
 applyMapVisibilityFilters();
 
