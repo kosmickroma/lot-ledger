@@ -57,6 +57,8 @@ const SOLD_FALLBACK_DOT_COLOR = "#004225";
 const SOLD_FALLBACK_DOT_BORDER = "#5C2D91";
 const FILTER_STORAGE_KEY = "lotledger.map.filters.v1";
 const CLICK_MODE_STORAGE_KEY = "lot_ledger_click_mode";
+const SIDEBAR_SECTION_STATE_STORAGE_KEY = "lot_ledger_sidebar_sections.v1";
+const SOLD_COMPS_COLLAPSED_STORAGE_KEY = "lot_ledger_sold_comps_collapsed.v1";
 
 const DEFAULT_FILTERS = {
   active: true,
@@ -434,7 +436,13 @@ let _currentlyRenderedSoldAccounts = new Set();
 let soldMarkers = [];
 let transientSoldSidebarPopup = null;
 let soldCompsSortMode = "price";
-let soldCompsCollapsed = true;
+let soldCompsCollapsed = (() => {
+  try {
+    return localStorage.getItem(SOLD_COMPS_COLLAPSED_STORAGE_KEY) === "1";
+  } catch (_) {
+    return false;
+  }
+})();
 const DEFAULT_SOLD_COMPS_FILTER = {
   maxDaysAgo: 365,
   minPrice: null,
@@ -759,7 +767,11 @@ function classifyFeatureForFilter(feature) {
 function isFeatureVisible(feature) {
   const bucket = classifyFeatureForFilter(feature);
   if (!filterState[bucket]) return false;
-  return passesNumericFilters(feature);
+  if (!passesNumericFilters(feature)) return false;
+  const p = feature?.properties || {};
+  const isListingOrSold = Boolean(p.on_redfin || p.sold_comp);
+  if (isListingOrSold && !passesCompFilters(feature)) return false;
+  return true;
 }
 
 function getVisibleFeatureCounts(features) {
@@ -999,6 +1011,11 @@ function applyAndRenderSoldFilters() {
 function renderSoldCompsPanel() {
   const panel = document.getElementById("sold-comps-panel");
   if (!panel) return;
+  const resultsVisible = !document.getElementById("sidebar-results")?.classList.contains("hidden");
+  if (!resultsVisible) {
+    panel.innerHTML = "";
+    return;
+  }
   const totalSoldCount = Array.isArray(allSoldPointsRef) ? allSoldPointsRef.length : 0;
   const soldCountNote = `<p class="sidebar-note sold-comps-count-note">${totalSoldCount} sold comp${totalSoldCount === 1 ? "" : "s"} in this area</p>`;
 
@@ -1116,7 +1133,7 @@ function renderSoldCompsPanel() {
     ${soldCountNote}
     <div class="sold-comps-panel">
       <button class="section-toggle" type="button" id="sold-comps-toggle" aria-expanded="${!soldCompsCollapsed}">
-        <span class="sidebar-label">Sold Comps</span>
+        <span class="sidebar-label">Comp Filters</span>
       </button>
       <div id="sold-comps-body" class="collapsible-body${soldCompsCollapsed ? " hidden" : ""}">
         <div class="sold-comps-summary">
@@ -1139,6 +1156,9 @@ function renderSoldCompsPanel() {
   const soldBody = document.getElementById("sold-comps-body");
   soldToggle?.addEventListener("click", () => {
     soldCompsCollapsed = !soldCompsCollapsed;
+    try {
+      localStorage.setItem(SOLD_COMPS_COLLAPSED_STORAGE_KEY, soldCompsCollapsed ? "1" : "0");
+    } catch (_) {}
     soldToggle.setAttribute("aria-expanded", String(!soldCompsCollapsed));
     soldBody?.classList.toggle("hidden", soldCompsCollapsed);
   });
@@ -2962,14 +2982,35 @@ const sidebarToggleBtn = document.getElementById("sidebar-toggle");
 const drawHelper = document.getElementById("draw-helper");
 
 function initSidebarCollapsibles() {
+  let savedStates = {};
+  try {
+    const raw = localStorage.getItem(SIDEBAR_SECTION_STATE_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object") savedStates = parsed;
+    }
+  } catch (_) {}
+
   document.querySelectorAll(".section-toggle[data-target]").forEach((btn) => {
     const targetId = btn.dataset.target;
     const body = targetId ? document.getElementById(targetId) : null;
     if (!body) return;
+
+    if (Object.prototype.hasOwnProperty.call(savedStates, targetId)) {
+      const expanded = Boolean(savedStates[targetId]);
+      btn.setAttribute("aria-expanded", String(expanded));
+      body.classList.toggle("hidden", !expanded);
+    }
+
     btn.addEventListener("click", () => {
       const expanded = btn.getAttribute("aria-expanded") !== "false";
-      btn.setAttribute("aria-expanded", String(!expanded));
-      body.classList.toggle("hidden", expanded);
+      const nextExpanded = !expanded;
+      btn.setAttribute("aria-expanded", String(nextExpanded));
+      body.classList.toggle("hidden", !nextExpanded);
+      try {
+        savedStates[targetId] = nextExpanded;
+        localStorage.setItem(SIDEBAR_SECTION_STATE_STORAGE_KEY, JSON.stringify(savedStates));
+      } catch (_) {}
     });
   });
 }
@@ -3903,8 +3944,6 @@ function _scheduleViewportRender() {
 function renderSidebar(counts, markers) {
   document.getElementById("sidebar-loading").classList.add("hidden");
   document.getElementById("sidebar-results").classList.remove("hidden");
-
-  const countsPanel = document.getElementById("counts-panel");
   const visibleCounts = Array.isArray(allAnalysisFeatures) && allAnalysisFeatures.length
     ? getVisibleFeatureCounts(allAnalysisFeatures)
     : {
@@ -3928,15 +3967,10 @@ function renderSidebar(counts, markers) {
     ["exempt", visibleCounts.exempt],
   ];
 
-  countsPanel.innerHTML = orderedCountRows
-    .map(([key, val]) => `
-      <div class="count-row">
-        <span class="count-dot ${key}" style="background:${COLORS[key] || COLORS.exempt}"></span>
-        <span class="count-label">${TYPE_LABELS[key] || key}</span>
-        <span class="count-val">${Number(val) || 0}</span>
-      </div>`
-    )
-    .join("");
+  orderedCountRows.forEach(([key, val]) => {
+    const countEl = document.getElementById(`filter-count-${key}`);
+    if (countEl) countEl.textContent = String(Number(val) || 0);
+  });
 
   renderSoldCompsPanel();
 

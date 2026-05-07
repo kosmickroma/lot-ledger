@@ -32,54 +32,7 @@
           <button id="btn-dismiss-import" type="button">Dismiss</button>
         </div>
       </div>
-      <div id="map-filters" class="filter-card collapsible-section">
-        <button class="section-toggle" type="button" data-target="map-filters-body" aria-expanded="true">
-          <span class="sidebar-label">Map Filters</span>
-        </button>
-        <div id="map-filters-body" class="collapsible-body">
-          <div class="filter-card-head">
-            <button id="btn-filters-reset" class="filter-reset-btn" type="button">Reset</button>
-          </div>
-          <div class="filter-list" id="filter-list">
-            <label class="filter-row">
-              <span class="filter-swatch" style="--sw:#D92228"></span>
-              <span class="filter-name">Listings</span>
-              <input type="checkbox" id="filter-active" checked>
-            </label>
-            <label class="filter-row">
-              <span class="filter-swatch" style="--sw:#5C2D91"></span>
-              <span class="filter-name">Sold</span>
-              <input type="checkbox" id="filter-sold" checked>
-            </label>
-            <label class="filter-row">
-              <span class="filter-swatch" style="--sw:#2980b9"></span>
-              <span class="filter-name">Off Market</span>
-              <input type="checkbox" id="filter-off-market" checked>
-            </label>
-            <label class="filter-row">
-              <span class="filter-swatch" style="--sw:#27ae60"></span>
-              <span class="filter-name">Vacant</span>
-              <input type="checkbox" id="filter-vacant" checked>
-            </label>
-            <label class="filter-row">
-              <span class="filter-swatch swatch-multifamily"></span>
-              <span class="filter-name">Multifamily</span>
-              <input type="checkbox" id="filter-multifamily" checked>
-            </label>
-            <label class="filter-row">
-              <span class="filter-swatch" style="--sw:#8B7355"></span>
-              <span class="filter-name">Commercial</span>
-              <input type="checkbox" id="filter-commercial" checked>
-            </label>
-            <label class="filter-row">
-              <span class="filter-swatch" style="--sw:#95a5a6"></span>
-              <span class="filter-name">Exempt</span>
-              <input type="checkbox" id="filter-exempt" checked>
-            </label>
-          </div>
-          <p id="sold-toggle-status" class="sidebar-note"></p>
-        </div>
-      </div>
+      <div id="sold-comps-panel"></div>
       <div id="numeric-filters" class="filter-card collapsible-section">
         <button class="section-toggle" type="button" data-target="numeric-filters-body" aria-expanded="true">
           <span class="sidebar-label">Property Filters</span>
@@ -124,6 +77,61 @@
           </div>
         </div>
       </div>
+      <div id="map-filters" class="filter-card collapsible-section">
+        <button class="section-toggle" type="button" data-target="map-filters-body" aria-expanded="true">
+          <span class="sidebar-label">Map Filters</span>
+        </button>
+        <div id="map-filters-body" class="collapsible-body">
+          <div class="filter-card-head">
+            <button id="btn-filters-reset" class="filter-reset-btn" type="button">Reset</button>
+          </div>
+          <div class="filter-list" id="filter-list">
+            <label class="filter-row">
+              <span class="filter-swatch" style="--sw:#D92228"></span>
+              <span class="filter-name">Listings</span>
+              <span class="filter-count" id="filter-count-active">0</span>
+              <input type="checkbox" id="filter-active" checked>
+            </label>
+            <label class="filter-row">
+              <span class="filter-swatch" style="--sw:#5C2D91"></span>
+              <span class="filter-name">Sold</span>
+              <span class="filter-count" id="filter-count-sold">0</span>
+              <input type="checkbox" id="filter-sold" checked>
+            </label>
+            <label class="filter-row">
+              <span class="filter-swatch" style="--sw:#2980b9"></span>
+              <span class="filter-name">Off Market</span>
+              <span class="filter-count" id="filter-count-off_market">0</span>
+              <input type="checkbox" id="filter-off-market" checked>
+            </label>
+            <label class="filter-row">
+              <span class="filter-swatch" style="--sw:#27ae60"></span>
+              <span class="filter-name">Vacant</span>
+              <span class="filter-count" id="filter-count-vacant">0</span>
+              <input type="checkbox" id="filter-vacant" checked>
+            </label>
+            <label class="filter-row">
+              <span class="filter-swatch swatch-multifamily"></span>
+              <span class="filter-name">Multifamily</span>
+              <span class="filter-count" id="filter-count-multifamily">0</span>
+              <input type="checkbox" id="filter-multifamily" checked>
+            </label>
+            <label class="filter-row">
+              <span class="filter-swatch" style="--sw:#8B7355"></span>
+              <span class="filter-name">Commercial</span>
+              <span class="filter-count" id="filter-count-commercial">0</span>
+              <input type="checkbox" id="filter-commercial" checked>
+            </label>
+            <label class="filter-row">
+              <span class="filter-swatch" style="--sw:#95a5a6"></span>
+              <span class="filter-name">Exempt</span>
+              <span class="filter-count" id="filter-count-exempt">0</span>
+              <input type="checkbox" id="filter-exempt" checked>
+            </label>
+          </div>
+          <p id="sold-toggle-status" class="sidebar-note"></p>
+        </div>
+      </div>
       <div class="hidden" aria-hidden="true">
         <input type="checkbox" id="toggle-redfin">
         <p id="redfin-toggle-status"></p>
@@ -140,8 +148,6 @@
       </div>
       <div id="sidebar-results" class="sidebar-section hidden">
         <p id="session-cache-note" class="sidebar-note hidden"></p>
-        <div id="counts-panel" class="counts-panel"></div>
-        <div id="sold-comps-panel"></div>
         <div class="sidebar-actions">
           <button id="btn-download" class="btn-primary">Download CSV</button>
           <button id="btn-update-saved-area" class="btn-secondary hidden">Update</button>

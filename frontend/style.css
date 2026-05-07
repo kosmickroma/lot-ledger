@@ -310,7 +310,7 @@ h1 {
 
 .filter-row {
   display: grid;
-  grid-template-columns: 10px 1fr auto;
+  grid-template-columns: 10px 1fr auto auto;
   align-items: center;
   gap: 9px;
   font-size: 12px;
@@ -339,6 +339,14 @@ h1 {
 
 .filter-name {
   user-select: none;
+}
+
+.filter-count {
+  min-width: 18px;
+  text-align: right;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
 }
 
 .filter-row input[type="checkbox"] {
