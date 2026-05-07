@@ -22,6 +22,7 @@ import logging
 import os
 import re
 import secrets
+import string
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -181,7 +182,7 @@ def _ensure_session_schema() -> None:
                     username TEXT NOT NULL,
                     email TEXT NOT NULL,
                     password_hash TEXT NOT NULL,
-                    role TEXT NOT NULL CHECK (role IN ('developer', 'owner', 'member')),
+                    role TEXT NOT NULL CHECK (role IN ('developer', 'owner', 'power_user', 'user', 'member')),
                     is_active BOOLEAN NOT NULL DEFAULT true,
                     force_password_change BOOLEAN NOT NULL DEFAULT false,
                     session_version INTEGER NOT NULL DEFAULT 1,
@@ -283,6 +284,12 @@ def _ensure_session_schema() -> None:
                 cur,
                 [
                     ("saved_areas_user_id", "ALTER TABLE saved_areas ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)"),
+                    ("users_role_check_drop", "ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check"),
+                    (
+                        "users_role_check_add",
+                        "ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('developer', 'owner', 'power_user', 'user', 'member'))",
+                    ),
+                    ("users_role_member_alias", "UPDATE users SET role = 'user' WHERE role = 'member'"),
                     ("saved_areas_filter_state", "ALTER TABLE saved_areas ADD COLUMN IF NOT EXISTS filter_state JSONB"),
                     ("saved_areas_type", "ALTER TABLE saved_areas ADD COLUMN IF NOT EXISTS type TEXT"),
                     ("saved_areas_share_id", "ALTER TABLE saved_areas ADD COLUMN IF NOT EXISTS share_id VARCHAR(20)"),
@@ -883,7 +890,7 @@ class AdminCreateUserRequest(BaseModel):
     username: str
     email: str
     temp_password: str
-    role: str = "member"
+    role: str = "user"
 
 
 class AdminResetPasswordRequest(BaseModel):
@@ -989,9 +996,9 @@ def _enforce_admin_target_rules(actor: dict[str, Any], target: dict[str, Any], a
     target_role = str(target.get("role") or "")
     if target_role == "developer":
         raise HTTPException(status_code=403, detail="Developer accounts cannot be modified via admin endpoints")
-    if actor_role == "owner" and target_role != "member":
-        raise HTTPException(status_code=403, detail="Owner can manage member accounts only")
-    if action == "disable" and target_role == "owner":
+    if actor_role == "owner" and target_role not in {"member", "user", "power_user"}:
+        raise HTTPException(status_code=403, detail="Owner can manage user and power_user accounts only")
+    if action in {"disable", "delete"} and target_role == "owner":
         # Keep at least one active owner account.
         conn = get_session_conn()
         try:
@@ -1309,17 +1316,25 @@ async def admin_create_user(
     username = str(payload.username or "").strip()
     email = str(payload.email or "").strip().lower()
     temp_password = str(payload.temp_password or "")
-    role = str(payload.role or "member").strip().lower()
+    role = str(payload.role or "user").strip().lower()
 
     if not username or not email:
         raise HTTPException(status_code=422, detail="Username and email are required")
     if not _password_valid(temp_password):
         raise HTTPException(status_code=422, detail="Password must be at least 10 characters")
 
+    if role == "member":
+        role = "user"
+
+    allowed_roles_by_owner = {"power_user", "user", "member"}
+    allowed_roles_by_developer = {"owner", "power_user", "user", "member"}
+
     if actor["role"] == "owner":
-        role = "member"
-    elif role not in {"owner", "member"}:
-        raise HTTPException(status_code=422, detail="Developer may create owner or member users only")
+        if role not in allowed_roles_by_owner:
+            raise HTTPException(status_code=403, detail=f"Owners cannot create role '{role}'")
+    elif actor["role"] == "developer":
+        if role not in allowed_roles_by_developer:
+            raise HTTPException(status_code=403, detail=f"Developers cannot create role '{role}' via this path")
 
     conn = get_session_conn()
     try:
@@ -1426,13 +1441,11 @@ async def admin_enable_user(
 async def admin_reset_password(
     user_id: int,
     request: Request,
-    payload: AdminResetPasswordRequest,
     actor: dict[str, Any] = Depends(require_role("owner", "developer")),
 ) -> dict[str, Any]:
     require_csrf(request)
-    temp_password = str(payload.temp_password or "")
-    if not _password_valid(temp_password):
-        raise HTTPException(status_code=422, detail="Password must be at least 10 characters")
+    alphabet = string.ascii_letters + string.digits
+    temp_password = "".join(secrets.choice(alphabet) for _ in range(14))
 
     conn = get_session_conn()
     try:
@@ -1460,6 +1473,50 @@ async def admin_reset_password(
                 user_agent=request.headers.get("user-agent", ""),
             )
         conn.commit()
+    finally:
+        release_session_conn(conn)
+    return {"ok": True, "temp_password": temp_password}
+
+
+@app.delete("/admin/users/{user_id}")
+async def admin_delete_user(
+    user_id: int,
+    request: Request,
+    actor: dict[str, Any] = Depends(require_role("owner", "developer")),
+) -> dict[str, Any]:
+    require_csrf(request)
+
+    if int(user_id) == int(actor["id"]):
+        raise HTTPException(status_code=403, detail="Cannot delete yourself")
+
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            target = _require_target_user(cur, user_id)
+            _enforce_admin_target_rules(actor, target, "delete")
+            write_auth_audit_log(
+                actor=actor["username"],
+                actor_user_id=int(actor["id"]),
+                action="delete_user",
+                target_user=target["username"],
+                target_user_id=int(target["id"]),
+                detail=f"role={target['role']}",
+                ip=get_client_ip(request),
+                user_agent=request.headers.get("user-agent", ""),
+            )
+            cur.execute("DELETE FROM session_tags WHERE user_id = %s", (int(user_id),))
+            cur.execute("DELETE FROM saved_parcels WHERE user_id = %s", (int(user_id),))
+            cur.execute("DELETE FROM cached_jobs WHERE user_id = %s", (int(user_id),))
+            cur.execute("DELETE FROM analysis_sessions WHERE user_id = %s", (int(user_id),))
+            cur.execute("DELETE FROM saved_areas WHERE user_id = %s", (int(user_id),))
+            cur.execute("DELETE FROM users WHERE id = %s", (int(user_id),))
+        conn.commit()
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         release_session_conn(conn)
     return {"ok": True}
@@ -2746,6 +2803,9 @@ async def set_tag(req: Request, payload: dict[str, Any] = Body(...), user: dict[
 
 @app.get("/api/download/{job_id}")
 async def download(job_id: str, filename: str | None = None, user: dict[str, Any] = Depends(get_current_user)) -> StreamingResponse:
+    if str(user.get("role") or "").strip().lower() == "user":
+        raise HTTPException(status_code=403, detail="CSV export not available for this role")
+
     job = _get_job(job_id, int(user["id"]))
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -3199,28 +3259,37 @@ async def save_session(
     if not name:
         raise HTTPException(status_code=400, detail="Session name is required")
     uid = int(user["id"])
+    is_developer = str(user.get("role") or "").strip().lower() == "developer"
     conn = get_session_conn()
     try:
         with conn.cursor() as cur:
+            select_where = "WHERE session_id = %s" if is_developer else "WHERE session_id = %s AND user_id = %s"
+            select_params = (session_id,) if is_developer else (session_id, uid)
             cur.execute(
-                "SELECT 1 FROM analysis_sessions WHERE session_id = %s AND user_id = %s",
-                (session_id, uid),
+                f"SELECT 1 FROM analysis_sessions {select_where}",
+                select_params,
             )
             if cur.fetchone() is None:
                 raise HTTPException(status_code=404, detail="Session not found")
+            update_where = "WHERE session_id = %s" if is_developer else "WHERE session_id = %s AND user_id = %s"
+            update_params: tuple[Any, ...] = (
+                name,
+                Json(request.filter_state) if isinstance(request.filter_state, dict) else None,
+                session_id,
+            ) if is_developer else (
+                name,
+                Json(request.filter_state) if isinstance(request.filter_state, dict) else None,
+                session_id,
+                uid,
+            )
             cur.execute(
-                """
+                f"""
                 UPDATE analysis_sessions
                 SET name = %s, filter_state = %s, expires_at = NULL, last_accessed = now()
-                WHERE session_id = %s AND user_id = %s
+                {update_where}
                 RETURNING session_id, name, parcel_count, county_coverage, filter_state, polygon, created_at
                 """,
-                (
-                    name,
-                    Json(request.filter_state) if isinstance(request.filter_state, dict) else None,
-                    session_id,
-                    uid,
-                ),
+                update_params,
             )
             row = cur.fetchone()
             if row is None:
@@ -3256,11 +3325,12 @@ async def update_session(
     req: Request,
     user: dict[str, Any] = Depends(get_current_user),
 ) -> dict[str, Any]:
-    """Rename a session and/or update its filter_state. Caller must own the session."""
+    """Rename a session and/or update its filter_state."""
     require_csrf(req)
     if request.name is None and request.filter_state is None:
         raise HTTPException(status_code=400, detail="Nothing to update")
     uid = int(user["id"])
+    is_developer = str(user.get("role") or "").strip().lower() == "developer"
 
     update_cols: list[str] = []
     params: list[Any] = []
@@ -3277,14 +3347,18 @@ async def update_session(
     conn = get_session_conn()
     try:
         with conn.cursor() as cur:
+            where_clause = "WHERE session_id = %s" if is_developer else "WHERE session_id = %s AND user_id = %s"
+            query_params: list[Any] = [*params, session_id]
+            if not is_developer:
+                query_params.append(uid)
             cur.execute(
                 f"""
                 UPDATE analysis_sessions
                 SET {', '.join(update_cols)}
-                WHERE session_id = %s AND user_id = %s
+                {where_clause}
                 RETURNING session_id, name, parcel_count, county_coverage, filter_state, polygon, created_at
                 """,
-                (*params, session_id, uid),
+                tuple(query_params),
             )
             row = cur.fetchone()
         conn.commit()
@@ -3314,16 +3388,16 @@ async def delete_session(
     req: Request,
     user: dict[str, Any] = Depends(get_current_user),
 ) -> dict[str, Any]:
-    """Delete a named session and its cached_jobs row. Cascades to session_tags via FK. Caller must own it."""
+    """Delete a named session and its cached_jobs row. Cascades to session_tags via FK."""
     require_csrf(req)
     uid = int(user["id"])
+    is_developer = str(user.get("role") or "").strip().lower() == "developer"
     conn = get_session_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                "DELETE FROM analysis_sessions WHERE session_id = %s AND user_id = %s",
-                (session_id, uid),
-            )
+            where_clause = "WHERE session_id = %s" if is_developer else "WHERE session_id = %s AND user_id = %s"
+            query_params = (session_id,) if is_developer else (session_id, uid)
+            cur.execute(f"DELETE FROM analysis_sessions {where_clause}", query_params)
             if cur.rowcount == 0:
                 raise HTTPException(status_code=404, detail="Session not found")
             # Explicit delete — cached_jobs has no FK to analysis_sessions
@@ -3532,6 +3606,90 @@ async def get_saved_area_by_share_id(
     }
 
 
+@app.post("/api/areas/from-share-id/{share_id}")
+async def fork_saved_area(
+    req: Request,
+    share_id: str = FastAPIPath(..., regex=r"^area_[A-Za-z0-9]{10}$"),
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    require_csrf(req)
+
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT name, polygon, filter_state, type
+                FROM saved_areas
+                WHERE share_id = %s
+                LIMIT 1
+                """,
+                (share_id,),
+            )
+            source = cur.fetchone()
+            if source is None:
+                raise HTTPException(status_code=404, detail="Saved area not found")
+
+            source_name = str(source[0] or "Untitled")
+            source_polygon = source[1] if isinstance(source[1], list) else []
+            source_filter_state = source[2] if isinstance(source[2], dict) else None
+            source_type = str(source[3] or "area")
+
+            row = None
+            new_share_id = ""
+            fork_name = f"{source_name} (copy)"
+            for _ in range(10):
+                new_share_id = _generate_share_id()
+                try:
+                    cur.execute("SAVEPOINT sp_fork_saved_area")
+                    cur.execute(
+                        """
+                        INSERT INTO saved_areas (name, polygon, filter_state, type, share_id, user_id)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        RETURNING area_id, created_at, updated_at
+                        """,
+                        (
+                            fork_name,
+                            Json(source_polygon),
+                            Json(source_filter_state) if isinstance(source_filter_state, dict) else None,
+                            source_type,
+                            new_share_id,
+                            int(user["id"]),
+                        ),
+                    )
+                    row = cur.fetchone()
+                    cur.execute("RELEASE SAVEPOINT sp_fork_saved_area")
+                    break
+                except UniqueViolation:
+                    cur.execute("ROLLBACK TO SAVEPOINT sp_fork_saved_area")
+                    cur.execute("RELEASE SAVEPOINT sp_fork_saved_area")
+                    continue
+            if row is None:
+                raise HTTPException(status_code=503, detail="Failed to allocate unique share_id")
+        conn.commit()
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        release_session_conn(conn)
+
+    return {
+        "area_id": row[0],
+        "name": fork_name,
+        "polygon": _to_leaflet_polygon(source_polygon),
+        "filter_state": source_filter_state if isinstance(source_filter_state, dict) else None,
+        "type": source_type,
+        "share_id": new_share_id,
+        "lat": (float(source_polygon[0][1]) if isinstance(source_polygon, list) and source_polygon and len(source_polygon[0]) >= 2 else None) if source_type == "location" else None,
+        "lng": (float(source_polygon[0][0]) if isinstance(source_polygon, list) and source_polygon and len(source_polygon[0]) >= 2 else None) if source_type == "location" else None,
+        "created_at": row[1].isoformat() if row[1] else None,
+        "updated_at": row[2].isoformat() if row[2] else None,
+    }
+
+
 @app.put("/api/areas/{area_id}")
 async def update_saved_area(area_id: str, request: SavedAreaUpdateRequest, req: Request, user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
     require_csrf(req)
@@ -3561,6 +3719,12 @@ async def update_saved_area(area_id: str, request: SavedAreaUpdateRequest, req: 
             update_cols.append("polygon = %s")
             params.append(Json(polygon_geojson))
 
+    is_developer = str(user.get("role") or "").strip().lower() == "developer"
+    where_clause = "WHERE area_id = %s" if is_developer else "WHERE area_id = %s AND user_id = %s"
+    query_params: list[Any] = [*params, area_id]
+    if not is_developer:
+        query_params.append(int(user["id"]))
+
     conn = get_session_conn()
     try:
         with conn.cursor() as cur:
@@ -3568,10 +3732,10 @@ async def update_saved_area(area_id: str, request: SavedAreaUpdateRequest, req: 
                 f"""
                 UPDATE saved_areas
                 SET {', '.join(update_cols)}
-                WHERE area_id = %s AND user_id = %s
+                {where_clause}
                 RETURNING area_id, name, polygon, filter_state, type, updated_at
                 """,
-                (*params, area_id, int(user["id"])),
+                tuple(query_params),
             )
             row = cur.fetchone()
         conn.commit()
@@ -3597,10 +3761,14 @@ async def update_saved_area(area_id: str, request: SavedAreaUpdateRequest, req: 
 
 @app.delete("/api/areas/{area_id}")
 async def delete_saved_area(area_id: str, user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
+    is_developer = str(user.get("role") or "").strip().lower() == "developer"
+    where_clause = "WHERE area_id = %s" if is_developer else "WHERE area_id = %s AND user_id = %s"
+    params = (area_id,) if is_developer else (area_id, int(user["id"]))
+
     conn = get_session_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM saved_areas WHERE area_id = %s AND user_id = %s", (area_id, int(user["id"])))
+            cur.execute(f"DELETE FROM saved_areas {where_clause}", params)
             deleted = cur.rowcount or 0
         conn.commit()
     except Exception:
