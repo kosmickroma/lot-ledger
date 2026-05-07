@@ -32,6 +32,7 @@ from urllib.parse import quote_plus
 from fastapi import Body, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from psycopg2.errors import UniqueViolation
 from psycopg2.extras import Json, execute_values
 from pydantic import BaseModel
 
@@ -3266,7 +3267,7 @@ async def list_saved_areas(user: dict[str, Any] = Depends(get_current_user)) -> 
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT area_id, name, polygon, filter_state, type, created_at, updated_at
+                SELECT area_id, name, polygon, filter_state, type, share_id, created_at, updated_at
                 FROM saved_areas
                 WHERE user_id = %s
                 ORDER BY created_at DESC
@@ -3280,10 +3281,11 @@ async def list_saved_areas(user: dict[str, Any] = Depends(get_current_user)) -> 
                     "polygon": _to_leaflet_polygon(row[2]),
                     "filter_state": row[3] if isinstance(row[3], dict) else None,
                     "type": str(row[4] or "area"),
+                    "share_id": str(row[5] or ""),
                     "lat": (float(row[2][0][1]) if isinstance(row[2], list) and row[2] and len(row[2][0]) >= 2 else None) if str(row[4] or "area") == "location" else None,
                     "lng": (float(row[2][0][0]) if isinstance(row[2], list) and row[2] and len(row[2][0]) >= 2 else None) if str(row[4] or "area") == "location" else None,
-                    "created_at": row[5].isoformat() if row[5] else None,
-                    "updated_at": row[6].isoformat() if row[6] else None,
+                    "created_at": row[6].isoformat() if row[6] else None,
+                    "updated_at": row[7].isoformat() if row[7] else None,
                 }
                 for row in cur.fetchall()
             ]
@@ -3303,16 +3305,40 @@ async def create_saved_area(request: SavedAreaCreateRequest, req: Request, user:
     conn = get_session_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO saved_areas (name, polygon, filter_state, type, user_id)
-                VALUES (%s, %s, %s, %s, %s)
-                RETURNING area_id, created_at, updated_at
-                """,
-                (name, Json(polygon_geojson), Json(request.filter_state) if isinstance(request.filter_state, dict) else None, area_type, int(user["id"])),
-            )
-            row = cur.fetchone()
+            row = None
+            share_id = ""
+            for _ in range(10):
+                share_id = _generate_share_id()
+                try:
+                    cur.execute("SAVEPOINT sp_create_saved_area")
+                    cur.execute(
+                        """
+                        INSERT INTO saved_areas (name, polygon, filter_state, type, share_id, user_id)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        RETURNING area_id, created_at, updated_at
+                        """,
+                        (
+                            name,
+                            Json(polygon_geojson),
+                            Json(request.filter_state) if isinstance(request.filter_state, dict) else None,
+                            area_type,
+                            share_id,
+                            int(user["id"]),
+                        ),
+                    )
+                    row = cur.fetchone()
+                    cur.execute("RELEASE SAVEPOINT sp_create_saved_area")
+                    break
+                except UniqueViolation:
+                    cur.execute("ROLLBACK TO SAVEPOINT sp_create_saved_area")
+                    cur.execute("RELEASE SAVEPOINT sp_create_saved_area")
+                    continue
+            if row is None:
+                raise HTTPException(status_code=503, detail="Failed to allocate unique share_id")
         conn.commit()
+    except HTTPException:
+        conn.rollback()
+        raise
     except Exception:
         conn.rollback()
         raise
@@ -3325,10 +3351,48 @@ async def create_saved_area(request: SavedAreaCreateRequest, req: Request, user:
         "polygon": _to_leaflet_polygon(polygon_geojson),
         "filter_state": request.filter_state if isinstance(request.filter_state, dict) else None,
         "type": area_type,
+        "share_id": share_id,
         "lat": lat,
         "lng": lng,
         "created_at": row[1].isoformat() if row[1] else None,
         "updated_at": row[2].isoformat() if row[2] else None,
+    }
+
+
+@app.get("/api/areas/{area_id}")
+async def get_saved_area(area_id: str, user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT area_id, name, polygon, filter_state, type, share_id, user_id, created_at, updated_at
+                FROM saved_areas
+                WHERE area_id = %s
+                LIMIT 1
+                """,
+                (area_id,),
+            )
+            row = cur.fetchone()
+    finally:
+        release_session_conn(conn)
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="Saved area not found")
+    if int(row[6] or 0) != int(user["id"]):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    return {
+        "area_id": row[0],
+        "name": row[1],
+        "polygon": _to_leaflet_polygon(row[2]),
+        "filter_state": row[3] if isinstance(row[3], dict) else None,
+        "type": str(row[4] or "area"),
+        "share_id": str(row[5] or ""),
+        "lat": (float(row[2][0][1]) if isinstance(row[2], list) and row[2] and len(row[2][0]) >= 2 else None) if str(row[4] or "area") == "location" else None,
+        "lng": (float(row[2][0][0]) if isinstance(row[2], list) and row[2] and len(row[2][0]) >= 2 else None) if str(row[4] or "area") == "location" else None,
+        "created_at": row[7].isoformat() if row[7] else None,
+        "updated_at": row[8].isoformat() if row[8] else None,
     }
 
 
