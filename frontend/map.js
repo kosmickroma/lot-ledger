@@ -976,6 +976,14 @@ function renderSoldCompsPanel() {
   const filterBar = `
     <div class="sold-filter-bar">
       <div class="numeric-filter-row">
+        <span class="numeric-filter-label">Lot Size (acres)</span>
+        <div class="numeric-filter-inputs">
+          <input type="number" id="nf-lot-min" placeholder="Min acres" class="nf-input" min="0" step="0.01" value="${numericFilters.lot_sqft_min == null ? "" : (numericFilters.lot_sqft_min / 43560).toFixed(2).replace(/\.00$/, "")}">
+          <span class="nf-sep">–</span>
+          <input type="number" id="nf-lot-max" placeholder="Max acres" class="nf-input" min="0" step="0.01" value="${numericFilters.lot_sqft_max == null ? "" : (numericFilters.lot_sqft_max / 43560).toFixed(2).replace(/\.00$/, "")}">
+        </div>
+      </div>
+      <div class="numeric-filter-row">
         <span class="numeric-filter-label">Sold Within (days)</span>
         <div class="numeric-filter-inputs">
           <input type="number" id="sold-days-max" placeholder="365" class="nf-input" min="1" value="${soldCompsFilter.maxDaysAgo ?? 365}">
@@ -1049,6 +1057,8 @@ function renderSoldCompsPanel() {
   const soldPriceMaxInput = panel.querySelector("#sold-price-max");
   const soldYrMinInput = panel.querySelector("#sold-yr-min");
   const soldYrMaxInput = panel.querySelector("#sold-yr-max");
+  const lotMinInput = panel.querySelector("#nf-lot-min");
+  const lotMaxInput = panel.querySelector("#nf-lot-max");
 
   const normalizeShorthandInput = (inputEl) => {
     if (!inputEl) return null;
@@ -1104,6 +1114,13 @@ function renderSoldCompsPanel() {
     inputEl?.addEventListener("change", () => {
       normalizeShorthandInput(inputEl);
       applySoldCompInputFilters();
+    });
+  });
+
+  [lotMinInput, lotMaxInput].forEach((inputEl) => {
+    inputEl?.addEventListener("input", () => {
+      bumpUndoPillVersion();
+      _applyNumericFilters();
     });
   });
 
