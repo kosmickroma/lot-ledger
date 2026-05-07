@@ -1052,30 +1052,6 @@ function renderSoldCompsPanel() {
   const filterBar = `
     <div class="sold-filter-bar">
       <div class="numeric-filter-row">
-        <span class="numeric-filter-label">Lot Size (acres)</span>
-        <div class="numeric-filter-inputs">
-          <input type="text" inputmode="decimal" id="nf-comp-lot-min" placeholder="Min acres" class="nf-input" value="${compNumericFilters.lot_sqft_min == null ? "" : (compNumericFilters.lot_sqft_min / 43560).toFixed(2).replace(/\.00$/, "")}">
-          <span class="nf-sep">–</span>
-          <input type="text" inputmode="decimal" id="nf-comp-lot-max" placeholder="Max acres" class="nf-input" value="${compNumericFilters.lot_sqft_max == null ? "" : (compNumericFilters.lot_sqft_max / 43560).toFixed(2).replace(/\.00$/, "")}">
-        </div>
-      </div>
-      <div class="numeric-filter-row">
-        <span class="numeric-filter-label">Year Built</span>
-        <div class="numeric-filter-inputs">
-          <input type="number" id="nf-comp-yr-min" placeholder="Min" class="nf-input" min="1800" max="2030" value="${compNumericFilters.yr_built_min ?? ""}">
-          <span class="nf-sep">–</span>
-          <input type="number" id="nf-comp-yr-max" placeholder="Max" class="nf-input" min="1800" max="2030" value="${compNumericFilters.yr_built_max ?? ""}">
-        </div>
-      </div>
-      <div class="numeric-filter-row">
-        <span class="numeric-filter-label">Building Sqft</span>
-        <div class="numeric-filter-inputs">
-          <input type="number" id="nf-comp-sqft-min" placeholder="Min" class="nf-input" min="0" value="${compNumericFilters.sqft_min ?? ""}">
-          <span class="nf-sep">–</span>
-          <input type="number" id="nf-comp-sqft-max" placeholder="Max" class="nf-input" min="0" value="${compNumericFilters.sqft_max ?? ""}">
-        </div>
-      </div>
-      <div class="numeric-filter-row">
         <span class="numeric-filter-label">Sold Within (days)</span>
         <div class="numeric-filter-inputs">
           <input type="number" id="sold-days-max" placeholder="365" class="nf-input" min="1" value="${soldCompsFilter.maxDaysAgo ?? 365}">
@@ -1087,6 +1063,30 @@ function renderSoldCompsPanel() {
           <input type="text" id="sold-price-min" placeholder="Min (500k)" class="nf-input" value="${soldCompsFilter.minPrice ?? ""}">
           <span class="nf-sep">–</span>
           <input type="text" id="sold-price-max" placeholder="Max (1m)" class="nf-input" value="${soldCompsFilter.maxPrice ?? ""}">
+        </div>
+      </div>
+      <div class="numeric-filter-row">
+        <span class="numeric-filter-label">Lot Size (acres)</span>
+        <div class="numeric-filter-inputs">
+          <input type="text" inputmode="decimal" id="nf-comp-lot-min" placeholder="Min acres" class="nf-input" value="${compNumericFilters.lot_sqft_min == null ? "" : (compNumericFilters.lot_sqft_min / 43560).toFixed(2).replace(/\.00$/, "")}">
+          <span class="nf-sep">–</span>
+          <input type="text" inputmode="decimal" id="nf-comp-lot-max" placeholder="Max acres" class="nf-input" value="${compNumericFilters.lot_sqft_max == null ? "" : (compNumericFilters.lot_sqft_max / 43560).toFixed(2).replace(/\.00$/, "")}">
+        </div>
+      </div>
+      <div class="numeric-filter-row">
+        <span class="numeric-filter-label">Building Sqft</span>
+        <div class="numeric-filter-inputs">
+          <input type="number" id="nf-comp-sqft-min" placeholder="Min" class="nf-input" min="0" value="${compNumericFilters.sqft_min ?? ""}">
+          <span class="nf-sep">–</span>
+          <input type="number" id="nf-comp-sqft-max" placeholder="Max" class="nf-input" min="0" value="${compNumericFilters.sqft_max ?? ""}">
+        </div>
+      </div>
+      <div class="numeric-filter-row">
+        <span class="numeric-filter-label">Year Built</span>
+        <div class="numeric-filter-inputs">
+          <input type="number" id="nf-comp-yr-min" placeholder="Min" class="nf-input" min="1800" max="2030" value="${compNumericFilters.yr_built_min ?? ""}">
+          <span class="nf-sep">–</span>
+          <input type="number" id="nf-comp-yr-max" placeholder="Max" class="nf-input" min="1800" max="2030" value="${compNumericFilters.yr_built_max ?? ""}">
         </div>
       </div>
     </div>`;
