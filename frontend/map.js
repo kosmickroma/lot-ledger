@@ -902,10 +902,10 @@ function applyAndRenderSoldFilters() {
     _soldPointPassesFilter(p, soldCompsFilter)
   );
   updateMatchedSoldCompVisibility(soldCompsFilter);
-  const filteredMap = lastSoldPoints.filter((p) =>
-    _soldPointPassesFilter(p, soldCompsFilter)
-  );
-  renderSoldPoints();
+  // Order matters: renderFeatures clears parcelTypeLayers.sold (which now hosts
+  // sold-matched parcels AND the invisible anchor markers used for price labels).
+  // We must run renderFeatures FIRST, then add anchors via renderSoldPoints, so
+  // the anchors aren't wiped immediately after creation.
   if (lastAnalysisGeojson && Array.isArray(lastAnalysisGeojson.features) && lastAnalysisGeojson.features.length <= BROWSE_ONLY_THRESHOLD) {
     if (viewportRenderMode) {
       renderViewportFeatures();
@@ -913,6 +913,7 @@ function applyAndRenderSoldFilters() {
       renderFeatures(lastAnalysisGeojson);
     }
   }
+  renderSoldPoints();
   renderSoldCompsPanel();
   updateSoldStatusText();
 }
