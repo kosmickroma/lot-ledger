@@ -270,6 +270,7 @@ def _ensure_session_schema() -> None:
                 CREATE TABLE IF NOT EXISTS cached_jobs (
                     job_id       TEXT PRIMARY KEY,
                     user_id      INTEGER REFERENCES users(id),
+                    saved_area_id TEXT REFERENCES saved_areas(area_id) ON DELETE SET NULL,
                     created_at   TIMESTAMPTZ DEFAULT now(),
                     expires_at   TIMESTAMPTZ DEFAULT (now() + interval '{_JOB_TTL_SECONDS} seconds'),
                     rows         JSONB NOT NULL,
@@ -340,6 +341,11 @@ def _ensure_session_schema() -> None:
                     ),
                     ("idx_cached_jobs_expires", "CREATE INDEX IF NOT EXISTS idx_cached_jobs_expires ON cached_jobs (expires_at)"),
                     ("idx_cached_jobs_user", "CREATE INDEX IF NOT EXISTS idx_cached_jobs_user ON cached_jobs (user_id)"),
+                    (
+                        "cached_jobs_saved_area_id",
+                        "ALTER TABLE cached_jobs ADD COLUMN IF NOT EXISTS saved_area_id TEXT REFERENCES saved_areas(area_id) ON DELETE SET NULL",
+                    ),
+                    ("idx_cached_jobs_saved_area", "CREATE INDEX IF NOT EXISTS idx_cached_jobs_saved_area ON cached_jobs (saved_area_id)"),
                 ],
             )
             _backfill_saved_area_share_ids(cur)
@@ -381,16 +387,18 @@ def _persist_cached_job_sync(
     rows: list[dict[str, Any]],
     sold_points: list[dict[str, Any]],
     polygon: list[list[float]],
+    saved_area_id: str | None = None,
 ) -> None:
     conn = get_session_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(
                 f"""
-                INSERT INTO cached_jobs (job_id, user_id, rows, sold_points, polygon, expires_at)
-                VALUES (%s, %s, %s, %s, %s, now() + interval '{_JOB_TTL_SECONDS} seconds')
+                INSERT INTO cached_jobs (job_id, user_id, saved_area_id, rows, sold_points, polygon, expires_at)
+                VALUES (%s, %s, %s, %s, %s, %s, now() + interval '{_JOB_TTL_SECONDS} seconds')
                 ON CONFLICT (job_id) DO UPDATE SET
                     user_id = EXCLUDED.user_id,
+                    saved_area_id = COALESCE(EXCLUDED.saved_area_id, cached_jobs.saved_area_id),
                     rows = EXCLUDED.rows,
                     sold_points = EXCLUDED.sold_points,
                     polygon = EXCLUDED.polygon,
@@ -399,7 +407,7 @@ def _persist_cached_job_sync(
                         ELSE now() + interval '{_JOB_TTL_SECONDS} seconds'
                     END
                 """,
-                (job_id, int(user_id), Json(rows), Json(sold_points), Json(polygon)),
+                (job_id, int(user_id), saved_area_id, Json(rows), Json(sold_points), Json(polygon)),
             )
         conn.commit()
     finally:
@@ -412,7 +420,7 @@ def _load_cached_job(job_id: str) -> dict[str, Any] | None:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                                SELECT rows, sold_points, polygon, user_id
+                                SELECT rows, sold_points, polygon, user_id, saved_area_id
                 FROM cached_jobs
                 WHERE job_id = %s
                                     AND (expires_at IS NULL OR expires_at > now())
@@ -434,13 +442,14 @@ def _load_cached_job(job_id: str) -> dict[str, Any] | None:
                 (job_id,),
             )
         conn.commit()
-        rows, sold_points, polygon, user_id = row
+        rows, sold_points, polygon, user_id, saved_area_id = row
         return {
             "rows": rows if isinstance(rows, list) else [],
             "redfin_data": {},
             "sold_points": sold_points if isinstance(sold_points, list) else [],
             "polygon": polygon if isinstance(polygon, list) else [],
             "user_id": int(user_id or 0),
+            "saved_area_id": str(saved_area_id or "").strip() or None,
             "created_at": time.monotonic(),
             "last_accessed": time.monotonic(),
         }
@@ -461,6 +470,50 @@ def _counties_from_rows(rows: list[dict[str, Any]]) -> list[str]:
         else:
             seen.add("dcad")
     return sorted(seen)
+
+
+def _saved_area_exists(area_id: str) -> bool:
+    normalized = str(area_id or "").strip()
+    if not normalized:
+        return False
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM saved_areas WHERE area_id = %s LIMIT 1", (normalized,))
+            return cur.fetchone() is not None
+    finally:
+        release_session_conn(conn)
+
+
+def _job_share_id(job_id: str, fallback_saved_area_id: str | None = None) -> str:
+    saved_area_id = str(fallback_saved_area_id or "").strip()
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            if not saved_area_id:
+                cur.execute(
+                    "SELECT saved_area_id FROM cached_jobs WHERE job_id = %s LIMIT 1",
+                    (job_id,),
+                )
+                row = cur.fetchone()
+                saved_area_id = str(row[0] or "").strip() if row else ""
+            if not saved_area_id:
+                cur.execute(
+                    "SELECT saved_area_id FROM analysis_sessions WHERE session_id = %s LIMIT 1",
+                    (job_id,),
+                )
+                row = cur.fetchone()
+                saved_area_id = str(row[0] or "").strip() if row else ""
+            if not saved_area_id:
+                return ""
+            cur.execute(
+                "SELECT share_id FROM saved_areas WHERE area_id = %s LIMIT 1",
+                (saved_area_id,),
+            )
+            row = cur.fetchone()
+            return str(row[0] or "").strip() if row else ""
+    finally:
+        release_session_conn(conn)
 
 
 def _persist_session_sync(
@@ -512,6 +565,7 @@ async def _persist_session_async(
     parcel_count: int,
     county_coverage: list[str],
     user_id: int,
+    saved_area_id: str | None = None,
 ) -> None:
     try:
         await asyncio.to_thread(
@@ -521,7 +575,7 @@ async def _persist_session_async(
             parcel_count,
             county_coverage,
             user_id,
-            None,
+            saved_area_id,
         )
     except Exception as exc:
         print(f"[session] persist failed for {session_id}: {exc}")
@@ -764,10 +818,12 @@ class AnalyzeRequest(BaseModel):
     polygon: list[list[float]]
     include_redfin: bool = False
     include_sold: bool = False
+    area_id: str | None = None
 
 
 class MergeJobsRequest(BaseModel):
     job_ids: list[str]
+    area_id: str | None = None
 
 
 class VerificationRequest(BaseModel):
@@ -2186,7 +2242,10 @@ async def analyze(request: AnalyzeRequest, req: Request, user: dict[str, Any] = 
     polygon = request.polygon
     include_redfin = bool(request.include_redfin)
     include_sold = bool(request.include_sold)
+    area_id = str(request.area_id or "").strip() or None
     user_id = int(user["id"])
+    if area_id and not _saved_area_exists(area_id):
+        raise HTTPException(status_code=404, detail="Saved area not found")
     if len(polygon) < 3:
         raise HTTPException(status_code=400, detail="Polygon must have at least 3 points")
 
@@ -2284,11 +2343,12 @@ async def analyze(request: AnalyzeRequest, req: Request, user: dict[str, Any] = 
             "sold_points": sold_points,
             "polygon": polygon,
             "user_id": user_id,
+            "saved_area_id": area_id,
             "created_at": time.monotonic(),
             "last_accessed": time.monotonic(),
         }
         try:
-            await asyncio.to_thread(_persist_cached_job_sync, empty_job_id, user_id, [], sold_points, polygon)
+            await asyncio.to_thread(_persist_cached_job_sync, empty_job_id, user_id, [], sold_points, polygon, area_id)
         except Exception as exc:
             logger.warning("Failed to persist job to cache (non-fatal): %s", exc)
         return {
@@ -2377,11 +2437,12 @@ async def analyze(request: AnalyzeRequest, req: Request, user: dict[str, Any] = 
         "sold_points": sold_points,
         "polygon": polygon,
         "user_id": user_id,
+        "saved_area_id": area_id,
         "created_at": time.monotonic(),
         "last_accessed": time.monotonic(),
     }
     try:
-        await asyncio.to_thread(_persist_cached_job_sync, job_id, user_id, rows, sold_points, polygon)
+        await asyncio.to_thread(_persist_cached_job_sync, job_id, user_id, rows, sold_points, polygon, area_id)
     except Exception as exc:
         logger.warning("Failed to persist job to cache (non-fatal): %s", exc)
     asyncio.create_task(
@@ -2391,6 +2452,7 @@ async def analyze(request: AnalyzeRequest, req: Request, user: dict[str, Any] = 
             len(rows),
             county_coverage,
             user_id,
+            area_id,
         )
     )
     return {
@@ -2421,10 +2483,17 @@ async def merge_jobs(request: MergeJobsRequest, req: Request, user: dict[str, An
     seen_keys: set[str] = set()
     seen_sold_keys: set[str] = set()
     user_id = int(user["id"])
+    area_id = str(request.area_id or "").strip() or None
+    if area_id and not _saved_area_exists(area_id):
+        raise HTTPException(status_code=404, detail="Saved area not found")
     for job_id in request.job_ids:
         job = _get_job(job_id, user_id)
         if job is None:
             continue
+        if area_id is None:
+            inferred_area = str(job.get("saved_area_id") or "").strip()
+            if inferred_area:
+                area_id = inferred_area
         for row in job.get("rows", []):
             key = str(row.get("parcel_key") or row.get("account_num") or "")
             if key and key in seen_keys:
@@ -2445,6 +2514,8 @@ async def merge_jobs(request: MergeJobsRequest, req: Request, user: dict[str, An
 
     if not merged_rows:
         raise HTTPException(status_code=404, detail="No valid tile jobs found to merge")
+    if area_id and not _saved_area_exists(area_id):
+        area_id = None
 
     _evict_stale_jobs()
     new_job_id = str(uuid.uuid4())
@@ -2454,11 +2525,12 @@ async def merge_jobs(request: MergeJobsRequest, req: Request, user: dict[str, An
         "sold_points": merged_sold_points,
         "polygon": [],
         "user_id": user_id,
+        "saved_area_id": area_id,
         "created_at": time.monotonic(),
         "last_accessed": time.monotonic(),
     }
     try:
-        await asyncio.to_thread(_persist_cached_job_sync, new_job_id, user_id, merged_rows, merged_sold_points, [])
+        await asyncio.to_thread(_persist_cached_job_sync, new_job_id, user_id, merged_rows, merged_sold_points, [], area_id)
     except Exception as exc:
         logger.warning("Failed to persist job to cache (non-fatal): %s", exc)
     return {"job_id": new_job_id}
@@ -2677,6 +2749,8 @@ async def download(job_id: str, filename: str | None = None, user: dict[str, Any
     rows = job.get("rows", [])
     redfin_data: dict[str, dict] = job.get("redfin_data", {})
     sold_points: list[dict[str, Any]] = job.get("sold_points", []) or []
+    job_saved_area_id = str(job.get("saved_area_id") or "").strip() or None
+    csv_share_id = _job_share_id(job_id, job_saved_area_id)
     logger.info("Download job %s: %d parcel rows, %d sold points", job_id, len(rows), len(sold_points))
 
     def _deg_dist(lat1, lng1, lat2, lng2):
@@ -2802,6 +2876,7 @@ async def download(job_id: str, filename: str | None = None, user: dict[str, Any
                 "Comp Baths",
                 "Comp Days on Market",
                 "Comp Listing URL",
+                "share_id",
             ]
         )
         buffer.seek(0)
@@ -2964,6 +3039,7 @@ async def download(job_id: str, filename: str | None = None, user: dict[str, Any
                     int(_safe_float(comp.get("baths"))) if comp and _safe_float(comp.get("baths")) not in (None, 0.0) else "",
                     int(_safe_float(comp.get("dom"))) if comp and _safe_float(comp.get("dom")) not in (None, 0.0) else "",
                     (comp.get("listing_url", "") or "") if comp else "",
+                    csv_share_id,
                 ]
             )
             buffer.seek(0)

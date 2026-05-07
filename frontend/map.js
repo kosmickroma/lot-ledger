@@ -1810,7 +1810,7 @@ async function restoreSavedArea(area, options = {}) {
   if (options.undoSnapshot) options.undoSnapshot.abortCtrl = _activeAnalysisAbortController;
 
   try {
-    const data = await runAnalysis(polygon, includeRedfin, includeSold, { signal: analysisRequest.signal });
+    const data = await runAnalysis(polygon, includeRedfin, includeSold, { signal: analysisRequest.signal, areaId: area.id });
     if (analysisRequest.signal.aborted) return;
     if (!isActiveAnalysisRequest(analysisRequest.requestId)) return;
     if (data.source_status && (!data.source_status.dcad_ok || !data.source_status.tad_ok)) {
@@ -3953,13 +3953,13 @@ async function postJsonWithRetry(endpoint, payload, options = {}) {
 }
 
 async function fetchTileDataRecursive(tilePolygon, includeRedfin, includeSold, depth, tileLabel, options = {}) {
-  const { signal } = options;
+  const { signal, areaId } = options;
   const redfinStatus = document.getElementById("redfin-status");
   let data;
   try {
     data = await postJsonWithRetry(
       "/api/analyze",
-      { polygon: tilePolygon, include_redfin: includeRedfin, include_sold: includeSold },
+      { polygon: tilePolygon, include_redfin: includeRedfin, include_sold: includeSold, area_id: areaId || null },
       {
         signal,
         maxRetries: 2,
@@ -4078,7 +4078,7 @@ async function runTiledAnalysis(polygon, includeRedfin, includeSold, options = {
   // Merge server-side so export + verification have a single stable job_id
   const mergeData = await postJsonWithRetry(
     "/api/merge-jobs",
-    { job_ids: tileJobIds },
+    { job_ids: tileJobIds, area_id: options.areaId || null },
     {
       signal: options.signal,
       maxRetries: 2,
@@ -4103,15 +4103,17 @@ async function runTiledAnalysis(polygon, includeRedfin, includeSold, options = {
 }
 
 async function runAnalysis(polygon, includeRedfin, includeSold, options = {}) {
+  const resolvedAreaId = (Object.prototype.hasOwnProperty.call(options, "areaId") ? options.areaId : _currentLoadedAreaId) || null;
+  const requestOptions = { ...options, areaId: resolvedAreaId };
   const bbox = getPolygonBbox(polygon);
   if (bboxArea(bbox) > TILE_AREA_THRESHOLD) {
-    return runTiledAnalysis(polygon, includeRedfin, includeSold, options);
+    return runTiledAnalysis(polygon, includeRedfin, includeSold, requestOptions);
   }
   return postJsonWithRetry(
     "/api/analyze",
-    { polygon, include_redfin: includeRedfin, include_sold: includeSold },
+    { polygon, include_redfin: includeRedfin, include_sold: includeSold, area_id: resolvedAreaId },
     {
-      signal: options.signal,
+      signal: requestOptions.signal,
       maxRetries: 2,
       statusElement: document.getElementById("redfin-status"),
       retryMessageBuilder: (attempt, total, waitMs, status) =>
