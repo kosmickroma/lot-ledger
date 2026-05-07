@@ -3565,8 +3565,8 @@ async def get_saved_area_by_share_id(
 
 @app.post("/api/areas/from-share-id/{share_id}")
 async def fork_saved_area(
-    share_id: str = FastAPIPath(..., regex=r"^area_[A-Za-z0-9]{10}$"),
     req: Request,
+    share_id: str = FastAPIPath(..., regex=r"^area_[A-Za-z0-9]{10}$"),
     user: dict[str, Any] = Depends(get_current_user),
 ) -> dict[str, Any]:
     require_csrf(req)
