@@ -2125,6 +2125,7 @@ function _renderList(sectionId, listId, items) {
         <div class="saved-area-main">
           <span class="saved-area-icon">${icon}</span>
           <span class="saved-area-name">${area.name}</span>
+          ${showFullControls ? `<button type="button" class="saved-area-quick-delete-btn" data-action="delete" title="Delete">🗑</button>` : ""}
           ${canShare ? `<button type="button" class="saved-area-action-btn saved-area-share-btn" data-action="share" data-share-id="${_esc(area.share_id)}" title="Share">🔗 Share</button>` : ""}
         </div>
         <div class="saved-area-secondary-line">${secondaryLine}</div>

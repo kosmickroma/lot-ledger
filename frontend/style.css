@@ -1132,7 +1132,7 @@ h1 {
 /* Gold Share button — matches #btn-download primary action styling */
 .saved-area-share-btn {
   flex-shrink: 0;
-  margin-left: auto;
+  margin-left: 6px;
   padding: 5px 10px;
   background: var(--gold);
   color: #111217;
@@ -1151,6 +1151,30 @@ h1 {
 
 .saved-area-share-btn:hover {
   background: var(--gold-strong);
+}
+
+/* Quick delete trash icon — sits to the left of Share, always accessible
+   (no need to load the area first to delete it). */
+.saved-area-quick-delete-btn {
+  margin-left: auto;
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid rgba(231, 76, 60, 0.3);
+  color: #e74c3c;
+  font-size: 13px;
+  cursor: pointer;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+
+.saved-area-quick-delete-btn:hover {
+  background: rgba(231, 76, 60, 0.15);
+  border-color: rgba(231, 76, 60, 0.6);
+  color: #ff8a80;
 }
 
 /* Rename + Delete — muted secondary, border-only */
