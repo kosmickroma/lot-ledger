@@ -477,6 +477,7 @@ let _savedParcelsCache = [];
 let _currentSessionIsNamed = false;
 let _savedSessionsCache = [];
 let _currentLoadedAreaId = null;
+let _selectedSavedItemId = null;
 const _initialAreaShareId = (() => {
   try {
     const v = new URLSearchParams(window.location.search).get("area");
@@ -565,11 +566,11 @@ function setActiveItem(type, name) {
   typeEl.textContent = type || "";
   nameEl.textContent = name || "";
   slot.classList.remove("is-collapsed");
-  console.debug("[slot] set →", type, name);
-  console.trace("[slot] called from ↑");
 }
 
 function clearActiveItem() {
+  _selectedSavedItemId = null;
+  renderSavedAreasList();
   document.getElementById("active-item-slot")?.classList.add("is-collapsed");
 }
 
@@ -1510,6 +1511,7 @@ async function saveCurrentArea(name) {
   // Mark the just-saved area as the currently-loaded one so the Update button
   // becomes available the moment the user tweaks any filter after saving.
   _currentLoadedAreaId = normalized.id;
+  _selectedSavedItemId = normalized.id;
   setActiveItem("Workspace", normalized.name);
   renderSavedAreasList();
 }
@@ -1536,6 +1538,7 @@ async function deleteSavedArea(item) {
     _savedAreasCache = _savedAreasCache.filter((a) => a.id !== item.id);
     if (_currentLoadedAreaId === item.id) _currentLoadedAreaId = null;
   }
+  if (_selectedSavedItemId === item.id) _selectedSavedItemId = null;
   renderSavedAreasList();
 }
 
@@ -1681,6 +1684,7 @@ async function saveParcel(account_num, county, addr, lat, lng, geometry) {
   const row = _normalizeSavedParcelRow(created);
   _savedParcelsCache = _savedParcelsCache.filter((p) => !(p.account_num === row.account_num && p.county === row.county));
   _savedParcelsCache.unshift(row);
+  _selectedSavedItemId = row.id;
   renderSavedAreasList();
   _renderSavedParcelOutline(row);
   setActiveItem("Target", row.name);
@@ -1811,6 +1815,7 @@ function _restoreActiveParcelPopup() {
 
 async function restoreSavedArea(area, options = {}) {
   const rowEl = options.rowEl || null;
+  _selectedSavedItemId = area?.id || null;
   // Location pins (from address search) — just fly there and show the ring.
   if (area.type === "location") {
     const latlng = [area.lat, area.lng];
@@ -2016,6 +2021,7 @@ async function restoreSavedArea(area, options = {}) {
 
 async function restoreNamedSession(session, options = {}) {
   const rowEl = options.rowEl || null;
+  _selectedSavedItemId = null;
   if (!session.latlngs || session.latlngs.length < 3) {
     console.warn("[restoreNamedSession] session has no polygon", session);
     return;
@@ -2216,7 +2222,8 @@ function _renderList(sectionId, listId, items) {
     const chip = _formatFilterDiffChip(area);
     const canRename = area.type !== "parcel";
     const canShare = area.type === "area" && Boolean(String(area.share_id || "").trim());
-    const activeClass = area.id === _currentLoadedAreaId ? " saved-area-row-active" : "";
+    const isActiveRow = area.id === _currentLoadedAreaId || area.id === _selectedSavedItemId;
+    const activeClass = isActiveRow ? " saved-area-row-active" : "";
     const secondaryLine = [chip, `saved ${date}`].filter(Boolean).join(" · ");
 
     // Ownership + role gating for Rename / Delete / Fork
@@ -2278,6 +2285,7 @@ function _renderList(sectionId, listId, items) {
           });
           _savedAreasCache.unshift(_normalizeSavedAreaRow(cloned));
           _currentLoadedAreaId = cloned.area_id;
+          _selectedSavedItemId = cloned.area_id;
           renderSavedAreasList();
           _showToast(`Forked → "${cloned.name}"`);
         } catch {
@@ -2295,6 +2303,11 @@ function _renderList(sectionId, listId, items) {
         await _renameSavedItemInline(area, row);
         return;
       }
+      _selectedSavedItemId = area.id;
+      document.querySelectorAll(".saved-area-row-active").forEach((el) => {
+        if (el !== row) el.classList.remove("saved-area-row-active");
+      });
+      row.classList.add("saved-area-row-active");
       bumpUndoPillVersion();
       const snapshot = _createUndoSnapshot();
       await restoreSavedArea(area, { rowEl: row, undoSnapshot: snapshot });
@@ -4492,6 +4505,7 @@ map.on("draw:created", async (e) => {
   map.getContainer().classList.remove("drawing-active");
   _currentSessionIsNamed = false;
   _currentLoadedAreaId = null;
+  _selectedSavedItemId = null;
   _setSessionCacheNote("");
   renderSavedAreasList();
   drawLayer.clearLayers();
@@ -4672,6 +4686,7 @@ map.on("draw:drawstart", () => {
   map.getContainer().classList.add("drawing-active");
   _currentSessionIsNamed = false;
   _currentLoadedAreaId = null;
+  _selectedSavedItemId = null;
   _setSessionCacheNote("");
   renderSavedAreasList();
   _updateSaveSessionButtonState();
