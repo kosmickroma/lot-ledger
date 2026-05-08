@@ -992,6 +992,22 @@ function _soldPointPassesFilter(p, filter) {
   if (filter.minYearBuilt != null && (yr == null || yr < filter.minYearBuilt)) return false;
   if (filter.maxYearBuilt != null && (yr == null || yr > filter.maxYearBuilt)) return false;
 
+  // The Sold Comps + Listings panel filter bar in renderSoldCompsPanel writes
+  // Lot Size, Building Sqft, and Year Built inputs into compNumericFilters
+  // (not soldCompsFilter). Without honoring those here, the sidebar list
+  // silently ignored 3 of the 5 visible filters even while the same values
+  // correctly filtered the on-map polygons.
+  if (compNumericFilters.yr_built_min != null && (yr == null || yr < compNumericFilters.yr_built_min)) return false;
+  if (compNumericFilters.yr_built_max != null && (yr == null || yr > compNumericFilters.yr_built_max)) return false;
+
+  const lot = asNumber(p.lot_sqft);
+  if (compNumericFilters.lot_sqft_min != null && (lot == null || lot < compNumericFilters.lot_sqft_min)) return false;
+  if (compNumericFilters.lot_sqft_max != null && (lot == null || lot > compNumericFilters.lot_sqft_max)) return false;
+
+  const sqft = asNumber(p.sqft);
+  if (compNumericFilters.sqft_min != null && (sqft == null || sqft < compNumericFilters.sqft_min)) return false;
+  if (compNumericFilters.sqft_max != null && (sqft == null || sqft > compNumericFilters.sqft_max)) return false;
+
   return true;
 }
 
@@ -3279,6 +3295,14 @@ function _readCompNumericInputs() {
 function _applyCompNumericFilters() {
   _readCompNumericInputs();
   if (!lastAnalysisGeojson) return;
+  // Recompute the sold-points sidebar list so it reflects the new comp filters.
+  // _soldPointPassesFilter now reads compNumericFilters for lot/sqft/year-built,
+  // but lastSoldPanelPoints would otherwise stay stale until a separate sold-comps
+  // input change. Run the filter pass before rendering so renderSidebar ->
+  // renderSoldCompsPanel sees the up-to-date list.
+  lastSoldPanelPoints = allSoldPointsRef.filter((p) =>
+    _soldPointPassesFilter(p, soldCompsFilter)
+  );
   const markers = viewportRenderMode
     ? renderViewportFeatures()
     : renderFeatures(lastAnalysisGeojson);
