@@ -5430,10 +5430,18 @@ function _showChangePasswordForm(forced = false) {
     </form>`;
   _showAuthModal();
 
-  ["auth-chpw-current", "auth-chpw-new", "auth-chpw-confirm"].forEach((id) => {
-    const el = document.getElementById(id);
-    if (el) el.value = "";
-  });
+  // Stomp browser-autofilled password values. Some password managers re-fill
+  // after the synchronous JS, so clear immediately, on the next tick, and
+  // again at 100ms to catch slower autofill paths.
+  const _clearChpwFields = () => {
+    ["auth-chpw-current", "auth-chpw-new", "auth-chpw-confirm"].forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) el.value = "";
+    });
+  };
+  _clearChpwFields();
+  setTimeout(_clearChpwFields, 0);
+  setTimeout(_clearChpwFields, 100);
 
   document.getElementById("auth-close-chpw")?.addEventListener("click", () => {
     _hideAuthModal();
