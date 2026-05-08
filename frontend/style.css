@@ -115,8 +115,8 @@ h1 {
 }
 
 .collapsible-section {
-  padding-top: 10px;
-  padding-bottom: 10px;
+  padding-top: 6px;
+  padding-bottom: 6px;
 }
 
 .section-header {
@@ -136,7 +136,28 @@ h1 {
   background: transparent;
   cursor: pointer;
   position: relative;
-  padding: 2px 24px 8px 0;
+  padding: 2px 24px 4px 0;
+}
+
+.section-toggle[aria-expanded="false"] {
+  padding-bottom: 2px;
+}
+
+.section-toggle[aria-expanded="false"] .sidebar-label {
+  margin-bottom: 0;
+}
+
+#saved-areas {
+  padding-top: 10px;
+  padding-bottom: 10px;
+}
+
+#saved-areas .section-toggle {
+  padding-bottom: 8px;
+}
+
+#saved-areas .section-toggle[aria-expanded="false"] {
+  padding-bottom: 2px;
 }
 
 .section-toggle::after {
@@ -310,7 +331,7 @@ h1 {
 
 .filter-row {
   display: grid;
-  grid-template-columns: 10px 1fr auto;
+  grid-template-columns: 10px 1fr auto auto;
   align-items: center;
   gap: 9px;
   font-size: 12px;
@@ -339,6 +360,14 @@ h1 {
 
 .filter-name {
   user-select: none;
+}
+
+.filter-count {
+  min-width: 18px;
+  text-align: right;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
 }
 
 .filter-row input[type="checkbox"] {
@@ -570,6 +599,37 @@ h1 {
   line-height: 1.35;
 }
 
+.active-item-slot {
+  padding: 14px 20px 14px 16px;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background:
+    linear-gradient(90deg, var(--gold-soft) 0%, rgba(201, 162, 79, 0.06) 100%),
+    linear-gradient(180deg, rgba(13, 55, 42, 0.98), rgba(13, 55, 42, 0.94));
+  border-left: 4px solid var(--gold);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.active-item-type {
+  display: block;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--gold);
+  margin-bottom: 4px;
+}
+
+.active-item-name {
+  display: block;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-main);
+  line-height: 1.3;
+  word-break: break-word;
+}
+
 .sidebar-actions {
   display: flex;
   flex-wrap: wrap;
@@ -582,8 +642,29 @@ h1 {
   min-width: 0;
 }
 
-#btn-download {
-  flex-basis: 100%;
+.actions-secondary {
+  margin-bottom: 12px;
+  gap: 6px;
+}
+
+.btn-tertiary {
+  padding: 5px 10px;
+  background: transparent;
+  color: var(--text-soft);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 5px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.btn-tertiary:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-muted);
+}
+
+.btn-tertiary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .sidebar input,
@@ -595,7 +676,7 @@ h1 {
 
 .btn-primary {
   flex: 1;
-  padding: 8px 12px;
+  padding: 6px 10px;
   background: var(--gold);
   color: #111217;
   border: none;
@@ -610,7 +691,7 @@ h1 {
 }
 
 .btn-secondary {
-  padding: 8px 12px;
+  padding: 6px 10px;
   background: #232834;
   color: #c6c9d1;
   border: none;
@@ -1000,13 +1081,21 @@ h1 {
   margin-left: auto;
   font-size: 14px;
   font-weight: 700;
-  color: #27ae60;
+  color: #D92228;
   white-space: nowrap;
 }
 
 .popup-list-price a {
   color: inherit;
   text-decoration: none;
+}
+
+.popup-sold-price {
+  margin-left: auto;
+  font-size: 14px;
+  font-weight: 700;
+  color: #5C2D91;
+  white-space: nowrap;
 }
 
 .sold-popup-status {

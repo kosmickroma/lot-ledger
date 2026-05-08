@@ -57,6 +57,7 @@ const SOLD_FALLBACK_DOT_COLOR = "#004225";
 const SOLD_FALLBACK_DOT_BORDER = "#5C2D91";
 const FILTER_STORAGE_KEY = "lotledger.map.filters.v1";
 const CLICK_MODE_STORAGE_KEY = "lot_ledger_click_mode";
+const SIDEBAR_SECTION_STATE_STORAGE_KEY = "lot_ledger_sidebar_sections.v1";
 
 const DEFAULT_FILTERS = {
   active: true,
@@ -90,6 +91,14 @@ const NUMERIC_FILTER_INPUTS = [
 ];
 
 const numericFilters = {
+  lot_sqft_min: null, lot_sqft_max: null,
+  appr_val_min: null, appr_val_max: null,
+  yr_built_min: null, yr_built_max: null,
+  sqft_min: null,     sqft_max: null,
+};
+
+// Comp Filters: same numeric schema as Property Filters, but applied only to listings + sold-matched
+const compNumericFilters = {
   lot_sqft_min: null, lot_sqft_max: null,
   appr_val_min: null, appr_val_max: null,
   yr_built_min: null, yr_built_max: null,
@@ -189,6 +198,31 @@ function passesNumericFilters(feature) {
   return true;
 }
 
+// Comp Filters (applied only to listings + sold-matched): same parsing logic as Property Filters
+function passesCompFilters(feature) {
+  const p = feature?.properties || {};
+  const lotRaw = String(p.lot_sqft || "").replace(/,/g, "").match(/^[\d.]+/);
+  const lot = lotRaw ? Number(lotRaw[0]) : null;
+
+  const valRaw = String(p.tot_val || "").replace(/[$,]/g, "").match(/^[\d.]+/);
+  const val = valRaw ? Number(valRaw[0]) : null;
+
+  const yr = asNumber(p.yr_built);
+
+  const sqftRaw = String(p.sqft || "").replace(/,/g, "").match(/^[\d.]+/);
+  const sqft = sqftRaw ? Number(sqftRaw[0]) : null;
+
+  if (compNumericFilters.lot_sqft_min != null && (lot == null || lot < compNumericFilters.lot_sqft_min)) return false;
+  if (compNumericFilters.lot_sqft_max != null && (lot == null || lot > compNumericFilters.lot_sqft_max)) return false;
+  if (compNumericFilters.appr_val_min != null && (val == null || val < compNumericFilters.appr_val_min)) return false;
+  if (compNumericFilters.appr_val_max != null && (val == null || val > compNumericFilters.appr_val_max)) return false;
+  if (compNumericFilters.yr_built_min != null && (yr == null || yr < compNumericFilters.yr_built_min)) return false;
+  if (compNumericFilters.yr_built_max != null && (yr == null || yr > compNumericFilters.yr_built_max)) return false;
+  if (compNumericFilters.sqft_min != null && (sqft == null || sqft < compNumericFilters.sqft_min)) return false;
+  if (compNumericFilters.sqft_max != null && (sqft == null || sqft > compNumericFilters.sqft_max)) return false;
+  return true;
+}
+
 const PARCEL_LAYER_KEYS = ["active", "sold", "off_market", "vacant", "multifamily", "commercial", "exempt"];
 
 // -- Click mode helpers (Jump vs Stay) --
@@ -273,6 +307,13 @@ map.getPane("soldPane").style.zIndex = "640";
 map.createPane("countyLabelPane");
 map.getPane("countyLabelPane").style.zIndex = "645";
 map.getPane("countyLabelPane").style.pointerEvents = "none";
+
+// Saved-parcel (Target) pane sits above parcel fills + markers but below
+// soldPane (640) and tooltipPane (650) so sold-price labels remain readable
+// over orange targets.
+map.createPane("savedParcelPane");
+map.getPane("savedParcelPane").style.zIndex = "620";
+map.getPane("savedParcelPane").style.pointerEvents = "none";
 
 // Apply saved basemap BEFORE browseLayer is added. If we switch after protomaps
 // is on the map, the tile layer removal fires viewprereset → _invalidateAll on
@@ -401,7 +442,7 @@ let _currentlyRenderedSoldAccounts = new Set();
 let soldMarkers = [];
 let transientSoldSidebarPopup = null;
 let soldCompsSortMode = "price";
-let soldCompsCollapsed = true;
+let soldCompsCollapsed = false;
 const DEFAULT_SOLD_COMPS_FILTER = {
   maxDaysAgo: 365,
   minPrice: null,
@@ -436,6 +477,7 @@ let _savedParcelsCache = [];
 let _currentSessionIsNamed = false;
 let _savedSessionsCache = [];
 let _currentLoadedAreaId = null;
+let _selectedSavedItemId = null;
 const _initialAreaShareId = (() => {
   try {
     const v = new URLSearchParams(window.location.search).get("area");
@@ -486,12 +528,13 @@ function captureFilterState() {
       minYearBuilt: soldCompsFilter.minYearBuilt,
       maxYearBuilt: soldCompsFilter.maxYearBuilt,
     },
+    comp: { ...compNumericFilters },
   };
 }
 
 function _normalizeFilterStateForCompare(state) {
   if (!state || typeof state !== "object") {
-    return { v: 1, checkboxes: {}, numeric: {}, sold: {} };
+    return { v: 1, checkboxes: {}, numeric: {}, sold: {}, comp: {} };
   }
   const sold = state.sold && typeof state.sold === "object" ? state.sold : {};
   return {
@@ -505,6 +548,7 @@ function _normalizeFilterStateForCompare(state) {
       minYearBuilt: sold.minYearBuilt ?? null,
       maxYearBuilt: sold.maxYearBuilt ?? null,
     },
+    comp: { ...(state.comp || {}) },
   };
 }
 
@@ -514,24 +558,21 @@ function _filterStatesEqual(a, b) {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
-function _renderCurrentViewingArea() {
-  const host = document.getElementById("saved-area-current");
-  const nameEl = document.getElementById("saved-area-current-name");
-  if (!host || !nameEl) return;
-  if (!_currentLoadedAreaId) {
-    host.classList.add("hidden");
-    nameEl.textContent = "";
-    return;
-  }
-  const area = _savedAreasCache.find((a) => a.id === _currentLoadedAreaId && a.type === "area");
-  if (!area) {
-    host.classList.add("hidden");
-    nameEl.textContent = "";
-    _currentLoadedAreaId = null;
-    return;
-  }
-  nameEl.textContent = area.name || "Saved area";
-  host.classList.remove("hidden");
+function setActiveItem(type, name) {
+  const typeEl = document.getElementById("active-item-type");
+  const nameEl = document.getElementById("active-item-name");
+  if (!typeEl || !nameEl) return;
+  typeEl.textContent = type || "Workspace";
+  nameEl.textContent = name || "—";
+}
+
+function clearActiveItem() {
+  _selectedSavedItemId = null;
+  renderSavedAreasList();
+  const typeEl = document.getElementById("active-item-type");
+  const nameEl = document.getElementById("active-item-name");
+  if (typeEl) typeEl.textContent = "Workspace";
+  if (nameEl) nameEl.textContent = "—";
 }
 
 function _refreshLoadedAreaUi() {
@@ -597,6 +638,38 @@ function _hydrateSoldCompInputsFromState() {
   }
 }
 
+// Hydrate Comp Filter numeric inputs (similar to Property but with nf-comp- prefix)
+function _hydrateCompNumericInputsFromState() {
+  const compInputs = [
+    { id: "nf-comp-lot-min", key: "lot_sqft_min" },
+    { id: "nf-comp-lot-max", key: "lot_sqft_max" },
+    { id: "nf-comp-val-min", key: "appr_val_min" },
+    { id: "nf-comp-val-max", key: "appr_val_max" },
+    { id: "nf-comp-yr-min", key: "yr_built_min" },
+    { id: "nf-comp-yr-max", key: "yr_built_max" },
+    { id: "nf-comp-sqft-min", key: "sqft_min" },
+    { id: "nf-comp-sqft-max", key: "sqft_max" },
+  ];
+  compInputs.forEach(({ id, key }) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const val = compNumericFilters[key];
+    if (val == null) {
+      el.value = "";
+      return;
+    }
+    if (key === "lot_sqft_min" || key === "lot_sqft_max") {
+      el.value = String((Number(val) / 43560).toFixed(2)).replace(/\.00$/, "");
+      return;
+    }
+    if (key === "appr_val_min" || key === "appr_val_max") {
+      el.value = formatNumberWithCommas(val);
+      return;
+    }
+    el.value = String(val);
+  });
+}
+
 function restoreFilterState(state) {
   if (!state || typeof state !== "object") return;
   if (Number(state.v || 0) > 1) {
@@ -606,6 +679,7 @@ function restoreFilterState(state) {
   if (Number(state.v || 0) !== 1) return;
   if (state.checkboxes && typeof state.checkboxes === "object") Object.assign(filterState, state.checkboxes);
   if (state.numeric && typeof state.numeric === "object") Object.assign(numericFilters, state.numeric);
+  if (state.comp && typeof state.comp === "object") Object.assign(compNumericFilters, state.comp);
   if (state.sold && typeof state.sold === "object") {
     Object.assign(soldCompsFilter, {
       maxDaysAgo: state.sold.maxDaysAgo ?? DEFAULT_SOLD_COMPS_FILTER.maxDaysAgo,
@@ -618,10 +692,12 @@ function restoreFilterState(state) {
   console.debug("[restoreFilterState] restored", {
     checkboxes: { ...filterState },
     numeric: { ...numericFilters },
+    comp: { ...compNumericFilters },
     sold: { ...soldCompsFilter },
   });
   syncFilterInputs();
   _hydrateNumericInputsFromState();
+  _hydrateCompNumericInputsFromState();
   _hydrateSoldCompInputsFromState();
   if (lastAnalysisGeojson) {
     applyAndRenderSoldFilters();
@@ -689,7 +765,11 @@ function classifyFeatureForFilter(feature) {
 function isFeatureVisible(feature) {
   const bucket = classifyFeatureForFilter(feature);
   if (!filterState[bucket]) return false;
-  return passesNumericFilters(feature);
+  if (!passesNumericFilters(feature)) return false;
+  const p = feature?.properties || {};
+  const isListingOrSold = Boolean(p.on_redfin || p.sold_comp);
+  if (isListingOrSold && !passesCompFilters(feature)) return false;
+  return true;
 }
 
 function getVisibleFeatureCounts(features) {
@@ -932,11 +1012,6 @@ function renderSoldCompsPanel() {
   const totalSoldCount = Array.isArray(allSoldPointsRef) ? allSoldPointsRef.length : 0;
   const soldCountNote = `<p class="sidebar-note sold-comps-count-note">${totalSoldCount} sold comp${totalSoldCount === 1 ? "" : "s"} in this area</p>`;
 
-  if (!Array.isArray(allSoldPointsRef) || allSoldPointsRef.length === 0) {
-    panel.innerHTML = soldCountNote;
-    return;
-  }
-
   const priceValues = lastSoldPanelPoints.map((p) => asNumber(p.sold_price)).filter((n) => n != null);
   const ppsfValues = lastSoldPanelPoints.map((p) => asNumber(p.price_per_sqft)).filter((n) => n != null);
   const medianPrice = median(priceValues);
@@ -982,21 +1057,13 @@ function renderSoldCompsPanel() {
   const filterBar = `
     <div class="sold-filter-bar">
       <div class="numeric-filter-row">
-        <span class="numeric-filter-label">Lot Size (acres)</span>
-        <div class="numeric-filter-inputs">
-          <input type="text" inputmode="decimal" id="nf-lot-min" placeholder="Min acres" class="nf-input" value="${numericFilters.lot_sqft_min == null ? "" : (numericFilters.lot_sqft_min / 43560).toFixed(2).replace(/\.00$/, "")}">
-          <span class="nf-sep">–</span>
-          <input type="text" inputmode="decimal" id="nf-lot-max" placeholder="Max acres" class="nf-input" value="${numericFilters.lot_sqft_max == null ? "" : (numericFilters.lot_sqft_max / 43560).toFixed(2).replace(/\.00$/, "")}">
-        </div>
-      </div>
-      <div class="numeric-filter-row">
         <span class="numeric-filter-label">Sold Within (days)</span>
         <div class="numeric-filter-inputs">
           <input type="number" id="sold-days-max" placeholder="365" class="nf-input" min="1" value="${soldCompsFilter.maxDaysAgo ?? 365}">
         </div>
       </div>
       <div class="numeric-filter-row">
-        <span class="numeric-filter-label">Price ($)</span>
+        <span class="numeric-filter-label">Sold Price ($)</span>
         <div class="numeric-filter-inputs">
           <input type="text" id="sold-price-min" placeholder="Min (500k)" class="nf-input" value="${soldCompsFilter.minPrice ?? ""}">
           <span class="nf-sep">–</span>
@@ -1004,11 +1071,27 @@ function renderSoldCompsPanel() {
         </div>
       </div>
       <div class="numeric-filter-row">
+        <span class="numeric-filter-label">Lot Size (acres)</span>
+        <div class="numeric-filter-inputs">
+          <input type="text" inputmode="decimal" id="nf-comp-lot-min" placeholder="Min acres" class="nf-input" value="${compNumericFilters.lot_sqft_min == null ? "" : (compNumericFilters.lot_sqft_min / 43560).toFixed(2).replace(/\.00$/, "")}">
+          <span class="nf-sep">–</span>
+          <input type="text" inputmode="decimal" id="nf-comp-lot-max" placeholder="Max acres" class="nf-input" value="${compNumericFilters.lot_sqft_max == null ? "" : (compNumericFilters.lot_sqft_max / 43560).toFixed(2).replace(/\.00$/, "")}">
+        </div>
+      </div>
+      <div class="numeric-filter-row">
+        <span class="numeric-filter-label">Building Sqft</span>
+        <div class="numeric-filter-inputs">
+          <input type="number" id="nf-comp-sqft-min" placeholder="Min" class="nf-input" min="0" value="${compNumericFilters.sqft_min ?? ""}">
+          <span class="nf-sep">–</span>
+          <input type="number" id="nf-comp-sqft-max" placeholder="Max" class="nf-input" min="0" value="${compNumericFilters.sqft_max ?? ""}">
+        </div>
+      </div>
+      <div class="numeric-filter-row">
         <span class="numeric-filter-label">Year Built</span>
         <div class="numeric-filter-inputs">
-          <input type="number" id="sold-yr-min" placeholder="Min" class="nf-input" min="1800" max="2030" value="${soldCompsFilter.minYearBuilt ?? ""}">
+          <input type="number" id="nf-comp-yr-min" placeholder="Min" class="nf-input" min="1800" max="2030" value="${compNumericFilters.yr_built_min ?? ""}">
           <span class="nf-sep">–</span>
-          <input type="number" id="sold-yr-max" placeholder="Max" class="nf-input" min="1800" max="2030" value="${soldCompsFilter.maxYearBuilt ?? ""}">
+          <input type="number" id="nf-comp-yr-max" placeholder="Max" class="nf-input" min="1800" max="2030" value="${compNumericFilters.yr_built_max ?? ""}">
         </div>
       </div>
     </div>`;
@@ -1022,7 +1105,7 @@ function renderSoldCompsPanel() {
     ${soldCountNote}
     <div class="sold-comps-panel">
       <button class="section-toggle" type="button" id="sold-comps-toggle" aria-expanded="${!soldCompsCollapsed}">
-        <span class="sidebar-label">Sold Comps</span>
+        <span class="sidebar-label">Sold Comps + Listings</span>
       </button>
       <div id="sold-comps-body" class="collapsible-body${soldCompsCollapsed ? " hidden" : ""}">
         <div class="sold-comps-summary">
@@ -1061,10 +1144,12 @@ function renderSoldCompsPanel() {
   const soldDaysMaxInput = panel.querySelector("#sold-days-max");
   const soldPriceMinInput = panel.querySelector("#sold-price-min");
   const soldPriceMaxInput = panel.querySelector("#sold-price-max");
-  const soldYrMinInput = panel.querySelector("#sold-yr-min");
-  const soldYrMaxInput = panel.querySelector("#sold-yr-max");
-  const lotMinInput = panel.querySelector("#nf-lot-min");
-  const lotMaxInput = panel.querySelector("#nf-lot-max");
+  const compLotMinInput = panel.querySelector("#nf-comp-lot-min");
+  const compLotMaxInput = panel.querySelector("#nf-comp-lot-max");
+  const compYrMinInput = panel.querySelector("#nf-comp-yr-min");
+  const compYrMaxInput = panel.querySelector("#nf-comp-yr-max");
+  const compSqftMinInput = panel.querySelector("#nf-comp-sqft-min");
+  const compSqftMaxInput = panel.querySelector("#nf-comp-sqft-max");
 
   const normalizeShorthandInput = (inputEl) => {
     if (!inputEl) return null;
@@ -1099,18 +1184,18 @@ function renderSoldCompsPanel() {
 
     soldCompsFilter.minPrice = parseShorthand(soldPriceMinInput?.value);
     soldCompsFilter.maxPrice = parseShorthand(soldPriceMaxInput?.value);
-    soldCompsFilter.minYearBuilt = parseIntegerInput(soldYrMinInput);
-    soldCompsFilter.maxYearBuilt = parseIntegerInput(soldYrMaxInput);
     applyAndRenderSoldFilters();
     _refreshLoadedAreaUi();
   };
 
+  const applyCompNumericInputFilters = () => {
+    bumpUndoPillVersion();
+    // Read comp numeric filter inputs  and apply
+    _applyCompNumericFilters();
+  };
+
   soldDaysMaxInput?.addEventListener("blur", applySoldCompInputFilters);
   soldDaysMaxInput?.addEventListener("change", applySoldCompInputFilters);
-  soldYrMinInput?.addEventListener("blur", applySoldCompInputFilters);
-  soldYrMaxInput?.addEventListener("blur", applySoldCompInputFilters);
-  soldYrMinInput?.addEventListener("change", applySoldCompInputFilters);
-  soldYrMaxInput?.addEventListener("change", applySoldCompInputFilters);
 
   [soldPriceMinInput, soldPriceMaxInput].forEach((inputEl) => {
     inputEl?.addEventListener("blur", () => {
@@ -1123,17 +1208,10 @@ function renderSoldCompsPanel() {
     });
   });
 
-  // Use blur + change (NOT input) so the panel doesn't re-render mid-keystroke.
-  // _applyNumericFilters → renderFeatures → renderSoldCompsPanel rebuilds the
-  // panel HTML, destroying input elements and stealing focus. Match the same
-  // pattern the sold-price/sold-year-built inputs use above.
-  const applyLotSizeFilter = () => {
-    bumpUndoPillVersion();
-    _applyNumericFilters();
-  };
-  [lotMinInput, lotMaxInput].forEach((inputEl) => {
-    inputEl?.addEventListener("blur", applyLotSizeFilter);
-    inputEl?.addEventListener("change", applyLotSizeFilter);
+  // Comp numeric filter inputs: use blur + change (NOT input) to avoid re-render mid-keystroke
+  [compLotMinInput, compLotMaxInput, compYrMinInput, compYrMaxInput, compSqftMinInput, compSqftMaxInput].forEach((inputEl) => {
+    inputEl?.addEventListener("blur", applyCompNumericInputFilters);
+    inputEl?.addEventListener("change", applyCompNumericInputFilters);
   });
 
   panel.querySelectorAll(".sold-row[data-sold-idx]").forEach((rowEl) => {
@@ -1434,6 +1512,8 @@ async function saveCurrentArea(name) {
   // Mark the just-saved area as the currently-loaded one so the Update button
   // becomes available the moment the user tweaks any filter after saving.
   _currentLoadedAreaId = normalized.id;
+  _selectedSavedItemId = normalized.id;
+  setActiveItem("Workspace", normalized.name);
   renderSavedAreasList();
 }
 
@@ -1459,6 +1539,7 @@ async function deleteSavedArea(item) {
     _savedAreasCache = _savedAreasCache.filter((a) => a.id !== item.id);
     if (_currentLoadedAreaId === item.id) _currentLoadedAreaId = null;
   }
+  if (_selectedSavedItemId === item.id) _selectedSavedItemId = null;
   renderSavedAreasList();
 }
 
@@ -1494,6 +1575,7 @@ async function saveCurrentSession(name) {
   _savedSessionsCache.unshift(normalized);
   _currentSessionIsNamed = true;
   _updateSaveSessionButtonState();
+  setActiveItem("Snapshot", normalized.name);
   renderSavedSessionsList();
 }
 
@@ -1567,7 +1649,15 @@ function _renderSavedParcelOutline(area) {
   if (savedParcelLayers[area.account_num]) return; // already on map
   if (!area.geometry || !["Polygon", "MultiPolygon"].includes(area.geometry.type)) return;
   const layer = L.geoJSON({ type: "Feature", geometry: area.geometry, properties: {} }, {
-    style: { color: SAVED_PARCEL_COLOR, weight: 3, fill: false, interactive: false },
+    pane: "savedParcelPane",
+    style: {
+      color: SAVED_PARCEL_COLOR,
+      weight: 3,
+      fill: true,
+      fillColor: SAVED_PARCEL_COLOR,
+      fillOpacity: 0.95,
+      interactive: false,
+    },
     interactive: false,
   }).addTo(savedParcelLayer);
   savedParcelLayers[area.account_num] = layer;
@@ -1595,8 +1685,10 @@ async function saveParcel(account_num, county, addr, lat, lng, geometry) {
   const row = _normalizeSavedParcelRow(created);
   _savedParcelsCache = _savedParcelsCache.filter((p) => !(p.account_num === row.account_num && p.county === row.county));
   _savedParcelsCache.unshift(row);
+  _selectedSavedItemId = row.id;
   renderSavedAreasList();
   _renderSavedParcelOutline(row);
+  setActiveItem("Workspace", row.name);
 }
 
 function _restoreAllSavedParcelOutlines() {
@@ -1724,6 +1816,7 @@ function _restoreActiveParcelPopup() {
 
 async function restoreSavedArea(area, options = {}) {
   const rowEl = options.rowEl || null;
+  _selectedSavedItemId = area?.id || null;
   // Location pins (from address search) — just fly there and show the ring.
   if (area.type === "location") {
     const latlng = [area.lat, area.lng];
@@ -1772,6 +1865,7 @@ async function restoreSavedArea(area, options = {}) {
       })();
     };
     map.once("moveend", window._searchMoveEndHandler);
+    setActiveItem("Location", area.name);
     return;
   }
 
@@ -1786,6 +1880,7 @@ async function restoreSavedArea(area, options = {}) {
         map.setView([area.lat, area.lng], map.getZoom());
       }
     }
+    setActiveItem("Workspace", area.name);
     return;
   }
 
@@ -1795,6 +1890,7 @@ async function restoreSavedArea(area, options = {}) {
     ? area.filter_state
     : null;
   clearDrawResults();
+  setActiveItem("Workspace", area.name);
   if (savedFilterState) {
     restoreFilterState(savedFilterState);
   }
@@ -1838,7 +1934,6 @@ async function restoreSavedArea(area, options = {}) {
 
   const includeRedfin = true;
   const includeSold = Boolean(filterState.sold);
-  document.getElementById("sidebar-instructions")?.classList.add("hidden");
   document.getElementById("sidebar-results")?.classList.add("hidden");
   document.getElementById("sidebar-loading")?.classList.remove("hidden");
   document.getElementById("redfin-status").textContent = "Loading area analysis...";
@@ -1905,6 +2000,11 @@ async function restoreSavedArea(area, options = {}) {
     renderSidebar(data.counts, markers);
     applyResultTags(data);
     _currentLoadedAreaId = area.id;
+    // NOTE: don't re-call setActiveItem here. It was already set at line 1885
+    // before the await. Calling it again post-analysis stomps any active
+    // selection the user made during the analysis (e.g., clicking a target
+    // while the workspace was still loading would briefly show the target,
+    // then this would override it back to "Workspace").
     renderSavedAreasList();
     // Debug: sold-count restore diagnostics (remove after Bug 2 confirmed fixed)
     console.debug("[restoreSavedArea] post-render sold state — allSoldPointsRef:", allSoldPointsRef.length, "lastSoldPanelPoints:", lastSoldPanelPoints.length, "soldCompsFilter:", JSON.stringify(soldCompsFilter), "filterState.sold:", filterState.sold);
@@ -1915,7 +2015,6 @@ async function restoreSavedArea(area, options = {}) {
     console.error("[restoreSavedArea] Analysis failed:", err);
     document.getElementById("redfin-status").textContent = getAnalysisErrorMessage(err, "Area analysis failed. Please try again.");
     document.getElementById("sidebar-loading")?.classList.add("hidden");
-    document.getElementById("sidebar-instructions")?.classList.remove("hidden");
   } finally {
     if (rowEl) rowEl.classList.remove("row-shimmer");
   }
@@ -1923,6 +2022,7 @@ async function restoreSavedArea(area, options = {}) {
 
 async function restoreNamedSession(session, options = {}) {
   const rowEl = options.rowEl || null;
+  _selectedSavedItemId = null;
   if (!session.latlngs || session.latlngs.length < 3) {
     console.warn("[restoreNamedSession] session has no polygon", session);
     return;
@@ -1962,10 +2062,11 @@ async function restoreNamedSession(session, options = {}) {
   lastPolygon = polygon;
   if (map.hasLayer(browseLayer)) browseLayer.remove();
   const includeSold = Boolean(filterState.sold);
-  document.getElementById("sidebar-instructions")?.classList.add("hidden");
-  document.getElementById("sidebar-results")?.classList.add("hidden");
   document.getElementById("sidebar-loading")?.classList.remove("hidden");
   document.getElementById("redfin-status").textContent = "Loading session…";
+  // Set the slot BEFORE the await so it shows up immediately and so a user
+  // clicking a different item during the analysis isn't stomped post-analysis.
+  setActiveItem("Snapshot", session.name);
   const analysisRequest = beginLatestAnalysisRequest();
   if (options.undoSnapshot) options.undoSnapshot.abortCtrl = _activeAnalysisAbortController;
 
@@ -2037,6 +2138,7 @@ async function restoreNamedSession(session, options = {}) {
     }
     renderSidebar(data.counts, markers);
     applyResultTags(data);
+    // NOTE: don't re-call setActiveItem here. Already set before the await.
     if (loadedFromSessionCache && data.redfin_skipped === true) {
       _setSessionCacheNote("Active listings not shown - re-analyze for current");
     } else {
@@ -2049,7 +2151,6 @@ async function restoreNamedSession(session, options = {}) {
     console.error("[restoreNamedSession] failed:", err);
     document.getElementById("redfin-status").textContent = getAnalysisErrorMessage(err, "Session load failed. Please try again.");
     document.getElementById("sidebar-loading")?.classList.add("hidden");
-    document.getElementById("sidebar-instructions")?.classList.remove("hidden");
     _setSessionCacheNote("");
   } finally {
     if (rowEl) rowEl.classList.remove("row-shimmer");
@@ -2116,14 +2217,14 @@ function _renderList(sectionId, listId, items) {
   const list = document.getElementById(listId);
   if (!section || !list) return;
   section.classList.toggle("hidden", items.length === 0);
-  _renderCurrentViewingArea();
   list.innerHTML = items.map((area) => {
     const date = new Date(area.savedAt).toLocaleDateString(undefined, { month: "short", day: "numeric" });
     const icon = area.type === "parcel" ? "📌" : area.type === "location" ? "📍" : "▭";
     const chip = _formatFilterDiffChip(area);
     const canRename = area.type !== "parcel";
     const canShare = area.type === "area" && Boolean(String(area.share_id || "").trim());
-    const activeClass = area.id === _currentLoadedAreaId ? " saved-area-row-active" : "";
+    const isActiveRow = area.id === _currentLoadedAreaId || area.id === _selectedSavedItemId;
+    const activeClass = isActiveRow ? " saved-area-row-active" : "";
     const secondaryLine = [chip, `saved ${date}`].filter(Boolean).join(" · ");
 
     // Ownership + role gating for Rename / Delete / Fork
@@ -2185,6 +2286,7 @@ function _renderList(sectionId, listId, items) {
           });
           _savedAreasCache.unshift(_normalizeSavedAreaRow(cloned));
           _currentLoadedAreaId = cloned.area_id;
+          _selectedSavedItemId = cloned.area_id;
           renderSavedAreasList();
           _showToast(`Forked → "${cloned.name}"`);
         } catch {
@@ -2202,6 +2304,11 @@ function _renderList(sectionId, listId, items) {
         await _renameSavedItemInline(area, row);
         return;
       }
+      _selectedSavedItemId = area.id;
+      document.querySelectorAll(".saved-area-row-active").forEach((el) => {
+        if (el !== row) el.classList.remove("saved-area-row-active");
+      });
+      row.classList.add("saved-area-row-active");
       bumpUndoPillVersion();
       const snapshot = _createUndoSnapshot();
       await restoreSavedArea(area, { rowEl: row, undoSnapshot: snapshot });
@@ -2212,7 +2319,6 @@ function _renderList(sectionId, listId, items) {
 }
 
 function renderSavedAreasList() {
-  _renderCurrentViewingArea();
   _renderList("saved-areas", "saved-areas-list", _savedAreasCache.filter((a) => a.type === "area"));
   _renderList("saved-parcels", "saved-parcels-list", [..._savedAreasCache.filter((a) => a.type === "location"), ..._savedParcelsCache]);
   _updateUpdateAreaButtonVisibility();
@@ -2484,6 +2590,7 @@ const MapToolbar = L.Control.extend({
     L.DomEvent.on(clearBtn, "click", (e) => {
       L.DomEvent.preventDefault(e);
       clearDrawResults();
+      clearActiveItem();
     });
 
     const hoaBtn = L.DomUtil.create("a", "", container);
@@ -2852,14 +2959,35 @@ const sidebarToggleBtn = document.getElementById("sidebar-toggle");
 const drawHelper = document.getElementById("draw-helper");
 
 function initSidebarCollapsibles() {
+  let savedStates = {};
+  try {
+    const raw = localStorage.getItem(SIDEBAR_SECTION_STATE_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object") savedStates = parsed;
+    }
+  } catch (_) {}
+
   document.querySelectorAll(".section-toggle[data-target]").forEach((btn) => {
     const targetId = btn.dataset.target;
     const body = targetId ? document.getElementById(targetId) : null;
     if (!body) return;
+
+    if (Object.prototype.hasOwnProperty.call(savedStates, targetId)) {
+      const expanded = Boolean(savedStates[targetId]);
+      btn.setAttribute("aria-expanded", String(expanded));
+      body.classList.toggle("hidden", !expanded);
+    }
+
     btn.addEventListener("click", () => {
       const expanded = btn.getAttribute("aria-expanded") !== "false";
-      btn.setAttribute("aria-expanded", String(!expanded));
-      body.classList.toggle("hidden", expanded);
+      const nextExpanded = !expanded;
+      btn.setAttribute("aria-expanded", String(nextExpanded));
+      body.classList.toggle("hidden", !nextExpanded);
+      try {
+        savedStates[targetId] = nextExpanded;
+        localStorage.setItem(SIDEBAR_SECTION_STATE_STORAGE_KEY, JSON.stringify(savedStates));
+      } catch (_) {}
     });
   });
 }
@@ -2939,7 +3067,32 @@ function applyMapVisibilityFilters() {
     }
   }
 
+  _updateMergedSidebarCounts();
   updateSoldStatusText();
+}
+
+// Light-touch count refresh for the merged Map Filters counts. Avoids the full
+// renderSidebar (which re-renders the sold panel) when all we need is the
+// number next to each checkbox.
+function _updateMergedSidebarCounts() {
+  if (!Array.isArray(allAnalysisFeatures) || !allAnalysisFeatures.length) return;
+  const visibleCounts = getVisibleFeatureCounts(allAnalysisFeatures);
+  const soldCount = Array.isArray(lastSoldPanelPoints) && lastSoldPanelPoints.length
+    ? lastSoldPanelPoints.length
+    : (Array.isArray(allSoldPointsRef) ? allSoldPointsRef.length : 0);
+  const rows = [
+    ["active", visibleCounts.active],
+    ["sold", soldCount],
+    ["off_market", visibleCounts.off_market],
+    ["vacant", visibleCounts.vacant],
+    ["multifamily", visibleCounts.multifamily],
+    ["commercial", visibleCounts.commercial],
+    ["exempt", visibleCounts.exempt],
+  ];
+  rows.forEach(([key, val]) => {
+    const el = document.getElementById(`filter-count-${key}`);
+    if (el) el.textContent = String(Number(val) || 0);
+  });
 }
 
 loadFilters();
@@ -3014,6 +3167,57 @@ document.getElementById("btn-filters-reset")?.addEventListener("click", () => {
   _refreshLoadedAreaUi();
 });
 
+// Comp Filters: read from nf-comp-* inputs and apply
+function _readCompNumericInputs() {
+  const compInputs = [
+    { id: "nf-comp-lot-min", key: "lot_sqft_min" },
+    { id: "nf-comp-lot-max", key: "lot_sqft_max" },
+    { id: "nf-comp-val-min", key: "appr_val_min" },
+    { id: "nf-comp-val-max", key: "appr_val_max" },
+    { id: "nf-comp-yr-min", key: "yr_built_min" },
+    { id: "nf-comp-yr-max", key: "yr_built_max" },
+    { id: "nf-comp-sqft-min", key: "sqft_min" },
+    { id: "nf-comp-sqft-max", key: "sqft_max" },
+  ];
+  compInputs.forEach(({ id, key }) => {
+    const el = document.getElementById(id);
+    const raw = el ? el.value.trim() : "";
+    if (raw === "") {
+      compNumericFilters[key] = null;
+      return;
+    }
+    if (key === "appr_val_min" || key === "appr_val_max") {
+      compNumericFilters[key] = parseShorthand(raw);
+      return;
+    }
+    if (key === "lot_sqft_min" || key === "lot_sqft_max") {
+      const acres = Number(raw);
+      compNumericFilters[key] = Number.isFinite(acres) ? acres * 43_560 : null;
+      return;
+    }
+    const n = Number(raw);
+    compNumericFilters[key] = Number.isFinite(n) ? n : null;
+  });
+}
+
+function _applyCompNumericFilters() {
+  _readCompNumericInputs();
+  if (!lastAnalysisGeojson) return;
+  const markers = viewportRenderMode
+    ? renderViewportFeatures()
+    : renderFeatures(lastAnalysisGeojson);
+  const counts = getVisibleFeatureCounts(lastAnalysisGeojson.features || []);
+  if (lastAnalysisCounts) renderSidebar(counts, markers || {});
+  _refreshLoadedAreaUi();
+}
+
+// Comp numeric filter event listeners are wired INSIDE renderSoldCompsPanel
+// (using blur + change) since the inputs are part of dynamically rendered
+// HTML. Don't re-attach at module level — the renderSoldCompsPanel-internal
+// setup is correct and complete. Module-level attachment with an `input`
+// event would also re-introduce the focus-stealing-mid-keystroke regression
+// we just fixed for the lot-size filter.
+
 applyMapVisibilityFilters();
 
 function isRedfinVisualActive(feature) {
@@ -3068,8 +3272,13 @@ function geometryKey(geometry) {
 function makePopupHtml(p) {
   const pseudoFeature = { properties: p };
   const hasVisibleSoldComp = Boolean(p?.sold_comp);
-  const statusColor = hasVisibleSoldComp ? SOLD_MARKER_COLOR : getColor(pseudoFeature);
-  const statusText = hasVisibleSoldComp ? "SOLD COMP" : getStatusLabel(pseudoFeature);
+  const statusColor = hasVisibleSoldComp ? SOLD_OUTLINE_COLOR : getColor(pseudoFeature);
+  const statusText = hasVisibleSoldComp ? "SOLD" : getStatusLabel(pseudoFeature);
+  const soldHeaderPrice = hasVisibleSoldComp
+    ? (typeof p.sold_comp?.sold_price === "number"
+      ? `$${p.sold_comp.sold_price.toLocaleString()}`
+      : String(p.sold_comp?.sold_price || ""))
+    : "";
   const verifiedVacant = normalizeVerificationValue(
     verificationByAccount.get(p.account_num) || p.verified_vacant
   );
@@ -3127,7 +3336,11 @@ function makePopupHtml(p) {
         <div class="popup-addr">${p.addr || "Unknown address"}</div>
         <div class="popup-status-row">
           <div class="popup-status" style="color:${statusColor};">${statusText}</div>
-          ${activeListingPrice ? `<div class="popup-list-price">${activeListingPrice}</div>` : ""}
+          ${activeListingPrice
+            ? `<div class="popup-list-price">${activeListingPrice}</div>`
+            : soldHeaderPrice
+              ? `<div class="popup-sold-price">${soldHeaderPrice}</div>`
+              : ""}
         </div>
         <table class="popup-table">
           ${row("Owner", p.owner)}
@@ -3409,7 +3622,11 @@ function renderFeatures(geojson) {
   geojson.features.forEach((feature) => {
     const p = feature.properties;
     const bucket = classifyFeatureForFilter(feature);
+    // All parcels must pass Property Filters
     if (!passesNumericFilters(feature)) return;
+    // Listings + sold-matched parcels must ALSO pass Comp Filters
+    const isListingOrSold = Boolean(p.on_redfin || p.sold_comp);
+    if (isListingOrSold && !passesCompFilters(feature)) return;
     const hasSoldComp = Boolean(p.sold_comp);
     const targetLayer = (hasSoldComp ? parcelTypeLayers.sold : parcelTypeLayers[bucket]) || markerLayer;
     if (hasSoldComp && p.account_num) {
@@ -3702,8 +3919,6 @@ function _scheduleViewportRender() {
 function renderSidebar(counts, markers) {
   document.getElementById("sidebar-loading").classList.add("hidden");
   document.getElementById("sidebar-results").classList.remove("hidden");
-
-  const countsPanel = document.getElementById("counts-panel");
   const visibleCounts = Array.isArray(allAnalysisFeatures) && allAnalysisFeatures.length
     ? getVisibleFeatureCounts(allAnalysisFeatures)
     : {
@@ -3727,15 +3942,10 @@ function renderSidebar(counts, markers) {
     ["exempt", visibleCounts.exempt],
   ];
 
-  countsPanel.innerHTML = orderedCountRows
-    .map(([key, val]) => `
-      <div class="count-row">
-        <span class="count-dot ${key}" style="background:${COLORS[key] || COLORS.exempt}"></span>
-        <span class="count-label">${TYPE_LABELS[key] || key}</span>
-        <span class="count-val">${Number(val) || 0}</span>
-      </div>`
-    )
-    .join("");
+  orderedCountRows.forEach(([key, val]) => {
+    const countEl = document.getElementById(`filter-count-${key}`);
+    if (countEl) countEl.textContent = String(Number(val) || 0);
+  });
 
   renderSoldCompsPanel();
 
@@ -4296,6 +4506,7 @@ map.on("draw:created", async (e) => {
   map.getContainer().classList.remove("drawing-active");
   _currentSessionIsNamed = false;
   _currentLoadedAreaId = null;
+  _selectedSavedItemId = null;
   _setSessionCacheNote("");
   renderSavedAreasList();
   drawLayer.clearLayers();
@@ -4308,7 +4519,7 @@ map.on("draw:created", async (e) => {
   potentialTargetByAccount.clear();
   verificationBadgeMarkers.clear();
   targetBadgeMarkers.clear();
-  document.getElementById("sidebar-instructions").classList.add("hidden");
+  // Instructions section removed; results manage visibility
   document.getElementById("sidebar-results").classList.add("hidden");
   document.getElementById("sidebar-loading").classList.remove("hidden");
   const includeRedfin = true;
@@ -4351,6 +4562,7 @@ map.on("draw:created", async (e) => {
     });
     document.getElementById("redfin-status").textContent = "Analysis complete";
     _updateSaveSessionButtonState();
+    setActiveItem("Unsaved area", "Unsaved");
     redfinLayerVisible = false;
     soldLayerVisible = Boolean(filterState.sold);
     map.removeLayer(redfinLayer);
@@ -4407,7 +4619,7 @@ map.on("draw:created", async (e) => {
     console.error("[draw:created] Analysis failed:", err);
     document.getElementById("redfin-status").textContent = getAnalysisErrorMessage(err, "Analysis failed. Please try drawing a smaller area.");
     document.getElementById("sidebar-loading").classList.add("hidden");
-    document.getElementById("sidebar-instructions").classList.remove("hidden");
+    // Instructions section removed
     document.getElementById("btn-draw-clear")?.classList.remove("hidden");
   }
 });
@@ -4454,10 +4666,13 @@ function clearDrawResults() {
   document.getElementById("redfin-toggle-status").textContent = "";
   document.getElementById("sold-toggle-status").textContent = "";
   document.getElementById("sidebar-results")?.classList.add("hidden");
-  document.getElementById("sidebar-instructions")?.classList.remove("hidden");
   document.getElementById("sidebar-loading")?.classList.add("hidden");
-  document.getElementById("btn-draw-clear")?.classList.add("hidden");
-  document.getElementById("btn-saved-area-clear")?.classList.add("hidden");
+  document.getElementById("btn-drawd-area-clear")?.classList.add("hidden");
+  // NOTE: clearActiveItem is intentionally NOT called here. Callers that
+  // immediately follow clearDrawResults() with setActiveItem(...) would
+  // otherwise toggle .is-collapsed twice in the same JS tick, which the
+  // browser batches and skips the slide-in animation. Explicit slot
+  // management lives at the Deselect button + the slot × dismiss.
   renderSavedAreasList();
 }
 
@@ -4472,6 +4687,7 @@ map.on("draw:drawstart", () => {
   map.getContainer().classList.add("drawing-active");
   _currentSessionIsNamed = false;
   _currentLoadedAreaId = null;
+  _selectedSavedItemId = null;
   _setSessionCacheNote("");
   renderSavedAreasList();
   _updateSaveSessionButtonState();
@@ -4699,14 +4915,9 @@ document.getElementById("btn-update-saved-area")?.addEventListener("click", asyn
   await _updateSavedAreaFilters(area, e.currentTarget);
 });
 
-document.getElementById("btn-saved-area-current-clear")?.addEventListener("click", () => {
-  bumpUndoPillVersion();
-  _currentLoadedAreaId = null;
-  renderSavedAreasList();
-});
-
 document.getElementById("btn-clear").addEventListener("click", () => {
   clearDrawResults();
+  clearActiveItem();
 });
 
 // ── Save Session helpers ─────────────────────────────────────────────────────

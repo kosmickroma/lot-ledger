@@ -32,54 +32,30 @@
           <button id="btn-dismiss-import" type="button">Dismiss</button>
         </div>
       </div>
-      <div id="map-filters" class="filter-card collapsible-section">
-        <button class="section-toggle" type="button" data-target="map-filters-body" aria-expanded="true">
-          <span class="sidebar-label">Map Filters</span>
-        </button>
-        <div id="map-filters-body" class="collapsible-body">
-          <div class="filter-card-head">
-            <button id="btn-filters-reset" class="filter-reset-btn" type="button">Reset</button>
-          </div>
-          <div class="filter-list" id="filter-list">
-            <label class="filter-row">
-              <span class="filter-swatch" style="--sw:#D92228"></span>
-              <span class="filter-name">Listings</span>
-              <input type="checkbox" id="filter-active" checked>
-            </label>
-            <label class="filter-row">
-              <span class="filter-swatch" style="--sw:#5C2D91"></span>
-              <span class="filter-name">Sold</span>
-              <input type="checkbox" id="filter-sold" checked>
-            </label>
-            <label class="filter-row">
-              <span class="filter-swatch" style="--sw:#2980b9"></span>
-              <span class="filter-name">Off Market</span>
-              <input type="checkbox" id="filter-off-market" checked>
-            </label>
-            <label class="filter-row">
-              <span class="filter-swatch" style="--sw:#27ae60"></span>
-              <span class="filter-name">Vacant</span>
-              <input type="checkbox" id="filter-vacant" checked>
-            </label>
-            <label class="filter-row">
-              <span class="filter-swatch swatch-multifamily"></span>
-              <span class="filter-name">Multifamily</span>
-              <input type="checkbox" id="filter-multifamily" checked>
-            </label>
-            <label class="filter-row">
-              <span class="filter-swatch" style="--sw:#8B7355"></span>
-              <span class="filter-name">Commercial</span>
-              <input type="checkbox" id="filter-commercial" checked>
-            </label>
-            <label class="filter-row">
-              <span class="filter-swatch" style="--sw:#95a5a6"></span>
-              <span class="filter-name">Exempt</span>
-              <input type="checkbox" id="filter-exempt" checked>
-            </label>
-          </div>
-          <p id="sold-toggle-status" class="sidebar-note"></p>
+      <div id="active-item-slot" class="active-item-slot">
+        <div class="active-item-slot-inner">
+          <span class="active-item-type" id="active-item-type">Workspace</span>
+          <strong class="active-item-name" id="active-item-name">—</strong>
         </div>
       </div>
+      <div id="sidebar-results" class="sidebar-section hidden">
+        <p id="session-cache-note" class="sidebar-note hidden"></p>
+        <div class="sidebar-actions">
+          <button id="btn-save-area" class="btn-primary">Save Area</button>
+          <button id="btn-download" class="btn-secondary">Download CSV</button>
+          <button id="btn-update-saved-area" class="btn-secondary hidden">Update</button>
+        </div>
+        <div class="sidebar-actions actions-secondary">
+          <button id="btn-save-session" class="btn-tertiary" disabled>Save Snapshot</button>
+          <button id="btn-clear" class="btn-tertiary">Deselect</button>
+        </div>
+      </div>
+      <div id="sidebar-loading" class="sidebar-section hidden">
+        <div class="spinner"></div>
+        <p class="sidebar-copy">Loading parcels...</p>
+        <p id="redfin-status" class="sidebar-note">Pulling Redfin listings...</p>
+      </div>
+      <div id="sold-comps-panel"></div>
       <div id="numeric-filters" class="filter-card collapsible-section">
         <button class="section-toggle" type="button" data-target="numeric-filters-body" aria-expanded="true">
           <span class="sidebar-label">Property Filters</span>
@@ -89,6 +65,14 @@
             <button id="btn-numeric-reset" class="filter-reset-btn" type="button">Reset</button>
           </div>
           <div class="numeric-filter-list">
+            <div class="numeric-filter-row">
+              <span class="numeric-filter-label">Lot Size (acres)</span>
+              <div class="numeric-filter-inputs">
+                <input type="text" id="nf-lot-min" placeholder="Min" class="nf-input" inputmode="decimal">
+                <span class="nf-sep">–</span>
+                <input type="text" id="nf-lot-max" placeholder="Max" class="nf-input" inputmode="decimal">
+              </div>
+            </div>
             <div class="numeric-filter-row">
               <span class="numeric-filter-label">Appraised Value</span>
               <div class="numeric-filter-inputs">
@@ -116,35 +100,69 @@
           </div>
         </div>
       </div>
+      <div id="map-filters" class="filter-card collapsible-section">
+        <button class="section-toggle" type="button" data-target="map-filters-body" aria-expanded="true">
+          <span class="sidebar-label">Map Filters</span>
+        </button>
+        <div id="map-filters-body" class="collapsible-body">
+          <div class="filter-card-head">
+            <button id="btn-filters-reset" class="filter-reset-btn" type="button">Reset</button>
+          </div>
+          <div class="filter-list" id="filter-list">
+            <label class="filter-row">
+              <span class="filter-swatch" style="--sw:#D92228"></span>
+              <span class="filter-name">Listings</span>
+              <span class="filter-count" id="filter-count-active">0</span>
+              <input type="checkbox" id="filter-active" checked>
+            </label>
+            <label class="filter-row">
+              <span class="filter-swatch" style="--sw:#5C2D91"></span>
+              <span class="filter-name">Sold</span>
+              <span class="filter-count" id="filter-count-sold">0</span>
+              <input type="checkbox" id="filter-sold" checked>
+            </label>
+            <label class="filter-row">
+              <span class="filter-swatch" style="--sw:#2980b9"></span>
+              <span class="filter-name">Off Market</span>
+              <span class="filter-count" id="filter-count-off_market">0</span>
+              <input type="checkbox" id="filter-off-market" checked>
+            </label>
+            <label class="filter-row">
+              <span class="filter-swatch" style="--sw:#27ae60"></span>
+              <span class="filter-name">Vacant</span>
+              <span class="filter-count" id="filter-count-vacant">0</span>
+              <input type="checkbox" id="filter-vacant" checked>
+            </label>
+            <label class="filter-row">
+              <span class="filter-swatch swatch-multifamily"></span>
+              <span class="filter-name">Multifamily</span>
+              <span class="filter-count" id="filter-count-multifamily">0</span>
+              <input type="checkbox" id="filter-multifamily" checked>
+            </label>
+            <label class="filter-row">
+              <span class="filter-swatch" style="--sw:#8B7355"></span>
+              <span class="filter-name">Commercial</span>
+              <span class="filter-count" id="filter-count-commercial">0</span>
+              <input type="checkbox" id="filter-commercial" checked>
+            </label>
+            <label class="filter-row">
+              <span class="filter-swatch" style="--sw:#95a5a6"></span>
+              <span class="filter-name">Exempt</span>
+              <span class="filter-count" id="filter-count-exempt">0</span>
+              <input type="checkbox" id="filter-exempt" checked>
+            </label>
+          </div>
+          <p id="sold-toggle-status" class="sidebar-note"></p>
+        </div>
+      </div>
       <div class="hidden" aria-hidden="true">
         <input type="checkbox" id="toggle-redfin">
         <p id="redfin-toggle-status"></p>
         <input type="checkbox" id="toggle-sold" checked>
       </div>
-      <div id="sidebar-instructions" class="sidebar-section">
-        <p class="sidebar-copy">Draw a polygon around a target pocket to analyze parcels instantly.</p>
-        <p class="sidebar-note">Shortcuts: Enter or right-click to finish. Esc to cancel.</p>
-      </div>
-      <div id="sidebar-loading" class="sidebar-section hidden">
-        <div class="spinner"></div>
-        <p class="sidebar-copy">Loading parcels...</p>
-        <p id="redfin-status" class="sidebar-note">Pulling Redfin listings...</p>
-      </div>
-      <div id="sidebar-results" class="sidebar-section hidden">
-        <p id="session-cache-note" class="sidebar-note hidden"></p>
-        <div id="counts-panel" class="counts-panel"></div>
-        <div id="sold-comps-panel"></div>
-        <div class="sidebar-actions">
-          <button id="btn-download" class="btn-primary">Download CSV</button>
-          <button id="btn-update-saved-area" class="btn-secondary hidden">Update</button>
-          <button id="btn-save-session" class="btn-secondary" disabled>Save Snapshot</button>
-          <button id="btn-clear" class="btn-secondary">Clear</button>
-          <button id="btn-save-area" class="btn-secondary">Save Area</button>
-        </div>
-      </div>
       <div id="saved-areas" class="sidebar-section hidden collapsible-section">
         <div class="section-header">
-          <button class="section-toggle" type="button" data-target="saved-areas-body" aria-expanded="true">
+          <button class="section-toggle" type="button" data-target="saved-areas-body" aria-expanded="false">
             <span class="sidebar-label">Saved Areas</span>
           </button>
           <div class="click-mode-toggle" id="click-mode-toggle">
@@ -152,35 +170,31 @@
             <button class="click-mode-btn stay-mode" data-mode="stay" type="button" title="Keep current zoom and view">Keep View</button>
           </div>
         </div>
-        <div id="saved-areas-body" class="collapsible-body">
-          <div id="saved-area-current" class="saved-area-current hidden">
-            <span class="sidebar-note">Currently viewing: <strong id="saved-area-current-name"></strong></span>
-            <button id="btn-saved-area-current-clear" type="button" class="saved-area-action-btn" title="Clear current saved area">×</button>
-          </div>
+        <div id="saved-areas-body" class="collapsible-body hidden">
           <div id="saved-areas-list"></div>
-          <button id="btn-saved-area-clear" class="hidden" onclick="clearDrawResults()" style="margin-top:8px;width:100%;padding:5px 0;background:transparent;border:1px solid #555;border-radius:4px;color:#aaa;font-size:11px;cursor:pointer;">× Back to Browse</button>
+          <button id="btn-saved-area-clear" class="hidden" onclick="clearDrawResults()" style="margin-top:8px;width:100%;padding:5px 0;background:transparent;border:1px solid #555;border-radius:4px;color:#aaa;font-size:11px;cursor:pointer;">← Back to Browse</button>
         </div>
       </div>
       <div id="saved-parcels" class="sidebar-section hidden collapsible-section">
         <div class="section-header">
-          <button class="section-toggle" type="button" data-target="saved-parcels-body" aria-expanded="true">
-            <span class="sidebar-label">Saved Parcels</span>
+          <button class="section-toggle" type="button" data-target="saved-parcels-body" aria-expanded="false">
+            <span class="sidebar-label">Targets</span>
           </button>
         </div>
-        <div id="saved-parcels-body" class="collapsible-body">
+        <div id="saved-parcels-body" class="collapsible-body hidden">
           <div id="saved-parcels-list"></div>
         </div>
       </div>
-        <div id="saved-sessions" class="sidebar-section hidden collapsible-section">
-          <div class="section-header">
-            <button class="section-toggle" type="button" data-target="saved-sessions-body" aria-expanded="true">
-              <span class="sidebar-label">Saved Snapshots</span>
-            </button>
-          </div>
-          <div id="saved-sessions-body" class="collapsible-body">
-            <div id="saved-sessions-list"></div>
-          </div>
+      <div id="saved-sessions" class="sidebar-section hidden collapsible-section">
+        <div class="section-header">
+          <button class="section-toggle" type="button" data-target="saved-sessions-body" aria-expanded="false">
+            <span class="sidebar-label">Saved Snapshots</span>
+          </button>
         </div>
+        <div id="saved-sessions-body" class="collapsible-body hidden">
+          <div id="saved-sessions-list"></div>
+        </div>
+      </div>
     </aside>
     <main class="map-panel">
       <button id="sidebar-toggle" class="sidebar-toggle" aria-expanded="true" aria-controls="sidebar">
