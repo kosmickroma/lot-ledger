@@ -3946,7 +3946,7 @@ async def list_saved_parcels(user: dict[str, Any] = Depends(get_current_user)) -
                 """
                 SELECT account_num, county, payload, created_at
                 FROM saved_parcels
-                WHERE user_id = %s
+                WHERE user_id = %s AND area_id IS NULL
                 ORDER BY created_at DESC
                 """,
                 (int(user["id"]),),
