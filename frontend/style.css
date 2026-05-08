@@ -436,7 +436,7 @@ h1 {
 .sold-price-label {
   background: rgba(0, 66, 37, 0.9);
   color: #f7e3a1;
-  border: 1px solid rgba(212, 175, 55, 0.72);
+  border: 1.5px solid rgba(212, 175, 55, 1);
   border-radius: 8px;
   padding: 1px 6px;
   font-size: 10px;
@@ -444,6 +444,19 @@ h1 {
   letter-spacing: 0.01em;
   white-space: nowrap;
   box-shadow: 0 2px 6px rgba(0, 31, 18, 0.34);
+}
+
+.redfin-price-label {
+  background: rgba(247, 227, 161, 0.95);
+  color: #8B0000;
+  border: 1.5px solid #D92228;
+  border-radius: 8px;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  box-shadow: 0 2px 6px rgba(80, 0, 0, 0.34);
 }
 
 .count-row {
