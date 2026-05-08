@@ -1,0 +1,8 @@
+# requirements-dev.txt
+# Role: local-only dependencies for one-shot pipeline scripts.
+# Connects to:
+#   scripts/neighborhoods/build.py - TIGER block-group build pipeline
+#   frontend/tx_block_groups.geojson - generated output asset
+
+geopandas>=0.14,<2.0
+pyogrio>=0.9
