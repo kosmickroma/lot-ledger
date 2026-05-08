@@ -427,6 +427,7 @@ let countyLayer = null;
 let countyLabelLayer = null;
 let countyVisible = false;
 let nbhdLayer = null;
+let nbhdMedianPillsLayer = null;
 let nbhdLayerVisible = false;
 let hoaLayer = null;
 let hoaVisible = false;
@@ -1428,9 +1429,65 @@ function _updateNbhdVisibility() {
   const shouldShow = map.getZoom() >= NBHD_MIN_ZOOM;
   if (shouldShow) {
     if (!map.hasLayer(nbhdLayer)) nbhdLayer.addTo(map);
-  } else if (map.hasLayer(nbhdLayer)) {
-    map.removeLayer(nbhdLayer);
+    if (nbhdMedianPillsLayer && !map.hasLayer(nbhdMedianPillsLayer)) {
+      nbhdMedianPillsLayer.addTo(map);
+    }
+  } else {
+    if (map.hasLayer(nbhdLayer)) map.removeLayer(nbhdLayer);
+    if (nbhdMedianPillsLayer && map.hasLayer(nbhdMedianPillsLayer)) {
+      map.removeLayer(nbhdMedianPillsLayer);
+    }
   }
+}
+
+function _buildNbhdMedianPills(geojson) {
+  const layer = L.layerGroup();
+  const features = Array.isArray(geojson?.features) ? geojson.features : [];
+
+  features.forEach((feature) => {
+    const v = Number(feature?.properties?.median_appr_val);
+    if (!Number.isFinite(v) || v <= 0) return;
+    const geom = feature?.geometry;
+    if (!geom) return;
+
+    let ring = null;
+    if (geom.type === "Polygon") {
+      ring = geom.coordinates?.[0];
+    } else if (geom.type === "MultiPolygon") {
+      ring = geom.coordinates?.[0]?.[0];
+    }
+    if (!Array.isArray(ring) || ring.length < 3) return;
+
+    let sumLat = 0;
+    let sumLng = 0;
+    let count = 0;
+    ring.forEach((pair) => {
+      if (!Array.isArray(pair) || pair.length < 2) return;
+      const lng = Number(pair[0]);
+      const lat = Number(pair[1]);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+      sumLat += lat;
+      sumLng += lng;
+      count += 1;
+    });
+    if (!count) return;
+
+    const label = abbreviatePrice(v) || "";
+    if (!label) return;
+
+    const icon = L.divIcon({
+      className: "nbhd-median-pill",
+      html: label,
+      iconSize: null,
+    });
+    L.marker([sumLat / count, sumLng / count], {
+      icon,
+      interactive: false,
+      keyboard: false,
+    }).addTo(layer);
+  });
+
+  return layer;
 }
 
 // === Neighborhood overlay (POC - TIGER 2024 Block Groups) ===
@@ -1439,6 +1496,9 @@ async function toggleNeighborhoodLayer() {
   const btn = document.getElementById("btn-nbhd-toggle");
   if (nbhdLayerVisible && nbhdLayer) {
     if (map.hasLayer(nbhdLayer)) map.removeLayer(nbhdLayer);
+    if (nbhdMedianPillsLayer && map.hasLayer(nbhdMedianPillsLayer)) {
+      map.removeLayer(nbhdMedianPillsLayer);
+    }
     nbhdLayerVisible = false;
     btn?.classList.remove("active");
     return;
@@ -1464,6 +1524,7 @@ async function toggleNeighborhoodLayer() {
       },
       interactive: false,
     });
+    nbhdMedianPillsLayer = _buildNbhdMedianPills(geojson);
     nbhdLayerVisible = true;
     if (btn) {
       btn.textContent = "NBHD";
