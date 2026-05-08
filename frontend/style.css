@@ -601,14 +601,17 @@ h1 {
 
 .active-item-slot {
   overflow: hidden;
-  max-height: 80px;
+  max-height: 120px;
   opacity: 1;
-  padding: 12px 20px;
+  padding: 14px 20px 14px 16px;
   position: sticky;
   top: 0;
   z-index: 2;
-  background: linear-gradient(180deg, rgba(13, 55, 42, 0.98), rgba(13, 55, 42, 0.94));
-  border-bottom: 1px solid rgba(255,255,255,0.05);
+  background:
+    linear-gradient(90deg, var(--gold-soft) 0%, rgba(201, 162, 79, 0.06) 100%),
+    linear-gradient(180deg, rgba(13, 55, 42, 0.98), rgba(13, 55, 42, 0.94));
+  border-left: 4px solid var(--gold);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   transition: max-height 0.25s ease, opacity 0.2s ease, padding 0.25s ease;
 }
 
@@ -623,15 +626,18 @@ h1 {
 .active-item-type {
   display: block;
   font-size: 10px;
+  font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--text-soft);
+  letter-spacing: 0.1em;
+  color: var(--gold);
   margin-bottom: 4px;
 }
 
 .active-item-name {
-  font-size: 14px;
+  font-size: 16px;
+  font-weight: 600;
   color: var(--text-main);
+  line-height: 1.25;
 }
 
 .sidebar-actions {
