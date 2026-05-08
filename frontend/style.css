@@ -600,9 +600,6 @@ h1 {
 }
 
 .active-item-slot {
-  overflow: hidden;
-  max-height: 120px;
-  opacity: 1;
   padding: 14px 20px 14px 16px;
   position: sticky;
   top: 0;
@@ -612,15 +609,6 @@ h1 {
     linear-gradient(180deg, rgba(13, 55, 42, 0.98), rgba(13, 55, 42, 0.94));
   border-left: 4px solid var(--gold);
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-  transition: max-height 0.25s ease, opacity 0.2s ease, padding 0.25s ease;
-}
-
-.active-item-slot.is-collapsed {
-  max-height: 0;
-  opacity: 0;
-  padding-top: 0;
-  padding-bottom: 0;
-  border-bottom-width: 0;
 }
 
 .active-item-type {

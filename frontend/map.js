@@ -559,19 +559,20 @@ function _filterStatesEqual(a, b) {
 }
 
 function setActiveItem(type, name) {
-  const slot = document.getElementById("active-item-slot");
   const typeEl = document.getElementById("active-item-type");
   const nameEl = document.getElementById("active-item-name");
-  if (!slot || !typeEl || !nameEl) return;
-  typeEl.textContent = type || "";
-  nameEl.textContent = name || "";
-  slot.classList.remove("is-collapsed");
+  if (!typeEl || !nameEl) return;
+  typeEl.textContent = type || "Workspace";
+  nameEl.textContent = name || "—";
 }
 
 function clearActiveItem() {
   _selectedSavedItemId = null;
   renderSavedAreasList();
-  document.getElementById("active-item-slot")?.classList.add("is-collapsed");
+  const typeEl = document.getElementById("active-item-type");
+  const nameEl = document.getElementById("active-item-name");
+  if (typeEl) typeEl.textContent = "Workspace";
+  if (nameEl) nameEl.textContent = "—";
 }
 
 function _refreshLoadedAreaUi() {
