@@ -348,10 +348,6 @@ def _ensure_session_schema() -> None:
                         "CREATE UNIQUE INDEX IF NOT EXISTS uq_saved_areas_share_id ON saved_areas (share_id) WHERE share_id IS NOT NULL",
                     ),
                     ("idx_saved_parcels_user", "CREATE INDEX IF NOT EXISTS idx_saved_parcels_user ON saved_parcels (user_id)"),
-                    (
-                        "uq_saved_parcels_user_account",
-                        "CREATE UNIQUE INDEX IF NOT EXISTS uq_saved_parcels_user_account ON saved_parcels (user_id, county, account_num)",
-                    ),
                     ("drop_uq_saved_parcels_user_account", "DROP INDEX IF EXISTS uq_saved_parcels_user_account"),
                     ("idx_cached_jobs_expires", "CREATE INDEX IF NOT EXISTS idx_cached_jobs_expires ON cached_jobs (expires_at)"),
                     ("idx_cached_jobs_user", "CREATE INDEX IF NOT EXISTS idx_cached_jobs_user ON cached_jobs (user_id)"),
