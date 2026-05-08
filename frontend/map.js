@@ -565,7 +565,6 @@ function setActiveItem(type, name) {
   typeEl.textContent = type || "";
   nameEl.textContent = name || "";
   slot.classList.remove("is-collapsed");
-  console.debug("[slot] set →", { type, name, nameElText: nameEl.textContent, nameElHTML: nameEl.outerHTML });
 }
 
 function clearActiveItem() {
@@ -1993,7 +1992,11 @@ async function restoreSavedArea(area, options = {}) {
     renderSidebar(data.counts, markers);
     applyResultTags(data);
     _currentLoadedAreaId = area.id;
-    setActiveItem("Workspace", area.name);
+    // NOTE: don't re-call setActiveItem here. It was already set at line 1885
+    // before the await. Calling it again post-analysis stomps any active
+    // selection the user made during the analysis (e.g., clicking a target
+    // while the workspace was still loading would briefly show the target,
+    // then this would override it back to "Workspace").
     renderSavedAreasList();
     // Debug: sold-count restore diagnostics (remove after Bug 2 confirmed fixed)
     console.debug("[restoreSavedArea] post-render sold state — allSoldPointsRef:", allSoldPointsRef.length, "lastSoldPanelPoints:", lastSoldPanelPoints.length, "soldCompsFilter:", JSON.stringify(soldCompsFilter), "filterState.sold:", filterState.sold);
@@ -2052,6 +2055,9 @@ async function restoreNamedSession(session, options = {}) {
   const includeSold = Boolean(filterState.sold);
   document.getElementById("sidebar-loading")?.classList.remove("hidden");
   document.getElementById("redfin-status").textContent = "Loading session…";
+  // Set the slot BEFORE the await so it shows up immediately and so a user
+  // clicking a different item during the analysis isn't stomped post-analysis.
+  setActiveItem("Snapshot", session.name);
   const analysisRequest = beginLatestAnalysisRequest();
   if (options.undoSnapshot) options.undoSnapshot.abortCtrl = _activeAnalysisAbortController;
 
@@ -2123,7 +2129,7 @@ async function restoreNamedSession(session, options = {}) {
     }
     renderSidebar(data.counts, markers);
     applyResultTags(data);
-    setActiveItem("Snapshot", session.name);
+    // NOTE: don't re-call setActiveItem here. Already set before the await.
     if (loadedFromSessionCache && data.redfin_skipped === true) {
       _setSessionCacheNote("Active listings not shown - re-analyze for current");
     } else {
