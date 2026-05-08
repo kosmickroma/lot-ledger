@@ -5335,8 +5335,8 @@ function _showLoginForm(errorMsg = "") {
     <span class="auth-modal-subtitle">Enter your credentials to continue.</span>
     <form id="auth-login-form" class="auth-form" autocomplete="off">
       <div class="auth-field">
-        <label for="auth-email">Email</label>
-        <input type="email" id="auth-email" name="email" autocomplete="off" autocapitalize="off" spellcheck="false" required placeholder="you@example.com">
+        <label for="auth-identifier">Username or Email</label>
+        <input type="text" id="auth-identifier" name="identifier" autocomplete="off" autocapitalize="off" spellcheck="false" required placeholder="username or you@example.com">
       </div>
       <div class="auth-field">
         <label for="auth-password">Password</label>
@@ -5357,7 +5357,7 @@ function _showLoginForm(errorMsg = "") {
 
   document.getElementById("auth-login-form").addEventListener("submit", async (e) => {
     e.preventDefault();
-    const email = document.getElementById("auth-email").value.trim();
+    const identifier = document.getElementById("auth-identifier").value.trim();
     const password = document.getElementById("auth-password").value;
     _setAuthError("auth-login-error", "");
     _setAuthBusy("auth-login-btn", true, "Sign In");
@@ -5366,7 +5366,7 @@ function _showLoginForm(errorMsg = "") {
       const resp = await fetch("/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json", ...authHeaders() },
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({ identifier, password }),
         credentials: "same-origin",
       });
       const data = await resp.json().catch(() => ({}));
@@ -5395,8 +5395,8 @@ function _showLoginForm(errorMsg = "") {
     }
   });
 
-  // Autofocus email field
-  requestAnimationFrame(() => document.getElementById("auth-email")?.focus());
+  // Autofocus identifier field
+  requestAnimationFrame(() => document.getElementById("auth-identifier")?.focus());
 }
 
 // ---------------------------------------------------------------------------
@@ -5430,10 +5430,18 @@ function _showChangePasswordForm(forced = false) {
     </form>`;
   _showAuthModal();
 
-  ["auth-chpw-current", "auth-chpw-new", "auth-chpw-confirm"].forEach((id) => {
-    const el = document.getElementById(id);
-    if (el) el.value = "";
-  });
+  // Stomp browser-autofilled password values. Some password managers re-fill
+  // after the synchronous JS, so clear immediately, on the next tick, and
+  // again at 100ms to catch slower autofill paths.
+  const _clearChpwFields = () => {
+    ["auth-chpw-current", "auth-chpw-new", "auth-chpw-confirm"].forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) el.value = "";
+    });
+  };
+  _clearChpwFields();
+  setTimeout(_clearChpwFields, 0);
+  setTimeout(_clearChpwFields, 100);
 
   document.getElementById("auth-close-chpw")?.addEventListener("click", () => {
     _hideAuthModal();
@@ -5511,7 +5519,6 @@ async function _showAdminPanel() {
     <div id="admin-user-table-wrap">Loading…</div>
     <p class="admin-section-title">Add New User</p>
     <div class="admin-add-form">
-      <input type="email" id="admin-new-email" placeholder="Email" autocomplete="off">
       <input type="text"  id="admin-new-username" placeholder="Username" autocomplete="off">
       <input type="password" id="admin-new-temp-password" placeholder="Temp Password (10+ chars)" autocomplete="new-password">
       <select id="admin-new-role">
@@ -5519,6 +5526,8 @@ async function _showAdminPanel() {
         <option value="power_user">Power User</option>
         ${_currentRole() === "developer" ? `<option value="owner">Owner</option>` : ""}
       </select>
+      <button type="button" id="admin-toggle-email" class="admin-link-btn">+ Add email (optional)</button>
+      <input type="email" id="admin-new-email" placeholder="Email (optional)" autocomplete="off" class="hidden">
       <button id="admin-add-btn" class="admin-add-btn">+ Add User</button>
       <p id="admin-add-msg" class="admin-msg"></p>
     </div>`;
@@ -5526,6 +5535,14 @@ async function _showAdminPanel() {
 
   document.getElementById("auth-close-admin").addEventListener("click", _hideAuthModal);
   document.getElementById("admin-add-btn").addEventListener("click", _adminAddUser);
+  document.getElementById("admin-toggle-email")?.addEventListener("click", () => {
+    const emailEl = document.getElementById("admin-new-email");
+    const toggleBtn = document.getElementById("admin-toggle-email");
+    if (!emailEl || !toggleBtn) return;
+    emailEl.classList.remove("hidden");
+    toggleBtn.classList.add("hidden");
+    emailEl.focus();
+  });
 
   await _adminRefreshTable();
 }
@@ -5562,7 +5579,7 @@ async function _adminRefreshTable() {
       }
       return `<tr>
         <td>${statusDot}${_esc(u.username)}</td>
-        <td>${_esc(u.email)}</td>
+        <td>${u.email ? _esc(u.email) : '<span class="admin-cell-empty">—</span>'}</td>
         <td>${roleBadge}</td>
         <td>${actions}</td>
       </tr>`;
@@ -5628,14 +5645,14 @@ async function _adminAction(action, uid, uname, btn) {
 }
 
 async function _adminAddUser() {
-  const email    = document.getElementById("admin-new-email")?.value.trim();
+  const email    = document.getElementById("admin-new-email")?.value.trim() || "";
   const username = document.getElementById("admin-new-username")?.value.trim();
   const tempPassword = document.getElementById("admin-new-temp-password")?.value;
   const role     = document.getElementById("admin-new-role")?.value;
   const msgEl    = document.getElementById("admin-add-msg");
 
-  if (!email || !username || !tempPassword) {
-    if (msgEl) { msgEl.textContent = "Email, username, and temporary password are required."; msgEl.className = "admin-msg err"; }
+  if (!username || !tempPassword) {
+    if (msgEl) { msgEl.textContent = "Username and temporary password are required."; msgEl.className = "admin-msg err"; }
     return;
   }
 
@@ -5649,10 +5666,12 @@ async function _adminAddUser() {
   if (btn) btn.disabled = true;
 
   try {
+    const body = { username, temp_password: tempPassword, role };
+    if (email) body.email = email;
     const resp = await fetch("/admin/users", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...authHeaders() },
-      body: JSON.stringify({ email, username, temp_password: tempPassword, role }),
+      body: JSON.stringify(body),
       credentials: "same-origin",
     });
     const data = await resp.json().catch(() => ({}));
