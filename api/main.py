@@ -2835,6 +2835,22 @@ async def download(job_id: str, filename: str | None = None, user: dict[str, Any
     csv_share_id = _job_share_id(job_id, job_saved_area_id)
     logger.info("Download job %s: %d parcel rows, %d sold points", job_id, len(rows), len(sold_points))
 
+    # Look up bonded seed-target account_nums for this area (if any), so the
+    # CSV can mark each row with whether it was a seed of this workspace.
+    # Empty set when the job has no saved_area_id (analysis-only, not yet saved).
+    seed_account_nums: set[str] = set()
+    if job_saved_area_id:
+        _conn = get_session_conn()
+        try:
+            with _conn.cursor() as _cur:
+                _cur.execute(
+                    "SELECT account_num FROM saved_parcels WHERE area_id = %s",
+                    (job_saved_area_id,),
+                )
+                seed_account_nums = {str(r[0]) for r in _cur.fetchall() if r and r[0]}
+        finally:
+            release_session_conn(_conn)
+
     def _deg_dist(lat1, lng1, lat2, lng2):
         return ((lat1 - lat2) ** 2 + (lng1 - lng2) ** 2) ** 0.5
 
@@ -2898,6 +2914,7 @@ async def download(job_id: str, filename: str | None = None, user: dict[str, Any
                 "Google Maps Link",
                 "Verified Vacant",
                 "Potential Target",
+                "Seed Target",
                 "HOA",
                 "HOA URL",
                 "Estimated Lot Size (sq ft)",
@@ -3058,6 +3075,7 @@ async def download(job_id: str, filename: str | None = None, user: dict[str, Any
                     _google_maps_link(row),
                     row.get("verified_vacant", "") or "",
                     row.get("potential_target", "") or "",
+                    "yes" if str(row.get("account_num", "") or "") in seed_account_nums else "",
                     (
                         row.get("hoa_name", "")
                         or ("N/A (Tarrant HOA not loaded)" if row.get("division_cd") == "TAD" else "")
