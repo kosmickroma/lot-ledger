@@ -48,6 +48,7 @@ from api.auth import (
     get_current_user,
     get_user_by_email,
     get_user_by_id,
+    get_user_by_username_or_email,
     hash_password,
     login_allowed,
     record_login_failure,
@@ -180,7 +181,7 @@ def _ensure_session_schema() -> None:
                 CREATE TABLE IF NOT EXISTS users (
                     id SERIAL PRIMARY KEY,
                     username TEXT NOT NULL,
-                    email TEXT NOT NULL,
+                    email TEXT,
                     password_hash TEXT NOT NULL,
                     role TEXT NOT NULL CHECK (role IN ('developer', 'owner', 'power_user', 'user', 'member')),
                     is_active BOOLEAN NOT NULL DEFAULT true,
@@ -284,6 +285,7 @@ def _ensure_session_schema() -> None:
                 cur,
                 [
                     ("saved_areas_user_id", "ALTER TABLE saved_areas ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)"),
+                    ("users_email_drop_not_null", "ALTER TABLE users ALTER COLUMN email DROP NOT NULL"),
                     ("users_role_check_drop", "ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check"),
                     (
                         "users_role_check_add",
@@ -876,7 +878,10 @@ class UpdateSessionRequest(BaseModel):
 
 
 class LoginRequest(BaseModel):
-    email: str
+    # `identifier` is the canonical field (username OR email). `email` is kept
+    # as a backward-compat alias for any client still posting the old shape.
+    identifier: str | None = None
+    email: str | None = None
     password: str
 
 
@@ -888,7 +893,7 @@ class ChangePasswordRequest(BaseModel):
 
 class AdminCreateUserRequest(BaseModel):
     username: str
-    email: str
+    email: str | None = None
     temp_password: str
     role: str = "user"
 
@@ -902,10 +907,11 @@ def _password_valid(password: str) -> bool:
 
 
 def _serialize_user(user: dict[str, Any]) -> dict[str, Any]:
+    raw_email = user.get("email")
     return {
         "id": int(user["id"]),
         "username": str(user["username"]),
-        "email": str(user["email"]),
+        "email": None if raw_email is None else str(raw_email),
         "role": str(user["role"]),
         "is_active": bool(user.get("is_active")),
         "force_password_change": bool(user.get("force_password_change")),
@@ -982,7 +988,7 @@ def _require_target_user(cur, target_user_id: int) -> dict[str, Any]:
     return {
         "id": int(row[0]),
         "username": str(row[1]),
-        "email": str(row[2]),
+        "email": row[2] if row[2] is None else str(row[2]),
         "role": str(row[3]),
         "is_active": bool(row[4]),
         "force_password_change": bool(row[5]),
@@ -1195,9 +1201,11 @@ async def auth_login(request: Request, payload: LoginRequest, response: Response
     if not allowed:
         raise HTTPException(status_code=429, detail=f"Too many failed attempts. Retry in {retry_after}s")
 
-    email = str(payload.email or "").strip().lower()
+    identifier = str(payload.identifier or payload.email or "").strip()
     password = str(payload.password or "")
-    user = get_user_by_email(email)
+    if not identifier:
+        raise HTTPException(status_code=422, detail="Username or email is required")
+    user = get_user_by_username_or_email(identifier)
     if user is None or not verify_password(password, str(user.get("password_hash") or "")):
         record_login_failure(ip)
         raise HTTPException(status_code=401, detail="Invalid credentials")
@@ -1266,7 +1274,7 @@ async def auth_change_password(
     refreshed_user = {
         "id": int(row[0]),
         "username": str(row[1]),
-        "email": str(row[2]),
+        "email": row[2] if row[2] is None else str(row[2]),
         "role": str(row[3]),
         "is_active": bool(row[4]),
         "force_password_change": bool(row[5]),
@@ -1292,7 +1300,7 @@ async def admin_list_users(user: dict[str, Any] = Depends(require_role("owner", 
                 {
                     "id": int(row[0]),
                     "username": str(row[1]),
-                    "email": str(row[2]),
+                    "email": row[2] if row[2] is None else str(row[2]),
                     "role": str(row[3]),
                     "is_active": bool(row[4]),
                     "force_password_change": bool(row[5]),
@@ -1314,12 +1322,13 @@ async def admin_create_user(
 ) -> dict[str, Any]:
     require_csrf(request)
     username = str(payload.username or "").strip()
-    email = str(payload.email or "").strip().lower()
+    email_raw = str(payload.email or "").strip().lower()
+    email_or_null: str | None = email_raw if email_raw else None
     temp_password = str(payload.temp_password or "")
     role = str(payload.role or "user").strip().lower()
 
-    if not username or not email:
-        raise HTTPException(status_code=422, detail="Username and email are required")
+    if not username:
+        raise HTTPException(status_code=422, detail="Username is required")
     if not _password_valid(temp_password):
         raise HTTPException(status_code=422, detail="Password must be at least 10 characters")
 
@@ -1345,7 +1354,7 @@ async def admin_create_user(
                 VALUES (%s, %s, %s, %s, true, true, %s)
                 RETURNING id, username, email, role, is_active, force_password_change
                 """,
-                (username, email, hash_password(temp_password), role, actor["username"]),
+                (username, email_or_null, hash_password(temp_password), role, actor["username"]),
             )
             row = cur.fetchone()
             write_auth_audit_log(
@@ -1371,7 +1380,7 @@ async def admin_create_user(
         "user": {
             "id": int(row[0]),
             "username": str(row[1]),
-            "email": str(row[2]),
+            "email": row[2] if row[2] is None else str(row[2]),
             "role": str(row[3]),
             "is_active": bool(row[4]),
             "force_password_change": bool(row[5]),
