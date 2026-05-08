@@ -565,6 +565,8 @@ function setActiveItem(type, name) {
   typeEl.textContent = type || "";
   nameEl.textContent = name || "";
   slot.classList.remove("is-collapsed");
+  console.debug("[slot] set →", type, name);
+  console.trace("[slot] called from ↑");
 }
 
 function clearActiveItem() {
