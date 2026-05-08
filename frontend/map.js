@@ -783,11 +783,50 @@ function getVisibleFeatureCounts(features) {
   };
 
   const list = Array.isArray(features) ? features : [];
-  list.forEach((feature) => {
+  // Dedupe by (account_num + source_county) so the same parcel counted across
+  // tile boundaries or cross-county merges only contributes once. Falls back
+  // to feature index if account_num is missing so we never silently drop a row.
+  const seen = new Set();
+  let rawSeen = 0;
+  let dupSkipped = 0;
+  let unknownPropType = 0;
+
+  list.forEach((feature, idx) => {
+    rawSeen += 1;
+    const p = feature?.properties || {};
+    const key = `${p.account_num || `__noacct_${idx}`}|${p.source_county || "dcad"}`;
+    if (seen.has(key)) {
+      dupSkipped += 1;
+      return;
+    }
+    seen.add(key);
+
     const bucket = classifyFeatureForFilter(feature);
     if (!(bucket in counts) || !isFeatureVisible(feature)) return;
+
+    // Track features falling through to off_market that are NOT recognized
+    // single_family — that signals a misclassification path we can investigate.
+    if (bucket === "off_market" && p.prop_type && p.prop_type !== "single_family") {
+      unknownPropType += 1;
+    }
+
     counts[bucket] += 1;
   });
+
+  if (rawSeen > 0) {
+    console.debug("[counts]", {
+      raw: rawSeen,
+      deduped: seen.size,
+      dupSkipped,
+      unknownPropType,
+      off_market: counts.off_market,
+      active: counts.active,
+      vacant: counts.vacant,
+      multifamily: counts.multifamily,
+      commercial: counts.commercial,
+      exempt: counts.exempt,
+    });
+  }
 
   return counts;
 }
