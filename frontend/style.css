@@ -447,9 +447,9 @@ h1 {
 }
 
 .redfin-price-label {
-  background: rgba(0, 0, 0, 0.92);
-  color: #D92228;
-  border: 1.5px solid #ff4d4d;
+  background: rgba(247, 227, 161, 0.95);
+  color: #8B0000;
+  border: 1.5px solid #D92228;
   border-radius: 8px;
   padding: 1px 6px;
   font-size: 10px;
