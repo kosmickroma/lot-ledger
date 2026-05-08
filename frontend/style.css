@@ -446,6 +446,19 @@ h1 {
   box-shadow: 0 2px 6px rgba(0, 31, 18, 0.34);
 }
 
+.redfin-price-label {
+  background: rgba(217, 34, 40, 0.92);
+  color: #000;
+  border: 1px solid rgba(163, 22, 26, 0.85);
+  border-radius: 8px;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  box-shadow: 0 2px 6px rgba(80, 0, 0, 0.34);
+}
+
 .count-row {
   display: flex;
   align-items: center;

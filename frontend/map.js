@@ -394,6 +394,7 @@ map.on("moveend", () => {
 map.on("zoomend", () => {
   if (viewportRenderMode) _scheduleViewportRender();
   refreshSoldPriceLabels();
+  refreshRedfinPriceLabels();
   _updateCountyLabelVisibility();
 });
 _updateZoomNudge();
@@ -440,6 +441,7 @@ let matchedSoldLabelPoints = [];
 // filters (e.g., lot-size min/max), so labels follow parcel visibility.
 let _currentlyRenderedSoldAccounts = new Set();
 let soldMarkers = [];
+let redfinMarkers = [];
 let transientSoldSidebarPopup = null;
 let soldCompsSortMode = "price";
 let soldCompsCollapsed = false;
@@ -873,6 +875,33 @@ function refreshSoldPriceLabels() {
       direction: "top",
       offset: [10, -8],
       className: "sold-price-label",
+      interactive: false,
+    });
+    shown += 1;
+  }
+}
+
+function refreshRedfinPriceLabels() {
+  redfinMarkers.forEach(({ marker }) => marker.unbindTooltip());
+  if (!filterState.active || map.getZoom() < 16) return;
+
+  const maxLabels = map.getZoom() >= 18 ? 220 : map.getZoom() >= 17 ? 140 : 80;
+  const cellPx = map.getZoom() >= 18 ? 20 : map.getZoom() >= 17 ? 26 : 34;
+  const occupied = new Set();
+  let shown = 0;
+
+  for (const { marker, priceLabel } of redfinMarkers) {
+    if (shown >= maxLabels) break;
+    if (!priceLabel) continue;
+    const p = map.latLngToContainerPoint(marker.getLatLng());
+    const key = `${Math.floor(p.x / cellPx)}:${Math.floor(p.y / cellPx)}`;
+    if (occupied.has(key)) continue;
+    occupied.add(key);
+    marker.bindTooltip(priceLabel, {
+      permanent: true,
+      direction: "top",
+      offset: [10, -8],
+      className: "redfin-price-label",
       interactive: false,
     });
     shown += 1;
@@ -3647,6 +3676,54 @@ function renderSoldPoints() {
   refreshSoldPriceLabels();
 }
 
+function renderRedfinPoints() {
+  // Mirror of renderSoldPoints for active (Redfin) listings. Anchors are
+  // invisible CircleMarkers placed at on_redfin parcel centroids; they exist
+  // solely to host zoom-gated price tooltips. Cleaning up tooltips before
+  // clearing the array uses the same belt-and-suspenders pattern as sold to
+  // avoid orphaned .leaflet-tooltip.redfin-price-label nodes after re-renders.
+  redfinMarkers.forEach(({ marker }) => {
+    const tooltip = marker?.getTooltip?.();
+    if (tooltip) {
+      try { tooltip.remove(); } catch {}
+    }
+    try { marker?.unbindTooltip?.(); } catch {}
+  });
+  document.querySelectorAll(".leaflet-tooltip.redfin-price-label").forEach((el) => el.remove());
+  redfinMarkers = [];
+  if (!filterState.active) return;
+  const activeParcelLayer = parcelTypeLayers.active;
+  if (!activeParcelLayer) return;
+
+  const features = Array.isArray(allAnalysisFeatures) ? allAnalysisFeatures : [];
+  features.forEach((feature) => {
+    const p = feature?.properties || {};
+    if (!p.on_redfin) return;
+    const lat = Number(p.lat);
+    const lng = Number(p.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+    if (!passesNumericFilters(feature)) return;
+    if (!passesCompFilters(feature)) return;
+    const numeric = parseInt(String(p.redfin_price || "").replace(/[^0-9]/g, ""), 10);
+    const priceLabel = Number.isFinite(numeric) && numeric > 0 ? abbreviatePrice(numeric) : "";
+    if (!priceLabel) return;
+
+    const marker = L.circleMarker([lat, lng], {
+      pane: "soldPane",
+      radius: 0,
+      stroke: false,
+      fill: false,
+      opacity: 0,
+      fillOpacity: 0,
+      interactive: false,
+      bubblingMouseEvents: false,
+    }).addTo(activeParcelLayer);
+    redfinMarkers.push({ marker, priceLabel });
+  });
+
+  refreshRedfinPriceLabels();
+}
+
 function renderFeatures(geojson) {
   const shouldRestorePopup = Boolean(_activeParcelPopupState?.accountNum);
   _isRefreshingParcelLayers = shouldRestorePopup;
@@ -3804,6 +3881,7 @@ function renderFeatures(geojson) {
   // labels survive every render pass (including viewport re-renders triggered
   // by zoom/pan events).
   renderSoldPoints();
+  renderRedfinPoints();
   return markers;
 }
 
