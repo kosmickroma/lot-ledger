@@ -1687,7 +1687,7 @@ async function saveParcel(account_num, county, addr, lat, lng, geometry) {
   _selectedSavedItemId = row.id;
   renderSavedAreasList();
   _renderSavedParcelOutline(row);
-  setActiveItem("Target", row.name);
+  setActiveItem("Workspace", row.name);
 }
 
 function _restoreAllSavedParcelOutlines() {
@@ -1879,7 +1879,7 @@ async function restoreSavedArea(area, options = {}) {
         map.setView([area.lat, area.lng], map.getZoom());
       }
     }
-    setActiveItem("Target", area.name);
+    setActiveItem("Workspace", area.name);
     return;
   }
 
