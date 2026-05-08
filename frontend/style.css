@@ -1881,3 +1881,31 @@ h1 {
   box-shadow: 0 0 0 2px rgba(201, 162, 79, 0.25);
   transition: box-shadow 0.15s ease, border-color 0.15s ease;
 }
+
+/* ── Saved-parcel / target gold-glow halo ──────────────────────────────────
+   Pulsing drop-shadow filter on the SVG path rendered by
+   _renderSavedParcelOutline() in map.js. The class is set via L.geoJSON's
+   className option. will-change: filter hints the GPU to keep the path on
+   its own compositor layer so the animation is effectively free at the
+   target counts we expect (5-30 saved). Two-stage drop-shadow stack (sharp
+   inner + soft outer) gives a richer halo than a single shadow. */
+.saved-parcel-glow {
+  will-change: filter;
+  filter:
+    drop-shadow(0 0 4px rgba(255, 215, 0, 0.95))
+    drop-shadow(0 0 12px rgba(255, 215, 0, 0.55));
+  animation: savedParcelPulse 2.2s ease-in-out infinite;
+}
+
+@keyframes savedParcelPulse {
+  0%, 100% {
+    filter:
+      drop-shadow(0 0 4px rgba(255, 215, 0, 0.95))
+      drop-shadow(0 0 10px rgba(255, 215, 0, 0.45));
+  }
+  50% {
+    filter:
+      drop-shadow(0 0 8px rgba(255, 215, 0, 1))
+      drop-shadow(0 0 18px rgba(255, 215, 0, 0.75));
+  }
+}

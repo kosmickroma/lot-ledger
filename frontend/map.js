@@ -1643,19 +1643,20 @@ async function _renameSavedSessionInline(session, rowEl) {
   input.addEventListener("blur", () => { if (!input.value.trim()) cancel(); });
 }
 
-const SAVED_PARCEL_COLOR = "#e67e22";
+const SAVED_PARCEL_COLOR = "#FFD700";
 
 function _renderSavedParcelOutline(area) {
   if (savedParcelLayers[area.account_num]) return; // already on map
   if (!area.geometry || !["Polygon", "MultiPolygon"].includes(area.geometry.type)) return;
   const layer = L.geoJSON({ type: "Feature", geometry: area.geometry, properties: {} }, {
     pane: "savedParcelPane",
+    className: "saved-parcel-glow",
     style: {
       color: SAVED_PARCEL_COLOR,
-      weight: 3,
+      weight: 4,
       fill: true,
       fillColor: SAVED_PARCEL_COLOR,
-      fillOpacity: 0.95,
+      fillOpacity: 0.75,
       interactive: false,
     },
     interactive: false,
