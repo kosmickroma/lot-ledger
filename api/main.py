@@ -66,6 +66,7 @@ from api.counties.dcad import SPTD_LABELS, _estimate_front_depth, build_feature,
 from api.counties.denton import _classify_denton, _normalize_denton_row, query_denton_parcels
 from api.counties.tad import _normalize_tad_row, _classify_tad, query_tad_parcels
 from api.geo import polygon_bbox
+from api.neighborhoods import router as neighborhoods_router
 from api.redfin import normalize_addr_key
 from api.sold import log_redfin_sold_row_count, query_active_listings, query_sold_parcels
 
@@ -1110,6 +1111,7 @@ def _parcel_addr_match_key(row: dict[str, Any]) -> str:
 get_settings()
 
 app = FastAPI(title="LotLedger")
+app.include_router(neighborhoods_router)
 
 
 _FORCE_PASSWORD_CHANGE_ALLOWED_PATHS = {
