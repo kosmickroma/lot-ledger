@@ -1667,21 +1667,28 @@ function _renderSavedParcelOutline(area) {
 async function saveParcel(account_num, county, addr, lat, lng, geometry) {
   if (!account_num) return;
   bumpUndoPillVersion();
+  // If a workspace is currently loaded, ask the server to also create a
+  // bonded copy of this target into that workspace. Backend silently skips
+  // if the user doesn't own that workspace.
+  const requestBody = {
+    account_num,
+    county: county || "dcad",
+    payload: {
+      account_num,
+      county,
+      name: addr || account_num,
+      lat,
+      lng,
+      geometry: geometry || null,
+    },
+  };
+  if (_currentLoadedAreaId) {
+    requestBody.area_id = _currentLoadedAreaId;
+  }
   const created = await _apiJson("/api/parcels", {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders() },
-    body: JSON.stringify({
-      account_num,
-      county: county || "dcad",
-      payload: {
-        account_num,
-        county,
-        name: addr || account_num,
-        lat,
-        lng,
-        geometry: geometry || null,
-      },
-    }),
+    body: JSON.stringify(requestBody),
   });
   const row = _normalizeSavedParcelRow(created);
   _savedParcelsCache = _savedParcelsCache.filter((p) => !(p.account_num === row.account_num && p.county === row.county));
@@ -4775,6 +4782,19 @@ document.getElementById("btn-download").addEventListener("click", async () => {
   }
 });
 
+function _suggestAreaNameFromContainedParcels() {
+  if (!Array.isArray(lastPolygon) || lastPolygon.length < 3) return null;
+  if (!Array.isArray(_savedParcelsCache) || _savedParcelsCache.length === 0) return null;
+  for (const p of _savedParcelsCache) {
+    if (!Number.isFinite(p.lat) || !Number.isFinite(p.lng)) continue;
+    if (pointInPolygonLngLat([p.lng, p.lat], lastPolygon)) {
+      const name = String(p.name || "").trim();
+      if (name) return name;
+    }
+  }
+  return null;
+}
+
 function _openSaveAreaInlineInput() {
   const btn = document.getElementById("btn-save-area");
   if (!btn) return;
@@ -4792,6 +4812,9 @@ function _openSaveAreaInlineInput() {
   input.style.minWidth = "0";
   input.style.maxWidth = "100%";
   input.style.flex = "1 1 auto";
+
+  const suggested = _suggestAreaNameFromContainedParcels();
+  if (suggested) input.value = suggested;
 
   const cancel = document.createElement("button");
   cancel.type = "button";
@@ -4838,7 +4861,10 @@ function _openSaveAreaInlineInput() {
   wrap.appendChild(cancel);
   parent.appendChild(wrap);
   btn.classList.add("hidden");
-  requestAnimationFrame(() => input.focus());
+  requestAnimationFrame(() => {
+    input.focus();
+    if (input.value) input.select();
+  });
 }
 
 document.getElementById("btn-save-area")?.addEventListener("click", () => {
@@ -5793,7 +5819,18 @@ async function _loadAreaFromShareId(shareId) {
       return;
     }
     const area = await resp.json();
+    const seedParcels = Array.isArray(area.seed_parcels) ? area.seed_parcels : [];
     await restoreSavedArea(_normalizeSavedAreaRow(area));
+    // Render the workspace's bonded seed targets as gold-glow polygons.
+    // Skipped automatically by _renderSavedParcelOutline if the same account_num
+    // is already on the map (e.g., user opened their own workspace and the
+    // seed is also one of their standalones).
+    seedParcels.forEach((sp) => {
+      const normalized = _normalizeSavedParcelRow(sp);
+      if (normalized.geometry) {
+        _renderSavedParcelOutline(normalized);
+      }
+    });
   } catch (err) {
     console.error("Deep-link load failed", err);
     _showToast("Could not open shared workspace", "error");

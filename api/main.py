@@ -324,6 +324,10 @@ def _ensure_session_schema() -> None:
                     ("analysis_sessions_expires_nullable", "ALTER TABLE analysis_sessions ALTER COLUMN expires_at DROP NOT NULL"),
                     ("session_tags_user_id", "ALTER TABLE session_tags ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)"),
                     ("saved_parcels_user_id", "ALTER TABLE saved_parcels ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)"),
+                    ("saved_parcels_area_id", "ALTER TABLE saved_parcels ADD COLUMN IF NOT EXISTS area_id TEXT REFERENCES saved_areas(area_id) ON DELETE CASCADE"),
+                    ("idx_saved_parcels_area_id", "CREATE INDEX IF NOT EXISTS idx_saved_parcels_area_id ON saved_parcels (area_id)"),
+                    ("uq_saved_parcels_standalone", "CREATE UNIQUE INDEX IF NOT EXISTS uq_saved_parcels_standalone ON saved_parcels (user_id, account_num, county) WHERE area_id IS NULL"),
+                    ("uq_saved_parcels_bonded", "CREATE UNIQUE INDEX IF NOT EXISTS uq_saved_parcels_bonded ON saved_parcels (user_id, account_num, county, area_id) WHERE area_id IS NOT NULL"),
                     ("cached_jobs_user_id", "ALTER TABLE cached_jobs ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)"),
                     ("idx_session_tags_session", "CREATE INDEX IF NOT EXISTS idx_session_tags_session ON session_tags (session_id)"),
                     ("idx_session_tags_user", "CREATE INDEX IF NOT EXISTS idx_session_tags_user ON session_tags (user_id)"),
@@ -344,10 +348,7 @@ def _ensure_session_schema() -> None:
                         "CREATE UNIQUE INDEX IF NOT EXISTS uq_saved_areas_share_id ON saved_areas (share_id) WHERE share_id IS NOT NULL",
                     ),
                     ("idx_saved_parcels_user", "CREATE INDEX IF NOT EXISTS idx_saved_parcels_user ON saved_parcels (user_id)"),
-                    (
-                        "uq_saved_parcels_user_account",
-                        "CREATE UNIQUE INDEX IF NOT EXISTS uq_saved_parcels_user_account ON saved_parcels (user_id, county, account_num)",
-                    ),
+                    ("drop_uq_saved_parcels_user_account", "DROP INDEX IF EXISTS uq_saved_parcels_user_account"),
                     ("idx_cached_jobs_expires", "CREATE INDEX IF NOT EXISTS idx_cached_jobs_expires ON cached_jobs (expires_at)"),
                     ("idx_cached_jobs_user", "CREATE INDEX IF NOT EXISTS idx_cached_jobs_user ON cached_jobs (user_id)"),
                     (
@@ -865,6 +866,10 @@ class SavedParcelCreateRequest(BaseModel):
     account_num: str
     county: str = "dcad"
     payload: dict[str, Any] | None = None
+    # Optional: when set, also creates a bonded copy of this target into the
+    # specified saved area (in addition to ensuring the standalone exists).
+    # Unknown / non-owned area_ids are ignored silently.
+    area_id: str | None = None
 
 
 class SaveSessionRequest(BaseModel):
@@ -2826,6 +2831,22 @@ async def download(job_id: str, filename: str | None = None, user: dict[str, Any
     csv_share_id = _job_share_id(job_id, job_saved_area_id)
     logger.info("Download job %s: %d parcel rows, %d sold points", job_id, len(rows), len(sold_points))
 
+    # Look up bonded seed-target account_nums for this area (if any), so the
+    # CSV can mark each row with whether it was a seed of this workspace.
+    # Empty set when the job has no saved_area_id (analysis-only, not yet saved).
+    seed_account_nums: set[str] = set()
+    if job_saved_area_id:
+        _conn = get_session_conn()
+        try:
+            with _conn.cursor() as _cur:
+                _cur.execute(
+                    "SELECT account_num FROM saved_parcels WHERE area_id = %s",
+                    (job_saved_area_id,),
+                )
+                seed_account_nums = {str(r[0]) for r in _cur.fetchall() if r and r[0]}
+        finally:
+            release_session_conn(_conn)
+
     def _deg_dist(lat1, lng1, lat2, lng2):
         return ((lat1 - lat2) ** 2 + (lng1 - lng2) ** 2) ** 0.5
 
@@ -2949,6 +2970,7 @@ async def download(job_id: str, filename: str | None = None, user: dict[str, Any
                 "Comp Baths",
                 "Comp Days on Market",
                 "Comp Listing URL",
+                "Seed Target",
                 "share_id",
             ]
         )
@@ -3112,6 +3134,7 @@ async def download(job_id: str, filename: str | None = None, user: dict[str, Any
                     int(_safe_float(comp.get("baths"))) if comp and _safe_float(comp.get("baths")) not in (None, 0.0) else "",
                     int(_safe_float(comp.get("dom"))) if comp and _safe_float(comp.get("dom")) not in (None, 0.0) else "",
                     (comp.get("listing_url", "") or "") if comp else "",
+                    "yes" if str(row.get("account_num", "") or "") in seed_account_nums else "",
                     csv_share_id,
                 ]
             )
@@ -3457,6 +3480,73 @@ async def list_saved_areas(user: dict[str, Any] = Depends(get_current_user)) -> 
     return {"areas": areas}
 
 
+def _point_in_polygon(lat: float, lng: float, polygon: list[list[float]]) -> bool:
+    """Ray-casting point-in-polygon test. Polygon is a list of [lng, lat] pairs
+    (GeoJSON convention, NOT Leaflet [lat, lng]). Returns True if the point
+    falls inside or on the polygon boundary."""
+    if not isinstance(polygon, list) or len(polygon) < 3:
+        return False
+    inside = False
+    n = len(polygon)
+    j = n - 1
+    for i in range(n):
+        xi, yi = float(polygon[i][0]), float(polygon[i][1])
+        xj, yj = float(polygon[j][0]), float(polygon[j][1])
+        if ((yi > lat) != (yj > lat)) and (lng < (xj - xi) * (lat - yi) / ((yj - yi) or 1e-12) + xi):
+            inside = not inside
+        j = i
+    return inside
+
+
+def _bond_standalone_targets_to_area(cur: Any, *, user_id: int, area_id: str, polygon_geojson: list[list[float]]) -> int:
+    """For all of the user's standalone targets (area_id IS NULL) whose
+    payload['lat'], payload['lng'] falls inside the given GeoJSON polygon,
+    INSERT a bonded copy with area_id set. Returns the number of bonds created.
+
+    Standalones are NOT modified - they remain as the user's master library.
+    Bonded copies inherit account_num, county, and payload from the standalone.
+    Conflicts (a bond already exists) are silently ignored.
+    """
+    if not isinstance(polygon_geojson, list) or len(polygon_geojson) < 3:
+        return 0
+    cur.execute(
+        """
+        SELECT account_num, county, payload
+        FROM saved_parcels
+        WHERE user_id = %s AND area_id IS NULL
+        """,
+        (int(user_id),),
+    )
+    standalones = cur.fetchall()
+    bonded_count = 0
+    for account_num, county, payload in standalones:
+        if not isinstance(payload, dict):
+            continue
+        lat_raw = payload.get("lat")
+        lng_raw = payload.get("lng")
+        if lat_raw is None or lng_raw is None:
+            continue
+        try:
+            lat = float(lat_raw)
+            lng = float(lng_raw)
+        except (TypeError, ValueError):
+            continue
+        if not _point_in_polygon(lat, lng, polygon_geojson):
+            continue
+        cur.execute(
+            """
+            INSERT INTO saved_parcels (account_num, county, payload, user_id, area_id)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (user_id, account_num, county, area_id) WHERE area_id IS NOT NULL
+            DO NOTHING
+            """,
+            (account_num, county, Json(payload), int(user_id), area_id),
+        )
+        if cur.rowcount > 0:
+            bonded_count += 1
+    return bonded_count
+
+
 @app.post("/api/areas")
 async def create_saved_area(request: SavedAreaCreateRequest, req: Request, user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
     require_csrf(req)
@@ -3512,6 +3602,16 @@ async def create_saved_area(request: SavedAreaCreateRequest, req: Request, user:
                     "UPDATE analysis_sessions SET saved_area_id = %s WHERE session_id = %s AND saved_area_id IS NULL AND user_id = %s",
                     (new_area_id, inflight_job_id, int(user["id"])),
                 )
+
+            # Bond standalone targets inside the polygon to the new area.
+            # Only meaningful for type='area' (location pins are single points).
+            if area_type == "area" and isinstance(polygon_geojson, list) and len(polygon_geojson) >= 3:
+                _bond_standalone_targets_to_area(
+                    cur,
+                    user_id=int(user["id"]),
+                    area_id=row[0],
+                    polygon_geojson=polygon_geojson,
+                )
         conn.commit()
     except HTTPException:
         conn.rollback()
@@ -3551,6 +3651,26 @@ async def get_saved_area(area_id: str, user: dict[str, Any] = Depends(get_curren
                 (area_id,),
             )
             row = cur.fetchone()
+
+            seed_parcels: list[dict[str, Any]] = []
+            if row is not None:
+                cur.execute(
+                    """
+                    SELECT account_num, county, payload
+                    FROM saved_parcels
+                    WHERE area_id = %s
+                    ORDER BY created_at ASC
+                    """,
+                    (row[0],),
+                )
+                for sp_row in cur.fetchall():
+                    seed_parcels.append(
+                        {
+                            "account_num": sp_row[0],
+                            "county": sp_row[1],
+                            "payload": sp_row[2] if isinstance(sp_row[2], dict) else {},
+                        }
+                    )
     finally:
         release_session_conn(conn)
 
@@ -3570,6 +3690,7 @@ async def get_saved_area(area_id: str, user: dict[str, Any] = Depends(get_curren
         "lng": (float(row[2][0][0]) if isinstance(row[2], list) and row[2] and len(row[2][0]) >= 2 else None) if str(row[4] or "area") == "location" else None,
         "created_at": row[7].isoformat() if row[7] else None,
         "updated_at": row[8].isoformat() if row[8] else None,
+        "seed_parcels": seed_parcels,
     }
 
 
@@ -3592,6 +3713,26 @@ async def get_saved_area_by_share_id(
                 (share_id,),
             )
             row = cur.fetchone()
+
+            seed_parcels: list[dict[str, Any]] = []
+            if row is not None:
+                cur.execute(
+                    """
+                    SELECT account_num, county, payload
+                    FROM saved_parcels
+                    WHERE area_id = %s
+                    ORDER BY created_at ASC
+                    """,
+                    (row[0],),
+                )
+                for sp_row in cur.fetchall():
+                    seed_parcels.append(
+                        {
+                            "account_num": sp_row[0],
+                            "county": sp_row[1],
+                            "payload": sp_row[2] if isinstance(sp_row[2], dict) else {},
+                        }
+                    )
     finally:
         release_session_conn(conn)
 
@@ -3612,6 +3753,7 @@ async def get_saved_area_by_share_id(
         "lng": (float(row[2][0][0]) if isinstance(row[2], list) and row[2] and len(row[2][0]) >= 2 else None) if str(row[4] or "area") == "location" else None,
         "created_at": row[6].isoformat() if row[6] else None,
         "updated_at": row[7].isoformat() if row[7] else None,
+        "seed_parcels": seed_parcels,
     }
 
 
@@ -3800,7 +3942,7 @@ async def list_saved_parcels(user: dict[str, Any] = Depends(get_current_user)) -
                 """
                 SELECT account_num, county, payload, created_at
                 FROM saved_parcels
-                WHERE user_id = %s
+                WHERE user_id = %s AND area_id IS NULL
                 ORDER BY created_at DESC
                 """,
                 (int(user["id"]),),
@@ -3827,20 +3969,48 @@ async def create_saved_parcel(request: SavedParcelCreateRequest, req: Request, u
     if not account_num:
         raise HTTPException(status_code=400, detail="account_num is required")
 
+    payload_data = request.payload if isinstance(request.payload, dict) else {}
+    target_area_id = str(request.area_id or "").strip() or None
+
     conn = get_session_conn()
     try:
         with conn.cursor() as cur:
+            # Always ensure a standalone target row exists for this user/parcel.
+            # If one already exists, refresh its payload (matches prior behavior).
             cur.execute(
                 """
-                INSERT INTO saved_parcels (account_num, county, payload, user_id)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (user_id, county, account_num)
+                INSERT INTO saved_parcels (account_num, county, payload, user_id, area_id)
+                VALUES (%s, %s, %s, %s, NULL)
+                ON CONFLICT (user_id, account_num, county) WHERE area_id IS NULL
                 DO UPDATE SET payload = EXCLUDED.payload
-                RETURNING account_num, county, payload, created_at
+                RETURNING account_num, county, payload, created_at, area_id
                 """,
-                (account_num, county, Json(request.payload) if isinstance(request.payload, dict) else Json({}), int(user["id"])),
+                (account_num, county, Json(payload_data), int(user["id"])),
             )
-            row = cur.fetchone()
+            standalone_row = cur.fetchone()
+
+            # If a workspace area_id was supplied, also create a bonded copy.
+            # Validate the area exists AND belongs to this user (or skip silently
+            # - we don't want to leak whether an area exists).
+            bonded_row = None
+            if target_area_id:
+                cur.execute(
+                    "SELECT 1 FROM saved_areas WHERE area_id = %s AND user_id = %s LIMIT 1",
+                    (target_area_id, int(user["id"])),
+                )
+                area_owned = cur.fetchone() is not None
+                if area_owned:
+                    cur.execute(
+                        """
+                        INSERT INTO saved_parcels (account_num, county, payload, user_id, area_id)
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (user_id, account_num, county, area_id) WHERE area_id IS NOT NULL
+                        DO UPDATE SET payload = EXCLUDED.payload
+                        RETURNING account_num, county, payload, created_at, area_id
+                        """,
+                        (account_num, county, Json(payload_data), int(user["id"]), target_area_id),
+                    )
+                    bonded_row = cur.fetchone()
         conn.commit()
     except Exception:
         conn.rollback()
@@ -3848,12 +4018,19 @@ async def create_saved_parcel(request: SavedParcelCreateRequest, req: Request, u
     finally:
         release_session_conn(conn)
 
-    return {
-        "account_num": row[0],
-        "county": row[1],
-        "payload": row[2] if isinstance(row[2], dict) else {},
-        "created_at": row[3].isoformat() if row[3] else None,
+    # Return the standalone row by default (matches prior shape). If a bonded
+    # copy was also created, surface its area_id so the frontend can confirm
+    # the bond happened.
+    response: dict[str, Any] = {
+        "account_num": standalone_row[0],
+        "county": standalone_row[1],
+        "payload": standalone_row[2] if isinstance(standalone_row[2], dict) else {},
+        "created_at": standalone_row[3].isoformat() if standalone_row[3] else None,
+        "area_id": None,
     }
+    if bonded_row is not None:
+        response["bonded_area_id"] = bonded_row[4]
+    return response
 
 
 @app.delete("/api/parcels/{county}/{account_num}")
