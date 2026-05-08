@@ -1118,6 +1118,8 @@ function renderSoldCompsPanel() {
       const soldDate = formatSoldDateLabel(point.sold_date) || "N/A";
       const ppsfText = ppsf != null ? `$${Math.round(ppsf)}/sqft` : "N/A";
       const sizeText = sqft != null ? `${Math.round(sqft).toLocaleString()} sf` : "N/A sf";
+      const lot = asNumber(point.lot_sqft);
+      const lotText = lot != null ? `${(lot / 43560).toFixed(2)} ac` : "N/A ac";
       const bedBathText = `${beds != null ? beds : "?"}bd/${baths != null ? baths : "?"}ba`;
       const yearText = yrBuilt != null ? `${Math.round(yrBuilt)}` : "N/A";
       return `
@@ -1126,7 +1128,7 @@ function renderSoldCompsPanel() {
             <span class="sold-row-price">${price}</span>
             <span>${ppsfText}</span>
           </div>
-          <div class="sold-row-meta">${sizeText} · ${bedBathText} · Built ${yearText}</div>
+          <div class="sold-row-meta">${sizeText} · ${lotText} · ${bedBathText} · Built ${yearText}</div>
           <div class="sold-row-sub">${soldDate} · ${soldAddressStreetOnly(point.address)}</div>
         </div>
       `;
