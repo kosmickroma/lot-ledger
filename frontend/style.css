@@ -781,12 +781,12 @@ h1 {
 }
 
 .map-toolbar a {
-  width: 34px !important;
+  width: 44px !important;
   height: 34px !important;
   display: flex !important;
   align-items: center;
   justify-content: center;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 700;
   color: #333 !important;
   text-decoration: none !important;
@@ -807,7 +807,6 @@ h1 {
 }
 
 #btn-county-toggle {
-  font-size: 9px;
   letter-spacing: 0.04em;
 }
 
