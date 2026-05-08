@@ -14,6 +14,7 @@
 const DALLAS_CENTER = [32.78, -96.8];
 const DEFAULT_ZOOM = 13;
 const COUNTY_LABEL_MIN_ZOOM = 9;
+const NBHD_MIN_ZOOM = 13;
 
 const COLORS = {
   single_family: "#2980b9",
@@ -396,6 +397,7 @@ map.on("zoomend", () => {
   refreshSoldPriceLabels();
   refreshRedfinPriceLabels();
   _updateCountyLabelVisibility();
+  _updateNbhdVisibility();
 });
 _updateZoomNudge();
 
@@ -424,6 +426,8 @@ const savedParcelLayers = {};
 let countyLayer = null;
 let countyLabelLayer = null;
 let countyVisible = false;
+let nbhdLayer = null;
+let nbhdLayerVisible = false;
 let hoaLayer = null;
 let hoaVisible = false;
 let currentJobId = null;
@@ -1418,6 +1422,60 @@ function _updateCountyLabelVisibility() {
     map.removeLayer(countyLabelLayer);
   }
 }
+
+function _updateNbhdVisibility() {
+  if (!nbhdLayer || !nbhdLayerVisible) return;
+  const shouldShow = map.getZoom() >= NBHD_MIN_ZOOM;
+  if (shouldShow) {
+    if (!map.hasLayer(nbhdLayer)) nbhdLayer.addTo(map);
+  } else if (map.hasLayer(nbhdLayer)) {
+    map.removeLayer(nbhdLayer);
+  }
+}
+
+// === Neighborhood overlay (POC - TIGER 2024 Block Groups) ===
+// Pluggable: delete this block and the toolbar button creation to remove.
+async function toggleNeighborhoodLayer() {
+  const btn = document.getElementById("btn-nbhd-toggle");
+  if (nbhdLayerVisible && nbhdLayer) {
+    if (map.hasLayer(nbhdLayer)) map.removeLayer(nbhdLayer);
+    nbhdLayerVisible = false;
+    btn?.classList.remove("active");
+    return;
+  }
+  if (nbhdLayer) {
+    nbhdLayerVisible = true;
+    btn?.classList.add("active");
+    _updateNbhdVisibility();
+    return;
+  }
+
+  if (btn) btn.textContent = "...";
+  try {
+    const res = await fetch("/api/neighborhoods/boundaries");
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const geojson = await res.json();
+    nbhdLayer = L.geoJSON(geojson, {
+      style: {
+        color: "#e8c96a",
+        weight: 1.5,
+        opacity: 0.9,
+        fill: false,
+      },
+      interactive: false,
+    });
+    nbhdLayerVisible = true;
+    if (btn) {
+      btn.textContent = "NBHD";
+      btn.classList.add("active");
+    }
+    _updateNbhdVisibility();
+  } catch (e) {
+    if (btn) btn.textContent = "NBHD";
+    console.error("Neighborhood layer load failed", e);
+  }
+}
+// === End neighborhood overlay ===
 
 async function _apiJson(url, options = {}) {
   const resp = await fetch(url, {
@@ -2687,6 +2745,16 @@ const MapToolbar = L.Control.extend({
     L.DomEvent.on(countyBtn, "click", (e) => {
       L.DomEvent.preventDefault(e);
       toggleCountyLayer();
+    });
+
+    const nbhdBtn = L.DomUtil.create("a", "", container);
+    nbhdBtn.id = "btn-nbhd-toggle";
+    nbhdBtn.href = "#";
+    nbhdBtn.title = "Toggle neighborhood (block group) boundaries";
+    nbhdBtn.textContent = "NBHD";
+    L.DomEvent.on(nbhdBtn, "click", (e) => {
+      L.DomEvent.preventDefault(e);
+      toggleNeighborhoodLayer();
     });
 
     return container;
