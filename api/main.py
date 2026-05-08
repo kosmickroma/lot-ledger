@@ -2910,7 +2910,6 @@ async def download(job_id: str, filename: str | None = None, user: dict[str, Any
                 "Google Maps Link",
                 "Verified Vacant",
                 "Potential Target",
-                "Seed Target",
                 "HOA",
                 "HOA URL",
                 "Estimated Lot Size (sq ft)",
@@ -2971,6 +2970,7 @@ async def download(job_id: str, filename: str | None = None, user: dict[str, Any
                 "Comp Baths",
                 "Comp Days on Market",
                 "Comp Listing URL",
+                "Seed Target",
                 "share_id",
             ]
         )
@@ -3071,7 +3071,6 @@ async def download(job_id: str, filename: str | None = None, user: dict[str, Any
                     _google_maps_link(row),
                     row.get("verified_vacant", "") or "",
                     row.get("potential_target", "") or "",
-                    "yes" if str(row.get("account_num", "") or "") in seed_account_nums else "",
                     (
                         row.get("hoa_name", "")
                         or ("N/A (Tarrant HOA not loaded)" if row.get("division_cd") == "TAD" else "")
@@ -3135,6 +3134,7 @@ async def download(job_id: str, filename: str | None = None, user: dict[str, Any
                     int(_safe_float(comp.get("baths"))) if comp and _safe_float(comp.get("baths")) not in (None, 0.0) else "",
                     int(_safe_float(comp.get("dom"))) if comp and _safe_float(comp.get("dom")) not in (None, 0.0) else "",
                     (comp.get("listing_url", "") or "") if comp else "",
+                    "yes" if str(row.get("account_num", "") or "") in seed_account_nums else "",
                     csv_share_id,
                 ]
             )
