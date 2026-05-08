@@ -128,15 +128,24 @@ def _is_idempotent_schema_error(exc: Exception) -> bool:
 
 
 def _run_schema_steps(cur: Any, steps: list[tuple[str, str]]) -> None:
-    for step_id, sql in steps:
+    # Each step runs inside its own SAVEPOINT so that an idempotent-skip
+    # (already exists / duplicate) does not poison the outer transaction.
+    # Without this, the next step after a skipped one fails with
+    # "current transaction is aborted, commands ignored until end of
+    # transaction block" — same pattern already used in _finalize_user_scoping.
+    for i, (step_id, sql) in enumerate(steps):
+        sp_name = f"step_{i}"
+        cur.execute(f"SAVEPOINT {sp_name}")
         try:
             cur.execute(sql)
         except Exception as exc:
+            cur.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
             if _is_idempotent_schema_error(exc):
                 print(f"[session-schema] step skipped (already applied): {step_id}")
                 continue
             print(f"[session-schema] step failed: {step_id} ({exc})")
             raise
+        cur.execute(f"RELEASE SAVEPOINT {sp_name}")
 
 
 def _generate_share_id() -> str:
