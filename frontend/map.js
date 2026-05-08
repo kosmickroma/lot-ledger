@@ -4782,6 +4782,19 @@ document.getElementById("btn-download").addEventListener("click", async () => {
   }
 });
 
+function _suggestAreaNameFromContainedParcels() {
+  if (!Array.isArray(lastPolygon) || lastPolygon.length < 3) return null;
+  if (!Array.isArray(_savedParcelsCache) || _savedParcelsCache.length === 0) return null;
+  for (const p of _savedParcelsCache) {
+    if (!Number.isFinite(p.lat) || !Number.isFinite(p.lng)) continue;
+    if (pointInPolygonLngLat([p.lng, p.lat], lastPolygon)) {
+      const name = String(p.name || "").trim();
+      if (name) return name;
+    }
+  }
+  return null;
+}
+
 function _openSaveAreaInlineInput() {
   const btn = document.getElementById("btn-save-area");
   if (!btn) return;
@@ -4799,6 +4812,9 @@ function _openSaveAreaInlineInput() {
   input.style.minWidth = "0";
   input.style.maxWidth = "100%";
   input.style.flex = "1 1 auto";
+
+  const suggested = _suggestAreaNameFromContainedParcels();
+  if (suggested) input.value = suggested;
 
   const cancel = document.createElement("button");
   cancel.type = "button";
@@ -4845,7 +4861,10 @@ function _openSaveAreaInlineInput() {
   wrap.appendChild(cancel);
   parent.appendChild(wrap);
   btn.classList.add("hidden");
-  requestAnimationFrame(() => input.focus());
+  requestAnimationFrame(() => {
+    input.focus();
+    if (input.value) input.select();
+  });
 }
 
 document.getElementById("btn-save-area")?.addEventListener("click", () => {
