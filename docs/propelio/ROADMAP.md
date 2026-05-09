@@ -95,6 +95,30 @@ year, price — Chunk D's spec) stay primary and always-visible. The
 Decision logged to avoid relitigating; UX session validates whether
 this layering actually works for the team.
 
+## 🔴 Phase 3.5 — Anchor parcel as Propelio subject (CRITICAL, post-Phase-3)
+
+**KK 2026-05-09 design clarification:** the current polygon flow uses
+the parcel **closest to the polygon's centroid** as the Propelio
+subject. That's wrong for Mike's actual workflow. He saves a target
+property, draws a polygon around it — the **target is the anchor**, not
+some random centroid house.
+
+Why it matters: Propelio's CMA returns 100 comps **ranked by relevance
+to the subject** (lot size match, age match, proximity, subdivision).
+If the subject is a centroid parcel that isn't the user's target, the
+100 most-relevant comps are about the wrong house.
+
+**Fix (3 hr work, do AFTER Phase 3 lands):**
+
+1. `saved_areas` schema gets `anchor_parcel_id` TEXT column
+2. UI prompts "Which saved parcel is your target?" on area save
+3. `/by-polygon` and `/refresh` use anchor_parcel_id → first saved_parcel
+   in polygon → centroid fallback
+4. Comps now ranked relative to the user's actual target
+
+See SPEC_V3_WORKSPACE.md "DESIGN CLARIFICATION — Workspace = Anchor
+Parcel + Polygon" section for full detail.
+
 ## 🟢 Active build — Phase 3 (workspace-anchored comps + filters + good/bad)
 
 **Spec:** [`SPEC_V3_WORKSPACE.md`](./SPEC_V3_WORKSPACE.md). Six chunks

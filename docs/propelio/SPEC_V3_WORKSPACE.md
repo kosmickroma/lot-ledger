@@ -47,6 +47,71 @@ outside that path, **stop and report instead.**
     Use `api.config.get_session_conn()` / `release_session_conn()`,
     NOT `get_conn()`.
 
+## ⚠️ DESIGN CLARIFICATION — Workspace = Anchor Parcel + Polygon (not just polygon)
+
+**Updated 2026-05-09 by KK:** the spec's original definition of
+"workspace = saved_areas row" is INCOMPLETE. The full mental model is:
+
+> **Workspace = a TARGET (saved_parcel) + a POLYGON drawn around it.**
+> The user is trying to value a SPECIFIC house; the polygon defines
+> the geographic search area for comps that relate to that house.
+
+### Current implementation gap
+
+`api/propelio/routes.py:_nearest_subject_parcel` picks the **parcel
+closest to the polygon's geometric centroid** as the Propelio subject.
+That subject anchors what Propelio considers "comparable" — proximity,
+lot size, age, etc. — for the 100 comps it returns.
+
+**Result:** if Mike saves 4044 Williamsburg Rd as his target and draws
+a polygon around it, but the polygon's centroid happens to land near
+9912 Lakemont Dr (a random house 0.3mi away), Propelio's 100 comps
+get ranked-relative-to-Lakemont — not Williamsburg. The user's target
+is **not** the anchor.
+
+### Fix that needs to happen (NOT in this Phase 3 cycle, but soon after)
+
+The `/by-polygon` flow should use the **saved_parcel inside the polygon
+as the Propelio subject**, falling back to centroid only when no saved
+parcel exists in the area. Specifically:
+
+1. Schema: add `saved_areas.anchor_parcel_id` (TEXT, nullable, FK or
+   reference to `saved_parcels.id`) — the user-designated target
+   property for this workspace. UI lets user set this when saving the
+   area, or pick from saved_parcels inside the polygon at refresh time.
+2. Route: `_nearest_subject_parcel` becomes `_resolve_subject_parcel`
+   that prefers `anchor_parcel_id` → first `saved_parcels` row inside
+   polygon → falls back to closest-to-centroid.
+3. Frontend: when user clicks "Save area," prompt "Which saved parcel
+   is your target for this area?" (default = the most-recently-saved
+   parcel inside the polygon). Stored on `saved_areas.anchor_parcel_id`.
+4. Validation: if anchor_parcel_id is set, ensure it's inside the
+   polygon (or warn user). Re-pull recomputes off the new anchor if
+   user changes it.
+
+### Why this is critical (KK's words)
+
+> "we are trying to get comps for the saved parcel remember thats very
+> important... we use the center of that for the area but we really
+> need relatable stuff to our target parcel 'house'"
+
+Propelio's value proposition is **comps relevant to a subject property**
+— same lot size, same neighborhood, same age band. If we anchor on a
+random centroid parcel, the relevance ranking is misdirected and we
+get less useful comps.
+
+### Sequencing
+
+Don't build this during the current Phase 3 chunks (A–F). Phase 3
+foundation (archive, refresh, filters, good/bad, status colors) lands
+first. Then a **Phase 3.5 mini-spec** wires anchor-parcel-as-subject
+through the schema + route + UI. Estimate ~3 hours total.
+
+When this lands, the spec section "Architectural decisions locked in"
+gets updated to reflect: `Workspace = saved_areas row + anchor_parcel_id`.
+Until then, treat the "workspace = saved_areas row" line below as a
+v1 simplification.
+
 ## Architectural decisions locked in (no relitigating)
 
 | Decision | Value |
