@@ -95,7 +95,32 @@ year, price — Chunk D's spec) stay primary and always-visible. The
 Decision logged to avoid relitigating; UX session validates whether
 this layering actually works for the team.
 
-## 🟢 Active build — Phase 2 (polygon-driven pulls + purple footprints)
+## 🟢 Active build — Phase 3 (workspace-anchored comps + filters + good/bad)
+
+**Spec:** [`SPEC_V3_WORKSPACE.md`](./SPEC_V3_WORKSPACE.md). Six chunks
+for Copilot, ~10 hours of execution. Locked-in design from KK's
+brainstorm 2026-05-09:
+
+- **Drop point-in-polygon filter** → show all 100 Propelio comps with
+  the polygon mask still applied for visual context (Chunk A)
+- **`propelio_comp_archive` table** in the SESSION DB tied to
+  `saved_areas` via FK with cascade delete (Chunk B)
+- **Append-only smart-merge on refresh** — never delete, only update +
+  insert. Combats the 100-cap over time as Propelio's pool churns
+- **Two-tier filter card** — API-side (months, range with explicit
+  Refresh button) + client-side (lot, sqft, year, price, status — all
+  instant, no credit burn) (Chunk C)
+- **Status colors** — sold=`#8b5cf6` purple, active=`#dc2626` red,
+  pending=`#f59e0b` amber (Chunk A)
+- **Good/bad comp tagging** — replaces verify-vacant pattern for
+  Propelio comps. Bad → dull color on map, removed from sidebar list,
+  skipped in CSV export (Chunks D + E)
+- **Sidebar comp list** — only non-bad comps, sortable, click-to-fly,
+  hover-to-highlight (Chunk D)
+- **Backburner probe of Propelio's 100-cap** — see if pagination breaks
+  it (Chunk F, ~30 min)
+
+## ✅ Done — Phase 2 (polygon-driven pulls + purple footprints)
 
 **Spec:** [`SPEC_V2_POLYGON.md`](./SPEC_V2_POLYGON.md). Six chunks (A–F)
 for Copilot. Total estimate ~6 hours of Copilot work + ~1 hour of review.
