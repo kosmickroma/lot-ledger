@@ -532,6 +532,25 @@ function renderPropelioComps(data) {
 - Card defaults to expanded (open) when comps are first loaded; user
   toggle persists in localStorage
 
+### D.2.5 — Per-comp row layout (the comp list inside the card)
+
+Each row in `#propelio-comp-list` represents one comp. Layout
+(KK requested neighborhood be prominent — bake it in on every row):
+
+```
+┌──────────────────────────────────────────────────────────┐
+│ Glenridge Estates 2                          $1,675,000  │  ← neighborhood + price (bold, 13px)
+│ 3947 Beechwood Ln · for_sale                             │  ← address · status (muted, 11px)
+│ 4,337 sqft · 9,277 sqft lot · built 2025 · DOM 85        │  ← key metrics (muted, 11px)
+└──────────────────────────────────────────────────────────┘
+```
+
+When `comp.neighborhood` is null/empty, fall back to `"—"` so the row
+layout stays consistent. Row click should fly the map to the comp's
+location and open its popup. Hover row → highlight the matching
+footprint on the map (apply a temporary `.propelio-footprint-highlight`
+class with brighter glow / stronger fill, removed on row mouseleave).
+
 ### D.3 — Smoke test (Chunk D)
 
 1. Pull comps for Glenridge polygon (Chunk C flow)
