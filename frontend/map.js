@@ -421,6 +421,10 @@ let targetBadgeLayer = L.layerGroup().addTo(map);
 // Persistent saved-parcel outlines (cyan). Keyed by account_num for dedup + removal.
 const savedParcelLayer = L.layerGroup().addTo(map);
 const savedParcelLayers = {};
+// Propelio comp pins — cyan pulse-glow markers fired per-address from the
+// search bar. Cleared on each new search. Costs 1 CMA credit per fetch
+// against Mike's account on cache miss; 7-day backend cache absorbs repeats.
+const propelioCompLayer = L.layerGroup().addTo(map);
 let countyLayer = null;
 let countyLabelLayer = null;
 let countyVisible = false;
@@ -2790,6 +2794,222 @@ const BasemapSwitcher = L.Control.extend({
 });
 new BasemapSwitcher().addTo(map);
 
+// ── Propelio per-address comp fetch + render ─────────────────────────────
+// Fires after every address search. Hits /api/propelio/by-address (which is
+// auth-gated and 7-day cached). Renders each returned comp as a pulsing
+// cyan dot with a popup. Subject parcel data lands in window._propelioLast
+// for future popup-enrichment work; not yet wired into the existing parcel
+// popups (Chunk 4 territory).
+function _propelioEscape(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (m) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[m])
+  );
+}
+
+function _propelioBuildPopup(c) {
+  const fmtPrice = (n) => Number.isFinite(n) ? `$${Math.round(n).toLocaleString()}` : "—";
+  const fmtNum = (n) => Number.isFinite(n) ? Number(n).toLocaleString() : null;
+  const fmtDate = (s) => {
+    if (!s) return null;
+    const d = new Date(s);
+    return Number.isFinite(d.getTime()) ? d.toISOString().slice(0, 10) : null;
+  };
+  const ex = c?.extra || {};
+  const status = String(c?.status || "");
+  const isSold = status === "sold";
+
+  const sqft = fmtNum(c?.sqft);
+  const lot = fmtNum(c?.lot_size);
+  const year = Number.isFinite(c?.year_built) ? c.year_built : null;
+  const beds = ex.beds;
+  const baths = ex.baths;
+  const bathsFull = ex.baths_full;
+  const bathsHalf = ex.baths_half;
+  const garage = ex.garage;
+  const dom = ex.dom;
+  const listPrice = Number(ex.list_price);
+  const closeDate = fmtDate(ex.close_date);
+  const modifiedTs = fmtDate(ex.modified_timestamp);
+  const propertyType = ex.property_type;
+  const mls = ex.mls || "";
+  const source = ex.source || "";
+  const zipCode = ex.zip || "";
+  const remarks = String(ex.remarks || "").trim();
+
+  // Dimensions line: sqft · lot · year built
+  const dims = [];
+  if (sqft) dims.push(`${sqft} sqft`);
+  if (lot) dims.push(`${lot} sqft lot`);
+  if (year) dims.push(`built ${year}`);
+
+  // Bed/bath/garage line — prefer baths_full+baths_half breakdown if present
+  const bbLine = [];
+  if (beds != null) bbLine.push(`${beds}bd`);
+  if (Number.isFinite(bathsFull) || Number.isFinite(bathsHalf)) {
+    const fullStr = Number.isFinite(bathsFull) ? `${bathsFull}` : "0";
+    const halfStr = Number.isFinite(bathsHalf) && bathsHalf > 0 ? ` + ${bathsHalf}½` : "";
+    bbLine.push(`${fullStr}ba${halfStr}`);
+  } else if (baths != null) {
+    bbLine.push(`${baths}ba`);
+  }
+  if (Number.isFinite(garage) && garage > 0) bbLine.push(`${garage}-car gar`);
+
+  // Sold-or-active price line
+  const priceLineParts = [fmtPrice(c?.price), _propelioEscape(status)];
+  // If sold and list price was different, show the delta in parens
+  let listVsCloseHtml = "";
+  if (isSold && Number.isFinite(listPrice) && Number.isFinite(c?.price) && listPrice > 0 && Math.abs(listPrice - c.price) > 1) {
+    const delta = c.price - listPrice;
+    const deltaPct = Math.round((delta / listPrice) * 100);
+    const sign = delta > 0 ? "+" : "";
+    listVsCloseHtml = `<div class="propelio-popup-meta">List was ${fmtPrice(listPrice)} (${sign}${deltaPct}% close vs list)</div>`;
+  } else if (!isSold && Number.isFinite(listPrice) && listPrice > 0 && Number(c?.price) !== listPrice) {
+    listVsCloseHtml = `<div class="propelio-popup-meta">List: ${fmtPrice(listPrice)}</div>`;
+  }
+
+  // Sold-specific metadata (close date, DOM)
+  const soldMeta = [];
+  if (isSold && closeDate) soldMeta.push(`closed ${closeDate}`);
+  if (Number.isFinite(dom)) soldMeta.push(`DOM ${dom}`);
+
+  // Subdivision + zip
+  const subLine = [];
+  if (c?.neighborhood) subLine.push(c.neighborhood);
+  if (zipCode) subLine.push(zipCode);
+
+  // MLS / source / property type
+  const idLine = [];
+  if (mls) idLine.push(`MLS ${mls}`);
+  if (propertyType) idLine.push(propertyType);
+
+  // Remarks excerpt (truncated)
+  const REMARKS_MAX = 280;
+  const remarksHtml = remarks
+    ? `<div class="propelio-popup-remarks">${_propelioEscape(remarks.length > REMARKS_MAX ? remarks.slice(0, REMARKS_MAX).trim() + "…" : remarks)}</div>`
+    : "";
+
+  return `
+    <div class="propelio-popup">
+      <div class="propelio-popup-addr">${_propelioEscape(c?.address || "")}</div>
+      <div class="propelio-popup-price">${priceLineParts.join(" · ")}</div>
+      ${listVsCloseHtml}
+      ${soldMeta.length ? `<div class="propelio-popup-meta">${_propelioEscape(soldMeta.join(" · "))}</div>` : ""}
+      ${dims.length ? `<div class="propelio-popup-meta">${_propelioEscape(dims.join(" · "))}</div>` : ""}
+      ${bbLine.length ? `<div class="propelio-popup-meta">${_propelioEscape(bbLine.join(" · "))}</div>` : ""}
+      ${subLine.length ? `<div class="propelio-popup-meta">${_propelioEscape(subLine.join(" · "))}</div>` : ""}
+      ${idLine.length ? `<div class="propelio-popup-meta">${_propelioEscape(idLine.join(" · "))}${source ? ` <span class="propelio-popup-source">(${_propelioEscape(source)})</span>` : ""}</div>` : ""}
+      ${modifiedTs ? `<div class="propelio-popup-meta-mute">MLS updated ${_propelioEscape(modifiedTs)}</div>` : ""}
+      ${remarksHtml}
+    </div>
+  `;
+}
+
+// CMA settings chip — bottom-left Leaflet control showing the filter
+// Propelio applied + count + Propelio's own ARV estimate for the most
+// recent fetch. Updated by firePropelioFetch; hidden until first hit.
+const PropelioCmaChip = L.Control.extend({
+  options: { position: "bottomleft" },
+  onAdd() {
+    const el = L.DomUtil.create("div", "propelio-cma-chip hidden");
+    L.DomEvent.disableClickPropagation(el);
+    L.DomEvent.disableScrollPropagation(el);
+    this._el = el;
+    return el;
+  },
+  setData(data) {
+    if (!this._el) return;
+    if (!data || !Array.isArray(data.comps)) {
+      this._el.classList.add("hidden");
+      this._el.innerHTML = "";
+      return;
+    }
+    const settings = data.cma_settings || {};
+    const params = settings.params || {};
+    const fmtMoney = (n) => Number.isFinite(n) ? `$${Math.round(n).toLocaleString()}` : null;
+    const escape = _propelioEscape;
+    const pieces = [];
+    if (Number.isFinite(params.range)) pieces.push(`${params.range} mi radius`);
+    if (Number.isFinite(params.months)) pieces.push(`last ${params.months} mo`);
+    const lotMax = params.lot_size_acres?.max;
+    if (Number.isFinite(lotMax)) pieces.push(`lot ≤ ${lotMax} ac`);
+    const filterLine = pieces.join(" · ") || "Propelio default filter";
+
+    const arv = fmtMoney(settings.arv);
+    const arvType = settings.arv_type ? ` (${settings.arv_type})` : "";
+    const cmaId = settings.cma_id ? `CMA #${settings.cma_id}` : "";
+    const cached = data.cached ? " · cached" : "";
+    const totalSales = settings.sales_count;
+
+    // Empty-result branch: render a friendly "no comps" notice with the warning text.
+    if (data.comps.length === 0) {
+      const warning = data.warning || "No comps returned by Propelio for this address.";
+      this._el.innerHTML = `
+        <div class="propelio-cma-chip-title">Propelio CMA — 0 comps</div>
+        <div class="propelio-cma-chip-row">${escape(warning)}</div>
+        <div class="propelio-cma-chip-row muted">Try: 4044 Williamsburg Rd · 6710 Northport Dr · 9012 Hunters Creek Dr</div>
+      `;
+      this._el.classList.remove("hidden");
+      return;
+    }
+
+    this._el.innerHTML = `
+      <div class="propelio-cma-chip-title">Propelio CMA${cached}</div>
+      <div class="propelio-cma-chip-row">${escape(filterLine)}</div>
+      <div class="propelio-cma-chip-row">${data.comps.length} comp${data.comps.length === 1 ? "" : "s"} returned${
+        Number.isFinite(totalSales) && totalSales !== data.comps.length ? ` (of ${totalSales} sales)` : ""
+      }</div>
+      ${arv ? `<div class="propelio-cma-chip-row"><strong>Propelio ARV:</strong> ${escape(arv)}${escape(arvType)}</div>` : ""}
+      ${cmaId ? `<div class="propelio-cma-chip-row muted">${escape(cmaId)}</div>` : ""}
+    `;
+    this._el.classList.remove("hidden");
+  },
+  hide() {
+    if (this._el) {
+      this._el.classList.add("hidden");
+      this._el.innerHTML = "";
+    }
+  },
+});
+const propelioCmaChip = new PropelioCmaChip().addTo(map);
+
+async function firePropelioFetch(addressString) {
+  if (!addressString || typeof addressString !== "string") return;
+  propelioCompLayer.clearLayers();
+  propelioCmaChip.hide();
+  try {
+    const resp = await fetch(`/api/propelio/by-address?address=${encodeURIComponent(addressString)}`);
+    if (!resp.ok) {
+      console.warn("[propelio] fetch failed:", resp.status);
+      return;
+    }
+    const data = await resp.json();
+    window._propelioLast = data;
+    if (!Array.isArray(data?.comps)) return;
+
+    const icon = L.divIcon({
+      className: "propelio-comp-marker-wrap",
+      html: '<div class="propelio-pulse-marker"></div>',
+      iconSize: [16, 16],
+      iconAnchor: [8, 8],
+    });
+
+    let added = 0;
+    data.comps.forEach((comp) => {
+      const lat = Number(comp?.extra?.lat);
+      const lon = Number(comp?.extra?.lon);
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+      const marker = L.marker([lat, lon], { icon, riseOnHover: true });
+      marker.bindPopup(_propelioBuildPopup(comp));
+      marker.addTo(propelioCompLayer);
+      added += 1;
+    });
+    propelioCmaChip.setData(data);
+    console.info(`[propelio] rendered ${added} comp pin(s)${data.cached ? " (cached)" : ""}`);
+  } catch (e) {
+    console.error("[propelio] fetch error:", e);
+  }
+}
+
 const AddressSearch = L.Control.extend({
   options: { position: "topright" },
   onAdd() {
@@ -2911,6 +3131,8 @@ const AddressSearch = L.Control.extend({
       const item = suggestItems[idx];
       if (!item) return;
       highlightSearchResult([Number(item.lat), Number(item.lng)]);
+      const addr = [item.address, item.city, "TX"].filter(Boolean).join(", ");
+      firePropelioFetch(addr);
     };
 
     const fetchSuggestions = async () => {
@@ -2998,6 +3220,7 @@ const AddressSearch = L.Control.extend({
         const { lat, lon } = results[0];
         const latlng = [parseFloat(lat), parseFloat(lon)];
         highlightSearchResult(latlng);
+        firePropelioFetch(q);
       } catch {
         btn.textContent = "Error";
         setTimeout(() => { btn.textContent = "Go"; btn.disabled = false; }, 2000);

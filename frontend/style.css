@@ -1921,3 +1921,118 @@ h1 {
       drop-shadow(0 0 18px rgba(255, 215, 0, 0.75));
   }
 }
+
+/* ── Propelio comp pin ─────────────────────────────────────────────────────
+   Pulsing cyan glow on the divIcon-based comp marker. Mirrors the
+   savedParcelPulse vibe (drop-shadow stack, 2.2s ease-in-out) so the
+   visual language stays consistent — different color so the user can tell
+   Propelio comps apart from saved/target gold polygons at a glance. */
+.propelio-comp-marker-wrap {
+  background: transparent;
+  border: 0;
+}
+
+.propelio-pulse-marker {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #06b6d4;
+  border: 2px solid #ffffff;
+  box-sizing: border-box;
+  will-change: filter;
+  filter:
+    drop-shadow(0 0 4px rgba(6, 182, 212, 0.95))
+    drop-shadow(0 0 12px rgba(6, 182, 212, 0.55));
+  animation: propelioCompPulse 2.2s ease-in-out infinite;
+  cursor: pointer;
+}
+
+@keyframes propelioCompPulse {
+  0%, 100% {
+    filter:
+      drop-shadow(0 0 4px rgba(6, 182, 212, 0.95))
+      drop-shadow(0 0 10px rgba(6, 182, 212, 0.45));
+  }
+  50% {
+    filter:
+      drop-shadow(0 0 8px rgba(6, 182, 212, 1))
+      drop-shadow(0 0 18px rgba(6, 182, 212, 0.75));
+  }
+}
+
+/* Popup styling for Propelio comp pins. Multi-line layout for richer fields. */
+.propelio-popup {
+  max-width: 320px;
+}
+.propelio-popup-addr {
+  font-weight: 600;
+  font-size: 13px;
+  margin-bottom: 4px;
+  color: #111;
+}
+.propelio-popup-price {
+  font-size: 13px;
+  color: #0f8a99;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+.propelio-popup-meta {
+  font-size: 11px;
+  color: #444;
+  line-height: 1.45;
+}
+.propelio-popup-meta-mute {
+  font-size: 10px;
+  color: #888;
+  line-height: 1.4;
+  font-style: italic;
+}
+.propelio-popup-source {
+  color: #888;
+  font-style: italic;
+}
+.propelio-popup-remarks {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(6, 182, 212, 0.25);
+  font-size: 11px;
+  color: #333;
+  line-height: 1.45;
+  max-height: 90px;
+  overflow-y: auto;
+}
+
+/* CMA settings chip — small floating panel at bottom-left of the map showing
+   what filter Propelio applied for the most recent fetch. Hidden when no
+   Propelio comps are loaded. */
+.propelio-cma-chip {
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid rgba(6, 182, 212, 0.45);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: #222;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+  max-width: 280px;
+  pointer-events: auto;
+}
+.propelio-cma-chip.hidden {
+  display: none;
+}
+.propelio-cma-chip-title {
+  font-weight: 700;
+  color: #0f8a99;
+  margin-bottom: 3px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  font-size: 10px;
+}
+.propelio-cma-chip-row {
+  font-size: 11px;
+  color: #444;
+}
+.propelio-cma-chip-row.muted {
+  color: #888;
+  font-size: 10px;
+}

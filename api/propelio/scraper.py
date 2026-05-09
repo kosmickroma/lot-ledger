@@ -575,22 +575,6 @@ class PropelioClient:
             f"all returned no items)."
         )
 
-    def _legacy_cma_probe(self, cma_id: str) -> bool:
-        """Lightweight GET to see whether ``/legacy/cma/{cma_id}`` responds OK."""
-        url = CMA_URL_TEMPLATE.format(lead_id=cma_id)
-        self.login()
-        try:
-            response = self.session.get(url, timeout=self.timeout)
-        except requests.RequestException as exc:
-            logger.warning("CMA probe GET failed for %s: %s", url, exc)
-            return False
-        snippet = repr(response.text[:120])
-        logger.info(
-            "CMA probe GET %s [HTTP %s] body[:120]=%s",
-            url, response.status_code, snippet,
-        )
-        return bool(response.ok)
-
     def _get_parcel_detail(self, parcel_uuid: str) -> Dict[str, Any]:
         """GET ``/parcels/v1/parcels/{parcel_uuid}`` (normalized address + lot)."""
         url = PARCEL_DETAIL_TEMPLATE.format(parcel_id=parcel_uuid)
@@ -744,7 +728,7 @@ class PropelioClient:
                optional ``low`` / ``high`` (always returned as a dict
                with all three keys; values may be ``None``).
 
-        Logs a probe ``GET /legacy/cma/{lead_id}``. No hardcoded lead-id shortcut.
+        No hardcoded lead-id shortcut.
         """
         parcel_uuid = self._suggest_parcel_uuid(address)
         parcel = self._get_parcel_detail(parcel_uuid)
@@ -761,7 +745,6 @@ class PropelioClient:
         body = _withaddress_payload_from_parcel(parcel)
         lead_id = self._lead_id_from_withaddress(body)
 
-        self._legacy_cma_probe(lead_id)
         logger.info(
             "Resolved address %r -> lead_id %r (parcel uuid=%r, subject_lot=%s)",
             address, lead_id, parcel_uuid, subject_lot,
@@ -926,6 +909,18 @@ def search_properties(
         subject.extra["valuation"] = valuation
     if isinstance(enrichment, dict):
         subject.extra["parcel_enrichment"] = enrichment
+
+    # Surface CMA-level metadata so callers can show "what filter Propelio
+    # ran" and Propelio's own ARV estimate. ``payload`` is the unwrapped
+    # CMA response dict from ``client.get_cma()``.
+    if isinstance(payload, dict):
+        cma_params = payload.get("params")
+        if isinstance(cma_params, dict):
+            subject.extra["cma_params"] = cma_params
+        for meta_key in ("arv", "arvType", "as_of_dt", "start_dt", "sales_count", "leases_count", "id"):
+            v = payload.get(meta_key)
+            if v is not None:
+                subject.extra[f"cma_{meta_key}"] = v
 
     logger.info(
         "Returned subject + %d comp(s) for address=%r (lead_id=%s)",
@@ -1440,7 +1435,16 @@ def _parse_property(raw: Dict[str, Any]) -> Property:
     elif price is not None and status == "sold":
         extra["close_price"] = price
 
-    for key in ("beds", "baths", "mls", "source"):
+    # High-frequency surface fields from the raw Propelio comp dict. Anything
+    # not in this list is still preserved under ``extra["raw"]`` for the
+    # frontend to dig into (popup builder, CSV export, future enrichment).
+    for key in (
+        "beds", "baths", "mls", "source",
+        "baths_full", "baths_half", "garage",
+        "dom", "list_price", "close_date",
+        "property_type", "property_category",
+        "modified_timestamp", "remarks",
+    ):
         value = raw.get(key)
         if value is not None and value != "":
             extra[key] = value
@@ -1451,6 +1455,14 @@ def _parse_property(raw: Dict[str, Any]) -> Property:
             extra["lat"] = lat
         if lon is not None:
             extra["lon"] = lon
+        zip_code = addr_obj.get("zip") or addr_obj.get("postalCode")
+        if zip_code:
+            extra["zip"] = zip_code
+
+    # Stash the full raw comp dict so the frontend / downstream can access
+    # any field we haven't explicitly surfaced. Keep the structured shortcuts
+    # above for hot paths (popup, sort) but use this for catch-all needs.
+    extra["raw"] = raw
 
     return Property(
         address=address,
