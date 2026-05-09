@@ -19,9 +19,10 @@ sold-comp pricing in this app.
 
 | File | Purpose |
 |---|---|
-| [`SESSION_2026-05-08.md`](./SESSION_2026-05-08.md) | Extreme-detail log of the build session that got us to v1 |
+| [`SESSION_2026-05-08.md`](./SESSION_2026-05-08.md) | Extreme-detail log of the build session that got Phase 1 (cyan dots) shipped |
 | [`ROADMAP.md`](./ROADMAP.md) | What's next — open chunks, polish, hardening, future ideas |
-| [`SPEC.md`](./SPEC.md) | Original 6-chunk Copilot build spec; chunks 1–3 done, 4–6 referenced from ROADMAP |
+| [`SPEC.md`](./SPEC.md) | Phase 1 spec — original 6-chunk Copilot build (cyan dots, address-driven). Chunks 1–3 done. Cyan render gets retired in Phase 2. |
+| [`SPEC_V2_POLYGON.md`](./SPEC_V2_POLYGON.md) | **Phase 2 spec — polygon-driven pulls + purple footprint render.** Active build. Six chunks for Copilot. |
 
 ## Quick reference
 

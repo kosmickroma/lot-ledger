@@ -4,7 +4,29 @@ What's next, ranked roughly by value × effort. Items in **Open** are
 unfinished. Items in **Done** are checked off and kept here for reference
 context.
 
-## 🔴 Highest priority (blocks Mike's actual workflow)
+## 🟢 Active build — Phase 2 (polygon-driven pulls + purple footprints)
+
+**Spec:** [`SPEC_V2_POLYGON.md`](./SPEC_V2_POLYGON.md). Six chunks (A–F)
+for Copilot. Total estimate ~6 hours of Copilot work + ~1 hour of review.
+
+The user draws a polygon → flashy purple "Get Comps" pill button appears
+→ click pulls Propelio (one credit, polygon-driven) → results render as
+transparent purple glowing parcel footprints (not dots) → sidebar card
+with filter strip narrows the 100-pool → save area persists comps to a
+per-area archive → reopen area = zero credits.
+
+Key design decisions (settled with KK 2026-05-09):
+- Pull-on-button (not auto-pull) — explicit credit burn, no surprises
+- Footprint-only render when DB has the parcel; dot fallback when not
+- Legacy redfin_sold + active layers stay, default OFF, localStorage persists
+- 1:N saved_area → comp_archive with UNIQUE(saved_area_id, comp_address_key)
+  per the no-M2M memory rule
+- Propelio-purple distinct from existing redfin_sold purple
+- Transparent fill so satellite shows underneath
+- "Get Comps" button: purple pill, white text, gradient, gentle pulse
+  glow matching the parcel overlay
+
+## 🟡 Phase 1 retros + completed work
 
 ### CMA auto-generation for newly-created leads (the actual root cause)
 
