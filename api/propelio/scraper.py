@@ -850,6 +850,63 @@ class PropelioClient:
             )
         return first
 
+    def search_cma(
+        self,
+        lead_id: str,
+        cma_id: str,
+        months: int = 24,
+        range_mi: float = 7.5,
+    ) -> Dict[str, Any]:
+        """Regenerate the CMA at ``lead_id``/``cma_id`` with new filter
+        params via ``POST /legacy/cma/search/{lead_id}/{cma_id}``.
+
+        This is the call Propelio's web UI fires when a user drags a
+        filter slider in the comp view — confirmed via dev-tools network
+        capture 2026-05-09. Unlike :meth:`add_cma` (where Propelio
+        ignores params on first creation and applies its own defaults),
+        this endpoint **honors** the ``months`` and ``range`` we send,
+        regenerating the comp pool with the new filter applied
+        server-side.
+
+        Body shape (literally 2 fields):
+            ``{"months": <int>, "range": "<float-as-string>"}``
+
+        Returns the regenerated CMA dict (same shape as :meth:`add_cma`).
+
+        ``cma_id`` must come from a prior :meth:`add_cma` call's response
+        — it's the CMA record's own ``id``, NOT the lead_id.
+        """
+        self.login()
+        url = f"{self.base_url}/legacy/cma/search/{lead_id}/{cma_id}"
+        body = {"months": int(months), "range": str(range_mi)}
+        try:
+            response = self.session.post(
+                url, json=body, timeout=max(self.timeout, 90),
+            )
+        except requests.exceptions.RequestException as exc:
+            raise PropelioScraperError(
+                f"search_cma network error against {url}: {exc}"
+            ) from exc
+        if response.status_code >= 400:
+            raise PropelioScraperError(
+                f"search_cma {url} returned HTTP {response.status_code}: "
+                f"{response.text[:300]}"
+            )
+        try:
+            raw = response.json()
+        except ValueError as exc:
+            raise PropelioScraperError(
+                f"search_cma {url} returned non-JSON body: {response.text[:300]}"
+            ) from exc
+        first = self._unwrap_list_envelope(raw, url, "CMA search response")
+        sales_n = len((first.get("data", {}) or {}).get("sales", []) or [])
+        logger.info(
+            "search_cma lead=%s cma=%s months=%d range=%s -> sales=%d (server params=%s)",
+            lead_id, cma_id, months, range_mi, sales_n,
+            first.get("params"),
+        )
+        return first
+
     def get_lead_details(self, lead_id: str) -> Dict[str, Any]:
         """Fetch the full lead record from ``/legacy/leads/{lead_id}``.
 
@@ -924,8 +981,8 @@ def search_properties(
     client: Optional[PropelioClient] = None,
     username: Optional[str] = None,
     password: Optional[str] = None,
-    months: int = 6,
-    range_mi: float = 0.5,
+    months: int = 24,
+    range_mi: float = 7.5,
 ) -> Tuple[Property, List[Property]]:
     """Return ``(subject, comps)`` for ``address``.
 
@@ -966,7 +1023,25 @@ def search_properties(
     try:
         lead_id, subject_lot_sqft, parcel_bundle = client.find_lead_id(address)
         confirmation_key = parcel_bundle.get("confirmation_key") if isinstance(parcel_bundle, dict) else None
-        payload = client.add_cma(lead_id, confirmation_key, months=months, range_mi=range_mi)
+
+        # Step 1 — /add to create or fetch the CMA. Propelio ignores our
+        # months/range here and applies its own defaults (6mo / 0.5mi),
+        # but we need the cma_id from the response to do the real widening.
+        add_payload = client.add_cma(
+            lead_id, confirmation_key, months=6, range_mi=0.5,
+        )
+        cma_id = str(add_payload.get("id") or "")
+
+        # Step 2 — /search to regenerate the CMA with our actual filter
+        # params. This call honors months and range. Skip it only when
+        # the caller asked for Propelio's defaults exactly (pointless 2nd
+        # call) or when we somehow couldn't extract a cma_id.
+        if cma_id and (months != 6 or range_mi != 0.5):
+            payload = client.search_cma(
+                lead_id, cma_id, months=months, range_mi=range_mi,
+            )
+        else:
+            payload = add_payload
     except PropelioScraperError:
         raise
     except Exception as exc:

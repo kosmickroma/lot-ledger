@@ -64,8 +64,8 @@ def _now_iso() -> str:
 @router.get("/by-address")
 async def get_by_address(
     address: str = Query(..., min_length=3),
-    months: int = Query(6, ge=1, le=60),
-    range: float = Query(0.5, gt=0.0, le=10.0),
+    months: int = Query(24, ge=1, le=60),
+    range: float = Query(7.5, gt=0.0, le=10.0),
 ) -> dict[str, Any]:
     address_key_base = cache_mod.normalize_address_key(address)
     if not address_key_base:
