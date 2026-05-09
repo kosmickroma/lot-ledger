@@ -4,6 +4,27 @@ What's next, ranked roughly by value × effort. Items in **Open** are
 unfinished. Items in **Done** are checked off and kept here for reference
 context.
 
+## 🔵 Post-Phase-2 — UX session (deferred, real signal worth its own pass)
+
+KK noted 2026-05-09 that the team has reported the app is **"not very
+user friendly"** during testing. Specific cause(s) unknown — could be
+search/draw flow steps, sidebar density, color coding, mental model,
+filter discoverability. Worth a structured pass:
+
+- Collect the team's actual quotes/notes (not paraphrased)
+- Screen-record someone using it cold — find the 3-5 highest-friction moments
+- Ranked list of fixes; cluster into a Phase 3 "UX polish" sprint
+
+Related design call (also deferred): **two-tier filter model** when we
+expose Propelio pull-time controls (months, radius). Pull-time filters
+go behind a small "settings" gear or collapsible section (only power
+users like Mike touch them; defaults at 24mo / 7.5mi work for most
+team members). Display-time filters (status, sold-within, lot, sqft,
+year, price — Chunk D's spec) stay primary and always-visible. The
+"Get Comps" pill button uses whatever pull-time settings are in place.
+Decision logged to avoid relitigating; UX session validates whether
+this layering actually works for the team.
+
 ## 🟢 Active build — Phase 2 (polygon-driven pulls + purple footprints)
 
 **Spec:** [`SPEC_V2_POLYGON.md`](./SPEC_V2_POLYGON.md). Six chunks (A–F)
