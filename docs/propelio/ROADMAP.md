@@ -4,6 +4,76 @@ What's next, ranked roughly by value × effort. Items in **Open** are
 unfinished. Items in **Done** are checked off and kept here for reference
 context.
 
+## 🟠 Performance — Cap GPU/CPU drain from purple footprint pulse animations
+
+KK noticed 2026-05-09 that his laptop fan ramps to "screaming banshee"
+levels when lot-ledger is open with Propelio comps loaded. As soon as
+the tab closes the fan calms down. **Almost certainly the pulsing CSS
+animations** — each `.propelio-footprint-glow` element has:
+
+- Two layered `drop-shadow()` filters
+- A keyframe (`propelioFootprintPulse`) that mutates both filters AND
+  `fill-opacity` every 2.2s
+- `will-change: filter` GPU hint
+
+Multiplied by 50-100 footprints per polygon pull + the button shimmer +
+the gold saved-parcel pulse already in lot-ledger, the GPU compositor
+is doing a lot of Gaussian-blur recomputation.
+
+Possible mitigations (try in order, cheapest first):
+
+1. **Drop the inner `drop-shadow` layer** — keep just one. Halves filter cost.
+2. **Slow the animation** to 4-6s ease-in-out. Less per-frame work.
+3. **Use `transform: scale()`** instead of filter changes — GPU-friendly.
+4. **Remove the second `drop-shadow` from the keyframe** so only the
+   filter on the base class animates, not the keyframe steps.
+5. **Pause animations when map is idle** — listener on map move/zoom
+   end + idle timer to pause `animation-play-state: paused`.
+6. **Use SVG filter defined once + `filter: url(#...)` reference**
+   instead of CSS `drop-shadow`. More efficient browser-side.
+7. **Box-shadow on a wrapper `g` element** instead of drop-shadow on
+   each path. Single shadow, applied as composite.
+
+For now (KK's request 2026-05-09): leave the visual unchanged, this is
+investigation-and-fix-later.
+
+## 🟠 Post-Chunk-C — Investigate parcel match rate in production
+
+Smoke test on Glenridge Estates polygon showed 98% match rate
+(58/59 comps got a `parcel_geom` from the parcel DB and rendered as
+purple glowing footprints, only 1 fell back to a dot).
+
+**In real use 2026-05-09**, KK observed that *significantly more comps
+fall back to dots vs footprints* than 98% would predict. Hypotheses
+to investigate:
+
+1. **Cross-county address-format differences.** TAD uses `situs_addr`,
+   Collin/Denton use `property_address` like DCAD. Their normalizers
+   may produce different keys for same physical address (e.g., TAD has
+   ZIP appended in some rows; subdivisions formatted differently).
+2. **Direction prefixes** (`N`, `S`, `E`, `W`) — `normalize_addr_key`
+   in `api/redfin.py` doesn't currently strip them. Propelio might
+   send "4044 Williamsburg Rd" while DCAD has "4044 N Williamsburg Rd"
+   (or vice versa).
+3. **Apartment/unit suffixes** stripped from Propelio's address but
+   present in parcel address.
+4. **Bounding-box slack too tight** in `parcel_match.py:_comps_bbox`
+   (currently 0.001 deg ~ 110m). Edge comps near the polygon boundary
+   might miss parcels stored just outside the slack.
+5. **Off-DFW comps** when polygon spillover crosses into uncovered
+   counties (Ellis, Kaufman, Rockwall, Johnson, etc.) — those comps
+   never have parcel_geom because we don't have their parcel data.
+   Those CORRECTLY fall back to dots; only the in-DFW dots are bugs.
+
+**Diagnostic approach (when we get to it):**
+- Add a `match_diagnostic` log per pull: list 10 unmatched in-DFW comps
+  with their normalized key vs nearest parcel's normalized key, side by
+  side. The mismatch pattern should reveal the dominant cause in 2 min.
+- Cross-reference the in-polygon lat/lng of each unmatched comp against
+  the parcel-table footprint count — if there ARE parcels at that
+  location but the join missed, it's a normalizer issue. If no parcels
+  are there, it's a coverage gap.
+
 ## 🔵 Post-Phase-2 — UX session (deferred, real signal worth its own pass)
 
 KK noted 2026-05-09 that the team has reported the app is **"not very
