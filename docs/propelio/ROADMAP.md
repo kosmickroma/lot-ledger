@@ -6,27 +6,60 @@ context.
 
 ## 🔴 Highest priority (blocks Mike's actual workflow)
 
-### Filter widening — get any address to return comps
+### CMA auto-generation for newly-created leads (the actual root cause)
 
-**Problem:** Propelio's account-default CMA filter is narrow (~0.5mi,
-6mo, lot ≤ subject's acreage). Active markets fit; quiet ones don't.
-Currently we have zero override capability — we just pass through whatever
-Propelio's auto-CMA returned.
+**Updated diagnosis 2026-05-09 ~01:30 CDT:** the issue isn't filter
+narrowness — it's that Propelio's API doesn't auto-generate the CMA when
+we create a new lead via `POST /legacy/leads/withaddress`. Verified by
+comparing lead creation timestamps:
 
-**Two paths, do whichever lands first:**
+| Address | Lead created | Comps returned |
+|---|---|---|
+| 4044 Williamsburg Rd | 2025-09-10 (8 months ago) | 42 |
+| 3710 Elsie Faye Heggins St | 2026-05-09 (brand new) | 0 |
+| 5528 Victor St | 2026-05-08 (brand new) | 0 |
 
-- **Path A — change Propelio's account defaults (zero engineering).**
-  Mike (or KK on his behalf) logs into propelio.com → CMA settings →
-  widens defaults globally. Months 6 → 24. Range 0.5 → 2.0. Loosen the
-  lot-size band. Those defaults flow into every API call we make from
-  his account. **Try this first** — could solve the problem without code.
-- **Path B — reverse-engineer Propelio's filter API.**
-  Open browser dev tools on propelio.com while adjusting CMA filter
-  sliders. Network tab will show the exact PATCH/POST shape they use to
-  mutate a CMA's params. Mirror that in `scraper.py` as a `widen_params=...`
-  kwarg. Pass through from the route as `?radius=&months=&...` query
-  params. Tested-failed shapes are already documented in
-  [`SESSION_2026-05-08.md`](./SESSION_2026-05-08.md) Phase 6.
+Williamsburg is an old lead in Mike's account. Mike (or someone) opened
+it in Propelio's web UI back in September, the UI triggered CMA generation,
+and that populated CMA has been sitting in Propelio's DB ever since. New
+leads we create via API have empty CMAs because the UI's
+generation-trigger call never fires.
+
+**This means:** the fix isn't "widen the filter" — it's "find the API
+call Propelio's web UI makes when it generates a CMA for a lead."
+
+**Path forward (one focused step):**
+
+1. KK or I open propelio.com → log in → Network tab in dev tools
+2. Navigate to a lead that has no CMA yet (the recent Elsie Faye Heggins
+   or Victor St leads work — both got created tonight, both empty)
+3. Click "Comps" / "CMA" / whatever the lead-details page calls it
+4. Watch Network tab for the call that returns ~40 properties — that's
+   the missing trigger. Capture URL + method + payload shape.
+5. Port to `scraper.py` as a "force generate" step inside `find_lead_id()`,
+   immediately after `withaddress` lands the lead_id and before
+   `get_cma()` runs.
+6. Optionally accept widen kwargs (months, range, lot caps) and pass them
+   into that generation call so the same code path also handles widening.
+
+Failed reverse-engineering attempts from the build session (kept here so
+we don't repeat them):
+
+| Variant | Result |
+|---|---|
+| `GET /legacy/cma/{lead_id}?months=24&range=2.0` | 400 — "Invalid longitude argument" |
+| `GET /legacy/cma/{lead_id}?lat=&lon=&months=24&range=2.0` | 400 same error |
+| `POST /legacy/cma/{lead_id}` with full mirrored params + lat/lon | 500 — generic api_error |
+| `PATCH/PUT/POST /legacy/cma/{cma_internal_id}` (using CMA's own id) | HTML error page (wrong path) |
+| `POST /legacy/cma` with lead_id in body | HTML page (not the API) |
+
+**Quick free probe before the dev-tools session:** if Mike opens propelio.com
+on the empty leads (8344577 for Elsie Faye Heggins, 8344548 for Victor St)
+and just clicks through the comps view, Propelio's UI will trigger the
+generation call internally. After that, **re-searching those addresses
+on our preview should suddenly return comps from the populated CMA.**
+That's a one-click verification of the entire theory before any code
+work.
 
 ### Chunk 4 — Subject popup enrichment
 
