@@ -1922,41 +1922,207 @@ h1 {
   }
 }
 
-/* ── Propelio comp pin ─────────────────────────────────────────────────────
-   Pulsing cyan glow on the divIcon-based comp marker. Mirrors the
-   savedParcelPulse vibe (drop-shadow stack, 2.2s ease-in-out) so the
-   visual language stays consistent — different color so the user can tell
-   Propelio comps apart from saved/target gold polygons at a glance. */
-.propelio-comp-marker-wrap {
+/* ── Propelio polygon comps (Phase 2) ────────────────────────────────────── */
+/* Static purple glow — no animation. Pulsing was removed per KK 2026-05-09
+   to fix the GPU/fan drain from animating drop-shadows on 50-100 elements
+   continuously. The glow itself stays — just the keyframe motion is off.
+   Keyframe definition is preserved (commented out below) so it's easy to
+   restore if we ever want it back behind a flag. */
+.propelio-footprint-glow {
+  fill: #8b5cf6;
+  fill-opacity: 0.14;
+  stroke: #8b5cf6;
+  stroke-width: 2.5;
+  filter:
+    drop-shadow(0 0 4px rgba(139, 92, 246, 0.95))
+    drop-shadow(0 0 12px rgba(139, 92, 246, 0.55));
+}
+
+.propelio-footprint-glow.sold {
+  fill: #8b5cf6;
+  stroke: #8b5cf6;
+  filter:
+    drop-shadow(0 0 4px rgba(139, 92, 246, 0.95))
+    drop-shadow(0 0 12px rgba(139, 92, 246, 0.55));
+}
+
+.propelio-footprint-glow.active {
+  fill: #dc2626;
+  stroke: #dc2626;
+  filter:
+    drop-shadow(0 0 4px rgba(220, 38, 38, 0.95))
+    drop-shadow(0 0 12px rgba(220, 38, 38, 0.55));
+}
+
+.propelio-footprint-glow.pending {
+  fill: #f59e0b;
+  stroke: #f59e0b;
+  filter:
+    drop-shadow(0 0 4px rgba(245, 158, 11, 0.95))
+    drop-shadow(0 0 12px rgba(245, 158, 11, 0.55));
+}
+
+/*
+@keyframes propelioFootprintPulse {
+  0%, 100% {
+    filter:
+      drop-shadow(0 0 4px rgba(139, 92, 246, 0.95))
+      drop-shadow(0 0 10px rgba(139, 92, 246, 0.45));
+    fill-opacity: 0.10;
+  }
+  50% {
+    filter:
+      drop-shadow(0 0 8px rgba(139, 92, 246, 1))
+      drop-shadow(0 0 18px rgba(139, 92, 246, 0.75));
+    fill-opacity: 0.18;
+  }
+}
+*/
+
+.propelio-fallback-dot-wrap {
   background: transparent;
   border: 0;
 }
 
-.propelio-pulse-marker {
-  width: 12px;
-  height: 12px;
+.propelio-fallback-dot {
+  width: 11px;
+  height: 11px;
   border-radius: 50%;
-  background: #06b6d4;
+  background: #8b5cf6;
   border: 2px solid #ffffff;
   box-sizing: border-box;
-  will-change: filter;
   filter:
-    drop-shadow(0 0 4px rgba(6, 182, 212, 0.95))
-    drop-shadow(0 0 12px rgba(6, 182, 212, 0.55));
-  animation: propelioCompPulse 2.2s ease-in-out infinite;
+    drop-shadow(0 0 4px rgba(139, 92, 246, 0.95))
+    drop-shadow(0 0 10px rgba(139, 92, 246, 0.55));
   cursor: pointer;
 }
 
-@keyframes propelioCompPulse {
-  0%, 100% {
-    filter:
-      drop-shadow(0 0 4px rgba(6, 182, 212, 0.95))
-      drop-shadow(0 0 10px rgba(6, 182, 212, 0.45));
+.propelio-fallback-dot.sold {
+  background: #8b5cf6;
+  filter:
+    drop-shadow(0 0 4px rgba(139, 92, 246, 0.95))
+    drop-shadow(0 0 10px rgba(139, 92, 246, 0.55));
+}
+
+.propelio-fallback-dot.active {
+  background: #dc2626;
+  filter:
+    drop-shadow(0 0 4px rgba(220, 38, 38, 0.95))
+    drop-shadow(0 0 10px rgba(220, 38, 38, 0.55));
+}
+
+.propelio-fallback-dot.pending {
+  background: #f59e0b;
+  filter:
+    drop-shadow(0 0 4px rgba(245, 158, 11, 0.95))
+    drop-shadow(0 0 10px rgba(245, 158, 11, 0.55));
+}
+
+/* Sticky anchor for the Get Comps button. Lives inside the Leaflet map
+   container so it's automatically inside the map area (right of the
+   sidebar) and recenters when the sidebar collapses/expands. */
+.propelio-get-comps-anchor {
+  position: absolute;
+  bottom: 28px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 700; /* above tiles + draw layer, below modals */
+  pointer-events: none; /* let map clicks pass through except on button */
+  display: none;
+}
+
+.propelio-get-comps-anchor.visible {
+  display: block;
+}
+
+.propelio-get-comps-anchor .propelio-get-comps-btn {
+  pointer-events: auto;
+}
+
+/* Legacy wrap class — older marker-based render path. Retained
+   harmlessly in case any css selector still references it. */
+.propelio-get-comps-wrap {
+  background: transparent;
+  border: 0;
+}
+
+.propelio-get-comps-btn {
+  border: 1px solid rgba(255, 255, 255, 0.42);
+  border-radius: 999px;
+  background: linear-gradient(135deg, #8b5cf6 0%, #6d28d9 58%, #5b21b6 100%);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  padding: 8px 18px;
+  min-width: 132px;
+  box-shadow:
+    0 10px 24px rgba(76, 29, 149, 0.35),
+    0 0 0 1px rgba(255, 255, 255, 0.1) inset,
+    0 0 18px rgba(139, 92, 246, 0.46);
+  animation: propelioPillPulse 2.2s ease-in-out infinite;
+  transform: translateZ(0);
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+}
+
+.propelio-get-comps-btn::after {
+  content: "";
+  position: absolute;
+  top: -120%;
+  left: -30%;
+  width: 42%;
+  height: 340%;
+  background: linear-gradient(120deg, rgba(255, 255, 255, 0), rgba(255, 255, 255, 0.34), rgba(255, 255, 255, 0));
+  transform: rotate(18deg);
+  animation: propelioPillShimmer 2.8s linear infinite;
+  pointer-events: none;
+}
+
+.propelio-get-comps-btn:hover:not(:disabled) {
+  transform: scale(1.04);
+  box-shadow:
+    0 12px 28px rgba(76, 29, 149, 0.42),
+    0 0 0 1px rgba(255, 255, 255, 0.15) inset,
+    0 0 22px rgba(139, 92, 246, 0.6);
+}
+
+.propelio-get-comps-btn:disabled {
+  opacity: 0.92;
+  cursor: wait;
+}
+
+@keyframes propelioPillPulse {
+  0%,
+  100% {
+    box-shadow:
+      0 10px 24px rgba(76, 29, 149, 0.35),
+      0 0 0 1px rgba(255, 255, 255, 0.1) inset,
+      0 0 16px rgba(139, 92, 246, 0.4);
   }
   50% {
-    filter:
-      drop-shadow(0 0 8px rgba(6, 182, 212, 1))
-      drop-shadow(0 0 18px rgba(6, 182, 212, 0.75));
+    box-shadow:
+      0 14px 30px rgba(76, 29, 149, 0.45),
+      0 0 0 1px rgba(255, 255, 255, 0.16) inset,
+      0 0 28px rgba(139, 92, 246, 0.68);
+  }
+}
+
+@keyframes propelioPillShimmer {
+  0% {
+    transform: translateX(-220%) rotate(18deg);
+  }
+  100% {
+    transform: translateX(420%) rotate(18deg);
+  }
+}
+
+@media (max-width: 720px) {
+  .propelio-get-comps-btn {
+    min-width: 118px;
+    padding: 7px 14px;
+    font-size: 11px;
   }
 }
 

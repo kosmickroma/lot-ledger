@@ -982,7 +982,7 @@ def search_properties(
     username: Optional[str] = None,
     password: Optional[str] = None,
     months: int = 24,
-    range_mi: float = 7.5,
+    range_mi: float = 1.0,
 ) -> Tuple[Property, List[Property]]:
     """Return ``(subject, comps)`` for ``address``.
 

@@ -421,10 +421,14 @@ let targetBadgeLayer = L.layerGroup().addTo(map);
 // Persistent saved-parcel outlines (cyan). Keyed by account_num for dedup + removal.
 const savedParcelLayer = L.layerGroup().addTo(map);
 const savedParcelLayers = {};
-// Propelio comp pins — cyan pulse-glow markers fired per-address from the
-// search bar. Cleared on each new search. Costs 1 CMA credit per fetch
-// against Mike's account on cache miss; 7-day backend cache absorbs repeats.
+// Propelio comps rendered from address/polygon pulls.
+// Parcel geometry is preferred (purple glowing footprints); missing geometry
+// falls back to compact purple dots.
 const propelioCompLayer = L.layerGroup().addTo(map);
+// (Old marker-based "Get Comps" button retired. The sticky DOM-based
+// version lives in propelioStickyAnchor / propelioStickyBtn declared
+// near _ensureStickyPropelioButton.)
+let propelioPolygonPullInFlight = false;
 let countyLayer = null;
 let countyLabelLayer = null;
 let countyVisible = false;
@@ -2939,6 +2943,15 @@ const PropelioCmaChip = L.Control.extend({
     const cmaId = settings.cma_id ? `CMA #${settings.cma_id}` : "";
     const cached = data.cached ? " · cached" : "";
     const totalSales = settings.sales_count;
+    const fetchedCount = Array.isArray(data.comps) ? data.comps.length : 0;
+    const polygonMeta = data?.polygon_meta && typeof data.polygon_meta === "object" ? data.polygon_meta : null;
+    const insideCount = Number.isFinite(Number(polygonMeta?.comps_in_polygon))
+      ? Number(polygonMeta.comps_in_polygon)
+      : null;
+    const outsideCount = Number.isFinite(Number(polygonMeta?.comps_outside_polygon))
+      ? Number(polygonMeta.comps_outside_polygon)
+      : null;
+    const inWindowCount = Number.isFinite(Number(totalSales)) ? Number(totalSales) : null;
 
     // Empty-result branch: render a friendly "no comps" notice with the warning text.
     if (data.comps.length === 0) {
@@ -2955,8 +2968,9 @@ const PropelioCmaChip = L.Control.extend({
     this._el.innerHTML = `
       <div class="propelio-cma-chip-title">Propelio CMA${cached}</div>
       <div class="propelio-cma-chip-row">${escape(filterLine)}</div>
-      <div class="propelio-cma-chip-row">${data.comps.length} comp${data.comps.length === 1 ? "" : "s"} returned${
-        Number.isFinite(totalSales) && totalSales !== data.comps.length ? ` (of ${totalSales} sales)` : ""
+      <div class="propelio-cma-chip-row">${insideCount != null && outsideCount != null
+        ? `${insideCount} inside · ${outsideCount} outside · ${fetchedCount} fetched · ${inWindowCount != null ? inWindowCount : "—"} total in window`
+        : `${fetchedCount} comp${fetchedCount === 1 ? "" : "s"} returned${Number.isFinite(totalSales) && totalSales !== fetchedCount ? ` (of ${totalSales} sales)` : ""}`
       }</div>
       ${arv ? `<div class="propelio-cma-chip-row"><strong>Propelio ARV:</strong> ${escape(arv)}${escape(arvType)}</div>` : ""}
       ${cmaId ? `<div class="propelio-cma-chip-row muted">${escape(cmaId)}</div>` : ""}
@@ -2972,6 +2986,230 @@ const PropelioCmaChip = L.Control.extend({
 });
 const propelioCmaChip = new PropelioCmaChip().addTo(map);
 
+const PROPELIO_POLYGON_MONTHS = 24;
+
+function _propelioCompLatLng(comp) {
+  const lat = Number(comp?.extra?.lat);
+  const lng = Number(comp?.extra?.lon ?? comp?.extra?.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  return [lat, lng];
+}
+
+function _propelioStatusBucket(comp) {
+  const raw = String(comp?.status || "").trim().toLowerCase();
+  if (raw === "sold") return "sold";
+  if (raw === "pending") return "pending";
+  if (raw === "for_sale") return "active";
+  return "active";
+}
+
+function _pointInPolygonLngLat(lng, lat, polygon) {
+  if (!Array.isArray(polygon) || polygon.length < 3) return false;
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const xi = Number(polygon[i]?.[0]);
+    const yi = Number(polygon[i]?.[1]);
+    const xj = Number(polygon[j]?.[0]);
+    const yj = Number(polygon[j]?.[1]);
+    if (!Number.isFinite(xi) || !Number.isFinite(yi) || !Number.isFinite(xj) || !Number.isFinite(yj)) continue;
+
+    const intersects = ((yi > lat) !== (yj > lat)) &&
+      (lng < ((xj - xi) * (lat - yi)) / ((yj - yi) || 1e-12) + xi);
+    if (intersects) inside = !inside;
+  }
+  return inside;
+}
+
+function _propelioFootprintStyle(statusClass) {
+  return {
+    weight: 2.5,
+    className: `propelio-footprint-glow ${statusClass}`,
+  };
+}
+
+function _renderPropelioComps(data) {
+  propelioCompLayer.clearLayers();
+  if (!data || !Array.isArray(data.comps)) return { total: 0, footprintCount: 0, fallbackCount: 0 };
+
+  let footprintCount = 0;
+  let fallbackCount = 0;
+  let insideCount = 0;
+  const hasPolygonContext = Boolean(data?.polygon_meta) && Array.isArray(lastPolygon) && lastPolygon.length >= 3;
+
+  data.comps.forEach((comp) => {
+    const statusClass = _propelioStatusBucket(comp);
+    const latlng = _propelioCompLatLng(comp);
+    if (hasPolygonContext && latlng && _pointInPolygonLngLat(latlng[1], latlng[0], lastPolygon)) {
+      insideCount += 1;
+    }
+
+    const geom = comp?.parcel_geom;
+    const hasGeom = geom && (geom.type === "Polygon" || geom.type === "MultiPolygon");
+
+    if (hasGeom) {
+      const footprint = L.geoJSON(geom, {
+        style: () => _propelioFootprintStyle(statusClass),
+        onEachFeature: (_feature, layer) => {
+          layer.bindPopup(_propelioBuildPopup(comp));
+        },
+      });
+      footprint.addTo(propelioCompLayer);
+      footprintCount += 1;
+      return;
+    }
+
+    if (!latlng) return;
+
+    const fallbackIcon = L.divIcon({
+      className: "propelio-fallback-dot-wrap",
+      html: `<div class="propelio-fallback-dot ${statusClass}"></div>`,
+      iconSize: [14, 14],
+      iconAnchor: [7, 7],
+    });
+
+    const marker = L.marker(latlng, {
+      icon: fallbackIcon,
+      riseOnHover: true,
+    });
+    marker.bindPopup(_propelioBuildPopup(comp));
+    marker.addTo(propelioCompLayer);
+    fallbackCount += 1;
+  });
+
+  if (data?.polygon_meta) {
+    const total = data.comps.length;
+    data.polygon_meta.comps_in_polygon = insideCount;
+    data.polygon_meta.comps_outside_polygon = Math.max(total - insideCount, 0);
+  }
+
+  return {
+    total: data.comps.length,
+    footprintCount,
+    fallbackCount,
+  };
+}
+
+// Sticky bottom-center button (DOM-anchored, not map-pinned). Lives inside
+// the Leaflet map container so it's automatically right of the sidebar
+// and recenters when the sidebar collapses/expands.
+let propelioStickyAnchor = null;
+let propelioStickyBtn = null;
+
+function _ensureStickyPropelioButton() {
+  if (propelioStickyBtn) return propelioStickyBtn;
+  propelioStickyAnchor = L.DomUtil.create("div", "propelio-get-comps-anchor");
+  propelioStickyBtn = document.createElement("button");
+  propelioStickyBtn.type = "button";
+  propelioStickyBtn.className = "propelio-get-comps-btn";
+  propelioStickyBtn.textContent = "Get Comps";
+  propelioStickyAnchor.appendChild(propelioStickyBtn);
+  L.DomEvent.disableClickPropagation(propelioStickyAnchor);
+  L.DomEvent.disableScrollPropagation(propelioStickyAnchor);
+  L.DomEvent.on(propelioStickyBtn, "click", (evt) => {
+    L.DomEvent.stopPropagation(evt);
+    void _pullPropelioByPolygon();
+  });
+  map.getContainer().appendChild(propelioStickyAnchor);
+  return propelioStickyBtn;
+}
+
+function _removePropelioPolygonButton() {
+  if (propelioStickyAnchor) {
+    propelioStickyAnchor.classList.remove("visible");
+  }
+}
+
+function _setPropelioPolygonButtonState({ text, disabled }) {
+  if (!propelioStickyBtn) return;
+  if (typeof text === "string") propelioStickyBtn.textContent = text;
+  if (typeof disabled === "boolean") propelioStickyBtn.disabled = disabled;
+}
+
+function _polygonButtonLatLng(latlngs) {
+  const pts = Array.isArray(latlngs) ? latlngs : [];
+  if (!pts.length) return null;
+
+  let north = -Infinity;
+  let south = Infinity;
+  let east = -Infinity;
+  let west = Infinity;
+
+  pts.forEach((p) => {
+    const lat = Number(p?.lat);
+    const lng = Number(p?.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+    if (lat > north) north = lat;
+    if (lat < south) south = lat;
+    if (lng > east) east = lng;
+    if (lng < west) west = lng;
+  });
+
+  if (!Number.isFinite(north) || !Number.isFinite(south) || !Number.isFinite(east) || !Number.isFinite(west)) {
+    return null;
+  }
+
+  const centerLng = (east + west) / 2;
+  const latPad = Math.max((north - south) * 0.12, 0.00035);
+  return L.latLng(Math.min(89.9999, north + latPad), centerLng);
+}
+
+async function _pullPropelioByPolygon() {
+  if (propelioPolygonPullInFlight || !Array.isArray(lastPolygon) || lastPolygon.length < 3) return;
+
+  propelioPolygonPullInFlight = true;
+  _setPropelioPolygonButtonState({ text: "Pulling...", disabled: true });
+  propelioCompLayer.clearLayers();
+  propelioCmaChip.hide();
+
+  let shouldHideButton = false;
+  try {
+    const resp = await fetch("/api/propelio/by-polygon", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify({
+        polygon: lastPolygon,
+        months: PROPELIO_POLYGON_MONTHS,
+      }),
+    });
+
+    if (!resp.ok) {
+      console.warn("[propelio] by-polygon fetch failed:", resp.status);
+      return;
+    }
+
+    const data = await resp.json();
+    window._propelioLast = data;
+    const rendered = _renderPropelioComps(data);
+    propelioCmaChip.setData(data);
+    console.info(
+      `[propelio] rendered ${rendered.total} polygon comp(s) (${rendered.footprintCount} footprints, ${rendered.fallbackCount} fallback dots)${data.cached ? " (cached)" : ""}`
+    );
+    shouldHideButton = true;
+  } catch (err) {
+    console.error("[propelio] by-polygon fetch error:", err);
+  } finally {
+    propelioPolygonPullInFlight = false;
+    if (shouldHideButton) {
+      _removePropelioPolygonButton();
+    } else {
+      _setPropelioPolygonButtonState({ text: "Get Comps", disabled: false });
+    }
+  }
+}
+
+function _showPropelioPolygonButton(_latlngs) {
+  // _latlngs no longer needed — button is sticky bottom-center, not
+  // anchored to polygon geometry. Argument retained so existing call
+  // sites don't have to change.
+  _ensureStickyPropelioButton();
+  if (!propelioStickyBtn) return;
+  propelioStickyBtn.textContent = "Get Comps";
+  propelioStickyBtn.disabled = false;
+  if (propelioStickyAnchor) {
+    propelioStickyAnchor.classList.add("visible");
+  }
+}
+
 async function firePropelioFetch(addressString) {
   if (!addressString || typeof addressString !== "string") return;
   propelioCompLayer.clearLayers();
@@ -2984,27 +3222,11 @@ async function firePropelioFetch(addressString) {
     }
     const data = await resp.json();
     window._propelioLast = data;
-    if (!Array.isArray(data?.comps)) return;
-
-    const icon = L.divIcon({
-      className: "propelio-comp-marker-wrap",
-      html: '<div class="propelio-pulse-marker"></div>',
-      iconSize: [16, 16],
-      iconAnchor: [8, 8],
-    });
-
-    let added = 0;
-    data.comps.forEach((comp) => {
-      const lat = Number(comp?.extra?.lat);
-      const lon = Number(comp?.extra?.lon);
-      if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
-      const marker = L.marker([lat, lon], { icon, riseOnHover: true });
-      marker.bindPopup(_propelioBuildPopup(comp));
-      marker.addTo(propelioCompLayer);
-      added += 1;
-    });
+    const rendered = _renderPropelioComps(data);
     propelioCmaChip.setData(data);
-    console.info(`[propelio] rendered ${added} comp pin(s)${data.cached ? " (cached)" : ""}`);
+    console.info(
+      `[propelio] rendered ${rendered.total} address comp(s) (${rendered.footprintCount} footprints, ${rendered.fallbackCount} fallback dots)${data.cached ? " (cached)" : ""}`
+    );
   } catch (e) {
     console.error("[propelio] fetch error:", e);
   }
@@ -3131,6 +3353,10 @@ const AddressSearch = L.Control.extend({
       const item = suggestItems[idx];
       if (!item) return;
       highlightSearchResult([Number(item.lat), Number(item.lng)]);
+      // Address search auto-pulls Propelio comps (matches Propelio's
+      // single-step "search address -> see comps" mental model that
+      // Mike's team is used to). Polygon-button still available for
+      // area-scouting workflows.
       const addr = [item.address, item.city, "TX"].filter(Boolean).join(", ");
       firePropelioFetch(addr);
     };
@@ -3220,6 +3446,8 @@ const AddressSearch = L.Control.extend({
         const { lat, lon } = results[0];
         const latlng = [parseFloat(lat), parseFloat(lon)];
         highlightSearchResult(latlng);
+        // Address search auto-pulls Propelio (see note in
+        // selectSuggestion).
         firePropelioFetch(q);
       } catch {
         btn.textContent = "Error";
@@ -4911,6 +5139,12 @@ map.on("draw:created", async (e) => {
   const polygon = e.layer.getLatLngs()[0].map((ll) => [ll.lng, ll.lat]);
   lastDrawnLatLngs = e.layer.getLatLngs()[0].map((ll) => [ll.lat, ll.lng]);
   lastPolygon = polygon;
+  // Clear any Propelio comps + chip from a prior polygon — those comps
+  // were filtered to a different shape and shouldn't linger when the
+  // user redraws.
+  propelioCompLayer.clearLayers();
+  propelioCmaChip.hide();
+  _showPropelioPolygonButton(e.layer.getLatLngs()[0]);
   const analysisRequest = beginLatestAnalysisRequest();
 
   try {
@@ -5001,6 +5235,7 @@ function clearDrawResults() {
   clearTimeout(_vpRenderTimeout);
   drawLayer.clearLayers();
   maskLayer.clearLayers();
+  _removePropelioPolygonButton();
   if (!map.hasLayer(browseLayer)) browseLayer.addTo(map);
   PARCEL_LAYER_KEYS.forEach((key) => parcelTypeLayers[key]?.clearLayers());
   redfinLayer.clearLayers();
