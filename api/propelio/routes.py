@@ -21,10 +21,11 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from api.config import get_conn, release_conn
+from api.config import get_conn, get_session_conn, release_conn, release_session_conn
 from api.geo import haversine_miles, point_in_polygon, polygon_centroid
 from api.redfin import normalize_addr_key
 
+from .archive import load_archived_comps, merge_comps_into_archive
 from .parcel_match import match_comps_to_parcels
 from . import cache as cache_mod
 from . import scraper as scraper_mod
@@ -36,6 +37,13 @@ router = APIRouter(prefix="/api/propelio", tags=["propelio"])
 
 class PolygonRequest(BaseModel):
     polygon: list[list[float]]
+    months: int = 24
+    range_override_mi: float | None = None
+    saved_area_id: str | None = None
+
+
+class RefreshRequest(BaseModel):
+    saved_area_id: str
     months: int = 24
     range_override_mi: float | None = None
 
@@ -232,6 +240,176 @@ def _comp_point(comp: Any) -> tuple[float | None, float | None]:
     return lat, lng
 
 
+def _load_saved_area_polygon(saved_area_id: str) -> list[list[float]]:
+    normalized = str(saved_area_id or "").strip()
+    if not normalized:
+        raise HTTPException(status_code=400, detail="saved_area_id is required")
+
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT polygon
+                FROM saved_areas
+                WHERE area_id = %s
+                LIMIT 1
+                """,
+                (normalized,),
+            )
+            row = cur.fetchone()
+    finally:
+        release_session_conn(conn)
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="saved_area_id not found")
+
+    polygon = row[0]
+    if not isinstance(polygon, list):
+        raise HTTPException(status_code=422, detail="Saved area polygon is invalid")
+    return _validate_polygon(polygon)
+
+
+async def _run_by_polygon(request: PolygonRequest, *, use_cache: bool) -> dict[str, Any]:
+    polygon = _validate_polygon(request.polygon)
+    months = int(request.months)
+    saved_area_id = str(request.saved_area_id or "").strip() or None
+    centroid_lat, centroid_lng = polygon_centroid(polygon)
+    circumradius_mi = max(
+        haversine_miles(centroid_lat, centroid_lng, point_lat, point_lng)
+        for point_lng, point_lat in polygon
+    )
+    computed_range_mi = min(circumradius_mi * 1.05, 10.0)
+    if request.range_override_mi is None:
+        range_mi = computed_range_mi
+    else:
+        range_mi = min(max(float(request.range_override_mi), 0.01), 10.0)
+
+    cache_key = _polygon_cache_key(polygon, months, range_mi)
+    if use_cache:
+        cached = cache_mod.get_cached(cache_key)
+        if cached is not None:
+            cached_payload = dict(cached)
+            cached_payload["comps"] = match_comps_to_parcels(cached_payload.get("comps") or [])
+            polygon_meta = cached_payload.get("polygon_meta")
+            if isinstance(polygon_meta, dict):
+                comps_pulled = polygon_meta.get("comps_pulled")
+                if not isinstance(comps_pulled, int):
+                    comps_pulled = len(cached_payload.get("comps") or [])
+                comps_in_polygon = polygon_meta.get("comps_in_polygon")
+                if not isinstance(comps_in_polygon, int):
+                    comps_in_polygon = 0
+                polygon_meta["comps_outside_polygon"] = max(comps_pulled - comps_in_polygon, 0)
+            if saved_area_id:
+                cached_payload["archive_meta"] = merge_comps_into_archive(saved_area_id, cached_payload.get("comps") or [])
+            return {"cached": True, **cached_payload}
+
+    subject_parcel = _nearest_subject_parcel(centroid_lat, centroid_lng)
+    if subject_parcel is None:
+        raise HTTPException(status_code=404, detail="No parcel found near polygon centroid")
+
+    try:
+        subject, comps_list = await asyncio.to_thread(
+            scraper_mod.search_properties,
+            subject_parcel["address"],
+            months=months,
+            range_mi=range_mi,
+        )
+    except scraper_mod.PropelioScraperError as exc:
+        msg = str(exc)
+        if "empty list" in msg.lower():
+            empty_payload = {
+                "fetched_at": _now_iso(),
+                "balance": None,
+                "cma_settings": {
+                    "params": None,
+                    "arv": None,
+                    "arv_type": None,
+                    "as_of_dt": None,
+                    "start_dt": None,
+                    "sales_count": 0,
+                    "leases_count": None,
+                    "cma_id": None,
+                },
+                "subject": {
+                    "address": subject_parcel["address"],
+                    "lot_size": None,
+                    "sqft": None,
+                    "year_built": None,
+                    "neighborhood": None,
+                    "lat": None,
+                    "lon": None,
+                    "parcel_enrichment": None,
+                    "valuation": None,
+                    "transfer_history": None,
+                    "raw": None,
+                },
+                "comps": [],
+                "polygon_meta": {
+                    "centroid": {"lat": centroid_lat, "lng": centroid_lng},
+                    "circumradius_mi": circumradius_mi,
+                    "subject_parcel": {
+                        "address": subject_parcel["address"],
+                        "county": subject_parcel["county"],
+                        "account_num": subject_parcel["account_num"],
+                    },
+                    "comps_pulled": 0,
+                    "comps_in_polygon": 0,
+                    "comps_outside_polygon": 0,
+                },
+                "warning": "Propelio resolved the centroid parcel but returned 0 comps for the polygon pull under the current filter settings.",
+            }
+            if saved_area_id:
+                empty_payload["archive_meta"] = merge_comps_into_archive(saved_area_id, [])
+            return {"cached": False, **empty_payload}
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Propelio service unavailable", "error": msg},
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Address not resolvable on Propelio") from exc
+    except Exception as exc:
+        logger.exception("Unexpected Propelio by-polygon error")
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "Unexpected error", "error": str(exc)},
+        )
+
+    comps_in_polygon = 0
+    for comp in comps_list:
+        lat, lng = _comp_point(comp)
+        if lat is None or lng is None:
+            continue
+        if point_in_polygon(lat, lng, polygon):
+            comps_in_polygon += 1
+
+    payload = _build_payload(subject, comps_list)
+    payload["comps"] = match_comps_to_parcels(payload.get("comps") or [])
+    comps_pulled = len(comps_list)
+    payload["polygon_meta"] = {
+        "centroid": {"lat": centroid_lat, "lng": centroid_lng},
+        "circumradius_mi": circumradius_mi,
+        "subject_parcel": {
+            "address": subject_parcel["address"],
+            "county": subject_parcel["county"],
+            "account_num": subject_parcel["account_num"],
+        },
+        "comps_pulled": comps_pulled,
+        "comps_in_polygon": comps_in_polygon,
+        "comps_outside_polygon": max(comps_pulled - comps_in_polygon, 0),
+    }
+
+    if saved_area_id:
+        payload["archive_meta"] = merge_comps_into_archive(saved_area_id, payload.get("comps") or [])
+
+    if use_cache:
+        cache_payload = dict(payload)
+        cache_payload.pop("archive_meta", None)
+        cache_mod.log_quota(payload.get("balance"), cache_key)
+        cache_mod.put_cached(cache_key, cache_payload)
+    return {"cached": False, **payload}
+
+
 @router.get("/by-address")
 async def get_by_address(
     address: str = Query(..., min_length=3),
@@ -306,128 +484,44 @@ async def get_by_address(
 
 
 @router.post("/by-polygon")
-async def get_by_polygon(request: PolygonRequest) -> dict[str, Any]:
-    polygon = _validate_polygon(request.polygon)
-    months = int(request.months)
-    centroid_lat, centroid_lng = polygon_centroid(polygon)
-    circumradius_mi = max(
-        haversine_miles(centroid_lat, centroid_lng, point_lat, point_lng)
-        for point_lng, point_lat in polygon
+async def get_by_polygon(
+    request: PolygonRequest,
+    saved_area_id: str | None = Query(None),
+) -> dict[str, Any]:
+    body_saved_area_id = str(request.saved_area_id or "").strip() or None
+    query_saved_area_id = str(saved_area_id or "").strip() or None
+    effective_saved_area_id = query_saved_area_id or body_saved_area_id
+
+    effective_request = PolygonRequest(
+        polygon=request.polygon,
+        months=request.months,
+        range_override_mi=request.range_override_mi,
+        saved_area_id=effective_saved_area_id,
     )
-    computed_range_mi = min(circumradius_mi * 1.05, 10.0)
-    if request.range_override_mi is None:
-        range_mi = computed_range_mi
-    else:
-        range_mi = min(max(float(request.range_override_mi), 0.01), 10.0)
+    return await _run_by_polygon(effective_request, use_cache=True)
 
-    cache_key = _polygon_cache_key(polygon, months, range_mi)
-    cached = cache_mod.get_cached(cache_key)
-    if cached is not None:
-        cached_payload = dict(cached)
-        cached_payload["comps"] = match_comps_to_parcels(cached_payload.get("comps") or [])
-        polygon_meta = cached_payload.get("polygon_meta")
-        if isinstance(polygon_meta, dict):
-            comps_pulled = polygon_meta.get("comps_pulled")
-            if not isinstance(comps_pulled, int):
-                comps_pulled = len(cached_payload.get("comps") or [])
-            comps_in_polygon = polygon_meta.get("comps_in_polygon")
-            if not isinstance(comps_in_polygon, int):
-                comps_in_polygon = 0
-            polygon_meta["comps_outside_polygon"] = max(comps_pulled - comps_in_polygon, 0)
-        return {"cached": True, **cached_payload}
 
-    subject_parcel = _nearest_subject_parcel(centroid_lat, centroid_lng)
-    if subject_parcel is None:
-        raise HTTPException(status_code=404, detail="No parcel found near polygon centroid")
+@router.post("/refresh")
+async def refresh_by_saved_area(request: RefreshRequest) -> dict[str, Any]:
+    saved_area_id = str(request.saved_area_id or "").strip()
+    if not saved_area_id:
+        raise HTTPException(status_code=400, detail="saved_area_id is required")
 
-    try:
-        subject, comps_list = await asyncio.to_thread(
-            scraper_mod.search_properties,
-            subject_parcel["address"],
-            months=months,
-            range_mi=range_mi,
-        )
-    except scraper_mod.PropelioScraperError as exc:
-        msg = str(exc)
-        if "empty list" in msg.lower():
-            empty_payload = {
-                "fetched_at": _now_iso(),
-                "balance": None,
-                "cma_settings": {
-                    "params": None,
-                    "arv": None,
-                    "arv_type": None,
-                    "as_of_dt": None,
-                    "start_dt": None,
-                    "sales_count": 0,
-                    "leases_count": None,
-                    "cma_id": None,
-                },
-                "subject": {
-                    "address": subject_parcel["address"],
-                    "lot_size": None,
-                    "sqft": None,
-                    "year_built": None,
-                    "neighborhood": None,
-                    "lat": None,
-                    "lon": None,
-                    "parcel_enrichment": None,
-                    "valuation": None,
-                    "transfer_history": None,
-                    "raw": None,
-                },
-                "comps": [],
-                "polygon_meta": {
-                    "centroid": {"lat": centroid_lat, "lng": centroid_lng},
-                    "circumradius_mi": circumradius_mi,
-                    "subject_parcel": {
-                        "address": subject_parcel["address"],
-                        "county": subject_parcel["county"],
-                        "account_num": subject_parcel["account_num"],
-                    },
-                    "comps_pulled": 0,
-                    "comps_in_polygon": 0,
-                    "comps_outside_polygon": 0,
-                },
-                "warning": "Propelio resolved the centroid parcel but returned 0 comps for the polygon pull under the current filter settings.",
-            }
-            return {"cached": False, **empty_payload}
-        return JSONResponse(
-            status_code=503,
-            content={"detail": "Propelio service unavailable", "error": msg},
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail="Address not resolvable on Propelio") from exc
-    except Exception as exc:
-        logger.exception("Unexpected Propelio by-polygon error")
-        return JSONResponse(
-            status_code=500,
-            content={"detail": "Unexpected error", "error": str(exc)},
-        )
+    polygon = _load_saved_area_polygon(saved_area_id)
+    by_poly_request = PolygonRequest(
+        polygon=polygon,
+        months=int(request.months),
+        range_override_mi=request.range_override_mi,
+        saved_area_id=saved_area_id,
+    )
+    response = await _run_by_polygon(by_poly_request, use_cache=False)
+    response["comps"] = load_archived_comps(saved_area_id)
+    return response
 
-    comps_in_polygon = 0
-    for comp in comps_list:
-        lat, lng = _comp_point(comp)
-        if lat is None or lng is None:
-            continue
-        if point_in_polygon(lat, lng, polygon):
-            comps_in_polygon += 1
 
-    payload = _build_payload(subject, comps_list)
-    payload["comps"] = match_comps_to_parcels(payload.get("comps") or [])
-    comps_pulled = len(comps_list)
-    payload["polygon_meta"] = {
-        "centroid": {"lat": centroid_lat, "lng": centroid_lng},
-        "circumradius_mi": circumradius_mi,
-        "subject_parcel": {
-            "address": subject_parcel["address"],
-            "county": subject_parcel["county"],
-            "account_num": subject_parcel["account_num"],
-        },
-        "comps_pulled": comps_pulled,
-        "comps_in_polygon": comps_in_polygon,
-        "comps_outside_polygon": max(comps_pulled - comps_in_polygon, 0),
-    }
-    cache_mod.log_quota(payload.get("balance"), cache_key)
-    cache_mod.put_cached(cache_key, payload)
-    return {"cached": False, **payload}
+@router.get("/by-saved-area")
+async def get_by_saved_area(saved_area_id: str = Query(..., min_length=1)) -> dict[str, Any]:
+    normalized = str(saved_area_id or "").strip()
+    if not normalized:
+        raise HTTPException(status_code=400, detail="saved_area_id is required")
+    return {"comps": load_archived_comps(normalized)}
