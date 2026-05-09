@@ -30,6 +30,36 @@ Existing Redfin sold + active layers stay in the code as **legacy** —
 default OFF on load with localStorage persistence for the user's last
 choice. Mike's team can still toggle them back on.
 
+## SCOPE LOCK (read this first, every chunk)
+
+**You are working in exactly one repository:** `lot-ledger-pro`, located at
+`/home/kk/projects/clients/lot-ledger-pro/`.
+
+**Forbidden — do not read, edit, run commands in, or otherwise touch:**
+
+- `/home/kk/projects/clients/lot-ledger/` (the original lot-ledger repo)
+- `/home/kk/projects/clients/real-estate-comps/` (the standalone Propelio CLI)
+- `/home/kk/projects/clients/deepfin/` (the Redfin scraper)
+- `/home/kk/projects/clients/redfin/` and `redfin-harvest/`
+- `/home/kk/projects/clients/bylersonsgarage/` and similar sibling folders
+- Any folder outside `/home/kk/projects/clients/lot-ledger-pro/`
+- Any system path (`/etc`, `/var`, `~/.config`, `~/.claude`, etc.)
+
+**If you need to know what some other code does:** the SPEC documents
+the behavior. Trust the spec. Don't go peeking into adjacent repos for
+context — they're either out of scope or already vendored into this
+repo's `api/propelio/`.
+
+**Allowed:** anything inside `/home/kk/projects/clients/lot-ledger-pro/`,
+subject to the per-chunk "Files to NOT touch" list below.
+
+**Confirm understanding:** before writing any code, your first response
+must include the line:
+> Scope confirmed: working only in /home/kk/projects/clients/lot-ledger-pro/
+
+If at any point you find yourself wanting to read or modify a file
+outside that path, **stop and report instead.**
+
 ## Hard rules across all chunks
 
 - **No M2M.** The saved-area ↔ comps relationship is 1:N with the
