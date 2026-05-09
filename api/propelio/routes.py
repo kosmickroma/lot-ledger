@@ -62,17 +62,31 @@ def _now_iso() -> str:
 
 
 @router.get("/by-address")
-async def get_by_address(address: str = Query(..., min_length=3)) -> dict[str, Any]:
-    address_key = cache_mod.normalize_address_key(address)
-    if not address_key:
+async def get_by_address(
+    address: str = Query(..., min_length=3),
+    months: int = Query(6, ge=1, le=60),
+    range: float = Query(0.5, gt=0.0, le=10.0),
+) -> dict[str, Any]:
+    address_key_base = cache_mod.normalize_address_key(address)
+    if not address_key_base:
         raise HTTPException(status_code=400, detail="Address is required")
+
+    # Cache key includes filter params so different settings don't collide.
+    # Only fresh CMA generations honor these params — existing CMAs return
+    # cached data — but cache key still distinguishes for clarity.
+    address_key = f"{address_key_base}|m{months}|r{range}"
 
     cached = cache_mod.get_cached(address_key)
     if cached is not None:
         return {"cached": True, **cached}
 
     try:
-        subject, comps_list = await asyncio.to_thread(scraper_mod.search_properties, address)
+        subject, comps_list = await asyncio.to_thread(
+            scraper_mod.search_properties,
+            address,
+            months=months,
+            range_mi=range,
+        )
     except scraper_mod.PropelioScraperError as exc:
         msg = str(exc)
         # Empty CMA / lead-details lists are not real failures — they mean

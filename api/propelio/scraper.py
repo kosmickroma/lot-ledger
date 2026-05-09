@@ -637,14 +637,18 @@ class PropelioClient:
         )
         return response.status_code, payload, response.text
 
-    def _lead_id_from_withaddress(self, body: Dict[str, Any]) -> str:
+    def _lead_id_from_withaddress(self, body: Dict[str, Any]) -> Tuple[str, Optional[str]]:
         """Two-step ``/legacy/leads/withaddress`` flow with ``confirmationKey``.
+
+        Returns ``(lead_id, confirmation_key)``. The confirmation_key is
+        retained because :meth:`add_cma` reuses it to trigger CMA generation
+        on the lead — same key the web UI uses internally.
 
         Step 1
             POST ``body`` (no ``confirmationKey``). Expected HTTP 409 with
             ``error.confirmationKey`` set. If the server happens to return
             200 with a usable ``result.id`` already, short-circuits and
-            returns that lead id.
+            returns ``(lead_id, None)``.
 
         Step 2
             POST the same ``body`` with ``confirmationKey`` added. Expected
@@ -663,7 +667,7 @@ class PropelioClient:
                     "needing a confirmationKey",
                     lead_id,
                 )
-                return lead_id
+                return lead_id, None
             raise PropelioScraperError(
                 "withaddress step1 returned HTTP 200 but no extractable "
                 f"lead id; keys={list(payload1.keys())}; raw={raw1!r}"
@@ -698,7 +702,7 @@ class PropelioClient:
 
         lead_id = _extract_lead_id_from_withaddress_json(payload2)
         if lead_id:
-            return lead_id
+            return lead_id, confirmation_key
 
         raise PropelioScraperError(
             "withaddress step2 returned no extractable lead id "
@@ -743,14 +747,18 @@ class PropelioClient:
             )
 
         body = _withaddress_payload_from_parcel(parcel)
-        lead_id = self._lead_id_from_withaddress(body)
+        lead_id, confirmation_key = self._lead_id_from_withaddress(body)
 
         logger.info(
-            "Resolved address %r -> lead_id %r (parcel uuid=%r, subject_lot=%s)",
-            address, lead_id, parcel_uuid, subject_lot,
+            "Resolved address %r -> lead_id %r (parcel uuid=%r, subject_lot=%s, has_ck=%s)",
+            address, lead_id, parcel_uuid, subject_lot, bool(confirmation_key),
         )
         enrichment = _parcel_subject_enrichment(parcel, valuation)
-        parcel_bundle = {"valuation": valuation, "enrichment": enrichment}
+        parcel_bundle = {
+            "valuation": valuation,
+            "enrichment": enrichment,
+            "confirmation_key": confirmation_key,
+        }
         return lead_id, subject_lot, parcel_bundle
 
     # -- CMA / lead helpers --------------------------------------------------
@@ -775,6 +783,70 @@ class PropelioClient:
             logger.info(
                 "Unwrapped CMA list response (len=%d, first.id=%s) for lead_id=%s",
                 len(raw), wrapper_id, lead_id,
+            )
+        return first
+
+    def add_cma(
+        self,
+        lead_id: str,
+        confirmation_key: Optional[str],
+        months: int = 6,
+        range_mi: float = 0.5,
+    ) -> Dict[str, Any]:
+        """Trigger CMA generation/refresh for ``lead_id`` via ``POST
+        /legacy/cma/add/{lead_id}`` and return the populated CMA dict.
+
+        This is the call Propelio's web UI makes when a user opens the
+        Comparable Sales view on a lead. Unlike ``get_cma`` (which only
+        returns a CMA if one was *already generated*, typical for old
+        leads someone has clicked through in the UI), ``add_cma`` works
+        for **brand-new leads we just created via the API** — it generates
+        the CMA on-demand and returns it directly.
+
+        Reverse-engineered from Propelio's web UI network calls
+        2026-05-09. Body shape (small) is ``{confirmationKey, months,
+        range}``. ``confirmation_key`` is reused from the
+        ``withaddress`` flow's step1 409 response (same key works here).
+        ``months`` and ``range`` are the time-window and radius filters;
+        omitting ``lot_size_acres`` from the body causes Propelio to drop
+        its default lot-size cap, which is *desired* for teardown comp
+        use cases.
+
+        For leads that were ALREADY generated previously, Propelio
+        returns the cached CMA and the ``months``/``range`` we send may
+        be ignored. To re-run with new params on an existing CMA, the
+        UI fires a different mutation we have not yet captured.
+        """
+        self.login()
+        url = f"{self.base_url}/legacy/cma/add/{lead_id}"
+        body: Dict[str, Any] = {"months": int(months), "range": str(range_mi)}
+        if confirmation_key:
+            body["confirmationKey"] = confirmation_key
+        try:
+            response = self.session.post(
+                url, json=body, timeout=self.timeout,
+            )
+        except requests.exceptions.RequestException as exc:
+            raise PropelioScraperError(
+                f"add_cma network error against {url}: {exc}"
+            ) from exc
+        if response.status_code >= 400:
+            raise PropelioScraperError(
+                f"add_cma {url} returned HTTP {response.status_code}: "
+                f"{response.text[:300]}"
+            )
+        try:
+            raw = response.json()
+        except ValueError as exc:
+            raise PropelioScraperError(
+                f"add_cma {url} returned non-JSON body: {response.text[:300]}"
+            ) from exc
+        first = self._unwrap_list_envelope(raw, url, "CMA add response")
+        if isinstance(raw, list):
+            logger.info(
+                "add_cma list response (len=%d) for lead_id=%s — sales=%d",
+                len(raw), lead_id,
+                len((first.get("data", {}) or {}).get("sales", []) or []),
             )
         return first
 
@@ -852,23 +924,29 @@ def search_properties(
     client: Optional[PropelioClient] = None,
     username: Optional[str] = None,
     password: Optional[str] = None,
+    months: int = 6,
+    range_mi: float = 0.5,
 ) -> Tuple[Property, List[Property]]:
     """Return ``(subject, comps)`` for ``address``.
 
     Flow: resolve the address to a ``lead_id`` (parcel suggest → parcel
-    detail → ``/legacy/leads/withaddress``), then fetch ``/legacy/cma/{id}``
-    and parse the result.
+    detail → ``/legacy/leads/withaddress``), then **trigger CMA generation
+    via** ``POST /legacy/cma/add/{lead_id}`` (the call Propelio's web UI
+    makes — fixes the "empty CMA on brand-new leads" issue) and parse the
+    result.
 
     ``subject`` is always a :class:`Property` so callers don't need to
     null-check; if the CMA payload doesn't carry recoverable subject
     metadata, a synthetic Property with only ``address`` populated is
     returned and the comp engine will skip filtering (logged at WARNING).
 
-    ``radius`` is *not* sent to the server — Propelio's CMA endpoint
-    returns its own pre-selected comp set; ``comp_engine.filter_comps``
-    enforces the radius threshold post-hoc. The kwarg is kept in the
-    signature for compatibility with existing callers (``main.py``) and
-    is logged for visibility.
+    ``radius`` is the CLI's filter knob (post-hoc, in
+    ``comp_engine.filter_comps``); ``range_mi`` is what we send to Propelio
+    server-side via the CMA add call. ``months`` is the time-window filter
+    sent to Propelio. ``range_mi`` and ``months`` only affect FRESH CMA
+    generation — for already-generated CMAs, Propelio returns the cached
+    version and these params are ignored (TODO: capture the slider-drag
+    mutation to handle that case).
 
     If ``client`` is omitted, a fresh authenticated client is built from
     the supplied credentials (or ``config.PROPELIO_USERNAME`` /
@@ -881,13 +959,14 @@ def search_properties(
         client = login_propelio(username, password)
 
     logger.info(
-        "Looking up Propelio lead for %r (filter radius=%.2f mi)",
-        address, radius,
+        "Looking up Propelio lead for %r (cli radius=%.2f mi; CMA add months=%d range=%s)",
+        address, radius, months, range_mi,
     )
 
     try:
         lead_id, subject_lot_sqft, parcel_bundle = client.find_lead_id(address)
-        payload = client.get_cma(lead_id)
+        confirmation_key = parcel_bundle.get("confirmation_key") if isinstance(parcel_bundle, dict) else None
+        payload = client.add_cma(lead_id, confirmation_key, months=months, range_mi=range_mi)
     except PropelioScraperError:
         raise
     except Exception as exc:
