@@ -47,70 +47,59 @@ outside that path, **stop and report instead.**
     Use `api.config.get_session_conn()` / `release_session_conn()`,
     NOT `get_conn()`.
 
-## ⚠️ DESIGN CLARIFICATION — Workspace = Anchor Parcel + Polygon (not just polygon)
+## ⚠️ DESIGN CLARIFICATION — Polygon centroid IS the right search anchor
 
-**Updated 2026-05-09 by KK:** the spec's original definition of
-"workspace = saved_areas row" is INCOMPLETE. The full mental model is:
+**Updated 2026-05-09 — second pass after KK pushback:** earlier draft
+of this section argued for changing the Propelio subject to the user's
+target parcel. **That was wrong.** Keeping the existing centroid-based
+logic is correct.
 
-> **Workspace = a TARGET (saved_parcel) + a POLYGON drawn around it.**
-> The user is trying to value a SPECIFIC house; the polygon defines
-> the geographic search area for comps that relate to that house.
+### Why centroid (not target) is the right anchor
 
-### Current implementation gap
+The polygon **encodes** the user's definition of "comparable area." They
+draw it around the neighborhood they consider the right comp pool —
+deliberately excluding adjacent neighborhoods, school districts, or
+markets. The polygon's centroid sits in the heart of the chosen area
+by construction.
 
-`api/propelio/routes.py:_nearest_subject_parcel` picks the **parcel
-closest to the polygon's geometric centroid** as the Propelio subject.
-That subject anchors what Propelio considers "comparable" — proximity,
-lot size, age, etc. — for the 100 comps it returns.
+If the **target** is on the edge of the polygon (common for corner-lot
+or boundary properties Mike actually buys), centering the Propelio
+search on the target would project half the search circle into a
+neighborhood the user explicitly excluded. That breaks the comp pool.
 
-**Result:** if Mike saves 4044 Williamsburg Rd as his target and draws
-a polygon around it, but the polygon's centroid happens to land near
-9912 Lakemont Dr (a random house 0.3mi away), Propelio's 100 comps
-get ranked-relative-to-Lakemont — not Williamsburg. The user's target
-is **not** the anchor.
+The polygon centroid is already the right geographic anchor. The user
+solved the edge-of-neighborhood problem by drawing a smart polygon —
+we shouldn't override their geometry.
 
-### Fix that needs to happen (NOT in this Phase 3 cycle, but soon after)
+### What Phase 3.5 should actually do (UI work, NOT schema or route)
 
-The `/by-polygon` flow should use the **saved_parcel inside the polygon
-as the Propelio subject**, falling back to centroid only when no saved
-parcel exists in the area. Specifically:
+The user's target parcel still matters — for **relevance scoring within
+the polygon's comp pool**, not for the search anchor.
 
-1. Schema: add `saved_areas.anchor_parcel_id` (TEXT, nullable, FK or
-   reference to `saved_parcels.id`) — the user-designated target
-   property for this workspace. UI lets user set this when saving the
-   area, or pick from saved_parcels inside the polygon at refresh time.
-2. Route: `_nearest_subject_parcel` becomes `_resolve_subject_parcel`
-   that prefers `anchor_parcel_id` → first `saved_parcels` row inside
-   polygon → falls back to closest-to-centroid.
-3. Frontend: when user clicks "Save area," prompt "Which saved parcel
-   is your target for this area?" (default = the most-recently-saved
-   parcel inside the polygon). Stored on `saved_areas.anchor_parcel_id`.
-4. Validation: if anchor_parcel_id is set, ensure it's inside the
-   polygon (or warn user). Re-pull recomputes off the new anchor if
-   user changes it.
+1. **Target marker on map** — render the saved target parcel as a
+   prominent gold/glowing marker on top of the purple/red/amber comp
+   pool, so the user always sees "here's my house, here's everything
+   around it"
+2. **Relevance score per comp (client-side)** — each comp gets a score
+   based on lot-size delta, year-built delta, sqft delta, distance from
+   target. Pure client-side compute on data we already have. Doesn't
+   change what Propelio returns.
+3. **Sidebar list sorted by relevance-to-target by default** — best
+   comps for THIS specific target rise to the top, even though the
+   comp pool itself was anchored on the polygon centroid
+4. **Optional "highlight top 5 for this target" toggle** — extra glow
+   on the 5 comps most similar to the target, so the user's eye finds
+   them first
 
-### Why this is critical (KK's words)
+**No schema change. No route change. No `anchor_parcel_id` column.**
+Just frontend UX work that uses an existing concept (saved target) on
+existing data (the comp pool).
 
-> "we are trying to get comps for the saved parcel remember thats very
-> important... we use the center of that for the area but we really
-> need relatable stuff to our target parcel 'house'"
+### Phase 3.5 sequencing
 
-Propelio's value proposition is **comps relevant to a subject property**
-— same lot size, same neighborhood, same age band. If we anchor on a
-random centroid parcel, the relevance ranking is misdirected and we
-get less useful comps.
-
-### Sequencing
-
-Don't build this during the current Phase 3 chunks (A–F). Phase 3
-foundation (archive, refresh, filters, good/bad, status colors) lands
-first. Then a **Phase 3.5 mini-spec** wires anchor-parcel-as-subject
-through the schema + route + UI. Estimate ~3 hours total.
-
-When this lands, the spec section "Architectural decisions locked in"
-gets updated to reflect: `Workspace = saved_areas row + anchor_parcel_id`.
-Until then, treat the "workspace = saved_areas row" line below as a
-v1 simplification.
+Build after Phase 3 (chunks A–F) lands. Estimate ~2 hours total — all
+frontend, no backend touch. The "workspace = saved_areas row" definition
+in the table below stays correct.
 
 ## Architectural decisions locked in (no relitigating)
 

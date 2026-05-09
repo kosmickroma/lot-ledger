@@ -95,29 +95,33 @@ year, price — Chunk D's spec) stay primary and always-visible. The
 Decision logged to avoid relitigating; UX session validates whether
 this layering actually works for the team.
 
-## 🔴 Phase 3.5 — Anchor parcel as Propelio subject (CRITICAL, post-Phase-3)
+## 🟡 Phase 3.5 — Target-relevance UX (frontend only, post-Phase-3)
 
-**KK 2026-05-09 design clarification:** the current polygon flow uses
-the parcel **closest to the polygon's centroid** as the Propelio
-subject. That's wrong for Mike's actual workflow. He saves a target
-property, draws a polygon around it — the **target is the anchor**, not
-some random centroid house.
+**KK 2026-05-09 second-pass clarification:** earlier ROADMAP entry
+proposed making the saved target parcel the Propelio subject. **Reversed
+after KK pushback** — if the target is at the edge of a neighborhood,
+centering the search on it projects the circle into adjacent areas the
+user explicitly excluded by drawing a different polygon. **The polygon
+centroid is the right search anchor** because the polygon encodes the
+user's definition of "comparable area."
 
-Why it matters: Propelio's CMA returns 100 comps **ranked by relevance
-to the subject** (lot size match, age match, proximity, subdivision).
-If the subject is a centroid parcel that isn't the user's target, the
-100 most-relevant comps are about the wrong house.
+The target still matters — but for **relevance scoring within the
+existing comp pool**, not for changing the search anchor.
 
-**Fix (3 hr work, do AFTER Phase 3 lands):**
+**Phase 3.5 work (~2 hr, frontend only, no schema or route changes):**
 
-1. `saved_areas` schema gets `anchor_parcel_id` TEXT column
-2. UI prompts "Which saved parcel is your target?" on area save
-3. `/by-polygon` and `/refresh` use anchor_parcel_id → first saved_parcel
-   in polygon → centroid fallback
-4. Comps now ranked relative to the user's actual target
+1. Render the saved target parcel as a prominent gold/glowing marker on
+   top of the comp pool (so user always sees "my house + everything
+   around it")
+2. Compute a client-side relevance score per comp (lot-size delta,
+   year delta, sqft delta, distance from target)
+3. Default sort the sidebar comp list by relevance-to-target so the
+   best matches surface first
+4. Optional "highlight top 5 for this target" toggle that adds extra
+   glow on the 5 most-similar comps
 
-See SPEC_V3_WORKSPACE.md "DESIGN CLARIFICATION — Workspace = Anchor
-Parcel + Polygon" section for full detail.
+See SPEC_V3_WORKSPACE.md "DESIGN CLARIFICATION — Polygon centroid IS
+the right search anchor" section for the reasoning.
 
 ## 🟢 Active build — Phase 3 (workspace-anchored comps + filters + good/bad)
 
