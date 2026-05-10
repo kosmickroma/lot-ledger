@@ -542,7 +542,7 @@ function captureFilterState() {
       maxYearBuilt: soldCompsFilter.maxYearBuilt,
     },
     comp: { ...compNumericFilters },
-    propelio: { ...propelioFilterState },
+    propelio: { ...propelioFilterState, sortMode: propelioCompSortMode },
   };
 }
 
@@ -587,6 +587,7 @@ function applyPropelioFilterStateToUI(persisted) {
   setChk("prop-status-sold", merged.statusSold);
   setChk("prop-status-active", merged.statusActive);
   setChk("prop-status-pending", merged.statusPending);
+  setChk("prop-outside-area", merged.showOutsideArea);
   setVal("prop-sold-within", merged.soldWithinDays);
   setVal("prop-lot-min", merged.lotMin);
   setVal("prop-lot-max", merged.lotMax);
@@ -596,6 +597,13 @@ function applyPropelioFilterStateToUI(persisted) {
   setVal("prop-year-max", merged.yearMax);
   setVal("prop-price-min", merged.priceMin);
   setVal("prop-price-max", merged.priceMax);
+  // Comp-list sort mode lives outside propelioFilterState but is part of
+  // the workspace's visible state, so it persists alongside.
+  if (typeof persisted.sortMode === "string" && persisted.sortMode) {
+    propelioCompSortMode = persisted.sortMode;
+    const sortEl = document.getElementById("propelio-comp-sort");
+    if (sortEl) sortEl.value = propelioCompSortMode;
+  }
   propelioFilterState = readPropelioFiltersFromUI();
 }
 
@@ -611,6 +619,7 @@ function setActiveItem(type, name) {
   if (!typeEl || !nameEl) return;
   typeEl.textContent = type || "Workspace";
   nameEl.textContent = name || "—";
+  _updateActiveItemRenameVisibility();
 }
 
 function clearActiveItem() {
@@ -620,6 +629,92 @@ function clearActiveItem() {
   const nameEl = document.getElementById("active-item-name");
   if (typeEl) typeEl.textContent = "Workspace";
   if (nameEl) nameEl.textContent = "—";
+  _updateActiveItemRenameVisibility();
+}
+
+// Pencil only shows when there's actually a saved area to rename. For
+// transient states (no workspace loaded, snapshots, location pins) it
+// stays hidden so users don't try to rename something the API doesn't
+// own. Called from setActiveItem / clearActiveItem and after renames.
+function _updateActiveItemRenameVisibility() {
+  const btn = document.getElementById("active-item-rename");
+  if (!btn) return;
+  btn.classList.toggle("hidden", !_currentLoadedAreaId);
+}
+
+(function _initActiveItemRenamePencil() {
+  const btn = document.getElementById("active-item-rename");
+  if (!btn) return;
+  btn.addEventListener("click", (e) => {
+    e.preventDefault();
+    void _handleActiveItemRenameClick();
+  });
+})();
+
+async function _handleActiveItemRenameClick() {
+  if (!_currentLoadedAreaId) return;
+  const nameEl = document.getElementById("active-item-name");
+  const btn = document.getElementById("active-item-rename");
+  if (!nameEl || !btn) return;
+  if (nameEl.classList.contains("is-editing")) return;
+
+  const currentName = (nameEl.textContent || "").trim();
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "active-item-name-input";
+  input.value = currentName === "—" ? "" : currentName;
+  input.maxLength = 120;
+
+  nameEl.classList.add("is-editing");
+  nameEl.style.display = "none";
+  nameEl.parentElement.insertBefore(input, btn);
+  btn.classList.add("hidden");
+  input.focus();
+  input.select();
+
+  let resolved = false;
+  const cleanup = () => {
+    nameEl.classList.remove("is-editing");
+    nameEl.style.display = "";
+    if (input.parentElement) input.parentElement.removeChild(input);
+    btn.classList.toggle("hidden", !_currentLoadedAreaId);
+  };
+
+  const finish = async (mode) => {
+    if (resolved) return;
+    resolved = true;
+    if (mode === "cancel") {
+      cleanup();
+      return;
+    }
+    const nextName = String(input.value || "").trim();
+    if (!nextName || nextName === currentName) {
+      cleanup();
+      return;
+    }
+    try {
+      bumpUndoPillVersion();
+      await _apiJson(`/api/areas/${encodeURIComponent(_currentLoadedAreaId)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ name: nextName }),
+      });
+      const cached = _savedAreasCache.find((a) => a.id === _currentLoadedAreaId);
+      if (cached) cached.name = nextName;
+      nameEl.textContent = nextName;
+      cleanup();
+      renderSavedAreasList();
+    } catch (err) {
+      console.error("[rename] active-item rename failed:", err);
+      cleanup();
+    }
+  };
+
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { e.preventDefault(); void finish("cancel"); return; }
+    if (e.key === "Enter") { e.preventDefault(); void finish("save"); }
+  });
+  input.addEventListener("blur", () => { void finish("save"); });
 }
 
 function _refreshLoadedAreaUi() {
@@ -3923,6 +4018,24 @@ function _polygonButtonLatLng(latlngs) {
 
 async function _pullPropelioByPolygon() {
   if (propelioPolygonPullInFlight || !Array.isArray(lastPolygon) || lastPolygon.length < 3) return;
+
+  // Auto-save the workspace before pulling comps when there's a saved
+  // target inside the polygon and no workspace is loaded yet. Uses the
+  // target parcel's address as the workspace name (user can rename via
+  // the active-item slot pencil). This guarantees the comps land in
+  // the archive with stable keys, so rating buttons go live on the
+  // first click — no "save twice" race.
+  if (!_currentLoadedAreaId) {
+    const suggestedName = _suggestAreaNameFromContainedParcels();
+    if (suggestedName) {
+      _setPropelioPolygonButtonState({ text: "Saving…", disabled: true });
+      try {
+        await saveCurrentArea(suggestedName);
+      } catch (err) {
+        console.warn("[propelio] auto-save before Get Comps failed:", err);
+      }
+    }
+  }
 
   propelioPolygonPullInFlight = true;
   _setPropelioPolygonButtonState({ text: "Pulling...", disabled: true });
