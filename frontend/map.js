@@ -452,7 +452,7 @@ let soldMarkers = [];
 let redfinMarkers = [];
 let transientSoldSidebarPopup = null;
 let soldCompsSortMode = "price";
-let soldCompsCollapsed = false;
+let soldCompsCollapsed = true;
 const DEFAULT_SOLD_COMPS_FILTER = {
   maxDaysAgo: 365,
   minPrice: null,
@@ -1237,7 +1237,7 @@ function renderSoldCompsPanel() {
     ${soldCountNote}
     <div class="sold-comps-panel">
       <button class="section-toggle" type="button" id="sold-comps-toggle" aria-expanded="${!soldCompsCollapsed}">
-        <span class="sidebar-label">Sold Comps + Listings</span>
+        <span class="sidebar-label">Legacy Filters</span>
       </button>
       <div id="sold-comps-body" class="collapsible-body${soldCompsCollapsed ? " hidden" : ""}">
         <div class="sold-comps-summary">
