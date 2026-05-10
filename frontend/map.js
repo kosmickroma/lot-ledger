@@ -539,6 +539,7 @@ function captureFilterState() {
       maxYearBuilt: soldCompsFilter.maxYearBuilt,
     },
     comp: { ...compNumericFilters },
+    propelio: { ...propelioFilterState },
   };
 }
 
@@ -559,7 +560,40 @@ function _normalizeFilterStateForCompare(state) {
       maxYearBuilt: sold.maxYearBuilt ?? null,
     },
     comp: { ...(state.comp || {}) },
+    propelio: { ...(state.propelio || {}) },
   };
+}
+
+// Restore Propelio filter state into UI inputs from a persisted state blob.
+// Called during saved-area load. Pure DOM writes — no API calls.
+function applyPropelioFilterStateToUI(persisted) {
+  if (!persisted || typeof persisted !== "object") return;
+  const setVal = (id, v) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.value = v == null ? "" : String(v);
+  };
+  const setChk = (id, v) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.checked = Boolean(v);
+  };
+  const merged = { ...DEFAULT_PROPELIO_FILTERS, ...persisted };
+  setVal("prop-months", merged.months);
+  setVal("prop-range", merged.range);
+  setChk("prop-status-sold", merged.statusSold);
+  setChk("prop-status-active", merged.statusActive);
+  setChk("prop-status-pending", merged.statusPending);
+  setVal("prop-sold-within", merged.soldWithinDays);
+  setVal("prop-lot-min", merged.lotMin);
+  setVal("prop-lot-max", merged.lotMax);
+  setVal("prop-sqft-min", merged.sqftMin);
+  setVal("prop-sqft-max", merged.sqftMax);
+  setVal("prop-year-min", merged.yearMin);
+  setVal("prop-year-max", merged.yearMax);
+  setVal("prop-price-min", merged.priceMin);
+  setVal("prop-price-max", merged.priceMax);
+  propelioFilterState = readPropelioFiltersFromUI();
 }
 
 function _filterStatesEqual(a, b) {
@@ -699,11 +733,15 @@ function restoreFilterState(state) {
       maxYearBuilt: state.sold.maxYearBuilt ?? null,
     });
   }
+  if (state.propelio && typeof state.propelio === "object") {
+    applyPropelioFilterStateToUI(state.propelio);
+  }
   console.debug("[restoreFilterState] restored", {
     checkboxes: { ...filterState },
     numeric: { ...numericFilters },
     comp: { ...compNumericFilters },
     sold: { ...soldCompsFilter },
+    propelio: { ...propelioFilterState },
   });
   syncFilterInputs();
   _hydrateNumericInputsFromState();
@@ -3089,6 +3127,227 @@ function _renderPropelioComps(data) {
   };
 }
 
+// === Propelio sidebar filter card (Phase 3 Chunk C) ========================
+// Two tiers: API-side filters (months, range) require an explicit Refresh
+// button (1 credit). Client-side filters (status checkboxes, sold-within,
+// lot/sqft/year/price min-max) apply instantly to the existing comp pool
+// without re-hitting Propelio.
+
+const DEFAULT_PROPELIO_FILTERS = {
+  months: 24,
+  range: 1.0,
+  statusSold: true,
+  statusActive: true,
+  statusPending: true,
+  soldWithinDays: null,
+  lotMin: null, lotMax: null,
+  sqftMin: null, sqftMax: null,
+  yearMin: null, yearMax: null,
+  priceMin: null, priceMax: null,
+};
+let propelioFilterState = { ...DEFAULT_PROPELIO_FILTERS };
+
+function _propNumIn(id) {
+  const el = document.getElementById(id);
+  if (!el) return null;
+  const v = String(el.value || "").trim();
+  if (!v) return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function _propIntIn(id) {
+  const v = _propNumIn(id);
+  return v != null && Number.isFinite(v) ? Math.round(v) : null;
+}
+
+function _propPriceIn(id) {
+  const el = document.getElementById(id);
+  if (!el) return null;
+  const v = parseShorthand(el.value);
+  return Number.isFinite(v) ? v : null;
+}
+
+function readPropelioFiltersFromUI() {
+  const sold = document.getElementById("prop-status-sold");
+  const active = document.getElementById("prop-status-active");
+  const pending = document.getElementById("prop-status-pending");
+  return {
+    months: _propNumIn("prop-months") ?? DEFAULT_PROPELIO_FILTERS.months,
+    range: _propNumIn("prop-range") ?? DEFAULT_PROPELIO_FILTERS.range,
+    statusSold: sold ? sold.checked : true,
+    statusActive: active ? active.checked : true,
+    statusPending: pending ? pending.checked : true,
+    soldWithinDays: _propIntIn("prop-sold-within"),
+    lotMin: _propNumIn("prop-lot-min"),
+    lotMax: _propNumIn("prop-lot-max"),
+    sqftMin: _propIntIn("prop-sqft-min"),
+    sqftMax: _propIntIn("prop-sqft-max"),
+    yearMin: _propIntIn("prop-year-min"),
+    yearMax: _propIntIn("prop-year-max"),
+    priceMin: _propPriceIn("prop-price-min"),
+    priceMax: _propPriceIn("prop-price-max"),
+  };
+}
+
+function compPassesPropelioFilters(comp, filters) {
+  const status = String(comp?.status || "").toLowerCase();
+  // Status checkbox filters
+  if (status === "sold" && !filters.statusSold) return false;
+  if ((status === "for_sale" || status === "active") && !filters.statusActive) return false;
+  if (status === "pending" && !filters.statusPending) return false;
+  // If status is unknown/other, fall through (don't filter out)
+
+  // Sold-within (days) — only applies to sold comps
+  if (status === "sold" && filters.soldWithinDays != null) {
+    const cd = comp?.extra?.close_date;
+    if (!cd) return false;
+    const dt = new Date(cd);
+    if (!Number.isFinite(dt.getTime())) return false;
+    const days = (Date.now() - dt.getTime()) / 86400000;
+    if (days > filters.soldWithinDays) return false;
+  }
+
+  // Lot acres (lot_size is in sqft from Propelio)
+  const lotSqft = Number(comp?.lot_size);
+  const acres = Number.isFinite(lotSqft) && lotSqft > 0 ? lotSqft / 43560 : null;
+  if (filters.lotMin != null && (acres == null || acres < filters.lotMin)) return false;
+  if (filters.lotMax != null && (acres == null || acres > filters.lotMax)) return false;
+
+  // Living sqft
+  const sqft = Number(comp?.sqft);
+  if (filters.sqftMin != null && (!Number.isFinite(sqft) || sqft < filters.sqftMin)) return false;
+  if (filters.sqftMax != null && (!Number.isFinite(sqft) || sqft > filters.sqftMax)) return false;
+
+  // Year built
+  const yr = Number(comp?.year_built);
+  if (filters.yearMin != null && (!Number.isFinite(yr) || yr < filters.yearMin)) return false;
+  if (filters.yearMax != null && (!Number.isFinite(yr) || yr > filters.yearMax)) return false;
+
+  // Price
+  const price = Number(comp?.price);
+  if (filters.priceMin != null && (!Number.isFinite(price) || price < filters.priceMin)) return false;
+  if (filters.priceMax != null && (!Number.isFinite(price) || price > filters.priceMax)) return false;
+
+  return true;
+}
+
+let _propelioFilterDebounceId = null;
+function applyPropelioClientFilters() {
+  if (!window._propelioLast || !Array.isArray(window._propelioLast.comps)) {
+    const countEl = document.getElementById("propelio-filter-count");
+    if (countEl) countEl.textContent = "—";
+    return;
+  }
+  propelioFilterState = readPropelioFiltersFromUI();
+  const all = window._propelioLast.comps;
+  const filtered = all.filter((c) => compPassesPropelioFilters(c, propelioFilterState));
+  // Re-render with the filtered subset (preserve polygon_meta & cma_settings)
+  _renderPropelioComps({ ...window._propelioLast, comps: filtered });
+  // Re-set the chip from the ORIGINAL data so chip totals reflect raw pull
+  // (filtering is for the map; chip stays accurate to what Propelio sent).
+  if (window._propelioLast) propelioCmaChip.setData(window._propelioLast);
+  // Update the card-head count chip
+  const countEl = document.getElementById("propelio-filter-count");
+  if (countEl) {
+    countEl.textContent = filtered.length === all.length
+      ? `${all.length}`
+      : `${filtered.length} / ${all.length}`;
+  }
+}
+
+function applyPropelioClientFiltersDebounced() {
+  if (_propelioFilterDebounceId) clearTimeout(_propelioFilterDebounceId);
+  _propelioFilterDebounceId = setTimeout(applyPropelioClientFilters, 150);
+}
+
+async function pullPropelioRefresh() {
+  const btn = document.getElementById("btn-propelio-refresh");
+  if (!btn) return;
+  const filters = readPropelioFiltersFromUI();
+  propelioFilterState = filters;
+  const savedAreaId = (typeof _currentLoadedAreaId === "string" ? _currentLoadedAreaId : "") || "";
+  const origText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Refreshing…";
+  try {
+    let data;
+    if (savedAreaId) {
+      const resp = await fetch("/api/propelio/refresh", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({
+          saved_area_id: savedAreaId,
+          months: filters.months,
+          range_override_mi: filters.range,
+        }),
+      });
+      if (!resp.ok) throw new Error(`refresh failed: ${resp.status}`);
+      data = await resp.json();
+    } else {
+      if (!Array.isArray(lastPolygon) || lastPolygon.length < 3) {
+        console.warn("[propelio] no polygon to refresh against");
+        return;
+      }
+      const resp = await fetch("/api/propelio/by-polygon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({
+          polygon: lastPolygon,
+          months: filters.months,
+          range_override_mi: filters.range,
+        }),
+      });
+      if (!resp.ok) throw new Error(`by-polygon failed: ${resp.status}`);
+      data = await resp.json();
+    }
+    window._propelioLast = data;
+    applyPropelioClientFilters();
+  } catch (err) {
+    console.error("[propelio] refresh error:", err);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = origText;
+  }
+}
+
+function resetPropelioFilters() {
+  const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+  const setChk = (id, v) => { const el = document.getElementById(id); if (el) el.checked = v; };
+  set("prop-months", String(DEFAULT_PROPELIO_FILTERS.months));
+  set("prop-range", String(DEFAULT_PROPELIO_FILTERS.range));
+  setChk("prop-status-sold", true);
+  setChk("prop-status-active", true);
+  setChk("prop-status-pending", true);
+  set("prop-sold-within", "");
+  set("prop-lot-min", ""); set("prop-lot-max", "");
+  set("prop-sqft-min", ""); set("prop-sqft-max", "");
+  set("prop-year-min", ""); set("prop-year-max", "");
+  set("prop-price-min", ""); set("prop-price-max", "");
+  applyPropelioClientFilters();
+}
+
+(function _initPropelioFilterListeners() {
+  const liveIds = [
+    "prop-status-sold", "prop-status-active", "prop-status-pending",
+    "prop-sold-within",
+    "prop-lot-min", "prop-lot-max",
+    "prop-sqft-min", "prop-sqft-max",
+    "prop-year-min", "prop-year-max",
+    "prop-price-min", "prop-price-max",
+  ];
+  liveIds.forEach((id) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener("input", applyPropelioClientFiltersDebounced);
+    el.addEventListener("change", applyPropelioClientFiltersDebounced);
+  });
+  const refreshBtn = document.getElementById("btn-propelio-refresh");
+  if (refreshBtn) refreshBtn.addEventListener("click", () => void pullPropelioRefresh());
+  const resetBtn = document.getElementById("btn-propelio-reset");
+  if (resetBtn) resetBtn.addEventListener("click", resetPropelioFilters);
+})();
+
 // Sticky bottom-center button (DOM-anchored, not map-pinned). Lives inside
 // the Leaflet map container so it's automatically right of the sidebar
 // and recenters when the sidebar collapses/expands.
@@ -3179,10 +3438,10 @@ async function _pullPropelioByPolygon() {
 
     const data = await resp.json();
     window._propelioLast = data;
-    const rendered = _renderPropelioComps(data);
-    propelioCmaChip.setData(data);
+    // applyPropelioClientFilters renders + sets chip + updates count chip
+    applyPropelioClientFilters();
     console.info(
-      `[propelio] rendered ${rendered.total} polygon comp(s) (${rendered.footprintCount} footprints, ${rendered.fallbackCount} fallback dots)${data.cached ? " (cached)" : ""}`
+      `[propelio] received ${Array.isArray(data?.comps) ? data.comps.length : 0} polygon comp(s)${data.cached ? " (cached)" : ""}`
     );
     shouldHideButton = true;
   } catch (err) {
@@ -3222,10 +3481,10 @@ async function firePropelioFetch(addressString) {
     }
     const data = await resp.json();
     window._propelioLast = data;
-    const rendered = _renderPropelioComps(data);
-    propelioCmaChip.setData(data);
+    // applyPropelioClientFilters renders + sets chip + updates count chip
+    applyPropelioClientFilters();
     console.info(
-      `[propelio] rendered ${rendered.total} address comp(s) (${rendered.footprintCount} footprints, ${rendered.fallbackCount} fallback dots)${data.cached ? " (cached)" : ""}`
+      `[propelio] received ${Array.isArray(data?.comps) ? data.comps.length : 0} address comp(s)${data.cached ? " (cached)" : ""}`
     );
   } catch (e) {
     console.error("[propelio] fetch error:", e);

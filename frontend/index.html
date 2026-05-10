@@ -155,6 +155,91 @@
           <p id="sold-toggle-status" class="sidebar-note"></p>
         </div>
       </div>
+      <div id="propelio-filters" class="filter-card collapsible-section">
+        <button class="section-toggle" type="button" data-target="propelio-filters-body" aria-expanded="true">
+          <span class="sidebar-label">Propelio Filters</span>
+          <span id="propelio-filter-count" class="propelio-filter-count">—</span>
+        </button>
+        <div id="propelio-filters-body" class="collapsible-body">
+          <div class="filter-card-head">
+            <button id="btn-propelio-reset" class="filter-reset-btn" type="button">Reset</button>
+          </div>
+          <div class="propelio-api-section">
+            <p class="propelio-section-label">Search settings (refresh required)</p>
+            <div class="numeric-filter-row">
+              <span class="numeric-filter-label">Time window (months)</span>
+              <div class="numeric-filter-inputs">
+                <input type="number" id="prop-months" class="nf-input" min="1" max="60" value="24">
+              </div>
+            </div>
+            <div class="numeric-filter-row">
+              <span class="numeric-filter-label">Search radius (mi)</span>
+              <div class="numeric-filter-inputs">
+                <input type="number" id="prop-range" class="nf-input" min="0.1" max="10" step="0.1" value="1.0">
+              </div>
+            </div>
+            <button id="btn-propelio-refresh" class="propelio-refresh-btn" type="button">↻ Refresh from Propelio</button>
+          </div>
+          <div class="propelio-client-section">
+            <p class="propelio-section-label">Display filters (instant)</p>
+            <div class="propelio-status-row">
+              <label class="propelio-status-chip">
+                <input type="checkbox" id="prop-status-sold" checked>
+                <span class="propelio-status-swatch sold"></span>
+                <span>Sold</span>
+              </label>
+              <label class="propelio-status-chip">
+                <input type="checkbox" id="prop-status-active" checked>
+                <span class="propelio-status-swatch active"></span>
+                <span>Active</span>
+              </label>
+              <label class="propelio-status-chip">
+                <input type="checkbox" id="prop-status-pending" checked>
+                <span class="propelio-status-swatch pending"></span>
+                <span>Pending</span>
+              </label>
+            </div>
+            <div class="numeric-filter-row">
+              <span class="numeric-filter-label">Sold within (days)</span>
+              <div class="numeric-filter-inputs">
+                <input type="number" id="prop-sold-within" class="nf-input" placeholder="any" min="1" max="3650">
+              </div>
+            </div>
+            <div class="numeric-filter-row">
+              <span class="numeric-filter-label">Lot Size (acres)</span>
+              <div class="numeric-filter-inputs">
+                <input type="text" id="prop-lot-min" class="nf-input" placeholder="Min" inputmode="decimal">
+                <span class="nf-sep">–</span>
+                <input type="text" id="prop-lot-max" class="nf-input" placeholder="Max" inputmode="decimal">
+              </div>
+            </div>
+            <div class="numeric-filter-row">
+              <span class="numeric-filter-label">Living Sqft</span>
+              <div class="numeric-filter-inputs">
+                <input type="number" id="prop-sqft-min" class="nf-input" placeholder="Min" min="0">
+                <span class="nf-sep">–</span>
+                <input type="number" id="prop-sqft-max" class="nf-input" placeholder="Max" min="0">
+              </div>
+            </div>
+            <div class="numeric-filter-row">
+              <span class="numeric-filter-label">Year Built</span>
+              <div class="numeric-filter-inputs">
+                <input type="number" id="prop-year-min" class="nf-input" placeholder="Min" min="1800" max="2030">
+                <span class="nf-sep">–</span>
+                <input type="number" id="prop-year-max" class="nf-input" placeholder="Max" min="1800" max="2030">
+              </div>
+            </div>
+            <div class="numeric-filter-row">
+              <span class="numeric-filter-label">Price</span>
+              <div class="numeric-filter-inputs">
+                <input type="text" id="prop-price-min" class="nf-input" placeholder="Min (500k)" inputmode="decimal">
+                <span class="nf-sep">–</span>
+                <input type="text" id="prop-price-max" class="nf-input" placeholder="Max (1m)" inputmode="decimal">
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
       <div class="hidden" aria-hidden="true">
         <input type="checkbox" id="toggle-redfin">
         <p id="redfin-toggle-status"></p>

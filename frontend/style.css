@@ -2202,3 +2202,104 @@ h1 {
   color: #888;
   font-size: 10px;
 }
+
+/* ── Propelio sidebar filter card (Phase 3 Chunk C) ──────────────────────── */
+.propelio-section-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--text-soft);
+  text-transform: uppercase;
+  margin: 6px 0 4px;
+}
+
+.propelio-api-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-bottom: 10px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.propelio-client-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.propelio-refresh-btn {
+  margin-top: 6px;
+  background: linear-gradient(135deg, #8b5cf6 0%, #6d28d9 100%);
+  color: #fff;
+  border: 0;
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  width: 100%;
+  box-shadow: 0 2px 8px rgba(139, 92, 246, 0.45);
+  transition: transform 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease;
+}
+
+.propelio-refresh-btn:hover:not(:disabled) {
+  transform: scale(1.02);
+  box-shadow: 0 4px 12px rgba(139, 92, 246, 0.65);
+}
+
+.propelio-refresh-btn:disabled {
+  opacity: 0.6;
+  cursor: wait;
+  transform: none;
+}
+
+.propelio-status-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 4px 0 8px;
+}
+
+.propelio-status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  padding: 3px 10px 3px 6px;
+  font-size: 11px;
+  color: #d3d6dd;
+  cursor: pointer;
+  user-select: none;
+}
+
+.propelio-status-chip input[type="checkbox"] {
+  width: 12px;
+  height: 12px;
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--gold);
+}
+
+.propelio-status-swatch {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.25);
+}
+
+.propelio-status-swatch.sold { background: #8b5cf6; }
+.propelio-status-swatch.active { background: #dc2626; }
+.propelio-status-swatch.pending { background: #f59e0b; }
+
+.propelio-filter-count {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-soft);
+  margin-left: 6px;
+  letter-spacing: 0.02em;
+}
