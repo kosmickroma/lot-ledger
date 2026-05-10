@@ -302,6 +302,9 @@ async def _run_by_polygon(request: PolygonRequest, *, use_cache: bool) -> dict[s
                 polygon_meta["comps_outside_polygon"] = max(comps_pulled - comps_in_polygon, 0)
             if saved_area_id:
                 cached_payload["archive_meta"] = merge_comps_into_archive(saved_area_id, cached_payload.get("comps") or [])
+                # Reload the archive view so user_rating + comp_address_key
+                # round-trip on cache hits, matching the fresh-pull path.
+                cached_payload["comps"] = load_archived_comps(saved_area_id)
             return {"cached": True, **cached_payload}
 
     subject_parcel = _nearest_subject_parcel(centroid_lat, centroid_lng)

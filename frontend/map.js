@@ -3670,13 +3670,16 @@ async function _pullPropelioByPolygon() {
 
   let shouldHideButton = false;
   try {
+    const savedAreaId = (typeof _currentLoadedAreaId === "string" ? _currentLoadedAreaId : "") || "";
+    const reqBody = {
+      polygon: lastPolygon,
+      months: PROPELIO_POLYGON_MONTHS,
+    };
+    if (savedAreaId) reqBody.saved_area_id = savedAreaId;
     const resp = await fetch("/api/propelio/by-polygon", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...authHeaders() },
-      body: JSON.stringify({
-        polygon: lastPolygon,
-        months: PROPELIO_POLYGON_MONTHS,
-      }),
+      body: JSON.stringify(reqBody),
     });
 
     if (!resp.ok) {
