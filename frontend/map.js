@@ -3121,6 +3121,35 @@ function _propelioFootprintStyle(statusClass) {
 // hover highlight class on the matching footprint.
 const propelioCompLayerByKey = new Map();
 
+// Drop a green checkmark badge at the geometric center of a good-rated comp.
+// For polygon footprints we use the bounds center (visually close enough to
+// a true centroid for our parcel sizes); for fallback dots we just stack
+// the badge on top of the dot's latlng.
+function _maybeAddGoodCompMark(comp, footprint, fallbackLatLng) {
+  if (comp?.user_rating !== "good") return;
+  let target = null;
+  if (footprint && typeof footprint.getBounds === "function") {
+    try {
+      const b = footprint.getBounds();
+      if (b && b.isValid()) target = b.getCenter();
+    } catch (_) { /* noop */ }
+  }
+  if (!target && fallbackLatLng) target = fallbackLatLng;
+  if (!target) return;
+  const goodIcon = L.divIcon({
+    className: "propelio-good-mark-wrap",
+    html: `<div class="propelio-good-mark">&#10003;</div>`,
+    iconSize: [16, 16],
+    iconAnchor: [8, 8],
+  });
+  const goodMarker = L.marker(target, {
+    icon: goodIcon,
+    interactive: false,
+    keyboard: false,
+  });
+  goodMarker.addTo(propelioCompLayer);
+}
+
 function _renderPropelioComps(data) {
   propelioCompLayer.clearLayers();
   propelioCompLayerByKey.clear();
@@ -3154,6 +3183,7 @@ function _renderPropelioComps(data) {
       footprint.addTo(propelioCompLayer);
       if (compKey) propelioCompLayerByKey.set(compKey, footprint);
       footprintCount += 1;
+      _maybeAddGoodCompMark(comp, footprint, latlng);
       return;
     }
 
@@ -3174,6 +3204,7 @@ function _renderPropelioComps(data) {
     marker.addTo(propelioCompLayer);
     if (compKey) propelioCompLayerByKey.set(compKey, marker);
     fallbackCount += 1;
+    _maybeAddGoodCompMark(comp, null, latlng);
   });
 
   if (data?.polygon_meta) {
