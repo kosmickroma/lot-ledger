@@ -425,6 +425,12 @@ let targetBadgeLayer = L.layerGroup().addTo(map);
 // Persistent saved-parcel outlines (cyan). Keyed by account_num for dedup + removal.
 const savedParcelLayer = L.layerGroup().addTo(map);
 const savedParcelLayers = {};
+// Invisible click-catcher polygons that mirror saved-parcel outlines. The
+// decorative halo on `savedParcelPane` is pointer-events:none so its drop-shadow
+// bleed doesn't catch stray clicks; this parallel layer (default overlay pane)
+// is what actually opens the popup. Keyed by account_num.
+const savedParcelClickLayer = L.layerGroup().addTo(map);
+const savedParcelClickLayers = {};
 // Propelio comps rendered from address/polygon pulls.
 // Parcel geometry is preferred (purple glowing footprints); missing geometry
 // falls back to compact purple dots.
@@ -1867,6 +1873,11 @@ async function deleteSavedArea(item) {
       savedParcelLayer.removeLayer(layer);
       delete savedParcelLayers[item.account_num];
     }
+    const clickLayer = savedParcelClickLayers[item.account_num];
+    if (clickLayer) {
+      savedParcelClickLayer.removeLayer(clickLayer);
+      delete savedParcelClickLayers[item.account_num];
+    }
   } else {
     await _apiJson(`/api/areas/${encodeURIComponent(item.id)}`, {
       method: "DELETE",
@@ -1998,6 +2009,34 @@ function _renderSavedParcelOutline(area) {
     interactive: false,
   }).addTo(savedParcelLayer);
   savedParcelLayers[area.account_num] = layer;
+
+  // Sibling click-catcher on the default overlay pane. Transparent fill, no
+  // stroke — exists only to make the gold target reliably clickable even when
+  // an active draw has set lastAnalysisGeojson (which makes the browse-layer
+  // click handler bail), or when the target sits outside the draw polygon and
+  // therefore has no entry in parcelTypeLayers.
+  const county = area.county || "dcad";
+  const accountNum = area.account_num;
+  const clickLayer = L.geoJSON({ type: "Feature", geometry: area.geometry, properties: {} }, {
+    style: { stroke: false, fill: true, fillOpacity: 0, fillColor: SAVED_PARCEL_COLOR },
+    interactive: true,
+  });
+  clickLayer.on("click", async (ev) => {
+    L.DomEvent.stopPropagation(ev);
+    try {
+      const resp = await fetch(`/api/parcel/${county}/${accountNum}`);
+      if (!resp.ok) return;
+      const detail = await resp.json();
+      L.popup()
+        .setLatLng(ev.latlng)
+        .setContent(makePopupHtml(detail.properties || detail))
+        .openOn(map);
+    } catch (e) {
+      console.error("Saved-target popup failed", e);
+    }
+  });
+  clickLayer.addTo(savedParcelClickLayer);
+  savedParcelClickLayers[accountNum] = clickLayer;
 }
 
 async function saveParcel(account_num, county, addr, lat, lng, geometry) {
@@ -2038,6 +2077,8 @@ async function saveParcel(account_num, county, addr, lat, lng, geometry) {
 function _restoreAllSavedParcelOutlines() {
   Object.values(savedParcelLayers).forEach((layer) => savedParcelLayer.removeLayer(layer));
   Object.keys(savedParcelLayers).forEach((key) => delete savedParcelLayers[key]);
+  Object.values(savedParcelClickLayers).forEach((layer) => savedParcelClickLayer.removeLayer(layer));
+  Object.keys(savedParcelClickLayers).forEach((key) => delete savedParcelClickLayers[key]);
   _savedParcelsCache.forEach(_renderSavedParcelOutline);
 }
 
