@@ -3399,11 +3399,18 @@ function _propelioCompRowHtml(comp) {
   const yr = Number.isFinite(comp?.year_built) ? comp.year_built : null;
   const beds = ex.beds;
   const baths = ex.baths;
+  const lotSqft = Number(comp?.lot_size);
+  const lotAcres = Number.isFinite(lotSqft) && lotSqft > 0 ? (lotSqft / 43560) : null;
+  const lotAcresStr = lotAcres != null ? `${lotAcres.toFixed(lotAcres < 1 ? 2 : 1)} ac lot` : null;
+  const neighborhood = String(comp?.neighborhood || "").trim();
+
   const dim = [];
   if (sqft) dim.push(`${sqft} sqft`);
+  if (lotAcresStr) dim.push(lotAcresStr);
   if (yr) dim.push(`${yr}`);
   if (beds != null) dim.push(`${beds}bd`);
   if (baths != null) dim.push(`${baths}ba`);
+
   const compKey = String(comp?.comp_address_key || "").trim();
   const keyAttr = _propelioEscape(compKey);
   return `
@@ -3413,6 +3420,7 @@ function _propelioCompRowHtml(comp) {
         <span class="propelio-comp-row-status ${statusClass}">${_propelioEscape(status || "—")}</span>
       </div>
       <div class="propelio-comp-row-mid">${_propelioEscape(comp?.address || "")}</div>
+      ${neighborhood ? `<div class="propelio-comp-row-nbhd">${_propelioEscape(neighborhood)}</div>` : ""}
       ${dim.length ? `<div class="propelio-comp-row-meta">${_propelioEscape(dim.join(" · "))}</div>` : ""}
     </div>
   `;

@@ -1040,7 +1040,7 @@ h1 {
 
 .zoom-nudge {
   position: absolute;
-  bottom: 48px;
+  top: 16px;
   left: 50%;
   transform: translateX(-50%);
   z-index: 1000;
@@ -2430,6 +2430,14 @@ h1 {
   font-size: 11px;
   color: var(--text-muted);
   margin-top: 2px;
+}
+
+.propelio-comp-row-nbhd {
+  font-size: 10px;
+  color: #c9a24f;
+  margin-top: 1px;
+  font-style: italic;
+  letter-spacing: 0.01em;
 }
 
 .propelio-comp-row-meta {
