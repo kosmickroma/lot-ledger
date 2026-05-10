@@ -3331,7 +3331,7 @@ let propelioCompSortMode = "price_desc";
 function applyPropelioClientFilters() {
   if (!window._propelioLast || !Array.isArray(window._propelioLast.comps)) {
     const countEl = document.getElementById("propelio-filter-count");
-    if (countEl) countEl.textContent = "—";
+    if (countEl) countEl.textContent = "";
     renderPropelioCompList([]);
     return;
   }

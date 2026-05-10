@@ -2304,6 +2304,10 @@ h1 {
   letter-spacing: 0.02em;
 }
 
+.propelio-filter-count:empty {
+  display: none;
+}
+
 /* ── Bad-comp visual treatment (Phase 3 Chunk D) ─────────────────────────── */
 /* Same purple/red/amber hue, just noticeably duller so good comps pop and
    bad ones recede. We preserve the colored glow set on the parent .sold /
