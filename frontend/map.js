@@ -3364,6 +3364,7 @@ const DEFAULT_PROPELIO_FILTERS = {
   statusSold: true,
   statusActive: true,
   statusPending: true,
+  showOutsideArea: false,
   soldWithinDays: null,
   lotMin: null, lotMax: null,
   sqftMin: null, sqftMax: null,
@@ -3397,12 +3398,14 @@ function readPropelioFiltersFromUI() {
   const sold = document.getElementById("prop-status-sold");
   const active = document.getElementById("prop-status-active");
   const pending = document.getElementById("prop-status-pending");
+  const outside = document.getElementById("prop-outside-area");
   return {
     months: _propNumIn("prop-months") ?? DEFAULT_PROPELIO_FILTERS.months,
     range: _propNumIn("prop-range") ?? DEFAULT_PROPELIO_FILTERS.range,
     statusSold: sold ? sold.checked : true,
     statusActive: active ? active.checked : true,
     statusPending: pending ? pending.checked : true,
+    showOutsideArea: outside ? outside.checked : false,
     soldWithinDays: _propIntIn("prop-sold-within"),
     lotMin: _propNumIn("prop-lot-min"),
     lotMax: _propNumIn("prop-lot-max"),
@@ -3422,6 +3425,17 @@ function compPassesPropelioFilters(comp, filters) {
   if ((status === "for_sale" || status === "active") && !filters.statusActive) return false;
   if (status === "pending" && !filters.statusPending) return false;
   // If status is unknown/other, fall through (don't filter out)
+
+  // Outside-area gate. Default off → only comps inside the drawn polygon
+  // pass. Toggle on → also let through Propelio's spillover comps from
+  // its circumradius search. Falls open when there is no polygon yet
+  // (e.g. by-address pulls), so that path is unaffected.
+  if (!filters.showOutsideArea && Array.isArray(lastPolygon) && lastPolygon.length >= 3) {
+    const latlng = _propelioCompLatLng(comp);
+    if (!latlng || !_pointInPolygonLngLat(latlng[1], latlng[0], lastPolygon)) {
+      return false;
+    }
+  }
 
   // Sold-within (days) — only applies to sold comps
   if (status === "sold" && filters.soldWithinDays != null) {
@@ -3726,6 +3740,7 @@ function resetPropelioFilters() {
   setChk("prop-status-sold", true);
   setChk("prop-status-active", true);
   setChk("prop-status-pending", true);
+  setChk("prop-outside-area", false);
   set("prop-sold-within", "");
   set("prop-lot-min", ""); set("prop-lot-max", "");
   set("prop-sqft-min", ""); set("prop-sqft-max", "");
@@ -3737,6 +3752,7 @@ function resetPropelioFilters() {
 (function _initPropelioFilterListeners() {
   const liveIds = [
     "prop-status-sold", "prop-status-active", "prop-status-pending",
+    "prop-outside-area",
     "prop-sold-within",
     "prop-lot-min", "prop-lot-max",
     "prop-sqft-min", "prop-sqft-max",
@@ -3896,6 +3912,20 @@ async function _pullPropelioByPolygon() {
     console.info(
       `[propelio] received ${Array.isArray(data?.comps) ? data.comps.length : 0} polygon comp(s)${data.cached ? " (cached)" : ""}`
     );
+
+    // Race guard: if the user saved an area DURING this in-flight pull,
+    // savedAreaId was empty when the request went out, the backend never
+    // ran the archive merge, and the comps came back without
+    // comp_address_keys — meaning the rating buttons would be disabled.
+    // Detect this and run an attach-to-area pass so the buttons go live
+    // without forcing the user to save twice.
+    const savedAreaIdNow = (typeof _currentLoadedAreaId === "string" ? _currentLoadedAreaId : "") || "";
+    const compsArr = Array.isArray(data?.comps) ? data.comps : [];
+    const compsAreKeyed = compsArr.length > 0 && compsArr.every((c) => Boolean(c?.comp_address_key));
+    if (savedAreaIdNow && compsArr.length > 0 && !compsAreKeyed) {
+      await _reattachPropelioToSavedArea(savedAreaIdNow);
+    }
+
     shouldHideButton = true;
   } catch (err) {
     console.error("[propelio] by-polygon fetch error:", err);
@@ -4537,13 +4567,33 @@ function geometryKey(geometry) {
 function makePopupHtml(p) {
   const pseudoFeature = { properties: p };
   const hasVisibleSoldComp = Boolean(p?.sold_comp);
-  const statusColor = hasVisibleSoldComp ? SOLD_OUTLINE_COLOR : getColor(pseudoFeature);
-  const statusText = hasVisibleSoldComp ? "SOLD" : getStatusLabel(pseudoFeature);
-  const soldHeaderPrice = hasVisibleSoldComp
-    ? (typeof p.sold_comp?.sold_price === "number"
-      ? `$${p.sold_comp.sold_price.toLocaleString()}`
-      : String(p.sold_comp?.sold_price || ""))
+
+  // If this parcel has a matched Propelio comp, the popup header takes
+  // its status + price from the comp instead of the CAD classification:
+  // sold → purple, active → red, pending → amber. This mirrors the
+  // legacy R.F. card pattern where the header signaled the comp's MLS
+  // status and its price front-and-center.
+  const matchedComp = _findMatchedCompForAccount(p?.account_num);
+  const PROPELIO_HEADER_COLORS = { sold: "#8b5cf6", active: "#dc2626", pending: "#f59e0b" };
+  const matchedBucket = matchedComp ? _propelioStatusBucket(matchedComp) : null;
+  const matchedHeaderColor = matchedBucket ? PROPELIO_HEADER_COLORS[matchedBucket] : null;
+  const matchedHeaderText = matchedComp
+    ? String(matchedComp?.status || matchedBucket || "").toUpperCase()
     : "";
+  const matchedHeaderPrice = matchedComp && Number.isFinite(Number(matchedComp.price))
+    ? `$${Math.round(Number(matchedComp.price)).toLocaleString()}`
+    : "";
+
+  const statusColor = matchedHeaderColor
+    || (hasVisibleSoldComp ? SOLD_OUTLINE_COLOR : getColor(pseudoFeature));
+  const statusText = matchedHeaderText
+    || (hasVisibleSoldComp ? "SOLD" : getStatusLabel(pseudoFeature));
+  const soldHeaderPrice = matchedHeaderPrice
+    || (hasVisibleSoldComp
+      ? (typeof p.sold_comp?.sold_price === "number"
+        ? `$${p.sold_comp.sold_price.toLocaleString()}`
+        : String(p.sold_comp?.sold_price || ""))
+      : "");
   const verifiedVacant = normalizeVerificationValue(
     verificationByAccount.get(p.account_num) || p.verified_vacant
   );
@@ -4596,10 +4646,7 @@ function makePopupHtml(p) {
     `;
   }
 
-  // Pull in the matched Propelio comp (if any) so the popup can present
-  // CAD + MLS data together. Drives both the comp section under the table
-  // and the Good / Bad / Clear rating buttons.
-  const matchedComp = _findMatchedCompForAccount(p?.account_num);
+  // matchedComp resolved above (drives both the header recolor and these).
   const propelioSectionHtml = matchedComp ? _buildPropelioCompSectionHtml(matchedComp) : "";
   const ratingButtonsHtml = matchedComp ? _buildRatingButtonsHtml(matchedComp) : "";
 
@@ -4608,11 +4655,13 @@ function makePopupHtml(p) {
         <div class="popup-addr">${p.addr || "Unknown address"}</div>
         <div class="popup-status-row">
           <div class="popup-status" style="color:${statusColor};">${statusText}</div>
-          ${activeListingPrice
-            ? `<div class="popup-list-price">${activeListingPrice}</div>`
-            : soldHeaderPrice
-              ? `<div class="popup-sold-price">${soldHeaderPrice}</div>`
-              : ""}
+          ${matchedHeaderPrice
+            ? `<div class="popup-sold-price" style="color:${statusColor};">${matchedHeaderPrice}</div>`
+            : activeListingPrice
+              ? `<div class="popup-list-price">${activeListingPrice}</div>`
+              : soldHeaderPrice
+                ? `<div class="popup-sold-price">${soldHeaderPrice}</div>`
+                : ""}
         </div>
         <table class="popup-table">
           ${row("Owner", p.owner)}
