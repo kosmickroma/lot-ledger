@@ -95,6 +95,60 @@ year, price — Chunk D's spec) stay primary and always-visible. The
 Decision logged to avoid relitigating; UX session validates whether
 this layering actually works for the team.
 
+## 🟡 Post-Chunk-D polish bundle (small, frontend-only, before Phase 3.5)
+
+KK's batch of UX polish items captured 2026-05-09 evening. None block
+Chunks E-F, all are frontend-only, ~2 hr total. Order of cheapness:
+
+### 1. Legacy Redfin layer reorg + rename
+
+- Move the existing "Sold Comps + Listings" card to the **bottom** of
+  the sidebar (below saved-areas, saved-parcels, saved-sessions)
+- Rename card title to **"Legacy filters"** (or "Redfin" — pick at
+  build time)
+- Inside the card, rename the two layer toggles:
+  - "Sold" → **"R.F. Sold"**
+  - "Listings" → **"R.F. Listings"**
+- Both layer toggles default to **OFF on landing** (Chunk E already
+  specced this default; this just confirms)
+- Keep the card accessible (not hidden) so KK can test back-and-forth
+  during the Phase 3 rollout. Final disposition (delete / hide / move)
+  goes to client after testing settles.
+
+### 2. Saved-parcel gold glow → transparent fill
+
+Currently `.saved-parcel-glow` uses a fully-opaque gold fill that
+hides the satellite-imagery view of the parcel underneath. Match the
+pattern we already use on `.propelio-footprint-glow` (transparent
+~12-18% fill so satellite shows through, drop-shadow-stack for the
+glow).
+
+File: `frontend/style.css` lines ~1904-1923.
+Change: `fill-opacity: 0.14` (or similar) on the base class. Keep
+the drop-shadow stack. The pulse animation can stay (gold has fewer
+elements at once than the old propelio purple did, so GPU drain is
+not an issue).
+
+### 3. Price balloons on Propelio comps (zoom-gated)
+
+Mirror the existing Redfin sold/active price-label pattern (per
+`renderSoldPoints` / `renderRedfinPoints`, around `frontend/map.js`
+lines 3759-3854) for Propelio comps. Three colors matching the
+footprint render:
+
+- **Sold (purple)**: show close_price as a purple-bordered label
+- **Active / for_sale (red)**: show list_price as a red-bordered label
+- **Pending (amber)**: show list_price as an amber-bordered label
+
+Zoom-gated to z17+ (same threshold as existing labels). Use the
+existing `abbreviatePrice()` helper. New `propelioPriceLabelMarkers`
+array tracking the tooltip-host markers. Cleanup pattern same as
+sold/redfin (belt-and-suspenders to avoid orphaned tooltips on
+re-render).
+
+CSS: add `.propelio-price-label.sold/.active/.pending` variants under
+the existing tooltip-label styling.
+
 ## 🟡 Phase 3.5 — Target-relevance UX (frontend only, post-Phase-3)
 
 **KK 2026-05-09 second-pass clarification:** earlier ROADMAP entry
