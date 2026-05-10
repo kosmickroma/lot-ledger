@@ -2930,22 +2930,24 @@ function _propelioBuildPopup(c) {
     ? `<div class="propelio-popup-remarks">${_propelioEscape(remarks.length > REMARKS_MAX ? remarks.slice(0, REMARKS_MAX).trim() + "…" : remarks)}</div>`
     : "";
 
-  // Rating buttons — only when comp belongs to a loaded saved area and
-  // carries a stable comp_address_key from the archive.
+  // Rating buttons. Always render the row so the affordance is visible.
+  // When no saved area is loaded (or the comp lacks a stable archive key),
+  // disable the buttons and show a "Save area to enable ratings" hint.
   const compKey = String(c?.comp_address_key || "").trim();
   const currentRating = c?.user_rating === "good" || c?.user_rating === "bad" ? c.user_rating : null;
-  let ratingHtml = "";
-  if (_currentLoadedAreaId && compKey) {
-    const goodActive = currentRating === "good" ? " is-active" : "";
-    const badActive = currentRating === "bad" ? " is-active" : "";
-    const keyAttr = _propelioEscape(compKey);
-    ratingHtml = `
-      <div class="propelio-popup-rating" data-comp-key="${keyAttr}">
-        <button type="button" class="propelio-rate-btn good${goodActive}" data-rating="good" data-comp-key="${keyAttr}">Good</button>
-        <button type="button" class="propelio-rate-btn bad${badActive}" data-rating="bad" data-comp-key="${keyAttr}">Bad</button>
-        <button type="button" class="propelio-rate-btn clear" data-rating="clear" data-comp-key="${keyAttr}">Clear</button>
-      </div>`;
-  }
+  const ratingsEnabled = Boolean(_currentLoadedAreaId && compKey);
+  const goodActive = ratingsEnabled && currentRating === "good" ? " is-active" : "";
+  const badActive = ratingsEnabled && currentRating === "bad" ? " is-active" : "";
+  const keyAttr = _propelioEscape(compKey);
+  const disabledAttr = ratingsEnabled ? "" : " disabled";
+  const wrapTitle = ratingsEnabled ? "" : ' title="Save this area to enable ratings"';
+  const hintHtml = ratingsEnabled ? "" : `<div class="propelio-rate-hint">Save area to enable ratings</div>`;
+  const ratingHtml = `
+      <div class="propelio-popup-rating${ratingsEnabled ? "" : " is-disabled"}" data-comp-key="${keyAttr}"${wrapTitle}>
+        <button type="button" class="propelio-rate-btn good${goodActive}" data-rating="good" data-comp-key="${keyAttr}"${disabledAttr}>Good</button>
+        <button type="button" class="propelio-rate-btn bad${badActive}" data-rating="bad" data-comp-key="${keyAttr}"${disabledAttr}>Bad</button>
+        <button type="button" class="propelio-rate-btn clear" data-rating="clear" data-comp-key="${keyAttr}"${disabledAttr}>Clear</button>
+      </div>${hintHtml}`;
 
   return `
     <div class="propelio-popup">
@@ -3376,19 +3378,39 @@ function _findPropelioCompByKey(key) {
 function flyToAndOpenPropelioComp(compKey) {
   const layer = propelioCompLayerByKey.get(String(compKey || "").trim());
   if (!layer) return;
-  let target = null;
+
+  // Resolve a bounds (preferred) and a center point for the layer.
+  let bounds = null;
+  let center = null;
   if (typeof layer.getBounds === "function") {
     try {
       const b = layer.getBounds();
-      if (b && b.isValid()) target = b.getCenter();
+      if (b && b.isValid()) {
+        bounds = b;
+        center = b.getCenter();
+      }
     } catch (_) { /* noop */ }
   }
-  if (!target && typeof layer.getLatLng === "function") {
-    target = layer.getLatLng();
+  if (!center && typeof layer.getLatLng === "function") {
+    center = layer.getLatLng();
   }
-  if (target) {
-    map.flyTo(target, Math.max(map.getZoom(), 17), { duration: 0.4 });
+
+  // Honor the global click-mode toggle so list-clicks behave the same as
+  // saved-area / target clicks.
+  const mode = (typeof getClickMode === "function" ? getClickMode() : "jump");
+  if (mode === "jump") {
+    if (bounds) {
+      map.fitBounds(bounds, { padding: [40, 40], maxZoom: 17 });
+    } else if (center) {
+      map.flyTo(center, Math.max(map.getZoom(), 17), { duration: 0.4 });
+    }
+  } else if (center) {
+    if (!isPointInViewport(center)) {
+      if (bounds) map.fitBounds(bounds, { padding: [40, 40], maxZoom: map.getZoom() });
+      else map.panTo(center);
+    }
   }
+
   if (typeof layer.openPopup === "function") {
     layer.openPopup();
   } else if (layer.eachLayer) {

@@ -2455,6 +2455,28 @@ h1 {
   background: rgba(0, 0, 0, 0.06);
 }
 
+.propelio-rate-btn.is-active {
+  background: rgba(0, 0, 0, 0.08);
+  border-color: rgba(0, 0, 0, 0.3);
+}
+
+.propelio-rate-btn[disabled] {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.propelio-popup-rating.is-disabled {
+  opacity: 0.7;
+}
+
+.propelio-rate-hint {
+  font-size: 10px;
+  color: var(--text-soft, #888);
+  font-style: italic;
+  margin-top: 4px;
+  text-align: center;
+}
+
 .propelio-rate-current {
   font-size: 10px;
   color: var(--text-soft);
