@@ -6166,6 +6166,17 @@ function clearDrawResults() {
   potentialTargetByAccount.clear();
   verificationBadgeMarkers.clear();
   targetBadgeMarkers.clear();
+  // Propelio surface: footprints/dots/checkmarks on the map, the
+  // sidebar comp list, the CMA chip, and the count chip on the card
+  // header. The archive in the DB is untouched — clicking the saved
+  // workspace again rehydrates everything exactly as it was.
+  propelioCompLayer.clearLayers();
+  propelioCompLayerByKey.clear();
+  window._propelioLast = null;
+  propelioCmaChip.hide();
+  renderPropelioCompList([]);
+  const _propelioCountEl = document.getElementById("propelio-filter-count");
+  if (_propelioCountEl) _propelioCountEl.textContent = "";
   currentJobId = null;
   lastPolygon = null;
   lastDrawnLatLngs = null;
