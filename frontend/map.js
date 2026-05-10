@@ -398,6 +398,7 @@ map.on("zoomend", () => {
   if (viewportRenderMode) _scheduleViewportRender();
   refreshSoldPriceLabels();
   refreshRedfinPriceLabels();
+  refreshPropelioPriceLabels();
   _updateCountyLabelVisibility();
 });
 _updateZoomNudge();
@@ -1046,6 +1047,39 @@ function refreshRedfinPriceLabels() {
       direction: "top",
       offset: [10, -8],
       className: "redfin-price-label",
+      interactive: false,
+    });
+    shown += 1;
+  }
+}
+
+// Zoom-gated permanent price tooltips for Propelio comps. Mirrors the
+// sold + redfin patterns. Status drives the chip color: sold→purple,
+// active→red, pending→amber-with-dashed-border (visually distinct
+// from active red so they don't blur together at a glance). Bad-rated
+// comps are excluded at marker-build time so they never get a balloon.
+function refreshPropelioPriceLabels() {
+  propelioPriceMarkers.forEach(({ marker }) => marker.unbindTooltip());
+  if (map.getZoom() < 16) return;
+  if (!propelioPriceMarkers.length) return;
+
+  const maxLabels = map.getZoom() >= 18 ? 220 : map.getZoom() >= 17 ? 140 : 80;
+  const cellPx = map.getZoom() >= 18 ? 20 : map.getZoom() >= 17 ? 26 : 34;
+  const occupied = new Set();
+  let shown = 0;
+
+  for (const { marker, priceLabel, bucket } of propelioPriceMarkers) {
+    if (shown >= maxLabels) break;
+    if (!priceLabel) continue;
+    const p = map.latLngToContainerPoint(marker.getLatLng());
+    const key = `${Math.floor(p.x / cellPx)}:${Math.floor(p.y / cellPx)}`;
+    if (occupied.has(key)) continue;
+    occupied.add(key);
+    marker.bindTooltip(priceLabel, {
+      permanent: true,
+      direction: "top",
+      offset: [10, -8],
+      className: `propelio-price-label ${bucket || "sold"}`,
       interactive: false,
     });
     shown += 1;
@@ -1958,7 +1992,7 @@ function _renderSavedParcelOutline(area) {
       weight: 4,
       fill: true,
       fillColor: SAVED_PARCEL_COLOR,
-      fillOpacity: 0.75,
+      fillOpacity: 0.16,
       interactive: false,
     },
     interactive: false,
@@ -3391,6 +3425,12 @@ function _propelioFootprintStyle(statusClass) {
 // hover highlight class on the matching footprint.
 const propelioCompLayerByKey = new Map();
 
+// Invisible CircleMarker anchors at each comp's centroid, used to bind
+// permanent zoom-gated price tooltips ("price balloons"). Mirrors the
+// soldMarkers / redfinMarkers pattern. Cleared and rebuilt on every
+// _renderPropelioComps call. Refresh is called on zoom changes too.
+let propelioPriceMarkers = [];
+
 // Drop a green checkmark badge at the geometric center of a good-rated comp.
 // For polygon footprints we use the bounds center (visually close enough to
 // a true centroid for our parcel sizes); for fallback dots we just stack
@@ -3423,6 +3463,7 @@ function _maybeAddGoodCompMark(comp, footprint, fallbackLatLng) {
 function _renderPropelioComps(data) {
   propelioCompLayer.clearLayers();
   propelioCompLayerByKey.clear();
+  propelioPriceMarkers = [];
   if (!data || !Array.isArray(data.comps)) return { total: 0, footprintCount: 0, fallbackCount: 0 };
 
   let footprintCount = 0;
@@ -3476,6 +3517,42 @@ function _renderPropelioComps(data) {
     fallbackCount += 1;
     _maybeAddGoodCompMark(comp, null, latlng);
   });
+
+  // After visible footprints/dots are placed, lay down invisible
+  // CircleMarker anchors at each comp's centroid so we can bind
+  // permanent price tooltips on top. Bad-rated comps are excluded from
+  // the balloon set entirely (they're already dim — no need to add
+  // a price chip for a comp the analyst already rejected).
+  data.comps.forEach((comp) => {
+    if (comp?.user_rating === "bad") return;
+    const priceLabel = abbreviatePrice(Number(comp?.price));
+    if (!priceLabel) return;
+    let anchorLatLng = null;
+    const compKey = String(comp?.comp_address_key || "").trim();
+    const layer = compKey ? propelioCompLayerByKey.get(compKey) : null;
+    if (layer && typeof layer.getBounds === "function") {
+      try {
+        const b = layer.getBounds();
+        if (b && b.isValid()) anchorLatLng = b.getCenter();
+      } catch (_) { /* noop */ }
+    }
+    if (!anchorLatLng) anchorLatLng = _propelioCompLatLng(comp);
+    if (!anchorLatLng) return;
+    if (Array.isArray(anchorLatLng)) anchorLatLng = L.latLng(anchorLatLng[0], anchorLatLng[1]);
+    const anchor = L.circleMarker(anchorLatLng, {
+      radius: 1,
+      opacity: 0,
+      fillOpacity: 0,
+      interactive: false,
+    });
+    anchor.addTo(propelioCompLayer);
+    propelioPriceMarkers.push({
+      marker: anchor,
+      priceLabel,
+      bucket: _propelioStatusBucket(comp),
+    });
+  });
+  refreshPropelioPriceLabels();
 
   if (data?.polygon_meta) {
     const total = data.comps.length;

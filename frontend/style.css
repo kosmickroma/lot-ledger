@@ -459,6 +459,41 @@ h1 {
   box-shadow: 0 2px 6px rgba(80, 0, 0, 0.34);
 }
 
+/* Propelio price balloons. Same zoom-gated permanent-tooltip pattern
+   as sold/redfin, status-colored to match the comp dots/footprints.
+   Pending uses a DASHED border so it doesn't blur into active red at
+   a glance — color hue stays consistent across surfaces, the border
+   style carries the "this hasn't closed yet" signal. */
+.propelio-price-label {
+  border-radius: 8px;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+
+.propelio-price-label.sold {
+  background: rgba(76, 29, 149, 0.92);
+  color: #f3e8ff;
+  border: 1.5px solid #8b5cf6;
+  box-shadow: 0 2px 6px rgba(46, 16, 101, 0.42);
+}
+
+.propelio-price-label.active {
+  background: rgba(127, 29, 29, 0.92);
+  color: #fef3c7;
+  border: 1.5px solid #dc2626;
+  box-shadow: 0 2px 6px rgba(80, 0, 0, 0.42);
+}
+
+.propelio-price-label.pending {
+  background: rgba(254, 243, 199, 0.95);
+  color: #92400e;
+  border: 1.5px dashed #f59e0b;
+  box-shadow: 0 2px 6px rgba(146, 64, 14, 0.34);
+}
+
 .count-row {
   display: flex;
   align-items: center;
