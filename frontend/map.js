@@ -60,8 +60,11 @@ const CLICK_MODE_STORAGE_KEY = "lot_ledger_click_mode";
 const SIDEBAR_SECTION_STATE_STORAGE_KEY = "lot_ledger_sidebar_sections.v1";
 
 const DEFAULT_FILTERS = {
-  active: true,
-  sold: true,
+  // R.F. Listings + R.F. Sold default OFF — those are the legacy Redfin
+  // overlays. Propelio is the primary comps surface now; legacy stays
+  // around as opt-in for sanity-check or deprecation review.
+  active: false,
+  sold: false,
   off_market: true,
   vacant: true,
   multifamily: true,
@@ -1657,6 +1660,42 @@ async function saveCurrentArea(name) {
   }
 }
 
+// On saved-area load: pull the archived comps for that workspace from
+// the session DB and rehydrate the propelio panel. No Propelio quota
+// hit, no scrape — just a DB read of comps the workspace already
+// owns. Comps come back with comp_address_key + user_rating already
+// stamped, so good/bad/dim states restore exactly as the user left
+// them. Empty archive → leave UI quiet (no error noise).
+async function _hydratePropelioFromArchive(savedAreaId) {
+  if (!savedAreaId) return;
+  // Reset any prior workspace's propelio state first.
+  window._propelioLast = null;
+  propelioCompLayer.clearLayers();
+  propelioCompLayerByKey.clear();
+  renderPropelioCompList([]);
+  propelioCmaChip.hide();
+  const countEl = document.getElementById("propelio-filter-count");
+  if (countEl) countEl.textContent = "";
+
+  try {
+    const resp = await fetch(
+      `/api/propelio/by-saved-area?saved_area_id=${encodeURIComponent(savedAreaId)}`,
+      { headers: { ...authHeaders() } },
+    );
+    if (!resp.ok) {
+      console.warn("[propelio] hydrate from archive failed:", resp.status);
+      return;
+    }
+    const data = await resp.json();
+    const comps = Array.isArray(data?.comps) ? data.comps : [];
+    if (!comps.length) return;
+    window._propelioLast = { comps };
+    applyPropelioClientFilters();
+  } catch (err) {
+    console.error("[propelio] hydrate error:", err);
+  }
+}
+
 async function _reattachPropelioToSavedArea(savedAreaId) {
   if (!savedAreaId) return;
   if (!window._propelioLast || !Array.isArray(window._propelioLast.comps) || !window._propelioLast.comps.length) return;
@@ -2176,6 +2215,10 @@ async function restoreSavedArea(area, options = {}) {
     renderSidebar(data.counts, markers);
     applyResultTags(data);
     _currentLoadedAreaId = area.id;
+    // Workspace = parcels + archived comps. Hydrate propelio comps from the
+    // session DB so the analyst lands back in the exact state they left
+    // (good/bad ratings, dimmed bad-comps, footprints, list).
+    void _hydratePropelioFromArchive(area.id);
     // NOTE: don't re-call setActiveItem here. It was already set at line 1885
     // before the await. Calling it again post-analysis stomps any active
     // selection the user made during the analysis (e.g., clicking a target
