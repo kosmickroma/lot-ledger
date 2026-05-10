@@ -2049,17 +2049,17 @@ h1 {
 .propelio-get-comps-btn {
   border: 1px solid rgba(255, 255, 255, 0.42);
   border-radius: 999px;
-  background: linear-gradient(135deg, #8b5cf6 0%, #6d28d9 58%, #5b21b6 100%);
-  color: #fff;
+  background: linear-gradient(135deg, #e2c075 0%, #c9a24f 58%, #9c7a2b 100%);
+  color: #1a1410;
   font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.01em;
   padding: 8px 18px;
   min-width: 132px;
   box-shadow:
-    0 10px 24px rgba(76, 29, 149, 0.35),
-    0 0 0 1px rgba(255, 255, 255, 0.1) inset,
-    0 0 18px rgba(139, 92, 246, 0.46);
+    0 10px 24px rgba(120, 90, 30, 0.35),
+    0 0 0 1px rgba(255, 255, 255, 0.18) inset,
+    0 0 18px rgba(201, 162, 79, 0.55);
   animation: propelioPillPulse 2.2s ease-in-out infinite;
   transform: translateZ(0);
   cursor: pointer;
@@ -2083,9 +2083,9 @@ h1 {
 .propelio-get-comps-btn:hover:not(:disabled) {
   transform: scale(1.04);
   box-shadow:
-    0 12px 28px rgba(76, 29, 149, 0.42),
-    0 0 0 1px rgba(255, 255, 255, 0.15) inset,
-    0 0 22px rgba(139, 92, 246, 0.6);
+    0 12px 28px rgba(120, 90, 30, 0.42),
+    0 0 0 1px rgba(255, 255, 255, 0.22) inset,
+    0 0 22px rgba(201, 162, 79, 0.7);
 }
 
 .propelio-get-comps-btn:disabled {
@@ -2097,15 +2097,15 @@ h1 {
   0%,
   100% {
     box-shadow:
-      0 10px 24px rgba(76, 29, 149, 0.35),
-      0 0 0 1px rgba(255, 255, 255, 0.1) inset,
-      0 0 16px rgba(139, 92, 246, 0.4);
+      0 10px 24px rgba(120, 90, 30, 0.35),
+      0 0 0 1px rgba(255, 255, 255, 0.18) inset,
+      0 0 16px rgba(201, 162, 79, 0.5);
   }
   50% {
     box-shadow:
-      0 14px 30px rgba(76, 29, 149, 0.45),
-      0 0 0 1px rgba(255, 255, 255, 0.16) inset,
-      0 0 28px rgba(139, 92, 246, 0.68);
+      0 14px 30px rgba(120, 90, 30, 0.45),
+      0 0 0 1px rgba(255, 255, 255, 0.24) inset,
+      0 0 28px rgba(201, 162, 79, 0.78);
   }
 }
 
@@ -2230,8 +2230,8 @@ h1 {
 
 .propelio-refresh-btn {
   margin-top: 6px;
-  background: linear-gradient(135deg, #8b5cf6 0%, #6d28d9 100%);
-  color: #fff;
+  background: linear-gradient(135deg, var(--gold) 0%, var(--gold-strong) 100%);
+  color: #1a1410;
   border: 0;
   border-radius: 999px;
   padding: 6px 14px;
@@ -2240,13 +2240,13 @@ h1 {
   letter-spacing: 0.02em;
   cursor: pointer;
   width: 100%;
-  box-shadow: 0 2px 8px rgba(139, 92, 246, 0.45);
+  box-shadow: 0 2px 8px rgba(201, 162, 79, 0.45);
   transition: transform 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease;
 }
 
 .propelio-refresh-btn:hover:not(:disabled) {
   transform: scale(1.02);
-  box-shadow: 0 4px 12px rgba(139, 92, 246, 0.65);
+  box-shadow: 0 4px 12px rgba(201, 162, 79, 0.65);
 }
 
 .propelio-refresh-btn:disabled {
