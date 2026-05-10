@@ -2305,10 +2305,13 @@ h1 {
 }
 
 /* ── Bad-comp visual treatment (Phase 3 Chunk D) ─────────────────────────── */
+/* Same purple/red/amber hue, just noticeably duller so good comps pop and
+   bad ones recede. We preserve the colored glow set on the parent .sold /
+   .active / .pending rules and only knock down the opacity. NO desaturate
+   — KK 2026-05-10: bad must stay clearly the status color, just dimmer. */
 .propelio-footprint-glow.bad-comp,
 .propelio-fallback-dot.bad-comp {
-  opacity: 0.30;
-  filter: saturate(0.35) brightness(0.95);
+  opacity: 0.55;
 }
 
 /* Sidebar comp list */
