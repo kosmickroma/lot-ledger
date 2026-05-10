@@ -535,6 +535,27 @@ async def get_by_saved_area(saved_area_id: str = Query(..., min_length=1)) -> di
     return {"comps": load_archived_comps(normalized)}
 
 
+class AttachExistingRequest(BaseModel):
+    saved_area_id: str
+    comps: list[dict[str, Any]]
+
+
+@router.post("/attach-to-area")
+async def attach_existing_comps(request: AttachExistingRequest) -> dict[str, Any]:
+    """Attach an in-memory comp list to an archive (saved area) without
+    re-pulling from Propelio. Used right after a user saves a fresh
+    polygon: the comps already on screen need stable comp_address_keys
+    so the popup rating buttons go live. No cache lookup, no scrape, no
+    quota cost — just the merge + reload."""
+    saved_area_id = str(request.saved_area_id or "").strip()
+    if not saved_area_id:
+        raise HTTPException(status_code=400, detail="saved_area_id is required")
+    comps = list(request.comps or [])
+    archive_meta = merge_comps_into_archive(saved_area_id, comps)
+    archived_comps = load_archived_comps(saved_area_id)
+    return {"archive_meta": archive_meta, "comps": archived_comps}
+
+
 class CompRateRequest(BaseModel):
     saved_area_id: str
     comp_address_key: str

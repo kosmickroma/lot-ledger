@@ -1647,36 +1647,41 @@ async function saveCurrentArea(name) {
   _selectedSavedItemId = normalized.id;
   setActiveItem("Workspace", normalized.name);
   renderSavedAreasList();
-  // If there's already a Propelio pull on screen for this polygon, re-pull
-  // through the saved-area path so the comps land in the archive and pick
-  // up stable comp_address_keys. The cache key doesn't include
-  // saved_area_id, so this hits cache (no Propelio credit spent).
+  // If there's already a Propelio pull on screen for this polygon, attach
+  // the existing comp list to the new saved area's archive so the comps
+  // pick up stable comp_address_keys. We AWAIT this so the user can't
+  // race a filter change against the merge — the buttons must be live by
+  // the time saveCurrentArea returns.
   if (window._propelioLast && Array.isArray(window._propelioLast.comps) && window._propelioLast.comps.length) {
-    void _reattachPropelioToSavedArea(normalized.id);
+    await _reattachPropelioToSavedArea(normalized.id);
   }
 }
 
 async function _reattachPropelioToSavedArea(savedAreaId) {
-  if (!savedAreaId || !Array.isArray(lastPolygon) || lastPolygon.length < 3) return;
+  if (!savedAreaId) return;
+  if (!window._propelioLast || !Array.isArray(window._propelioLast.comps) || !window._propelioLast.comps.length) return;
   try {
-    const resp = await fetch("/api/propelio/by-polygon", {
+    const resp = await fetch("/api/propelio/attach-to-area", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...authHeaders() },
       body: JSON.stringify({
-        polygon: lastPolygon,
-        months: PROPELIO_POLYGON_MONTHS,
         saved_area_id: savedAreaId,
+        comps: window._propelioLast.comps,
       }),
     });
     if (!resp.ok) {
-      console.warn("[propelio] reattach to saved area failed:", resp.status);
+      console.warn("[propelio] attach-to-area failed:", resp.status);
       return;
     }
     const data = await resp.json();
-    window._propelioLast = data;
+    window._propelioLast = {
+      ...window._propelioLast,
+      comps: Array.isArray(data?.comps) ? data.comps : window._propelioLast.comps,
+      archive_meta: data?.archive_meta || null,
+    };
     applyPropelioClientFilters();
   } catch (err) {
-    console.error("[propelio] reattach error:", err);
+    console.error("[propelio] attach-to-area error:", err);
   }
 }
 
@@ -2879,7 +2884,151 @@ function _propelioEscape(s) {
   );
 }
 
+// Find the Propelio comp matching a parcel by account number. Returns null
+// if no comps loaded or no match. Used by the unified popup to enrich a
+// CAD parcel popup with its matched comp's MLS data + rating buttons.
+function _findMatchedCompForAccount(accountNum) {
+  const account = String(accountNum || "").trim();
+  if (!account) return null;
+  const comps = window._propelioLast?.comps;
+  if (!Array.isArray(comps)) return null;
+  return comps.find((c) => String(c?.parcel_account_num || "").trim() === account) || null;
+}
+
+// Render the Good / Bad / Clear rating button row for a comp. Always
+// renders the row so the affordance is visible; when no saved area is
+// loaded or the comp lacks a stable archive key, the buttons are
+// disabled and a "Save area to enable ratings" hint is shown beneath.
+function _buildRatingButtonsHtml(comp) {
+  const compKey = String(comp?.comp_address_key || "").trim();
+  const currentRating = comp?.user_rating === "good" || comp?.user_rating === "bad" ? comp.user_rating : null;
+  const ratingsEnabled = Boolean(_currentLoadedAreaId && compKey);
+  const goodActive = ratingsEnabled && currentRating === "good" ? " is-active" : "";
+  const badActive = ratingsEnabled && currentRating === "bad" ? " is-active" : "";
+  const keyAttr = _propelioEscape(compKey);
+  const disabledAttr = ratingsEnabled ? "" : " disabled";
+  const wrapTitle = ratingsEnabled ? "" : ' title="Save this area to enable ratings"';
+  const hintHtml = ratingsEnabled ? "" : `<div class="propelio-rate-hint">Save area to enable ratings</div>`;
+  return `
+      <div class="propelio-popup-rating${ratingsEnabled ? "" : " is-disabled"}" data-comp-key="${keyAttr}"${wrapTitle}>
+        <button type="button" class="propelio-rate-btn good${goodActive}" data-rating="good" data-comp-key="${keyAttr}"${disabledAttr}>Good</button>
+        <button type="button" class="propelio-rate-btn bad${badActive}" data-rating="bad" data-comp-key="${keyAttr}"${disabledAttr}>Bad</button>
+        <button type="button" class="propelio-rate-btn clear" data-rating="clear" data-comp-key="${keyAttr}"${disabledAttr}>Clear</button>
+      </div>${hintHtml}`;
+}
+
+// Render the MLS-comp section for a unified popup. Mirrors the layout of
+// the Propelio standalone popup but is meant to live underneath the CAD
+// table inside makePopupHtml. Includes price, sold/list info, dims,
+// beds/baths, MLS metadata, and the truncated remarks excerpt.
+function _buildPropelioCompSectionHtml(c) {
+  if (!c) return "";
+  const fmtPrice = (n) => Number.isFinite(n) ? `$${Math.round(n).toLocaleString()}` : "—";
+  const fmtNum = (n) => Number.isFinite(n) ? Number(n).toLocaleString() : null;
+  const fmtDate = (s) => {
+    if (!s) return null;
+    const d = new Date(s);
+    return Number.isFinite(d.getTime()) ? d.toISOString().slice(0, 10) : null;
+  };
+  const ex = c?.extra || {};
+  const status = String(c?.status || "");
+  const isSold = status === "sold";
+
+  const sqft = fmtNum(c?.sqft);
+  const lot = fmtNum(c?.lot_size);
+  const year = Number.isFinite(c?.year_built) ? c.year_built : null;
+  const beds = ex.beds;
+  const baths = ex.baths;
+  const bathsFull = ex.baths_full;
+  const bathsHalf = ex.baths_half;
+  const garage = ex.garage;
+  const dom = ex.dom;
+  const listPrice = Number(ex.list_price);
+  const closeDate = fmtDate(ex.close_date);
+  const modifiedTs = fmtDate(ex.modified_timestamp);
+  const propertyType = ex.property_type;
+  const mls = ex.mls || "";
+  const source = ex.source || "";
+  const zipCode = ex.zip || "";
+  const remarks = String(ex.remarks || "").trim();
+
+  const dims = [];
+  if (sqft) dims.push(`${sqft} sqft`);
+  if (lot) dims.push(`${lot} sqft lot`);
+  if (year) dims.push(`built ${year}`);
+
+  const bbLine = [];
+  if (beds != null) bbLine.push(`${beds}bd`);
+  if (Number.isFinite(bathsFull) || Number.isFinite(bathsHalf)) {
+    const fullStr = Number.isFinite(bathsFull) ? `${bathsFull}` : "0";
+    const halfStr = Number.isFinite(bathsHalf) && bathsHalf > 0 ? ` + ${bathsHalf}½` : "";
+    bbLine.push(`${fullStr}ba${halfStr}`);
+  } else if (baths != null) {
+    bbLine.push(`${baths}ba`);
+  }
+  if (Number.isFinite(garage) && garage > 0) bbLine.push(`${garage}-car gar`);
+
+  const priceLineParts = [fmtPrice(c?.price), _propelioEscape(status)];
+  let listVsCloseHtml = "";
+  if (isSold && Number.isFinite(listPrice) && Number.isFinite(c?.price) && listPrice > 0 && Math.abs(listPrice - c.price) > 1) {
+    const delta = c.price - listPrice;
+    const deltaPct = Math.round((delta / listPrice) * 100);
+    const sign = delta > 0 ? "+" : "";
+    listVsCloseHtml = `<div class="propelio-popup-meta">List was ${fmtPrice(listPrice)} (${sign}${deltaPct}% close vs list)</div>`;
+  } else if (!isSold && Number.isFinite(listPrice) && listPrice > 0 && Number(c?.price) !== listPrice) {
+    listVsCloseHtml = `<div class="propelio-popup-meta">List: ${fmtPrice(listPrice)}</div>`;
+  }
+
+  const soldMeta = [];
+  if (isSold && closeDate) soldMeta.push(`closed ${closeDate}`);
+  if (Number.isFinite(dom)) soldMeta.push(`DOM ${dom}`);
+
+  const subLine = [];
+  if (c?.neighborhood) subLine.push(c.neighborhood);
+  if (zipCode) subLine.push(zipCode);
+
+  const idLine = [];
+  if (mls) idLine.push(`MLS ${mls}`);
+  if (propertyType) idLine.push(propertyType);
+
+  const REMARKS_MAX = 280;
+  const remarksHtml = remarks
+    ? `<div class="propelio-popup-remarks">${_propelioEscape(remarks.length > REMARKS_MAX ? remarks.slice(0, REMARKS_MAX).trim() + "…" : remarks)}</div>`
+    : "";
+
+  return `
+    <div class="popup-propelio-section">
+      <div class="popup-propelio-header">MLS Comp</div>
+      <div class="propelio-popup-price">${priceLineParts.join(" · ")}</div>
+      ${listVsCloseHtml}
+      ${soldMeta.length ? `<div class="propelio-popup-meta">${_propelioEscape(soldMeta.join(" · "))}</div>` : ""}
+      ${dims.length ? `<div class="propelio-popup-meta">${_propelioEscape(dims.join(" · "))}</div>` : ""}
+      ${bbLine.length ? `<div class="propelio-popup-meta">${_propelioEscape(bbLine.join(" · "))}</div>` : ""}
+      ${subLine.length ? `<div class="propelio-popup-meta">${_propelioEscape(subLine.join(" · "))}</div>` : ""}
+      ${idLine.length ? `<div class="propelio-popup-meta">${_propelioEscape(idLine.join(" · "))}${source ? ` <span class="propelio-popup-source">(${_propelioEscape(source)})</span>` : ""}</div>` : ""}
+      ${modifiedTs ? `<div class="popup-propelio-meta-mute">MLS updated ${_propelioEscape(modifiedTs)}</div>` : ""}
+      ${remarksHtml}
+    </div>
+  `;
+}
+
 function _propelioBuildPopup(c) {
+  // If this comp matches a parcel in the current draw, return the unified
+  // CAD popup (which now includes the comp section + rating buttons). Lets
+  // a click on the propelio footprint open the same card as a click on
+  // the underlying parcel outline. Spillover comps with no parcel match
+  // (Propelio search circumradius extends beyond the polygon) fall through
+  // to the standalone comp-only popup below.
+  const accountNum = String(c?.parcel_account_num || "").trim();
+  if (accountNum && lastAnalysisGeojson && Array.isArray(lastAnalysisGeojson.features)) {
+    const matched = lastAnalysisGeojson.features.find(
+      (f) => String(f?.properties?.account_num || "").trim() === accountNum
+    );
+    if (matched?.properties) {
+      return makePopupHtml(matched.properties);
+    }
+  }
+
   const fmtPrice = (n) => Number.isFinite(n) ? `$${Math.round(n).toLocaleString()}` : "—";
   const fmtNum = (n) => Number.isFinite(n) ? Number(n).toLocaleString() : null;
   const fmtDate = (s) => {
@@ -2961,24 +3110,7 @@ function _propelioBuildPopup(c) {
     ? `<div class="propelio-popup-remarks">${_propelioEscape(remarks.length > REMARKS_MAX ? remarks.slice(0, REMARKS_MAX).trim() + "…" : remarks)}</div>`
     : "";
 
-  // Rating buttons. Always render the row so the affordance is visible.
-  // When no saved area is loaded (or the comp lacks a stable archive key),
-  // disable the buttons and show a "Save area to enable ratings" hint.
-  const compKey = String(c?.comp_address_key || "").trim();
-  const currentRating = c?.user_rating === "good" || c?.user_rating === "bad" ? c.user_rating : null;
-  const ratingsEnabled = Boolean(_currentLoadedAreaId && compKey);
-  const goodActive = ratingsEnabled && currentRating === "good" ? " is-active" : "";
-  const badActive = ratingsEnabled && currentRating === "bad" ? " is-active" : "";
-  const keyAttr = _propelioEscape(compKey);
-  const disabledAttr = ratingsEnabled ? "" : " disabled";
-  const wrapTitle = ratingsEnabled ? "" : ' title="Save this area to enable ratings"';
-  const hintHtml = ratingsEnabled ? "" : `<div class="propelio-rate-hint">Save area to enable ratings</div>`;
-  const ratingHtml = `
-      <div class="propelio-popup-rating${ratingsEnabled ? "" : " is-disabled"}" data-comp-key="${keyAttr}"${wrapTitle}>
-        <button type="button" class="propelio-rate-btn good${goodActive}" data-rating="good" data-comp-key="${keyAttr}"${disabledAttr}>Good</button>
-        <button type="button" class="propelio-rate-btn bad${badActive}" data-rating="bad" data-comp-key="${keyAttr}"${disabledAttr}>Bad</button>
-        <button type="button" class="propelio-rate-btn clear" data-rating="clear" data-comp-key="${keyAttr}"${disabledAttr}>Clear</button>
-      </div>${hintHtml}`;
+  const ratingHtml = _buildRatingButtonsHtml(c);
 
   return `
     <div class="propelio-popup">
@@ -4464,6 +4596,13 @@ function makePopupHtml(p) {
     `;
   }
 
+  // Pull in the matched Propelio comp (if any) so the popup can present
+  // CAD + MLS data together. Drives both the comp section under the table
+  // and the Good / Bad / Clear rating buttons.
+  const matchedComp = _findMatchedCompForAccount(p?.account_num);
+  const propelioSectionHtml = matchedComp ? _buildPropelioCompSectionHtml(matchedComp) : "";
+  const ratingButtonsHtml = matchedComp ? _buildRatingButtonsHtml(matchedComp) : "";
+
   return `
       <div class="popup">
         <div class="popup-addr">${p.addr || "Unknown address"}</div>
@@ -4490,27 +4629,21 @@ function makePopupHtml(p) {
           ${row("School District", p.school)}
           ${row("Year Built", p.yr_built)}
           ${row("Living Area", p.sqft && p.sqft !== "N/A" ? p.sqft + " sf" : "N/A")}
-          ${row("Verified Vacant", verificationDisplay(verifiedVacant))}
           ${row("Potential Target", potentialTarget || "No")}
           ${redfinListingRow}
           ${soldCompRows}
         </table>
-        ${p.account_num ? `<div style="margin-top:8px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding-top:6px;border-top:1px solid #e2e8f0;">
-          <div style="flex:1;display:flex;gap:6px;font-size:11px;">
-            <a href="#" class="parcel-verify-yes" data-account="${p.account_num}" data-lat="${p.lat || ""}" data-lng="${p.lng || ""}" style="color:#27ae60;text-decoration:none;">✓ Vacant</a>
-            <a href="#" class="parcel-verify-no" data-account="${p.account_num}" data-lat="${p.lat || ""}" data-lng="${p.lng || ""}" style="color:#e74c3c;text-decoration:none;">✗ Not vacant</a>
-            <a href="#" class="parcel-verify-clear" data-account="${p.account_num}" style="color:#aaa;text-decoration:none;">· Clear</a>
-          </div>
-          <div style="flex:1;display:flex;gap:6px;font-size:11px;justify-content:flex-end;">
-            <a href="#" class="parcel-save-link"
-              data-account="${p.account_num}"
-              data-county="${p.source_county || "dcad"}"
-              data-addr="${(p.addr || "").replace(/"/g, "&quot;")}"
-              data-lat="${p.lat || ""}"
-              data-lng="${p.lng || ""}"
-              style="color:#e67e22;text-decoration:none;">📌 Save parcel</a>
-            <a href="#" class="parcel-clear-link" style="color:#aaa;text-decoration:none;">✕ Clear</a>
-          </div>
+        ${propelioSectionHtml}
+        ${ratingButtonsHtml}
+        ${p.account_num ? `<div style="margin-top:8px;display:flex;gap:6px;align-items:center;justify-content:flex-end;font-size:11px;padding-top:6px;border-top:1px solid #e2e8f0;">
+          <a href="#" class="parcel-save-link"
+            data-account="${p.account_num}"
+            data-county="${p.source_county || "dcad"}"
+            data-addr="${(p.addr || "").replace(/"/g, "&quot;")}"
+            data-lat="${p.lat || ""}"
+            data-lng="${p.lng || ""}"
+            style="color:#e67e22;text-decoration:none;">📌 Save parcel</a>
+          <a href="#" class="parcel-clear-link" style="color:#aaa;text-decoration:none;">✕ Clear</a>
         </div>` : ""}
       </div>`;
 }
