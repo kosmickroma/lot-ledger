@@ -18,7 +18,6 @@ from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from api.config import get_conn, get_session_conn, release_conn, release_session_conn
@@ -365,18 +364,25 @@ async def _run_by_polygon(request: PolygonRequest, *, use_cache: bool) -> dict[s
             if saved_area_id:
                 empty_payload["archive_meta"] = merge_comps_into_archive(saved_area_id, [])
             return {"cached": False, **empty_payload}
-        return JSONResponse(
+        # Surface the scraper error in logs so we can see WHY Propelio
+        # rejected the pull (auth expired, lead-id lookup failed, captcha,
+        # network blip, etc.). The frontend currently throws away the
+        # response body, so without this log the 503 is a black box.
+        logger.warning("[propelio] by-polygon scraper error: %s", msg)
+        raise HTTPException(
             status_code=503,
-            content={"detail": "Propelio service unavailable", "error": msg},
+            detail=f"Propelio service unavailable: {msg}",
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail="Address not resolvable on Propelio") from exc
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.exception("Unexpected Propelio by-polygon error")
-        return JSONResponse(
+        raise HTTPException(
             status_code=500,
-            content={"detail": "Unexpected error", "error": str(exc)},
-        )
+            detail=f"Unexpected error: {exc}",
+        ) from exc
 
     comps_in_polygon = 0
     for comp in comps_list:
@@ -470,18 +476,21 @@ async def get_by_address(
                 "warning": "Propelio resolved this address but returned 0 comps under their default filter (typically 0.5mi · 6mo · similar lot size). Try a higher-activity neighborhood, or wait for the filter-widen feature.",
             }
             return {"cached": False, **empty_payload}
-        return JSONResponse(
+        logger.warning("[propelio] by-address scraper error: %s", msg)
+        raise HTTPException(
             status_code=503,
-            content={"detail": "Propelio service unavailable", "error": msg},
+            detail=f"Propelio service unavailable: {msg}",
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail="Address not resolvable on Propelio") from exc
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.exception("Unexpected Propelio by-address error")
-        return JSONResponse(
+        raise HTTPException(
             status_code=500,
-            content={"detail": "Unexpected error", "error": str(exc)},
-        )
+            detail=f"Unexpected error: {exc}",
+        ) from exc
 
     payload = _build_payload(subject, comps_list)
     payload["comps"] = match_comps_to_parcels(payload.get("comps") or [])
