@@ -1647,6 +1647,37 @@ async function saveCurrentArea(name) {
   _selectedSavedItemId = normalized.id;
   setActiveItem("Workspace", normalized.name);
   renderSavedAreasList();
+  // If there's already a Propelio pull on screen for this polygon, re-pull
+  // through the saved-area path so the comps land in the archive and pick
+  // up stable comp_address_keys. The cache key doesn't include
+  // saved_area_id, so this hits cache (no Propelio credit spent).
+  if (window._propelioLast && Array.isArray(window._propelioLast.comps) && window._propelioLast.comps.length) {
+    void _reattachPropelioToSavedArea(normalized.id);
+  }
+}
+
+async function _reattachPropelioToSavedArea(savedAreaId) {
+  if (!savedAreaId || !Array.isArray(lastPolygon) || lastPolygon.length < 3) return;
+  try {
+    const resp = await fetch("/api/propelio/by-polygon", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify({
+        polygon: lastPolygon,
+        months: PROPELIO_POLYGON_MONTHS,
+        saved_area_id: savedAreaId,
+      }),
+    });
+    if (!resp.ok) {
+      console.warn("[propelio] reattach to saved area failed:", resp.status);
+      return;
+    }
+    const data = await resp.json();
+    window._propelioLast = data;
+    applyPropelioClientFilters();
+  } catch (err) {
+    console.error("[propelio] reattach error:", err);
+  }
 }
 
 async function deleteSavedArea(item) {
