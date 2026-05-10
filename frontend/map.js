@@ -2930,6 +2930,23 @@ function _propelioBuildPopup(c) {
     ? `<div class="propelio-popup-remarks">${_propelioEscape(remarks.length > REMARKS_MAX ? remarks.slice(0, REMARKS_MAX).trim() + "…" : remarks)}</div>`
     : "";
 
+  // Rating buttons — only when comp belongs to a loaded saved area and
+  // carries a stable comp_address_key from the archive.
+  const compKey = String(c?.comp_address_key || "").trim();
+  const currentRating = c?.user_rating === "good" || c?.user_rating === "bad" ? c.user_rating : null;
+  let ratingHtml = "";
+  if (_currentLoadedAreaId && compKey) {
+    const goodActive = currentRating === "good" ? " is-active" : "";
+    const badActive = currentRating === "bad" ? " is-active" : "";
+    const keyAttr = _propelioEscape(compKey);
+    ratingHtml = `
+      <div class="propelio-popup-rating" data-comp-key="${keyAttr}">
+        <button type="button" class="propelio-rate-btn good${goodActive}" data-rating="good" data-comp-key="${keyAttr}">Good</button>
+        <button type="button" class="propelio-rate-btn bad${badActive}" data-rating="bad" data-comp-key="${keyAttr}">Bad</button>
+        <button type="button" class="propelio-rate-btn clear" data-rating="clear" data-comp-key="${keyAttr}">Clear</button>
+      </div>`;
+  }
+
   return `
     <div class="propelio-popup">
       <div class="propelio-popup-addr">${_propelioEscape(c?.address || "")}</div>
@@ -2942,6 +2959,7 @@ function _propelioBuildPopup(c) {
       ${idLine.length ? `<div class="propelio-popup-meta">${_propelioEscape(idLine.join(" · "))}${source ? ` <span class="propelio-popup-source">(${_propelioEscape(source)})</span>` : ""}</div>` : ""}
       ${modifiedTs ? `<div class="propelio-popup-meta-mute">MLS updated ${_propelioEscape(modifiedTs)}</div>` : ""}
       ${remarksHtml}
+      ${ratingHtml}
     </div>
   `;
 }
@@ -3065,8 +3083,14 @@ function _propelioFootprintStyle(statusClass) {
   };
 }
 
+// Map: comp_address_key → leaflet layer (geoJSON or marker). Used so the
+// sidebar list can fly-to and open the matching popup on click and toggle a
+// hover highlight class on the matching footprint.
+const propelioCompLayerByKey = new Map();
+
 function _renderPropelioComps(data) {
   propelioCompLayer.clearLayers();
+  propelioCompLayerByKey.clear();
   if (!data || !Array.isArray(data.comps)) return { total: 0, footprintCount: 0, fallbackCount: 0 };
 
   let footprintCount = 0;
@@ -3076,6 +3100,9 @@ function _renderPropelioComps(data) {
 
   data.comps.forEach((comp) => {
     const statusClass = _propelioStatusBucket(comp);
+    const isBad = comp?.user_rating === "bad";
+    const compClass = isBad ? `${statusClass} bad-comp` : statusClass;
+    const compKey = String(comp?.comp_address_key || "").trim();
     const latlng = _propelioCompLatLng(comp);
     if (hasPolygonContext && latlng && _pointInPolygonLngLat(latlng[1], latlng[0], lastPolygon)) {
       insideCount += 1;
@@ -3086,12 +3113,13 @@ function _renderPropelioComps(data) {
 
     if (hasGeom) {
       const footprint = L.geoJSON(geom, {
-        style: () => _propelioFootprintStyle(statusClass),
+        style: () => _propelioFootprintStyle(compClass),
         onEachFeature: (_feature, layer) => {
           layer.bindPopup(_propelioBuildPopup(comp));
         },
       });
       footprint.addTo(propelioCompLayer);
+      if (compKey) propelioCompLayerByKey.set(compKey, footprint);
       footprintCount += 1;
       return;
     }
@@ -3100,7 +3128,7 @@ function _renderPropelioComps(data) {
 
     const fallbackIcon = L.divIcon({
       className: "propelio-fallback-dot-wrap",
-      html: `<div class="propelio-fallback-dot ${statusClass}"></div>`,
+      html: `<div class="propelio-fallback-dot ${compClass}"></div>`,
       iconSize: [14, 14],
       iconAnchor: [7, 7],
     });
@@ -3111,6 +3139,7 @@ function _renderPropelioComps(data) {
     });
     marker.bindPopup(_propelioBuildPopup(comp));
     marker.addTo(propelioCompLayer);
+    if (compKey) propelioCompLayerByKey.set(compKey, marker);
     fallbackCount += 1;
   });
 
@@ -3233,26 +3262,180 @@ function compPassesPropelioFilters(comp, filters) {
 }
 
 let _propelioFilterDebounceId = null;
+let propelioCompSortMode = "price_desc";
+
 function applyPropelioClientFilters() {
   if (!window._propelioLast || !Array.isArray(window._propelioLast.comps)) {
     const countEl = document.getElementById("propelio-filter-count");
     if (countEl) countEl.textContent = "—";
+    renderPropelioCompList([]);
     return;
   }
   propelioFilterState = readPropelioFiltersFromUI();
   const all = window._propelioLast.comps;
-  const filtered = all.filter((c) => compPassesPropelioFilters(c, propelioFilterState));
-  // Re-render with the filtered subset (preserve polygon_meta & cma_settings)
-  _renderPropelioComps({ ...window._propelioLast, comps: filtered });
+  // Map view: render every passing comp (good/unrated AND bad — bad gets
+  // the `.bad-comp` class for visual de-emphasis but stays on the map).
+  const visibleOnMap = all.filter((c) => compPassesPropelioFilters(c, propelioFilterState));
+  _renderPropelioComps({ ...window._propelioLast, comps: visibleOnMap });
   // Re-set the chip from the ORIGINAL data so chip totals reflect raw pull
   // (filtering is for the map; chip stays accurate to what Propelio sent).
   if (window._propelioLast) propelioCmaChip.setData(window._propelioLast);
+  // List view: hide bad-rated comps entirely from the sidebar list.
+  const visibleInList = visibleOnMap.filter((c) => c?.user_rating !== "bad");
+  renderPropelioCompList(visibleInList);
   // Update the card-head count chip
   const countEl = document.getElementById("propelio-filter-count");
   if (countEl) {
-    countEl.textContent = filtered.length === all.length
+    countEl.textContent = visibleOnMap.length === all.length
       ? `${all.length}`
-      : `${filtered.length} / ${all.length}`;
+      : `${visibleOnMap.length} / ${all.length}`;
+  }
+}
+
+function _sortPropelioComps(comps, mode) {
+  const list = Array.isArray(comps) ? comps.slice() : [];
+  const num = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
+  const cmp = (a, b, dir) => {
+    if (a == null && b == null) return 0;
+    if (a == null) return 1;
+    if (b == null) return -1;
+    return dir === "asc" ? a - b : b - a;
+  };
+  switch (mode) {
+    case "price_asc":
+      list.sort((a, b) => cmp(num(a?.price), num(b?.price), "asc"));
+      break;
+    case "sqft_desc":
+      list.sort((a, b) => cmp(num(a?.sqft), num(b?.sqft), "desc"));
+      break;
+    case "year_desc":
+      list.sort((a, b) => cmp(num(a?.year_built), num(b?.year_built), "desc"));
+      break;
+    case "distance_asc":
+      list.sort((a, b) => cmp(num(a?.distance_mi), num(b?.distance_mi), "asc"));
+      break;
+    case "price_desc":
+    default:
+      list.sort((a, b) => cmp(num(a?.price), num(b?.price), "desc"));
+      break;
+  }
+  return list;
+}
+
+function _propelioCompRowHtml(comp) {
+  const fmtPrice = (n) => Number.isFinite(n) ? `$${Math.round(n).toLocaleString()}` : "—";
+  const fmtNum = (n) => Number.isFinite(n) ? Number(n).toLocaleString() : null;
+  const ex = comp?.extra || {};
+  const status = String(comp?.status || "").toLowerCase();
+  const statusClass = _propelioStatusBucket(comp);
+  const sqft = fmtNum(Number(comp?.sqft));
+  const yr = Number.isFinite(comp?.year_built) ? comp.year_built : null;
+  const beds = ex.beds;
+  const baths = ex.baths;
+  const dim = [];
+  if (sqft) dim.push(`${sqft} sqft`);
+  if (yr) dim.push(`${yr}`);
+  if (beds != null) dim.push(`${beds}bd`);
+  if (baths != null) dim.push(`${baths}ba`);
+  const compKey = String(comp?.comp_address_key || "").trim();
+  const keyAttr = _propelioEscape(compKey);
+  return `
+    <div class="propelio-comp-row" data-comp-key="${keyAttr}">
+      <div class="propelio-comp-row-top">
+        <span class="propelio-comp-row-price">${fmtPrice(Number(comp?.price))}</span>
+        <span class="propelio-comp-row-status ${statusClass}">${_propelioEscape(status || "—")}</span>
+      </div>
+      <div class="propelio-comp-row-mid">${_propelioEscape(comp?.address || "")}</div>
+      ${dim.length ? `<div class="propelio-comp-row-meta">${_propelioEscape(dim.join(" · "))}</div>` : ""}
+    </div>
+  `;
+}
+
+function renderPropelioCompList(comps) {
+  const listEl = document.getElementById("propelio-comp-list");
+  if (!listEl) return;
+  const sorted = _sortPropelioComps(comps, propelioCompSortMode);
+  if (!sorted.length) {
+    listEl.innerHTML = `<div class="propelio-comp-list-empty">No comps to show.</div>`;
+    return;
+  }
+  listEl.innerHTML = sorted.map(_propelioCompRowHtml).join("");
+}
+
+function _findPropelioCompByKey(key) {
+  const k = String(key || "").trim();
+  if (!k) return null;
+  const all = window._propelioLast?.comps;
+  if (!Array.isArray(all)) return null;
+  return all.find((c) => String(c?.comp_address_key || "").trim() === k) || null;
+}
+
+function flyToAndOpenPropelioComp(compKey) {
+  const layer = propelioCompLayerByKey.get(String(compKey || "").trim());
+  if (!layer) return;
+  let target = null;
+  if (typeof layer.getBounds === "function") {
+    try {
+      const b = layer.getBounds();
+      if (b && b.isValid()) target = b.getCenter();
+    } catch (_) { /* noop */ }
+  }
+  if (!target && typeof layer.getLatLng === "function") {
+    target = layer.getLatLng();
+  }
+  if (target) {
+    map.flyTo(target, Math.max(map.getZoom(), 17), { duration: 0.4 });
+  }
+  if (typeof layer.openPopup === "function") {
+    layer.openPopup();
+  } else if (layer.eachLayer) {
+    layer.eachLayer((l) => { if (typeof l.openPopup === "function") l.openPopup(); });
+  }
+}
+
+function _setPropelioFootprintHighlight(compKey, on) {
+  const layer = propelioCompLayerByKey.get(String(compKey || "").trim());
+  if (!layer) return;
+  const apply = (l) => {
+    const el = typeof l.getElement === "function" ? l.getElement() : null;
+    if (el && el.classList) {
+      el.classList.toggle("propelio-footprint-highlight", !!on);
+    }
+  };
+  if (typeof layer.eachLayer === "function") layer.eachLayer(apply);
+  else apply(layer);
+}
+
+async function ratePropelioComp(compKey, rating) {
+  const areaId = (typeof _currentLoadedAreaId === "string" ? _currentLoadedAreaId : "") || "";
+  if (!areaId || !compKey) return false;
+  const body = {
+    saved_area_id: areaId,
+    comp_address_key: compKey,
+    rating: rating === "good" || rating === "bad" ? rating : null,
+  };
+  try {
+    const resp = await fetch("/api/propelio/comp/rate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) {
+      console.warn("[propelio] rate failed:", resp.status);
+      return false;
+    }
+    // Update the in-memory comp so re-render reflects the new rating
+    // without a round-trip to the archive.
+    const comp = _findPropelioCompByKey(compKey);
+    if (comp) comp.user_rating = body.rating;
+    applyPropelioClientFilters();
+    return true;
+  } catch (err) {
+    console.error("[propelio] rate error:", err);
+    return false;
   }
 }
 
@@ -3346,6 +3529,49 @@ function resetPropelioFilters() {
   if (refreshBtn) refreshBtn.addEventListener("click", () => void pullPropelioRefresh());
   const resetBtn = document.getElementById("btn-propelio-reset");
   if (resetBtn) resetBtn.addEventListener("click", resetPropelioFilters);
+
+  const sortEl = document.getElementById("propelio-comp-sort");
+  if (sortEl) {
+    sortEl.value = propelioCompSortMode;
+    sortEl.addEventListener("change", () => {
+      propelioCompSortMode = sortEl.value || "price_desc";
+      applyPropelioClientFilters();
+    });
+  }
+
+  const listEl = document.getElementById("propelio-comp-list");
+  if (listEl) {
+    listEl.addEventListener("click", (ev) => {
+      const row = ev.target.closest(".propelio-comp-row");
+      if (!row) return;
+      const k = row.getAttribute("data-comp-key");
+      if (k) flyToAndOpenPropelioComp(k);
+    });
+    listEl.addEventListener("mouseover", (ev) => {
+      const row = ev.target.closest(".propelio-comp-row");
+      if (!row) return;
+      const k = row.getAttribute("data-comp-key");
+      if (k) _setPropelioFootprintHighlight(k, true);
+    });
+    listEl.addEventListener("mouseout", (ev) => {
+      const row = ev.target.closest(".propelio-comp-row");
+      if (!row) return;
+      const k = row.getAttribute("data-comp-key");
+      if (k) _setPropelioFootprintHighlight(k, false);
+    });
+  }
+
+  // Document-level delegation for popup rating buttons. Popups are recreated
+  // on every render so a single delegated listener is simpler than per-popup
+  // wiring.
+  document.addEventListener("click", (ev) => {
+    const btn = ev.target.closest(".propelio-rate-btn");
+    if (!btn) return;
+    const key = btn.getAttribute("data-comp-key");
+    const rating = btn.getAttribute("data-rating");
+    if (!key) return;
+    void ratePropelioComp(key, rating === "clear" ? null : rating);
+  });
 })();
 
 // Sticky bottom-center button (DOM-anchored, not map-pinned). Lives inside
@@ -5402,6 +5628,8 @@ map.on("draw:created", async (e) => {
   // were filtered to a different shape and shouldn't linger when the
   // user redraws.
   propelioCompLayer.clearLayers();
+  propelioCompLayerByKey.clear();
+  renderPropelioCompList([]);
   propelioCmaChip.hide();
   _showPropelioPolygonButton(e.layer.getLatLngs()[0]);
   const analysisRequest = beginLatestAnalysisRequest();

@@ -117,6 +117,11 @@ def merge_comps_into_archive(saved_area_id: str, comps: list[dict[str, Any]]) ->
                 except (TypeError, ValueError):
                     last_price = None
 
+                # Stamp the canonical address-key onto the comp dict before
+                # we serialize so the saved JSONB blob carries it. This lets
+                # the frontend round-trip the same key when POSTing ratings.
+                comp["comp_address_key"] = comp_key
+
                 cur.execute(
                     """
                     INSERT INTO propelio_comp_archive (
@@ -173,6 +178,62 @@ def merge_comps_into_archive(saved_area_id: str, comps: list[dict[str, Any]]) ->
 
         conn.commit()
         return {"inserted": inserted, "updated": updated, "total": total}
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        release_session_conn(conn)
+
+
+def set_comp_rating(
+    saved_area_id: str,
+    comp_address_key: str,
+    rating: str | None,
+) -> int:
+    """Update user_rating + rating_at for a single comp in the archive.
+
+    rating values: 'good' | 'bad' | None (None clears the rating).
+    Returns the number of rows updated (0 if no match, 1 on success).
+
+    Validation:
+        - saved_area_id must be non-empty
+        - comp_address_key must be non-empty
+        - rating must be in {'good', 'bad', None}
+    """
+    area_id = str(saved_area_id or "").strip()
+    if not area_id:
+        raise ValueError("saved_area_id is required")
+    addr_key = str(comp_address_key or "").strip()
+    if not addr_key:
+        raise ValueError("comp_address_key is required")
+
+    norm_rating: str | None
+    if rating in (None, "", "null"):
+        norm_rating = None
+    elif isinstance(rating, str):
+        candidate = rating.strip().lower()
+        if candidate not in {"good", "bad"}:
+            raise ValueError(f"rating must be 'good', 'bad', or null; got {rating!r}")
+        norm_rating = candidate
+    else:
+        raise ValueError(f"rating must be a string or null; got type {type(rating).__name__}")
+
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE propelio_comp_archive
+                SET user_rating = %s,
+                    rating_at  = CASE WHEN %s IS NULL THEN NULL ELSE NOW() END
+                WHERE saved_area_id = %s
+                  AND comp_address_key = %s
+                """,
+                (norm_rating, norm_rating, area_id, addr_key),
+            )
+            updated = cur.rowcount
+        conn.commit()
+        return int(updated or 0)
     except Exception:
         conn.rollback()
         raise

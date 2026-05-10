@@ -25,7 +25,7 @@ from api.config import get_conn, get_session_conn, release_conn, release_session
 from api.geo import haversine_miles, point_in_polygon, polygon_centroid
 from api.redfin import normalize_addr_key
 
-from .archive import load_archived_comps, merge_comps_into_archive
+from .archive import load_archived_comps, merge_comps_into_archive, set_comp_rating
 from .parcel_match import match_comps_to_parcels
 from . import cache as cache_mod
 from . import scraper as scraper_mod
@@ -401,6 +401,11 @@ async def _run_by_polygon(request: PolygonRequest, *, use_cache: bool) -> dict[s
 
     if saved_area_id:
         payload["archive_meta"] = merge_comps_into_archive(saved_area_id, payload.get("comps") or [])
+        # Swap in the archive view of comps so the response includes any
+        # user_rating that previously existed on these comps (preserved
+        # across refreshes via the merge function). New unrated comps
+        # get user_rating=None.
+        payload["comps"] = load_archived_comps(saved_area_id)
 
     if use_cache:
         cache_payload = dict(payload)
@@ -525,3 +530,30 @@ async def get_by_saved_area(saved_area_id: str = Query(..., min_length=1)) -> di
     if not normalized:
         raise HTTPException(status_code=400, detail="saved_area_id is required")
     return {"comps": load_archived_comps(normalized)}
+
+
+class CompRateRequest(BaseModel):
+    saved_area_id: str
+    comp_address_key: str
+    rating: str | None = None
+
+
+@router.post("/comp/rate")
+async def rate_comp(request: CompRateRequest) -> dict[str, Any]:
+    """Set or clear a user_rating ('good' | 'bad' | None) on an archived
+    comp. Frontend uses this from the comp popup buttons.
+    """
+    try:
+        updated = set_comp_rating(
+            saved_area_id=request.saved_area_id,
+            comp_address_key=request.comp_address_key,
+            rating=request.rating,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if updated == 0:
+        raise HTTPException(
+            status_code=404,
+            detail="No archived comp found for that saved_area_id + comp_address_key",
+        )
+    return {"ok": True, "rating": request.rating, "updated": updated}
