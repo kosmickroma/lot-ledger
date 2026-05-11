@@ -2294,6 +2294,111 @@ h1 {
   overflow-y: auto;
 }
 
+.propelio-popup-schools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 11px;
+}
+
+.propelio-popup-school {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(255, 255, 255, 0.04);
+  padding: 2px 7px;
+  border-radius: 6px;
+  color: #d3d6dd;
+}
+
+.propelio-popup-school .label {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--gold);
+}
+
+.propelio-popup-agent-block {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.propelio-popup-agent-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--gold);
+  margin-bottom: 3px;
+}
+
+.propelio-popup-agent-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.propelio-popup-agent-line {
+  font-size: 11px;
+  color: #d3d6dd;
+  margin-top: 1px;
+}
+
+.propelio-popup-agent-contact {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 5px;
+  font-size: 11px;
+}
+
+.propelio-popup-agent-contact a {
+  color: var(--gold);
+  text-decoration: none;
+}
+
+.propelio-popup-agent-contact a:hover {
+  text-decoration: underline;
+}
+
+.propelio-popup-agent-contact a.muted {
+  color: var(--text-muted);
+}
+
+.propelio-popup-remarks-full {
+  margin-top: 10px;
+  padding: 8px 10px;
+  max-height: 200px;
+  overflow-y: auto;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: #d3d6dd;
+  white-space: pre-wrap;
+}
+
+.propelio-popup-realtor-link {
+  display: inline-block;
+  margin-top: 10px;
+  padding: 6px 10px;
+  background: rgba(201, 162, 79, 0.18);
+  border: 1px solid var(--gold);
+  border-radius: 6px;
+  color: var(--gold);
+  font-size: 11px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.propelio-popup-realtor-link:hover {
+  background: rgba(201, 162, 79, 0.32);
+}
+
 /* CMA settings chip — small floating panel at bottom-left of the map showing
    what filter Propelio applied for the most recent fetch. Hidden when no
    Propelio comps are loaded. */

@@ -2039,7 +2039,7 @@ function _renderSavedParcelOutline(area) {
       const resp = await fetch(`/api/parcel/${county}/${accountNum}`);
       if (!resp.ok) return;
       const detail = await resp.json();
-      L.popup()
+      L.popup({ maxWidth: 480, autoPan: true, autoPanPadding: [10, 50], keepInView: true })
         .setLatLng(ev.latlng)
         .setContent(makePopupHtml(detail.properties || detail))
         .openOn(map);
@@ -3175,7 +3175,8 @@ function _buildRatingButtonsHtml(comp) {
 // Render the MLS-comp section for a unified popup. Mirrors the layout of
 // the Propelio standalone popup but is meant to live underneath the CAD
 // table inside makePopupHtml. Includes price, sold/list info, dims,
-// beds/baths, MLS metadata, and the truncated remarks excerpt.
+// beds/baths, MLS metadata, school/agent enrichment, photo count, full
+// remarks, and a best-effort external MLS lookup link.
 function _buildPropelioCompSectionHtml(c) {
   if (!c) return "";
   const fmtPrice = (n) => Number.isFinite(n) ? `$${Math.round(n).toLocaleString()}` : "—";
@@ -3186,6 +3187,7 @@ function _buildPropelioCompSectionHtml(c) {
     return Number.isFinite(d.getTime()) ? d.toISOString().slice(0, 10) : null;
   };
   const ex = c?.extra || {};
+  const raw = c?.extra?.raw || {};
   const status = String(c?.status || "");
   const isSold = status === "sold";
 
@@ -3205,7 +3207,30 @@ function _buildPropelioCompSectionHtml(c) {
   const mls = ex.mls || "";
   const source = ex.source || "";
   const zipCode = ex.zip || "";
-  const remarks = String(ex.remarks || "").trim();
+  const remarks = String(ex.remarks || raw.remarks || "").trim();
+  const listingAgent = {
+    name: raw.listing_agent_name,
+    phone: raw.listing_agent_phone,
+    email: raw.listing_agent_email,
+    officeName: raw.listing_office_name,
+    officePhone: raw.listing_office_phone,
+    officeEmail: raw.listing_office_email,
+  };
+  const buyerAgent = {
+    name: raw.buyer_agent_name,
+    phone: raw.buyer_agent_phone,
+    email: raw.buyer_agent_email,
+    officeName: raw.buyer_office_name,
+    officePhone: raw.buyer_office_phone,
+    officeEmail: raw.buyer_office_email,
+  };
+  const schools = {
+    elementary: raw.elementary_school,
+    middle: raw.middle_school || raw.junior_high_school || raw.intermediate_school,
+    high: raw.high_school || raw.senior_high_school,
+  };
+  const photoCountValue = Number(raw.photo_count);
+  const photoCount = Number.isFinite(photoCountValue) ? photoCountValue : 0;
 
   const dims = [];
   if (sqft) dims.push(`${sqft} sqft`);
@@ -3246,9 +3271,45 @@ function _buildPropelioCompSectionHtml(c) {
   if (mls) idLine.push(`MLS ${mls}`);
   if (propertyType) idLine.push(propertyType);
 
-  const REMARKS_MAX = 280;
+  const schoolsHtml = schools.elementary || schools.middle || schools.high
+    ? `<div class="propelio-popup-schools">
+        ${schools.elementary ? `<span class="propelio-popup-school"><span class="label">ES</span> ${_propelioEscape(schools.elementary)}</span>` : ""}
+        ${schools.middle ? `<span class="propelio-popup-school"><span class="label">MS</span> ${_propelioEscape(schools.middle)}</span>` : ""}
+        ${schools.high ? `<span class="propelio-popup-school"><span class="label">HS</span> ${_propelioEscape(schools.high)}</span>` : ""}
+      </div>`
+    : "";
+  const listingAgentHtml = listingAgent.name
+    ? `<div class="propelio-popup-agent-block">
+        <div class="propelio-popup-agent-label">Listing Agent</div>
+        <div class="propelio-popup-agent-name">${_propelioEscape(listingAgent.name || "—")}</div>
+        ${listingAgent.officeName ? `<div class="propelio-popup-agent-line">${_propelioEscape(listingAgent.officeName)}</div>` : ""}
+        <div class="propelio-popup-agent-contact">
+          ${listingAgent.phone ? `<a href="tel:${encodeURIComponent(listingAgent.phone)}">${_propelioEscape(listingAgent.phone)}</a>` : ""}
+          ${listingAgent.email ? `<a href="mailto:${encodeURIComponent(listingAgent.email)}">${_propelioEscape(listingAgent.email)}</a>` : ""}
+          ${listingAgent.officePhone && listingAgent.officePhone !== listingAgent.phone ? `<a href="tel:${encodeURIComponent(listingAgent.officePhone)}" class="muted">office: ${_propelioEscape(listingAgent.officePhone)}</a>` : ""}
+        </div>
+      </div>`
+    : "";
+  const buyerAgentHtml = isSold && buyerAgent.name
+    ? `<div class="propelio-popup-agent-block">
+        <div class="propelio-popup-agent-label">Buyer Agent</div>
+        <div class="propelio-popup-agent-name">${_propelioEscape(buyerAgent.name || "—")}</div>
+        ${buyerAgent.officeName ? `<div class="propelio-popup-agent-line">${_propelioEscape(buyerAgent.officeName)}</div>` : ""}
+        <div class="propelio-popup-agent-contact">
+          ${buyerAgent.phone ? `<a href="tel:${encodeURIComponent(buyerAgent.phone)}">${_propelioEscape(buyerAgent.phone)}</a>` : ""}
+          ${buyerAgent.email ? `<a href="mailto:${encodeURIComponent(buyerAgent.email)}">${_propelioEscape(buyerAgent.email)}</a>` : ""}
+          ${buyerAgent.officePhone && buyerAgent.officePhone !== buyerAgent.phone ? `<a href="tel:${encodeURIComponent(buyerAgent.officePhone)}" class="muted">office: ${_propelioEscape(buyerAgent.officePhone)}</a>` : ""}
+        </div>
+      </div>`
+    : "";
+  const photoCountHtml = photoCount > 0
+    ? `<div class="propelio-popup-meta-mute">${photoCount} listing photo${photoCount === 1 ? "" : "s"} (Propelio-hosted)</div>`
+    : "";
   const remarksHtml = remarks
-    ? `<div class="propelio-popup-remarks">${_propelioEscape(remarks.length > REMARKS_MAX ? remarks.slice(0, REMARKS_MAX).trim() + "…" : remarks)}</div>`
+    ? `<div class="propelio-popup-remarks-full">${_propelioEscape(remarks)}</div>`
+    : "";
+  const realtorLinkHtml = mls
+    ? `<a class="propelio-popup-realtor-link" href="https://www.realtor.com/realestateandhomes-search/MLSID-${encodeURIComponent(mls)}" target="_blank" rel="noopener noreferrer">🔗 Look up MLS# ${_propelioEscape(mls)} on Realtor.com (best-effort)</a>`
     : "";
 
   return `
@@ -3262,7 +3323,12 @@ function _buildPropelioCompSectionHtml(c) {
       ${subLine.length ? `<div class="propelio-popup-meta">${_propelioEscape(subLine.join(" · "))}</div>` : ""}
       ${idLine.length ? `<div class="propelio-popup-meta">${_propelioEscape(idLine.join(" · "))}${source ? ` <span class="propelio-popup-source">(${_propelioEscape(source)})</span>` : ""}</div>` : ""}
       ${modifiedTs ? `<div class="popup-propelio-meta-mute">MLS updated ${_propelioEscape(modifiedTs)}</div>` : ""}
+      ${schoolsHtml}
+      ${listingAgentHtml}
+      ${buyerAgentHtml}
+      ${photoCountHtml}
       ${remarksHtml}
+      ${realtorLinkHtml}
     </div>
   `;
 }
@@ -3310,7 +3376,7 @@ async function _resolvePropelioPopupContent(comp) {
 async function _openUnifiedPropelioPopup(comp, latlng) {
   if (!comp || !latlng) return;
   const content = await _resolvePropelioPopupContent(comp);
-  L.popup({ maxWidth: 280, autoPan: true, autoPanPadding: [10, 50], keepInView: true })
+  L.popup({ maxWidth: 480, autoPan: true, autoPanPadding: [10, 50], keepInView: true })
     .setLatLng(latlng)
     .setContent(content)
     .openOn(map);
@@ -5475,7 +5541,7 @@ function renderFeatures(geojson) {
           opacity: 0.85,
         },
       }).bindPopup(() => makePopupHtml(p), {
-        maxWidth: 280,
+        maxWidth: 480,
         autoPan: true,
         autoPanPadding: [10, 50],
         keepInView: true,
@@ -5513,7 +5579,7 @@ function renderFeatures(geojson) {
         fillOpacity: 0.9,
         bubblingMouseEvents: false,
       }).bindPopup(() => makePopupHtml(p), {
-        maxWidth: 280,
+        maxWidth: 480,
         autoPan: true,
         autoPanPadding: [10, 50],
         keepInView: true,
@@ -6971,7 +7037,7 @@ map.on("click", async (ev) => {
     const resp = await fetch(`/api/parcel/${county}/${accountNum}`);
     if (!resp.ok) return;
     const detail = await resp.json();
-    L.popup()
+    L.popup({ maxWidth: 480, autoPan: true, autoPanPadding: [10, 50], keepInView: true })
       .setLatLng(ev.latlng)
       .setContent(makePopupHtml(detail.properties || detail))
       .openOn(map);
