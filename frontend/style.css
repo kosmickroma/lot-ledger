@@ -2294,6 +2294,12 @@ h1 {
   overflow-y: auto;
 }
 
+/* Popup-enrichment classes — designed for the WHITE Leaflet popup
+   background, not the dark sidebar. Use explicit hex values, not the
+   --text-main / --gold / --text-muted variables (those are sidebar-
+   theme tokens that render invisible on white). Teal #0f8a99 is the
+   established Propelio accent on white (already used by
+   .propelio-popup-price above). */
 .propelio-popup-schools {
   display: flex;
   flex-wrap: wrap;
@@ -2306,25 +2312,25 @@ h1 {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  background: rgba(255, 255, 255, 0.04);
+  background: #f1f5f9;
   padding: 2px 7px;
   border-radius: 6px;
-  color: #d3d6dd;
+  color: #334155;
 }
 
 .propelio-popup-school .label {
   font-size: 9px;
   font-weight: 700;
   letter-spacing: 0.05em;
-  color: var(--gold);
+  color: #0f8a99;
 }
 
 .propelio-popup-agent-block {
   margin-top: 10px;
   padding: 8px 10px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid #e2e8f0;
   border-radius: 7px;
-  background: rgba(255, 255, 255, 0.02);
+  background: #f8fafc;
 }
 
 .propelio-popup-agent-label {
@@ -2332,19 +2338,19 @@ h1 {
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: var(--gold);
+  color: #0f8a99;
   margin-bottom: 3px;
 }
 
 .propelio-popup-agent-name {
   font-size: 13px;
   font-weight: 600;
-  color: var(--text-main);
+  color: #0f172a;
 }
 
 .propelio-popup-agent-line {
   font-size: 11px;
-  color: #d3d6dd;
+  color: #334155;
   margin-top: 1px;
 }
 
@@ -2357,7 +2363,7 @@ h1 {
 }
 
 .propelio-popup-agent-contact a {
-  color: var(--gold);
+  color: #0f8a99;
   text-decoration: none;
 }
 
@@ -2366,7 +2372,7 @@ h1 {
 }
 
 .propelio-popup-agent-contact a.muted {
-  color: var(--text-muted);
+  color: #64748b;
 }
 
 .propelio-popup-remarks-full {
@@ -2374,11 +2380,12 @@ h1 {
   padding: 8px 10px;
   max-height: 200px;
   overflow-y: auto;
-  background: rgba(255, 255, 255, 0.03);
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
   border-radius: 6px;
   font-size: 11px;
   line-height: 1.45;
-  color: #d3d6dd;
+  color: #333;
   white-space: pre-wrap;
 }
 
@@ -2386,17 +2393,18 @@ h1 {
   display: inline-block;
   margin-top: 10px;
   padding: 6px 10px;
-  background: rgba(201, 162, 79, 0.18);
-  border: 1px solid var(--gold);
+  background: #fffbeb;
+  border: 1px solid #b78c35;
   border-radius: 6px;
-  color: var(--gold);
+  color: #b78c35;
   font-size: 11px;
   font-weight: 600;
   text-decoration: none;
 }
 
 .propelio-popup-realtor-link:hover {
-  background: rgba(201, 162, 79, 0.32);
+  background: #fef3c7;
+  color: #92400e;
 }
 
 /* CMA settings chip — small floating panel at bottom-left of the map showing
