@@ -901,6 +901,14 @@ function loadFilters() {
   } catch (_) {
     filterState = { ...DEFAULT_FILTERS };
   }
+  // Legacy R.F. filters (active = R.F. Listings, sold = R.F. Sold) are
+  // tucked away in the collapsed "Legacy Filters" card and should ONLY
+  // turn on when the user opts in by clicking them. localStorage might
+  // hold stale `true` values from before the 2026-05-10 restructure when
+  // these lived in Map Filters and defaulted on — force them off on
+  // every load so they never fire on a search without explicit opt-in.
+  filterState.active = false;
+  filterState.sold = false;
 }
 
 function saveFilters() {
@@ -5378,8 +5386,24 @@ function _flyToParcelDetailLatLng(latlng) {
   if (!latlng) return;
   const ll = Array.isArray(latlng) ? L.latLng(latlng[0], latlng[1]) : L.latLng(latlng);
   const panel = document.getElementById("parcel-detail-panel");
-  const targetZoom = Math.max(map.getZoom(), 17);
   const xOffset = panel ? Math.round(Math.min(panel.offsetWidth || 0, 820) * 0.18) : 0;
+
+  // Honor the global Keep View toggle. In stay mode we DO NOT change the
+  // zoom level — only pan when the clicked parcel would otherwise sit
+  // behind the panel or off-screen. In jump mode (default) we still
+  // zoom toward 17 (or further in if the user was already zoomed deeper).
+  const mode = (typeof getClickMode === "function" ? getClickMode() : "jump");
+
+  if (mode === "stay") {
+    const currentZoom = map.getZoom();
+    const shiftedCenter = map.unproject(map.project(ll, currentZoom).add([xOffset, 0]), currentZoom);
+    const inView = typeof isPointInViewport === "function" ? isPointInViewport(ll) : true;
+    if (inView) return; // already visible at current zoom — nothing to do
+    map.panTo(shiftedCenter, { animate: true, duration: 0.35 });
+    return;
+  }
+
+  const targetZoom = Math.max(map.getZoom(), 17);
   const shiftedCenter = map.unproject(map.project(ll, targetZoom).add([xOffset, 0]), targetZoom);
   map.flyTo(shiftedCenter, targetZoom, { duration: 0.35, animate: true });
 }
