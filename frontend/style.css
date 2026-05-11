@@ -470,10 +470,9 @@ h1 {
 }
 
 /* Propelio price balloons. Same zoom-gated permanent-tooltip pattern
-   as sold/redfin, status-colored to match the comp dots/footprints.
-   Pending uses a DASHED border so it doesn't blur into active red at
-   a glance — color hue stays consistent across surfaces, the border
-   style carries the "this hasn't closed yet" signal. */
+  as sold/redfin, status-colored to match the comp dots/footprints.
+  Sold uses cream/red, active uses green/cream/gold, and pending is a
+  cream/blue balloon with a solid blue border. */
 .propelio-price-label {
   border-radius: 8px;
   padding: 1px 6px;
@@ -483,29 +482,28 @@ h1 {
   white-space: nowrap;
 }
 
-/* Sold = green/cream/gold (mirror of .sold-price-label).
-   Active = cream/red (mirror of .redfin-price-label).
-   Pending = cream/amber with DASHED border so it stays in the
-   listing-family hue but reads as "not closed yet" at a glance. */
+/* Sold = cream/red (mirror of .redfin-price-label).
+   Active = green/cream/gold (mirror of .sold-price-label).
+   Pending = cream/blue with a solid border. */
 .propelio-price-label.sold {
-  background: rgba(0, 66, 37, 0.9);
-  color: #f7e3a1;
-  border: 1.5px solid rgba(212, 175, 55, 1);
-  box-shadow: 0 2px 6px rgba(0, 31, 18, 0.34);
-}
-
-.propelio-price-label.active {
   background: rgba(247, 227, 161, 0.95);
   color: #8B0000;
   border: 1.5px solid #D92228;
   box-shadow: 0 2px 6px rgba(80, 0, 0, 0.34);
 }
 
+.propelio-price-label.active {
+  background: rgba(0, 66, 37, 0.9);
+  color: #f7e3a1;
+  border: 1.5px solid rgba(212, 175, 55, 1);
+  box-shadow: 0 2px 6px rgba(0, 31, 18, 0.34);
+}
+
 .propelio-price-label.pending {
   background: rgba(247, 227, 161, 0.95);
-  color: #92400e;
-  border: 1.5px dashed #f59e0b;
-  box-shadow: 0 2px 6px rgba(146, 64, 14, 0.34);
+  color: #0c4a6e;
+  border: 1.5px solid #0284c7;
+  box-shadow: 0 2px 6px rgba(12, 74, 110, 0.34);
 }
 
 .count-row {
@@ -2044,24 +2042,16 @@ h1 {
    Keyframe definition is preserved (commented out below) so it's easy to
    restore if we ever want it back behind a flag. */
 .propelio-footprint-glow {
-  fill: #8b5cf6;
+  fill: #dc2626;
   fill-opacity: 0.14;
-  stroke: #8b5cf6;
+  stroke: #dc2626;
   stroke-width: 2.5;
   filter:
-    drop-shadow(0 0 4px rgba(139, 92, 246, 0.95))
-    drop-shadow(0 0 12px rgba(139, 92, 246, 0.55));
+    drop-shadow(0 0 4px rgba(220, 38, 38, 0.95))
+    drop-shadow(0 0 12px rgba(220, 38, 38, 0.55));
 }
 
 .propelio-footprint-glow.sold {
-  fill: #8b5cf6;
-  stroke: #8b5cf6;
-  filter:
-    drop-shadow(0 0 4px rgba(139, 92, 246, 0.95))
-    drop-shadow(0 0 12px rgba(139, 92, 246, 0.55));
-}
-
-.propelio-footprint-glow.active {
   fill: #dc2626;
   stroke: #dc2626;
   filter:
@@ -2069,12 +2059,21 @@ h1 {
     drop-shadow(0 0 12px rgba(220, 38, 38, 0.55));
 }
 
-.propelio-footprint-glow.pending {
-  fill: #f59e0b;
-  stroke: #f59e0b;
+.propelio-footprint-glow.active {
+  fill: #22c55e;
+  stroke: #22c55e;
   filter:
-    drop-shadow(0 0 4px rgba(245, 158, 11, 0.95))
-    drop-shadow(0 0 12px rgba(245, 158, 11, 0.55));
+    drop-shadow(0 0 4px rgba(34, 197, 94, 0.95))
+    drop-shadow(0 0 12px rgba(34, 197, 94, 0.55));
+}
+
+.propelio-footprint-glow.pending {
+  fill: #7dd3fc;
+  stroke: #0284c7;
+  stroke-width: 2.5;
+  filter:
+    drop-shadow(0 0 4px rgba(2, 132, 199, 0.95))
+    drop-shadow(0 0 12px rgba(2, 132, 199, 0.55));
 }
 
 /*
@@ -2103,34 +2102,34 @@ h1 {
   width: 11px;
   height: 11px;
   border-radius: 50%;
-  background: #8b5cf6;
+  background: #dc2626;
   border: 2px solid #ffffff;
   box-sizing: border-box;
   filter:
-    drop-shadow(0 0 4px rgba(139, 92, 246, 0.95))
-    drop-shadow(0 0 10px rgba(139, 92, 246, 0.55));
+    drop-shadow(0 0 4px rgba(220, 38, 38, 0.95))
+    drop-shadow(0 0 10px rgba(220, 38, 38, 0.55));
   cursor: pointer;
 }
 
 .propelio-fallback-dot.sold {
-  background: #8b5cf6;
-  filter:
-    drop-shadow(0 0 4px rgba(139, 92, 246, 0.95))
-    drop-shadow(0 0 10px rgba(139, 92, 246, 0.55));
-}
-
-.propelio-fallback-dot.active {
   background: #dc2626;
   filter:
     drop-shadow(0 0 4px rgba(220, 38, 38, 0.95))
     drop-shadow(0 0 10px rgba(220, 38, 38, 0.55));
 }
 
-.propelio-fallback-dot.pending {
-  background: #f59e0b;
+.propelio-fallback-dot.active {
+  background: #22c55e;
   filter:
-    drop-shadow(0 0 4px rgba(245, 158, 11, 0.95))
-    drop-shadow(0 0 10px rgba(245, 158, 11, 0.55));
+    drop-shadow(0 0 4px rgba(34, 197, 94, 0.95))
+    drop-shadow(0 0 10px rgba(34, 197, 94, 0.55));
+}
+
+.propelio-fallback-dot.pending {
+  background: #0284c7;
+  filter:
+    drop-shadow(0 0 4px rgba(2, 132, 199, 0.95))
+    drop-shadow(0 0 10px rgba(2, 132, 199, 0.55));
 }
 
 /* Sticky anchor for the Get Comps button. Lives inside the Leaflet map
@@ -2369,47 +2368,6 @@ h1 {
   cursor: wait;
   transform: none;
 }
-
-.propelio-status-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin: 4px 0 8px;
-}
-
-.propelio-status-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 999px;
-  padding: 3px 10px 3px 6px;
-  font-size: 11px;
-  color: #d3d6dd;
-  cursor: pointer;
-  user-select: none;
-}
-
-.propelio-status-chip input[type="checkbox"] {
-  width: 12px;
-  height: 12px;
-  margin: 0;
-  cursor: pointer;
-  accent-color: var(--gold);
-}
-
-.propelio-status-swatch {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  display: inline-block;
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.25);
-}
-
-.propelio-status-swatch.sold { background: #8b5cf6; }
-.propelio-status-swatch.active { background: #dc2626; }
-.propelio-status-swatch.pending { background: #f59e0b; }
 
 .propelio-filter-count {
   font-size: 10px;

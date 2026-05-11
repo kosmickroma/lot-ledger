@@ -4850,7 +4850,7 @@ function makePopupHtml(p) {
   // legacy R.F. card pattern where the header signaled the comp's MLS
   // status and its price front-and-center.
   const matchedComp = _findMatchedCompForAccount(p?.account_num);
-  const PROPELIO_HEADER_COLORS = { sold: "#8b5cf6", active: "#dc2626", pending: "#f59e0b" };
+  const PROPELIO_HEADER_COLORS = { sold: "#dc2626", active: "#22c55e", pending: "#0284c7" };
   const matchedBucket = matchedComp ? _propelioStatusBucket(matchedComp) : null;
   const matchedHeaderColor = matchedBucket ? PROPELIO_HEADER_COLORS[matchedBucket] : null;
   const matchedHeaderText = matchedComp

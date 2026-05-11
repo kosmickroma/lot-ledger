@@ -221,22 +221,23 @@
               <input type="checkbox" id="filter-exempt" checked>
             </label>
             <!-- Propelio comp-status toggles — dots (.is-dot) to distinguish
-                 from parcel-type squares above. Colors match current footprint
-                 hues; will be flipped in a later chunk. -->
+                 from parcel-type squares above. Swatch colors match the
+                 footprint-glow / fallback-dot palette (sold=red, active=green,
+                 pending=blue two-tone). -->
             <label class="filter-row">
-              <span class="filter-swatch is-dot" style="--sw:#8b5cf6"></span>
+              <span class="filter-swatch is-dot" style="--sw:#dc2626"></span>
               <span class="filter-name">Sold</span>
               <span class="filter-count"></span>
               <input type="checkbox" id="prop-status-sold" checked>
             </label>
             <label class="filter-row">
-              <span class="filter-swatch is-dot" style="--sw:#dc2626"></span>
+              <span class="filter-swatch is-dot" style="--sw:#22c55e"></span>
               <span class="filter-name">Active</span>
               <span class="filter-count"></span>
               <input type="checkbox" id="prop-status-active" checked>
             </label>
             <label class="filter-row">
-              <span class="filter-swatch is-dot" style="--sw:#f59e0b"></span>
+              <span class="filter-swatch is-dot" style="background: radial-gradient(circle, #0284c7 0%, #0284c7 35%, #7dd3fc 100%);"></span>
               <span class="filter-name">Pending</span>
               <span class="filter-count"></span>
               <input type="checkbox" id="prop-status-pending" checked>
