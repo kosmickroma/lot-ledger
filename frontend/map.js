@@ -5271,7 +5271,12 @@ function renderFeatures(geojson) {
     const borderColor = getBorderColor(feature);
     const hasVisibleSoldComp = hasSoldComp;
     const parcelBorderColor = hasVisibleSoldComp ? SOLD_OUTLINE_COLOR : borderColor;
-    const parcelBorderWeight = hasVisibleSoldComp ? 3.2 : (p.on_redfin ? 2.8 : 1.5);
+    // Vacant parcels get the THICKEST border on the map (4px) so they stand
+    // out at a glance. When a vacant lot is also matched to a Propelio comp,
+    // the comp's footprint-glow renders on top of this polygon via a separate
+    // layer, so "comp color inside, thick green ring outside" comes for free —
+    // no second polygon needed.
+    const parcelBorderWeight = hasVisibleSoldComp ? 3.2 : (p.on_redfin ? 2.8 : (bucket === "vacant" ? 4 : 1.5));
     if (p.lat == null || p.lng == null) return;
     const hasPolygonGeometry =
       feature.geometry?.type === "Polygon" || feature.geometry?.type === "MultiPolygon";
