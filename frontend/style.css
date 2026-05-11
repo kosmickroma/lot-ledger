@@ -160,6 +160,12 @@ h1 {
   padding-bottom: 2px;
 }
 
+#saved-areas-list {
+  max-height: 300px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
 .section-toggle::after {
   content: "▾";
   color: var(--text-soft);
@@ -349,7 +355,7 @@ h1 {
 .filter-swatch {
   width: 8px;
   height: 8px;
-  border-radius: 50%;
+  border-radius: 2px;
   background: var(--sw);
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.25);
 }

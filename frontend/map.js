@@ -4369,12 +4369,6 @@ const AddressSearch = L.Control.extend({
       const item = suggestItems[idx];
       if (!item) return;
       highlightSearchResult([Number(item.lat), Number(item.lng)]);
-      // Address search auto-pulls Propelio comps (matches Propelio's
-      // single-step "search address -> see comps" mental model that
-      // Mike's team is used to). Polygon-button still available for
-      // area-scouting workflows.
-      const addr = [item.address, item.city, "TX"].filter(Boolean).join(", ");
-      firePropelioFetch(addr);
     };
 
     const fetchSuggestions = async () => {
@@ -4462,9 +4456,6 @@ const AddressSearch = L.Control.extend({
         const { lat, lon } = results[0];
         const latlng = [parseFloat(lat), parseFloat(lon)];
         highlightSearchResult(latlng);
-        // Address search auto-pulls Propelio (see note in
-        // selectSuggestion).
-        firePropelioFetch(q);
       } catch {
         btn.textContent = "Error";
         setTimeout(() => { btn.textContent = "Go"; btn.disabled = false; }, 2000);
