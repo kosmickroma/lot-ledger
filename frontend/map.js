@@ -2726,8 +2726,16 @@ function _renderList(sectionId, listId, items) {
         return;
       }
       _selectedSavedItemId = area.id;
-      // Show a crisp purple outline on the map for the clicked item.
-      _renderSelectedOutline(area.geometry || area.polygon || null);
+      // Purple selection outline highlights a single parcel footprint.
+      // Skip for saved area drawings (type="area" — the polygon wraps many
+      // parcels and reads as a ring around them) and saved locations
+      // (type="location" — no polygon anyway). Saved parcels (type="parcel")
+      // and comp-list clicks are the only paths that get the highlight.
+      if (area.type === "parcel") {
+        _renderSelectedOutline(area.geometry || null);
+      } else {
+        _clearSelectedOutline();
+      }
       document.querySelectorAll(".saved-area-row-active").forEach((el) => {
         if (el !== row) el.classList.remove("saved-area-row-active");
       });
