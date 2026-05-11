@@ -5,7 +5,7 @@
 > **Branch:** `feat/propelio-deep-pull-experiment` (off `develop`)
 > **Deploys to:** `lot-ledger-preview` Cloud Run service via `gcloud builds submit --config cloudbuild-preview.yaml --project=lot-ledger`. DO NOT push to `develop` until KK approves.
 >
-> **Revision:** v2 (2026-05-11). Addresses Copilot first-review findings: router prefix collision, scraper ID retrieval, frontend variable mismatch, session-schema bootstrap location, try/except wrapper for detached tasks, stale-job sweeper, single-client reuse, env-var guard, error classification, alert() replacement.
+> **Revision:** v3 (2026-05-11). Addresses Copilot second-review findings: PropelioClient constructor needs credentials (scraper.py:374-388), find_lead_id 3-tuple unpacking with parcel_bundle.confirmation_key (scraper.py:712-762, 1023-1031), cma_id top-level envelope extraction (scraper.py:1033), stale-sweeper now sets stop_requested AND adds next_pass_at check, runner re-checks stop_requested AFTER sleep before each Propelio call, error classification prefers structured status_code attribute before message-text fallback, cloudbuild-preview.yaml uses --update-env-vars arg form (not env block). Skipped per KK: queued-job sweeper (vanishingly rare), endpoint ownership check (already role-gated to dev+owner), endpoint env-guard (failure mode is acceptable).
 
 ---
 
@@ -119,15 +119,13 @@ if os.environ.get("DEEP_PULL_EXPERIMENT") == "true":
 
 **Status enum includes 'blocked'** — this is the explicit signal for Propelio flagging events (401/403/429).
 
-**`cloudbuild-preview.yaml`** — under the Cloud Run service env block, add:
+**`cloudbuild-preview.yaml`** — verified at lines 35-47, the deploy step uses `gcloud run deploy` with `--flag=value` arguments in an `args:` list (NOT a structured env block). ADD this ONE LINE to that args list, alongside `--memory=1Gi`, `--quiet`, etc.:
 
 ```yaml
-env:
-  - name: DEEP_PULL_EXPERIMENT
-    value: "true"
+      - '--update-env-vars=DEEP_PULL_EXPERIMENT=true'
 ```
 
-The exact location depends on whether cloudbuild-preview.yaml uses `--set-env-vars` flag or a structured env block — match the existing pattern in that file. Verify dev's `cloudbuild.yaml` does NOT have this variable.
+Use `--update-env-vars` (NOT `--set-env-vars`) so existing service env config is preserved. Verify dev's `cloudbuild.yaml` does NOT have this variable.
 
 These are experimental table names. They will be dropped once the real comps DB lands.
 
@@ -172,18 +170,31 @@ from psycopg2.extras import Json
 from api.config import get_session_conn, release_session_conn
 from api.propelio.scraper import PropelioClient
 from api.propelio.archive import _comp_address_key  # intentional experimental reuse — see spec
+from api.propelio.config import PROPELIO_USERNAME, PROPELIO_PASSWORD  # constructor requires these (scraper.py:374-388)
 
 logger = logging.getLogger(__name__)
 
 
 def _classify_propelio_error(exc: Exception) -> str:
-    """Return 'blocked' if exc looks like 401/403/429 from Propelio, else 'error'.
+    """Return 'blocked' for 401/403/429-equivalent failures from Propelio, else 'error'.
 
-    Inspect the exception message + any attached HTTP status code. We classify
-    aggressively to surface flagging fast — false positives are safer than misses.
+    Strategy: prefer structured status_code if it leaks through (e.g., from a wrapped
+    requests.HTTPError or a future enhancement to PropelioScraperError). Fall back to
+    message-text heuristics, since PropelioScraperError today embeds the HTTP code in
+    the message string — see scraper.py:835 (add_cma), 892 (search_cma), 443 (login).
     """
+    # First check structured attributes on the exception or its attached response
+    status_code = getattr(exc, "status_code", None)
+    if status_code is None:
+        response = getattr(exc, "response", None)
+        if response is not None:
+            status_code = getattr(response, "status_code", None)
+    if status_code in (401, 403, 429):
+        return "blocked"
+
+    # Fall back to message-text heuristics — current scraper embeds HTTP codes inline
     msg = str(exc).lower()
-    if "429" in msg or "rate" in msg or "throttle" in msg or "too many" in msg:
+    if "429" in msg or "rate limit" in msg or "throttle" in msg or "too many" in msg:
         return "blocked"
     if "401" in msg or "403" in msg or "unauthor" in msg or "forbidden" in msg:
         return "blocked"
@@ -209,8 +220,12 @@ async def run_deep_pull(job_id: str) -> None:
         logger.info("[deep-pull job=%s] warmup sleep %.1fs before pass 1", job_id, warmup_s)
         await asyncio.sleep(warmup_s)
 
-        # 3. ONE PropelioClient for the entire job — session cookies reused across passes
-        client = PropelioClient()  # use whatever constructor scraper.py exposes
+        # 3. ONE PropelioClient for the entire job — session cookies reused across passes.
+        # PropelioClient constructor (scraper.py:374-388) REQUIRES username + password as
+        # named args; will raise PropelioScraperError("credentials are not configured") if
+        # they're empty strings. Credentials come from api/propelio/config.py which loads
+        # PROPELIO_USERNAME / PROPELIO_PASSWORD from env (.env or Cloud Run env vars).
+        client = PropelioClient(username=PROPELIO_USERNAME, password=PROPELIO_PASSWORD)
         await asyncio.to_thread(client.login)
 
         # 4. Pass 1: capture lead_id + cma_id (DO NOT go through search_properties,
@@ -222,14 +237,23 @@ async def run_deep_pull(job_id: str) -> None:
         logger.info("[deep-pull job=%s] Pass 1: months=%d range=%.2fmi label=%s",
                     job_id, PASSES[0]["months"], PASSES[0]["range_mi"], PASSES[0]["label"])
 
-        find_result = await asyncio.to_thread(client.find_lead_id, target_address)
-        # find_lead_id returns (lead_id, subject_lot_sqft, parcel_bundle) per scraper.py:712
-        lead_id = find_result[0]
+        # find_lead_id returns (lead_id, subject_lot_sqft, parcel_bundle) per scraper.py:712-762.
+        # parcel_bundle is a DICT with keys {'valuation', 'enrichment', 'confirmation_key'} —
+        # see scraper.py:757-761.
+        lead_id, subject_lot_sqft, parcel_bundle = await asyncio.to_thread(
+            client.find_lead_id, target_address
+        )
+        confirmation_key = (
+            parcel_bundle.get("confirmation_key") if isinstance(parcel_bundle, dict) else None
+        )
 
+        # add_cma signature (scraper.py:789-851): (lead_id, confirmation_key, months, range_mi).
+        # Passing confirmation_key matches the proven production flow at scraper.py:1023-1031.
+        # Returns a dict envelope whose top-level "id" key is the cma_id (scraper.py:1033).
         cma_envelope = await asyncio.to_thread(
             client.add_cma,
             lead_id,
-            confirmation_key=None,
+            confirmation_key,
             months=PASSES[0]["months"],
             range_mi=PASSES[0]["range_mi"],
         )
@@ -256,6 +280,17 @@ async def run_deep_pull(job_id: str) -> None:
             _set_next_pass_at(job_id, sleep_s)
             logger.info("[deep-pull job=%s] sleeping %.1fs before pass %d", job_id, sleep_s, pass_num)
             await asyncio.sleep(sleep_s)
+
+            # CRITICAL: re-check stop_requested AFTER sleeping, BEFORE the outbound Propelio call.
+            # The /status endpoint's stale-sweeper may have set stop_requested while we slept
+            # (the sweeper marks stale jobs with status='error' AND stop_requested=TRUE). We must
+            # NOT fire an outbound API call after being marked stopped — that would leak one
+            # unnecessary Propelio request that contributes nothing and looks botty.
+            if _is_stop_requested(job_id):
+                logger.info("[deep-pull job=%s] stop_requested set during sleep — bailing before pass %d",
+                            job_id, pass_num)
+                # Status was already set by whoever flipped stop_requested. Just exit.
+                return
 
             cfg = PASSES[pass_num - 1]
             logger.info("[deep-pull job=%s] Pass %d: months=%d range=%.2fmi label=%s",
@@ -326,10 +361,21 @@ def _check_saturation(counts: dict, pass_num: int) -> bool:
     counts['new'] / max(counts['total_unique'], 1) < SATURATION_THRESHOLD."""
 
 def _extract_cma_id(envelope: dict) -> str:
-    """Pull cma_id out of the add_cma response shape.
-    Inspect api/propelio/scraper.py:789-851 and api/propelio/scraper.py:977-1083
-    for how cma_id is surfaced today (e.g., subject.extra['cma_id'] or
-    envelope['data']['id']). Verify against an actual response before coding."""
+    """Pull cma_id from the add_cma response. Matches the proven production path at
+    api/propelio/scraper.py:1033 which does: `cma_id = str(add_payload.get("id") or "")`.
+
+    The envelope is the dict returned from `client.add_cma(...)` — see scraper.py:851
+    which returns the first element of an unwrapped list envelope. The top-level
+    "id" key is what we want; envelope["data"] holds the comp sales list.
+
+    Concrete implementation:
+        if not isinstance(envelope, dict):
+            raise ValueError(f"add_cma envelope is not a dict: type={type(envelope)}")
+        cma_id = str(envelope.get("id") or "")
+        if not cma_id:
+            raise ValueError(f"could not extract cma_id from envelope keys={list(envelope.keys())}")
+        return cma_id
+    """
 
 def _parse_cma_envelope_comps(envelope: dict) -> list[dict]:
     """Extract the sales list from the CMA envelope as a list of dicts ready
@@ -405,23 +451,31 @@ async def get_deep_pull_status(
     user: dict = Depends(get_current_user),
 ) -> dict:
     """Returns job state + per-pass breakdown.
-    Also runs STALE-JOB SWEEPER inline: if status='running' AND
-    last_pass_at < NOW() - INTERVAL '5 minutes' (or NULL with started_at older),
-    mark the job as 'error' with 'Worker interrupted (stale)' before reading.
-    Defends against Cloud Run mid-job instance restarts.
+    Also runs STALE-JOB SWEEPER inline: if status='running' AND no progress for
+    >5 minutes AND we're past next_pass_at, mark as 'error' with
+    'Worker interrupted (stale)' AND set stop_requested=TRUE so that if a worker
+    later resumes from a sleep, it bails BEFORE making the next Propelio call.
+
+    The next_pass_at check prevents false-positive stale flagging during
+    legitimate 30-60s sleeps. Defends against Cloud Run mid-job instance restarts.
     """
     conn = get_session_conn()
     try:
         with conn.cursor() as cur:
-            # Stale-job sweep
+            # Stale-job sweep. Sets stop_requested=TRUE so the worker (if still alive
+            # and just slow-waking from sleep) refuses to fire the next Propelio call.
+            # next_pass_at clause avoids flagging legitimate inter-pass sleeps.
             cur.execute(
                 """
                 UPDATE propelio_deep_pull_jobs
-                SET status='error', last_error='Worker interrupted (stale)'
+                SET status='error',
+                    last_error='Worker interrupted (stale)',
+                    stop_requested=TRUE
                 WHERE job_id = %s
                   AND status='running'
                   AND started_at < NOW() - INTERVAL '5 minutes'
                   AND (last_pass_at IS NULL OR last_pass_at < NOW() - INTERVAL '5 minutes')
+                  AND (next_pass_at IS NULL OR next_pass_at < NOW())
                 """,
                 (job_id,),
             )
@@ -573,19 +627,19 @@ let _lastSearchedAddress = null;
 
 Look at `frontend/map.js:4678` for `selectSuggestion(idx)` and `map.js:4748` for `doSearch()`.
 
-Inside `selectSuggestion(idx)`, after the suggestion is resolved to an address (find the local variable that holds the resolved address string in the existing function body), assign:
+Inside `selectSuggestion(idx)` at `map.js:4678`, the local variable `item` is defined at `map.js:4679` and holds the suggestion object with an `.address` property (rendered from `item.address` at `map.js:4613`). Assign:
 
 ```javascript
-_lastSearchedAddress = <whatever local variable holds the resolved address string>;
+_lastSearchedAddress = item.address;
 ```
 
-Inside `doSearch()`, after the user-typed query is resolved or unconditionally on the committed text:
+Inside `doSearch()` at `map.js:4748`, the local variable `q` holds the typed query, defined at `map.js:4749`. Assign:
 
 ```javascript
-_lastSearchedAddress = <typed or resolved address string>;
+_lastSearchedAddress = q;
 ```
 
-Use the existing local variable names already present in those functions. Do not rename them.
+Place each assignment immediately after the variable's existing definition in those functions. Do not modify any existing logic.
 
 #### Step 3 — add the Deep Pull section at the END of `map.js`
 
