@@ -1218,7 +1218,9 @@ h1 {
   color: #fff !important;
 }
 
-#btn-county-toggle {
+#btn-county-toggle,
+#btn-zoom-toggle,
+#btn-outside-area-toggle {
   letter-spacing: 0.04em;
 }
 

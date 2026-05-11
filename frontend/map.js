@@ -247,6 +247,24 @@ function updateClickModeButtonState() {
   const stayBtn = document.querySelector(".click-mode-btn.stay-mode");
   if (jumpBtn) jumpBtn.classList.toggle("active", currentClickMode === "jump");
   if (stayBtn) stayBtn.classList.toggle("active", currentClickMode === "stay");
+  // Mirror state onto the toolbar ZOOM button. Active (green) = jump mode.
+  const zoomToolbarBtn = document.getElementById("btn-zoom-toggle");
+  if (zoomToolbarBtn) {
+    zoomToolbarBtn.classList.toggle("active", currentClickMode === "jump");
+  }
+}
+
+// Keep the toolbar OAC button visually in sync with the Map Filters
+// #prop-outside-area checkbox. Listener attached at startup (see init
+// block at the bottom of this file). Updates active class whenever the
+// checkbox changes — whether the change came from clicking the checkbox
+// directly, clicking the toolbar OAC button (which dispatches a change),
+// or programmatic state restoration on saved-area load.
+function _updateOACButtonState() {
+  const checkbox = document.getElementById("prop-outside-area");
+  const btn = document.getElementById("btn-outside-area-toggle");
+  if (!checkbox || !btn) return;
+  btn.classList.toggle("active", Boolean(checkbox.checked));
 }
 
 function isPointInViewport(latlng) {
@@ -3050,6 +3068,40 @@ const MapToolbar = L.Control.extend({
       toggleCountyLayer();
     });
 
+    // ZOOM toggle — click-mode (jump = zoom on click, stay = keep current
+    // zoom). Active (green) = jump mode. Bidirectional with setClickMode
+    // so any caller mutating currentClickMode keeps this button visually
+    // in sync via updateClickModeButtonState below.
+    const zoomBtn = L.DomUtil.create("a", "", container);
+    zoomBtn.id = "btn-zoom-toggle";
+    zoomBtn.href = "#";
+    zoomBtn.title = "Toggle auto-zoom on parcel/comp click";
+    zoomBtn.textContent = "ZOOM";
+    L.DomEvent.on(zoomBtn, "click", (e) => {
+      L.DomEvent.preventDefault(e);
+      setClickMode(currentClickMode === "jump" ? "stay" : "jump");
+    });
+
+    // OAC (Outside Area Comps) toggle — mirrors the #prop-outside-area
+    // checkbox in the Map Filters card. Clicking either UI updates the
+    // shared state and reflects on the other surface. Active (green) =
+    // outside-polygon comps included.
+    const oacBtn = L.DomUtil.create("a", "", container);
+    oacBtn.id = "btn-outside-area-toggle";
+    oacBtn.href = "#";
+    oacBtn.title = "Toggle Outside Area Comps (also in Map Filters)";
+    oacBtn.textContent = "OAC";
+    L.DomEvent.on(oacBtn, "click", (e) => {
+      L.DomEvent.preventDefault(e);
+      const checkbox = document.getElementById("prop-outside-area");
+      if (!checkbox) return;
+      checkbox.checked = !checkbox.checked;
+      // Bubble a change event so the existing checkbox-change wiring fires
+      // (refilters comps, updates count chip, etc.). Toolbar button's own
+      // visual state then updates via the change-listener below.
+      checkbox.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
     return container;
   },
 });
@@ -4795,20 +4847,27 @@ function initClickModeToggle() {
   // Restore saved mode from localStorage
   const saved = localStorage.getItem(CLICK_MODE_STORAGE_KEY);
   currentClickMode = (saved === "stay" || saved === "jump") ? saved : "jump";
-  
-  // Set up button click handlers
+
+  // Set up button click handlers (legacy saved-areas-section toggle —
+  // markup may have been removed in the 2026-05-11 toolbar relocation,
+  // so these querySelectors might return null; that's fine, the toolbar
+  // ZOOM button updated via updateClickModeButtonState is the active UI).
   const jumpBtn = document.querySelector(".click-mode-btn.jump-mode");
   const stayBtn = document.querySelector(".click-mode-btn.stay-mode");
-  
-  if (jumpBtn) {
-    jumpBtn.addEventListener("click", () => setClickMode("jump"));
-  }
-  if (stayBtn) {
-    stayBtn.addEventListener("click", () => setClickMode("stay"));
-  }
-  
-  // Apply active state to current mode
+  if (jumpBtn) jumpBtn.addEventListener("click", () => setClickMode("jump"));
+  if (stayBtn) stayBtn.addEventListener("click", () => setClickMode("stay"));
+
   updateClickModeButtonState();
+}
+
+// Bidirectional sync between the toolbar OAC button and the Map Filters
+// prop-outside-area checkbox. Run once at startup after the checkbox
+// + toolbar button both exist in the DOM.
+function initOACToggleSync() {
+  const checkbox = document.getElementById("prop-outside-area");
+  if (!checkbox) return;
+  checkbox.addEventListener("change", _updateOACButtonState);
+  _updateOACButtonState();
 }
 
 function getPolygonDrawHandler() {
@@ -4834,6 +4893,7 @@ sidebarToggleBtn.addEventListener("click", () => {
 
 initSidebarCollapsibles();
 initClickModeToggle();
+initOACToggleSync();
 
 function applyMapVisibilityFilters() {
   const previousSoldLayerVisible = soldLayerVisible;

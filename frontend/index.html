@@ -264,10 +264,9 @@
           <button class="section-toggle" type="button" data-target="saved-areas-body" aria-expanded="false">
             <span class="sidebar-label">Saved Areas</span>
           </button>
-          <div class="click-mode-toggle" id="click-mode-toggle">
-            <button class="click-mode-btn jump-mode" data-mode="jump" type="button" title="Zoom to saved item">Zoom</button>
-            <button class="click-mode-btn stay-mode" data-mode="stay" type="button" title="Keep current zoom and view">Keep View</button>
-          </div>
+          <!-- click-mode-toggle (Zoom/Keep View) moved to the map control
+               toolbar as the ZOOM button — easier to discover, no scrolling
+               required (2026-05-11 relocation per KK). -->
         </div>
         <div id="saved-areas-body" class="collapsible-body hidden">
           <div id="saved-areas-list"></div>
