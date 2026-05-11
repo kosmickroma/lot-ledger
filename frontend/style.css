@@ -1071,9 +1071,11 @@ h1 {
 }
 
 .verify-badge-vacant {
-  background: #27ae60;
-  color: #ffffff;
-  border: 2px solid #1e8449;
+  background: #ffffff;
+  color: #16a34a;
+  box-shadow:
+    0 0 0 2px #16a34a,
+    0 0 6px rgba(22, 163, 74, 0.7);
 }
 
 .verify-badge-not-vacant {
@@ -2402,9 +2404,9 @@ h1 {
 }
 
 /* ── Good-comp checkmark badge ──────────────────────────────────────────── */
-/* Placed at the centroid of good-rated comps so the existing status hue
-   stays the comp's primary identity (purple/red/amber) and the badge just
-   marks it as curated-good. */
+/* Placed at the centroid of good-rated comps as a RED check-on-white ring,
+   so it reads as "good comp" while verified-vacant now carries the GREEN
+   check-on-white identity. */
 .propelio-good-mark-wrap {
   background: transparent;
   border: 0;
@@ -2416,7 +2418,7 @@ h1 {
   height: 16px;
   border-radius: 50%;
   background: #ffffff;
-  color: #16a34a;
+  color: #dc2626;
   font-size: 12px;
   font-weight: 800;
   line-height: 1;
@@ -2424,8 +2426,8 @@ h1 {
   align-items: center;
   justify-content: center;
   box-shadow:
-    0 0 0 2px #16a34a,
-    0 0 6px rgba(22, 163, 74, 0.7);
+    0 0 0 2px #dc2626,
+    0 0 6px rgba(220, 38, 38, 0.7);
 }
 
 /* Sidebar comp list */
