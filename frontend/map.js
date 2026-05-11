@@ -3267,13 +3267,59 @@ function _buildPropelioCompSectionHtml(c) {
   `;
 }
 
+// Async resolver for Propelio comp popup content. Returns the unified
+// CAD+MLS popup when the comp's parcel is reachable (either already in the
+// current draw analysis OR fetchable from the parcels API for spillover
+// comps via parcel_county + parcel_account_num set in api/propelio/
+// parcel_match.py). Falls back to the standalone Propelio-only popup
+// (_propelioBuildPopup) if the comp doesn't have a matched parcel or the
+// fetch fails. Used by the click handler and flyToAndOpenPropelioComp.
+async function _resolvePropelioPopupContent(comp) {
+  const accountNum = String(comp?.parcel_account_num || "").trim();
+
+  // Fast path: in-memory match against the current draw analysis.
+  if (accountNum && lastAnalysisGeojson && Array.isArray(lastAnalysisGeojson.features)) {
+    const matched = lastAnalysisGeojson.features.find(
+      (f) => String(f?.properties?.account_num || "").trim() === accountNum
+    );
+    if (matched?.properties) return makePopupHtml(matched.properties);
+  }
+
+  // Slow path: spillover comps (Propelio search circumradius extends past
+  // the polygon) still have parcel_county + parcel_account_num attached by
+  // parcel_match.py. Fetch the parcel detail so the unified popup shows
+  // for those too — same behavior as clicking the parcel from browse mode.
+  const county = String(comp?.parcel_county || "").trim();
+  if (accountNum && county) {
+    try {
+      const resp = await fetch(`/api/parcel/${county}/${accountNum}`);
+      if (resp.ok) {
+        const detail = await resp.json();
+        return makePopupHtml(detail.properties || detail);
+      }
+    } catch (err) {
+      console.error("Propelio spillover parcel fetch failed", err);
+    }
+  }
+
+  // Final fallback: unmatched comp (no account_num at all, or fetch
+  // failed) gets the standalone Propelio popup.
+  return _propelioBuildPopup(comp);
+}
+
+async function _openUnifiedPropelioPopup(comp, latlng) {
+  if (!comp || !latlng) return;
+  const content = await _resolvePropelioPopupContent(comp);
+  L.popup({ maxWidth: 280, autoPan: true, autoPanPadding: [10, 50], keepInView: true })
+    .setLatLng(latlng)
+    .setContent(content)
+    .openOn(map);
+}
+
 function _propelioBuildPopup(c) {
-  // If this comp matches a parcel in the current draw, return the unified
-  // CAD popup (which now includes the comp section + rating buttons). Lets
-  // a click on the propelio footprint open the same card as a click on
-  // the underlying parcel outline. Spillover comps with no parcel match
-  // (Propelio search circumradius extends beyond the polygon) fall through
-  // to the standalone comp-only popup below.
+  // Standalone Propelio-only popup. Used as the final fallback by
+  // _resolvePropelioPopupContent — direct callers should prefer that
+  // resolver so spillover comps get the unified popup.
   const accountNum = String(c?.parcel_account_num || "").trim();
   if (accountNum && lastAnalysisGeojson && Array.isArray(lastAnalysisGeojson.features)) {
     const matched = lastAnalysisGeojson.features.find(
@@ -3573,10 +3619,18 @@ function _renderPropelioComps(data) {
       const footprint = L.geoJSON(geom, {
         style: () => _propelioFootprintStyle(compClass),
         onEachFeature: (_feature, layer) => {
-          layer.bindPopup(_propelioBuildPopup(comp));
+          // No bindPopup — we resolve unified-vs-standalone popup content
+          // asynchronously on click so spillover comps (outside the drawn
+          // polygon) still get the unified CAD+MLS popup via on-demand
+          // parcel fetch.
+          layer.on("click", async (ev) => {
+            L.DomEvent.stopPropagation(ev);
+            await _openUnifiedPropelioPopup(comp, ev.latlng);
+          });
         },
       });
       footprint.addTo(propelioCompLayer);
+      footprint._lotLedgerComp = comp;
       if (compKey) propelioCompLayerByKey.set(compKey, footprint);
       footprintCount += 1;
       _maybeAddGoodCompMark(comp, footprint, latlng);
@@ -3596,7 +3650,11 @@ function _renderPropelioComps(data) {
       icon: fallbackIcon,
       riseOnHover: true,
     });
-    marker.bindPopup(_propelioBuildPopup(comp));
+    marker._lotLedgerComp = comp;
+    marker.on("click", async (ev) => {
+      L.DomEvent.stopPropagation(ev);
+      await _openUnifiedPropelioPopup(comp, ev.latlng);
+    });
     marker.addTo(propelioCompLayer);
     if (compKey) propelioCompLayerByKey.set(compKey, marker);
     fallbackCount += 1;
@@ -3891,7 +3949,7 @@ function _findPropelioCompByKey(key) {
   return all.find((c) => String(c?.comp_address_key || "").trim() === k) || null;
 }
 
-function flyToAndOpenPropelioComp(compKey) {
+async function flyToAndOpenPropelioComp(compKey) {
   const layer = propelioCompLayerByKey.get(String(compKey || "").trim());
   if (!layer) return;
 
@@ -3946,10 +4004,14 @@ function flyToAndOpenPropelioComp(compKey) {
     }
   }
 
-  if (typeof layer.openPopup === "function") {
-    layer.openPopup();
-  } else if (layer.eachLayer) {
-    layer.eachLayer((l) => { if (typeof l.openPopup === "function") l.openPopup(); });
+  // Open via the unified async resolver so spillover comps (outside the
+  // drawn polygon) get the unified CAD+MLS popup, not just the standalone
+  // Propelio-only popup. layer._lotLedgerComp is stashed at render time
+  // in _renderPropelioComps.
+  const comp = layer._lotLedgerComp
+    || (typeof layer.getLayers === "function" ? layer.getLayers()[0]?._lotLedgerComp : null);
+  if (comp && center) {
+    await _openUnifiedPropelioPopup(comp, center);
   }
 }
 

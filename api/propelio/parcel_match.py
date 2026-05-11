@@ -254,6 +254,7 @@ def match_comps_to_parcels(comps: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for c in comps:
         c["parcel_geom"] = None
         c["parcel_account_num"] = None
+        c["parcel_county"] = None
 
     bbox = _comps_bbox(comps)
     if bbox is None:
@@ -273,7 +274,7 @@ def match_comps_to_parcels(comps: list[dict[str, Any]]) -> list[dict[str, Any]]:
     # list of (parcel_geom, account_num, centroid_lat, centroid_lng) for
     # the lat/lon proximity fallback on address-key misses.
     global_index: dict[str, dict[str, Any]] = {}
-    geo_pool: list[tuple[Any, str, float, float]] = []
+    geo_pool: list[tuple[Any, str, str, float, float]] = []
     for county in _COUNTY_TABLES:
         rows = _fetch_county_parcels_in_bbox(county, bbox)
         county_index = _build_addr_key_index(rows, county)
@@ -281,7 +282,7 @@ def match_comps_to_parcels(comps: list[dict[str, Any]]) -> list[dict[str, Any]]:
             global_index.setdefault(k, v)
         for account_num, _raw, parcel_geom, clat, clng in rows:
             if clat is not None and clng is not None and parcel_geom is not None:
-                geo_pool.append((parcel_geom, account_num, clat, clng))
+                geo_pool.append((parcel_geom, account_num, county, clat, clng))
 
     matched_by_addr = 0
     matched_by_geo = 0
@@ -294,6 +295,7 @@ def match_comps_to_parcels(comps: list[dict[str, Any]]) -> list[dict[str, Any]]:
             if hit is not None:
                 comps[idx]["parcel_geom"] = hit["parcel_geom"]
                 comps[idx]["parcel_account_num"] = hit["parcel_account_num"]
+                comps[idx]["parcel_county"] = hit["source_county"]
                 matched_by_addr += 1
                 continue
         # Fallback: lat/lon proximity to nearest parcel centroid.
@@ -307,15 +309,18 @@ def match_comps_to_parcels(comps: list[dict[str, Any]]) -> list[dict[str, Any]]:
         best_dist = float("inf")
         best_geom = None
         best_account = None
-        for parcel_geom, account_num, plat, plng in geo_pool:
+        best_county = None
+        for parcel_geom, account_num, county, plat, plng in geo_pool:
             d = _haversine_meters(clat, clng, plat, plng)
             if d < best_dist:
                 best_dist = d
                 best_geom = parcel_geom
                 best_account = account_num
+                best_county = county
         if best_dist <= PROXIMITY_THRESHOLD_M:
             comps[idx]["parcel_geom"] = best_geom
             comps[idx]["parcel_account_num"] = best_account
+            comps[idx]["parcel_county"] = best_county
             matched_by_geo += 1
 
     logger.info(
