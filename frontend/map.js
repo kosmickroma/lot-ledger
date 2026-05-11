@@ -6000,13 +6000,13 @@ function renderFeatures(geojson) {
     const color = getColor(feature);
     const borderColor = getBorderColor(feature);
     const hasVisibleSoldComp = hasSoldComp;
-    const parcelBorderColor = hasVisibleSoldComp ? SOLD_OUTLINE_COLOR : borderColor;
+    const parcelBorderColor = borderColor;
     // Vacant parcels get the THICKEST border on the map (4px) so they stand
     // out at a glance. When a vacant lot is also matched to a Propelio comp,
     // the comp's footprint-glow renders on top of this polygon via a separate
     // layer, so "comp color inside, thick green ring outside" comes for free —
     // no second polygon needed.
-    const parcelBorderWeight = hasVisibleSoldComp ? 3.2 : (p.on_redfin ? 2.8 : (bucket === "vacant" ? 4 : 1.5));
+    const parcelBorderWeight = hasVisibleSoldComp ? 5 : (p.on_redfin ? 2.8 : (bucket === "vacant" ? 4 : 1.5));
     if (p.lat == null || p.lng == null) return;
     const hasPolygonGeometry =
       feature.geometry?.type === "Polygon" || feature.geometry?.type === "MultiPolygon";
@@ -6064,8 +6064,8 @@ function renderFeatures(geojson) {
         bubblingMouseEvents: false,
         style: {
           color: parcelBorderColor,
-          fillColor: hasVisibleSoldComp ? SOLD_OUTLINE_COLOR : (p.on_redfin ? COLORS.active : color),
-          fillOpacity: (hasVisibleSoldComp || p.on_redfin) ? 0.65 : 0.12,
+          fillColor: p.on_redfin ? COLORS.active : color,
+          fillOpacity: hasVisibleSoldComp ? 0 : (p.on_redfin ? 0.65 : 0.12),
           weight: parcelBorderWeight,
           opacity: 0.85,
         },
@@ -6100,7 +6100,7 @@ function renderFeatures(geojson) {
       layer = L.circleMarker([p.lat, p.lng], {
         renderer: MAP_SVG_RENDERER,
         radius: p.on_redfin ? 7 : 5,
-        fillColor: hasVisibleSoldComp ? SOLD_OUTLINE_COLOR : (p.on_redfin ? COLORS.active : color),
+        fillColor: p.on_redfin ? COLORS.active : color,
         color: parcelBorderColor,
         weight: 1.5,
         opacity: 1,
