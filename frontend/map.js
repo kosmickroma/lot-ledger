@@ -4996,8 +4996,22 @@ function makePopupHtml(p) {
   const verifiedVacant = normalizeVerificationValue(
     verificationByAccount.get(p.account_num) || p.verified_vacant
   );
-  const potentialTarget = String(potentialTargetByAccount.get(p.account_num) || p.potential_target || "").trim();
   const row = (label, val) => `<tr><td class="popup-label">${label}</td><td class="popup-val">${val || "N/A"}</td></tr>`;
+
+  // Helper — produce a colored over/under-CAD delta row for any price source.
+  // dcadRaw is just `${p.tot_val}` (already a "$NNN,NNN" string); numeric is
+  // the comp-side price (Propelio raw number, or parsed RF price string).
+  const buildDeltaRow = (label, numeric) => {
+    if (!Number.isFinite(numeric) || numeric <= 0) return "";
+    const dcadRaw = String(p.tot_val || "").replace(/[^0-9]/g, "");
+    const dcadNum = dcadRaw ? parseInt(dcadRaw, 10) : NaN;
+    if (!Number.isFinite(dcadNum) || dcadNum <= 0) return "";
+    const delta = Math.round(numeric) - dcadNum;
+    const pct = ((delta / dcadNum) * 100).toFixed(1);
+    const sign = delta >= 0 ? "+" : "";
+    const color = delta >= 0 ? "#27ae60" : "#e74c3c";
+    return `<tr><td class="popup-label">${label}</td><td class="popup-val" style="color:${color}">${sign}$${Math.abs(delta).toLocaleString()} (${sign}${pct}%)</td></tr>`;
+  };
 
   // Active listing price in header + delta row in table.
   let activeListingPrice = "";
@@ -5008,22 +5022,20 @@ function makePopupHtml(p) {
       ? `<a href="${p.redfin_url}" target="_blank" rel="noopener noreferrer">${p.redfin_price}</a>`
       : p.redfin_price;
 
-    // Numeric delta: parse both values
     const rfNum = parseInt(String(p.redfin_price).replace(/[^0-9]/g, ""), 10);
-    const dcadRaw = String(p.tot_val || "").replace(/[^0-9]/g, "");
-    const dcadNum = dcadRaw ? parseInt(dcadRaw, 10) : NaN;
-    if (!isNaN(rfNum) && !isNaN(dcadNum) && dcadNum > 0) {
-      const delta = rfNum - dcadNum;
-      const pct = ((delta / dcadNum) * 100).toFixed(1);
-      const sign = delta >= 0 ? "+" : "";
-      const color = delta >= 0 ? "#27ae60" : "#e74c3c";
-      listingDeltaRow = `<tr><td class="popup-label">LP vs DCAD</td><td class="popup-val" style="color:${color}">${sign}$${Math.abs(delta).toLocaleString()} (${sign}${pct}%)</td></tr>`;
-    }
+    listingDeltaRow = buildDeltaRow("LP vs DCAD", rfNum);
 
-    // Separate "Listing | View listing" row goes immediately under Potential Target
     if (p.redfin_url) {
       redfinListingRow = row("Listing", `<a href="${p.redfin_url}" target="_blank" rel="noopener noreferrer">View listing</a>`);
     }
+  }
+
+  // Propelio comp price (sold or list, whichever the matched comp carries) vs
+  // CAD total value — same red/green delta treatment so investors can scan
+  // over/under-CAD at a glance across all counties.
+  let propelioDeltaRow = "";
+  if (matchedComp && Number.isFinite(Number(matchedComp.price))) {
+    propelioDeltaRow = buildDeltaRow("Comp $ vs CAD", Number(matchedComp.price));
   }
 
   let soldCompRows = "";
@@ -5067,6 +5079,7 @@ function makePopupHtml(p) {
           ${row("Land Value", p.land_val)}
           ${row("Total Value", p.tot_val)}
           ${listingDeltaRow}
+          ${propelioDeltaRow}
           ${row("Land % of Total", p.land_pct)}
           ${row("Lot Size", p.lot_sqft)}
           ${row("Acres", p.lot_acres)}
@@ -5077,7 +5090,6 @@ function makePopupHtml(p) {
           ${row("School District", p.school)}
           ${row("Year Built", p.yr_built)}
           ${row("Living Area", p.sqft && p.sqft !== "N/A" ? p.sqft + " sf" : "N/A")}
-          ${row("Potential Target", potentialTarget || "No")}
           ${redfinListingRow}
           ${soldCompRows}
         </table>
