@@ -5208,8 +5208,14 @@ function _getParcelPanelCompDetails(comp) {
     officeName: raw.buyer_office_name,
     officePhone: raw.buyer_office_phone,
   };
+  const seenPhotoUrls = new Set();
   const photos = Array.isArray(raw.photos)
-    ? raw.photos.filter((photo) => typeof photo?.url === "string" && photo.url.trim())
+    ? raw.photos.filter((photo) => {
+        const url = typeof photo?.url === "string" ? photo.url.trim() : "";
+        if (!url || seenPhotoUrls.has(url)) return false;
+        seenPhotoUrls.add(url);
+        return true;
+      })
     : [];
   const photoCountValue = Number(raw.photo_count);
   const photoCount = photos.length || (Number.isFinite(photoCountValue) ? photoCountValue : 0);
