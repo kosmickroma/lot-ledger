@@ -7418,6 +7418,11 @@ document.getElementById("toggle-sold")?.addEventListener("change", async (e) => 
 map.on("mousemove", (ev) => {
   if (lastAnalysisGeojson) return;
   if (map.getZoom() < 14) return;
+  // Defensive: browseLayer can be detached from the map during certain
+  // saved-area restore + viewport-suspend cycles. Without this guard
+  // queryTileFeaturesDebug throws TypeError "this._map is null" on every
+  // mousemove and blocks all subsequent map interactions.
+  if (!browseLayer._map) return;
   const result = browseLayer.queryTileFeaturesDebug(ev.latlng.lng, ev.latlng.lat);
   const hit = result instanceof Map
     ? [...result.values()].flat().length > 0
@@ -7437,6 +7442,8 @@ map.on("click", async (ev) => {
   // Any map click clears an orphaned search highlight (search popup was replaced by this click).
   window._clearSearchHighlight?.();
 
+  // Defensive: same browseLayer-detached guard as the mousemove handler above.
+  if (!browseLayer._map) return;
   const result = browseLayer.queryTileFeaturesDebug(ev.latlng.lng, ev.latlng.lat);
   // v3 returns Map<string, PickedFeature[]> — flatten all values regardless of key name
   const allFeatures = result instanceof Map
