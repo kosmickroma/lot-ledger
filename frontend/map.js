@@ -3344,7 +3344,9 @@ function _propelioBuildPopup(c) {
 
 // CMA settings chip — bottom-left Leaflet control showing the filter
 // Propelio applied + count + Propelio's own ARV estimate for the most
-// recent fetch. Updated by firePropelioFetch; hidden until first hit.
+// recent fetch. Updated by firePropelioFetch when that path comes back
+// online via the planned "Comps" button (see firePropelioFetch comment
+// below). Currently dormant — no auto-pull on address search.
 const PropelioCmaChip = L.Control.extend({
   options: { position: "bottomleft" },
   onAdd() {
@@ -4226,6 +4228,15 @@ function _showPropelioPolygonButton(_latlngs) {
   }
 }
 
+// TODO(comps-button): intentionally retained. As of 2026-05-10 this
+// function has ZERO callers — the two address-search auto-pull sites
+// were removed by design (chunk 1 of the 2026-05-10 UI initiative).
+// The planned explicit "Comps" button next to the address search bar
+// will reconnect this code path. See memory:
+//   project_propelio_comp_harvest.md  (two-button search split + deep-pull)
+// If you are reading this AFTER the Comps button has shipped AND this
+// function is still unreferenced, then it really is dead — remove it
+// and the matching CMA-chip dormancy note above. Otherwise: leave it.
 async function firePropelioFetch(addressString) {
   if (!addressString || typeof addressString !== "string") return;
   propelioCompLayer.clearLayers();
