@@ -2039,7 +2039,7 @@ function _renderSavedParcelOutline(area) {
       const resp = await fetch(`/api/parcel/${county}/${accountNum}`);
       if (!resp.ok) return;
       const detail = await resp.json();
-      L.popup({ maxWidth: 480, autoPan: true, autoPanPadding: [10, 50], keepInView: true })
+      L.popup({ minWidth: 480, maxWidth: 480, autoPan: true, autoPanPadding: [10, 50], keepInView: true })
         .setLatLng(ev.latlng)
         .setContent(makePopupHtml(detail.properties || detail))
         .openOn(map);
@@ -3376,7 +3376,7 @@ async function _resolvePropelioPopupContent(comp) {
 async function _openUnifiedPropelioPopup(comp, latlng) {
   if (!comp || !latlng) return;
   const content = await _resolvePropelioPopupContent(comp);
-  L.popup({ maxWidth: 480, autoPan: true, autoPanPadding: [10, 50], keepInView: true })
+  L.popup({ minWidth: 480, maxWidth: 480, autoPan: true, autoPanPadding: [10, 50], keepInView: true })
     .setLatLng(latlng)
     .setContent(content)
     .openOn(map);
@@ -5541,6 +5541,7 @@ function renderFeatures(geojson) {
           opacity: 0.85,
         },
       }).bindPopup(() => makePopupHtml(p), {
+        minWidth: 480,
         maxWidth: 480,
         autoPan: true,
         autoPanPadding: [10, 50],
@@ -5579,6 +5580,7 @@ function renderFeatures(geojson) {
         fillOpacity: 0.9,
         bubblingMouseEvents: false,
       }).bindPopup(() => makePopupHtml(p), {
+        minWidth: 480,
         maxWidth: 480,
         autoPan: true,
         autoPanPadding: [10, 50],
@@ -7037,7 +7039,7 @@ map.on("click", async (ev) => {
     const resp = await fetch(`/api/parcel/${county}/${accountNum}`);
     if (!resp.ok) return;
     const detail = await resp.json();
-    L.popup({ maxWidth: 480, autoPan: true, autoPanPadding: [10, 50], keepInView: true })
+    L.popup({ minWidth: 480, maxWidth: 480, autoPan: true, autoPanPadding: [10, 50], keepInView: true })
       .setLatLng(ev.latlng)
       .setContent(makePopupHtml(detail.properties || detail))
       .openOn(map);
