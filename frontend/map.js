@@ -2039,7 +2039,7 @@ function _renderSavedParcelOutline(area) {
       const resp = await fetch(`/api/parcel/${county}/${accountNum}`);
       if (!resp.ok) return;
       const detail = await resp.json();
-      openParcelDetailPanel(detail.properties || detail, { latlng: ev.latlng });
+      openParcelDetailPanel(detail.properties || detail, { latlng: ev.latlng, geometry: detail.geometry });
     } catch (e) {
       console.error("Saved-target popup failed", e);
     }
@@ -2223,6 +2223,7 @@ function _restoreActiveParcelPopup() {
     openParcelDetailPanel(_activeParcelPopupState.props, {
       latlng: _activeParcelPopupState.latlng || null,
       matchedComp: _activeParcelPopupState.matchedComp || null,
+      geometry: _activeParcelPopupState.geometry || null,
       suppressFly: true,
     });
   }, 0);
@@ -3379,7 +3380,7 @@ async function _openUnifiedPropelioPopup(comp, latlng) {
       (f) => String(f?.properties?.account_num || "").trim() === accountNum
     );
     if (matched?.properties) {
-      openParcelDetailPanel(matched.properties, { latlng, matchedComp: comp });
+      openParcelDetailPanel(matched.properties, { latlng, matchedComp: comp, geometry: matched.geometry });
       return;
     }
   }
@@ -3390,7 +3391,7 @@ async function _openUnifiedPropelioPopup(comp, latlng) {
       const resp = await fetch(`/api/parcel/${county}/${accountNum}`);
       if (resp.ok) {
         const detail = await resp.json();
-        openParcelDetailPanel(detail.properties || detail, { latlng, matchedComp: comp });
+        openParcelDetailPanel(detail.properties || detail, { latlng, matchedComp: comp, geometry: detail.geometry });
         return;
       }
     } catch (err) {
@@ -3417,7 +3418,7 @@ async function _openUnifiedPropelioPopup(comp, latlng) {
     account_num: accountNum || "",
     lat: comp?.extra?.lat || null,
     lng: comp?.extra?.lon || comp?.extra?.lng || null,
-  }, { latlng, matchedComp: comp });
+  }, { latlng, matchedComp: comp, geometry: comp?.parcel_geom || null });
 }
 
 function _propelioBuildPopup(c) {
@@ -5451,7 +5452,18 @@ function openParcelDetailPanel(parcelProps, opts = {}) {
     props: parcelProps,
     latlng: opts.latlng || null,
     matchedComp: matchedComp || null,
+    geometry: opts.geometry || null,
   };
+
+  // Drop a purple selected-outline on the parcel currently in the panel so the
+  // user can still see WHICH parcel they were just looking at after they close
+  // the panel. The outline persists until a different parcel is clicked OR
+  // they click the empty map (which clears it via the chunk-5 map.on("click")
+  // listener). Falls back gracefully when no geometry is available — the
+  // outline just doesn't render for that case.
+  if (opts.geometry) {
+    _renderSelectedOutline(opts.geometry);
+  }
 
   map.closePopup();
   closeTransientSoldSidebarPopup();
@@ -5976,7 +5988,7 @@ function renderFeatures(geojson) {
       });
       layer.on("click", (ev) => {
         L.DomEvent.stopPropagation(ev);
-        openParcelDetailPanel(p, { latlng: ev.latlng });
+        openParcelDetailPanel(p, { latlng: ev.latlng, geometry: feature.geometry });
       });
       // L.geoJSON returns a FeatureGroup wrapper; click events fire on inner child layers,
       // so popup._source is the child, not the wrapper. Propagate metadata to children
@@ -6013,7 +6025,7 @@ function renderFeatures(geojson) {
       });
       layer.on("click", (ev) => {
         L.DomEvent.stopPropagation(ev);
-        openParcelDetailPanel(p, { latlng: ev.latlng });
+        openParcelDetailPanel(p, { latlng: ev.latlng, geometry: feature.geometry });
       });
       layer._lotLedgerPopupMeta = { type: "parcel", accountNum: String(p.account_num || "") };
       layer.addTo(circleLayer);
