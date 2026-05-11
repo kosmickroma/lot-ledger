@@ -2039,10 +2039,7 @@ function _renderSavedParcelOutline(area) {
       const resp = await fetch(`/api/parcel/${county}/${accountNum}`);
       if (!resp.ok) return;
       const detail = await resp.json();
-      L.popup({ minWidth: 480, maxWidth: 480, autoPan: true, autoPanPadding: [10, 50], keepInView: true })
-        .setLatLng(ev.latlng)
-        .setContent(makePopupHtml(detail.properties || detail))
-        .openOn(map);
+      openParcelDetailPanel(detail.properties || detail, { latlng: ev.latlng });
     } catch (e) {
       console.error("Saved-target popup failed", e);
     }
@@ -2219,15 +2216,15 @@ function _captureParcelPopupState(meta) {
 }
 
 function _restoreActiveParcelPopup() {
-  if (!_activeParcelPopupState?.accountNum) return;
-  const layer = _renderedParcelPopupLayers.get(_activeParcelPopupState.accountNum);
-  if (!layer) return;
+  if (!_activeParcelPopupState?.props) return;
   _suspendViewportRender();
   setTimeout(() => {
-    if (!_activeParcelPopupState?.accountNum) return;
-    const nextLayer = _renderedParcelPopupLayers.get(_activeParcelPopupState.accountNum);
-    if (!nextLayer || !map.hasLayer(nextLayer)) return;
-    nextLayer.openPopup();
+    if (!_activeParcelPopupState?.props) return;
+    openParcelDetailPanel(_activeParcelPopupState.props, {
+      latlng: _activeParcelPopupState.latlng || null,
+      matchedComp: _activeParcelPopupState.matchedComp || null,
+      suppressFly: true,
+    });
   }, 0);
 }
 
@@ -3375,11 +3372,52 @@ async function _resolvePropelioPopupContent(comp) {
 
 async function _openUnifiedPropelioPopup(comp, latlng) {
   if (!comp || !latlng) return;
-  const content = await _resolvePropelioPopupContent(comp);
-  L.popup({ minWidth: 480, maxWidth: 480, autoPan: true, autoPanPadding: [10, 50], keepInView: true })
-    .setLatLng(latlng)
-    .setContent(content)
-    .openOn(map);
+  const accountNum = String(comp?.parcel_account_num || "").trim();
+
+  if (accountNum && lastAnalysisGeojson && Array.isArray(lastAnalysisGeojson.features)) {
+    const matched = lastAnalysisGeojson.features.find(
+      (f) => String(f?.properties?.account_num || "").trim() === accountNum
+    );
+    if (matched?.properties) {
+      openParcelDetailPanel(matched.properties, { latlng, matchedComp: comp });
+      return;
+    }
+  }
+
+  const county = String(comp?.parcel_county || "").trim();
+  if (accountNum && county) {
+    try {
+      const resp = await fetch(`/api/parcel/${county}/${accountNum}`);
+      if (resp.ok) {
+        const detail = await resp.json();
+        openParcelDetailPanel(detail.properties || detail, { latlng, matchedComp: comp });
+        return;
+      }
+    } catch (err) {
+      console.error("Propelio spillover parcel fetch failed", err);
+    }
+  }
+
+  openParcelDetailPanel({
+    addr: comp?.address || "Unknown address",
+    owner: "N/A",
+    land_val: "N/A",
+    tot_val: "N/A",
+    land_pct: "N/A",
+    lot_sqft: Number.isFinite(Number(comp?.lot_size)) ? `${Math.round(Number(comp.lot_size)).toLocaleString()} sf` : "N/A",
+    lot_acres: Number.isFinite(Number(comp?.lot_size)) ? (Number(comp.lot_size) / 43560).toFixed(2) : "N/A",
+    frontage: "N/A",
+    depth: "N/A",
+    state_code: "N/A",
+    zoning: "N/A",
+    school: "N/A",
+    yr_built: Number.isFinite(Number(comp?.year_built)) ? Number(comp.year_built) : "N/A",
+    sqft: Number.isFinite(Number(comp?.sqft)) ? Math.round(Number(comp.sqft)).toLocaleString() : "N/A",
+    source_county: county || "dcad",
+    account_num: accountNum || "",
+    lat: comp?.extra?.lat || null,
+    lng: comp?.extra?.lon || comp?.extra?.lng || null,
+  }, { latlng, matchedComp: comp });
 }
 
 function _propelioBuildPopup(c) {
@@ -5029,6 +5067,392 @@ function geometryKey(geometry) {
   }
 }
 
+function _panelDisplayValue(value) {
+  return value && value !== "N/A" ? value : "N/A";
+}
+
+function _buildParcelDetailTableRow(label, value) {
+  return `<tr><td class="popup-label">${label}</td><td class="popup-val">${value || "N/A"}</td></tr>`;
+}
+
+function _buildParcelDeltaMeta(p, label, numeric) {
+  if (!Number.isFinite(numeric) || numeric <= 0) return null;
+  const dcadRaw = String(p?.tot_val || "").replace(/[^0-9]/g, "");
+  const dcadNum = dcadRaw ? parseInt(dcadRaw, 10) : NaN;
+  if (!Number.isFinite(dcadNum) || dcadNum <= 0) return null;
+  const delta = Math.round(numeric) - dcadNum;
+  const pct = ((delta / dcadNum) * 100).toFixed(1);
+  const sign = delta >= 0 ? "+" : "";
+  return {
+    label,
+    text: `${sign}$${Math.abs(delta).toLocaleString()} (${sign}${pct}%)`,
+    color: delta >= 0 ? "#16a34a" : "#dc2626",
+  };
+}
+
+function _getParcelPanelCompDetails(comp) {
+  if (!comp) return null;
+  const fmtPrice = (n) => Number.isFinite(n) ? `$${Math.round(n).toLocaleString()}` : "—";
+  const fmtNum = (n) => Number.isFinite(n) ? Number(n).toLocaleString() : null;
+  const fmtDate = (s) => {
+    if (!s) return null;
+    const d = new Date(s);
+    return Number.isFinite(d.getTime()) ? d.toISOString().slice(0, 10) : null;
+  };
+
+  const ex = comp?.extra || {};
+  const raw = comp?.extra?.raw || {};
+  const status = String(comp?.status || "");
+  const isSold = status === "sold";
+  const sqft = fmtNum(comp?.sqft);
+  const lot = fmtNum(comp?.lot_size);
+  const year = Number.isFinite(comp?.year_built) ? comp.year_built : null;
+  const beds = ex.beds;
+  const baths = ex.baths;
+  const bathsFull = ex.baths_full;
+  const bathsHalf = ex.baths_half;
+  const garage = ex.garage;
+  const dom = ex.dom;
+  const listPrice = Number(ex.list_price);
+  const closeDate = fmtDate(ex.close_date);
+  const modifiedTs = fmtDate(ex.modified_timestamp);
+  const propertyType = ex.property_type;
+  const mls = ex.mls || "";
+  const source = ex.source || "";
+  const remarks = String(ex.remarks || raw.remarks || "").trim();
+  const schools = {
+    elementary: raw.elementary_school,
+    middle: raw.middle_school || raw.junior_high_school || raw.intermediate_school,
+    high: raw.high_school || raw.senior_high_school,
+  };
+  const listingAgent = {
+    name: raw.listing_agent_name,
+    phone: raw.listing_agent_phone,
+    email: raw.listing_agent_email,
+    officeName: raw.listing_office_name,
+    officePhone: raw.listing_office_phone,
+  };
+  const buyerAgent = {
+    name: raw.buyer_agent_name,
+    phone: raw.buyer_agent_phone,
+    email: raw.buyer_agent_email,
+    officeName: raw.buyer_office_name,
+    officePhone: raw.buyer_office_phone,
+  };
+  const photos = Array.isArray(raw.photos)
+    ? raw.photos.filter((photo) => typeof photo?.url === "string" && photo.url.trim())
+    : [];
+  const photoCountValue = Number(raw.photo_count);
+  const photoCount = photos.length || (Number.isFinite(photoCountValue) ? photoCountValue : 0);
+
+  const dims = [];
+  if (sqft) dims.push(`${sqft} sqft`);
+  if (lot) dims.push(`${lot} sqft lot`);
+  if (year) dims.push(`built ${year}`);
+
+  const bbLine = [];
+  if (beds != null) bbLine.push(`${beds}bd`);
+  if (Number.isFinite(bathsFull) || Number.isFinite(bathsHalf)) {
+    const fullStr = Number.isFinite(bathsFull) ? `${bathsFull}` : "0";
+    const halfStr = Number.isFinite(bathsHalf) && bathsHalf > 0 ? ` + ${bathsHalf}½` : "";
+    bbLine.push(`${fullStr}ba${halfStr}`);
+  } else if (baths != null) {
+    bbLine.push(`${baths}ba`);
+  }
+  if (Number.isFinite(garage) && garage > 0) bbLine.push(`${garage}-car gar`);
+
+  let listVsCloseText = "";
+  if (isSold && Number.isFinite(listPrice) && Number.isFinite(comp?.price) && listPrice > 0 && Math.abs(listPrice - comp.price) > 1) {
+    const delta = comp.price - listPrice;
+    const deltaPct = Math.round((delta / listPrice) * 100);
+    const sign = delta > 0 ? "+" : "";
+    listVsCloseText = `List was ${fmtPrice(listPrice)} (${sign}${deltaPct}% close vs list)`;
+  } else if (!isSold && Number.isFinite(listPrice) && listPrice > 0 && Number(comp?.price) !== listPrice) {
+    listVsCloseText = `List: ${fmtPrice(listPrice)}`;
+  }
+
+  const soldMeta = [];
+  if (isSold && closeDate) soldMeta.push(`closed ${closeDate}`);
+  if (Number.isFinite(dom)) soldMeta.push(`DOM ${dom}`);
+
+  const idLine = [];
+  if (mls) idLine.push(`MLS ${mls}`);
+  if (propertyType) idLine.push(propertyType);
+
+  return {
+    status,
+    priceText: fmtPrice(comp?.price),
+    soldMetaText: soldMeta.join(" · "),
+    dimsText: dims.join(" · "),
+    bbText: bbLine.join(" · "),
+    idText: idLine.join(" · "),
+    source,
+    modifiedTs,
+    listVsCloseText,
+    remarks,
+    schools,
+    listingAgent,
+    buyerAgent,
+    photoCount,
+    photos,
+    mls,
+  };
+}
+
+function _buildPanelAgentBlockHtml(title, agent, emptyText) {
+  if (agent?.name) {
+    return `
+      <div class="propelio-popup-agent-block">
+        <div class="propelio-popup-agent-label">${title}</div>
+        <div class="propelio-popup-agent-name">${_propelioEscape(agent.name || "—")}</div>
+        ${agent.officeName ? `<div class="propelio-popup-agent-line">${_propelioEscape(agent.officeName)}</div>` : ""}
+        <div class="propelio-popup-agent-contact">
+          ${agent.phone ? `<a href="tel:${encodeURIComponent(agent.phone)}">${_propelioEscape(agent.phone)}</a>` : ""}
+          ${agent.email ? `<a href="mailto:${encodeURIComponent(agent.email)}">${_propelioEscape(agent.email)}</a>` : ""}
+          ${agent.officePhone && agent.officePhone !== agent.phone ? `<a href="tel:${encodeURIComponent(agent.officePhone)}" class="muted">office: ${_propelioEscape(agent.officePhone)}</a>` : ""}
+        </div>
+      </div>`;
+  }
+  return `
+    <div class="propelio-popup-agent-block parcel-panel-agent-empty">
+      <div class="propelio-popup-agent-label">${title}</div>
+      <div class="parcel-panel-empty-copy">${emptyText}</div>
+    </div>`;
+}
+
+function _buildParcelDetailPanelHtml(p, matchedComp) {
+  const pseudoFeature = { properties: p };
+  const hasVisibleSoldComp = Boolean(p?.sold_comp);
+  const effectiveMatchedComp = matchedComp || _findMatchedCompForAccount(p?.account_num);
+  const PROPELIO_HEADER_COLORS = { sold: "#dc2626", active: "#22c55e", pending: "#0284c7" };
+  const matchedBucket = effectiveMatchedComp ? _propelioStatusBucket(effectiveMatchedComp) : null;
+  const matchedHeaderColor = matchedBucket ? PROPELIO_HEADER_COLORS[matchedBucket] : null;
+  const matchedHeaderText = effectiveMatchedComp
+    ? String(effectiveMatchedComp?.status || matchedBucket || "").toUpperCase()
+    : "";
+  const matchedHeaderPrice = effectiveMatchedComp && Number.isFinite(Number(effectiveMatchedComp.price))
+    ? `$${Math.round(Number(effectiveMatchedComp.price)).toLocaleString()}`
+    : "";
+  const statusColor = matchedHeaderColor || (hasVisibleSoldComp ? SOLD_OUTLINE_COLOR : getColor(pseudoFeature));
+  const statusText = matchedHeaderText || (hasVisibleSoldComp ? "SOLD" : getStatusLabel(pseudoFeature));
+  const soldHeaderPrice = matchedHeaderPrice
+    || (hasVisibleSoldComp
+      ? (typeof p.sold_comp?.sold_price === "number"
+        ? `$${p.sold_comp.sold_price.toLocaleString()}`
+        : String(p.sold_comp?.sold_price || ""))
+      : "");
+  const activeListingPrice = p.on_redfin && p.redfin_price ? String(p.redfin_price) : "";
+  const listingDelta = p.on_redfin && p.redfin_price
+    ? _buildParcelDeltaMeta(p, "LP vs CAD", parseInt(String(p.redfin_price).replace(/[^0-9]/g, ""), 10))
+    : null;
+  const compDelta = effectiveMatchedComp && Number.isFinite(Number(effectiveMatchedComp.price))
+    ? _buildParcelDeltaMeta(p, "Comp vs CAD", Number(effectiveMatchedComp.price))
+    : null;
+  const headerDelta = compDelta || listingDelta;
+  const compDetails = _getParcelPanelCompDetails(effectiveMatchedComp);
+  const ratingButtonsHtml = effectiveMatchedComp ? _buildRatingButtonsHtml(effectiveMatchedComp) : "";
+  const realtorLinkHtml = compDetails?.mls
+    ? `<a class="propelio-popup-realtor-link" href="https://www.realtor.com/realestateandhomes-search/MLSID-${encodeURIComponent(compDetails.mls)}" target="_blank" rel="noopener noreferrer">Look up MLS# ${_propelioEscape(compDetails.mls)} on Realtor.com</a>`
+    : "";
+  const saveLinkHtml = p.account_num
+    ? `<a href="#" class="parcel-panel-save-link parcel-save-link" data-account="${_propelioEscape(p.account_num)}" data-county="${_propelioEscape(p.source_county || "dcad")}" data-addr="${_propelioEscape(p.addr || "")}" data-lat="${_propelioEscape(p.lat || "")}" data-lng="${_propelioEscape(p.lng || "")}">📌 Save parcel</a>`
+    : `<span class="parcel-panel-action-muted">Parcel save unavailable</span>`;
+  const photoHeroHtml = compDetails
+    ? (compDetails.photos.length
+      ? `<div class="parcel-panel-photo-hero">
+          <img class="parcel-panel-photo-image" data-photo-hero src="/api/propelio/photo?url=${encodeURIComponent(compDetails.photos[0].url)}" alt="MLS listing photo 1 of ${compDetails.photos.length}">
+          ${compDetails.photos.length > 1 ? `<button type="button" class="parcel-panel-photo-nav prev" data-photo-nav="prev" aria-label="Previous photo">&#8249;</button>
+          <button type="button" class="parcel-panel-photo-nav next" data-photo-nav="next" aria-label="Next photo">&#8250;</button>
+          <div class="parcel-panel-photo-counter" data-photo-counter>1 / ${compDetails.photos.length}</div>` : ""}
+        </div>`
+      : `<div class="parcel-panel-photo-hero is-empty"><div class="parcel-panel-photo-placeholder">No photos available</div></div>`)
+    : `<div class="parcel-panel-photo-hero is-empty"><div class="parcel-panel-photo-placeholder">No MLS comp</div></div>`;
+
+  const schoolsHtml = compDetails && (compDetails.schools.elementary || compDetails.schools.middle || compDetails.schools.high)
+    ? `<div class="propelio-popup-schools">
+        ${compDetails.schools.elementary ? `<span class="propelio-popup-school"><span class="label">ES</span> ${_propelioEscape(compDetails.schools.elementary)}</span>` : ""}
+        ${compDetails.schools.middle ? `<span class="propelio-popup-school"><span class="label">MS</span> ${_propelioEscape(compDetails.schools.middle)}</span>` : ""}
+        ${compDetails.schools.high ? `<span class="propelio-popup-school"><span class="label">HS</span> ${_propelioEscape(compDetails.schools.high)}</span>` : ""}
+      </div>`
+    : "";
+
+  const soldCompRows = p.sold_comp
+    ? `
+      <tr><td colspan="2" class="parcel-panel-table-break">Recent Sold Comp</td></tr>
+      ${_buildParcelDetailTableRow("Sold Price", typeof p.sold_comp?.sold_price === "number" ? `$${p.sold_comp.sold_price.toLocaleString()}` : p.sold_comp?.sold_price)}
+      ${_buildParcelDetailTableRow("Sold Date", p.sold_comp?.sold_date ? String(p.sold_comp.sold_date).slice(0, 10) : "N/A")}
+      ${_buildParcelDetailTableRow("Days on Market", p.sold_comp?.dom == null ? "N/A" : String(p.sold_comp.dom))}
+      ${_buildParcelDetailTableRow("Listing", p.sold_comp?.listing_url ? `<a href="${p.sold_comp.listing_url}" target="_blank" rel="noopener noreferrer">View listing</a>` : "N/A")}
+    `
+    : "";
+
+  const mlsHtml = compDetails
+    ? `
+      ${photoHeroHtml}
+      <div class="propelio-popup-price">${_propelioEscape(compDetails.priceText)} · ${_propelioEscape(compDetails.status.toUpperCase())}</div>
+      ${compDetails.listVsCloseText ? `<div class="propelio-popup-meta">${_propelioEscape(compDetails.listVsCloseText)}</div>` : ""}
+      ${compDetails.soldMetaText ? `<div class="propelio-popup-meta">${_propelioEscape(compDetails.soldMetaText)}</div>` : ""}
+      ${compDetails.dimsText ? `<div class="propelio-popup-meta">${_propelioEscape(compDetails.dimsText)}</div>` : ""}
+      ${compDetails.bbText ? `<div class="propelio-popup-meta">${_propelioEscape(compDetails.bbText)}</div>` : ""}
+      ${compDetails.idText ? `<div class="propelio-popup-meta">${_propelioEscape(compDetails.idText)}${compDetails.source ? ` <span class="propelio-popup-source">(${_propelioEscape(compDetails.source)})</span>` : ""}</div>` : ""}
+      ${compDetails.modifiedTs ? `<div class="popup-propelio-meta-mute">MLS updated ${_propelioEscape(compDetails.modifiedTs)}</div>` : ""}
+      ${schoolsHtml}
+      ${compDetails.photoCount > 0 ? `<div class="propelio-popup-meta-mute">${compDetails.photoCount} listing photo${compDetails.photoCount === 1 ? "" : "s"} (Propelio-hosted)</div>` : ""}
+    `
+    : `
+      ${photoHeroHtml}
+      <div class="parcel-panel-empty-copy">No MLS comp for this parcel. Pull comps from a polygon draw to see matched listings here.</div>
+    `;
+
+  return {
+    photos: compDetails?.photos || [],
+    html: `
+      <div class="parcel-panel-header">
+        <div>
+          <div class="parcel-panel-address">${_propelioEscape(p.addr || "Unknown address")}</div>
+          <div class="parcel-panel-header-meta">
+            <span class="parcel-panel-status-pill" style="--status-color:${statusColor}">${_propelioEscape(statusText)}</span>
+            ${matchedHeaderPrice || activeListingPrice || soldHeaderPrice ? `<span class="parcel-panel-header-price">${matchedHeaderPrice || activeListingPrice || soldHeaderPrice}</span>` : ""}
+            ${headerDelta ? `<span class="parcel-panel-header-delta" style="color:${headerDelta.color}">${_propelioEscape(headerDelta.label)} ${_propelioEscape(headerDelta.text)}</span>` : ""}
+          </div>
+        </div>
+        <button type="button" class="parcel-panel-close" aria-label="Close parcel details">&times;</button>
+      </div>
+      <div class="parcel-panel-body">
+        <div class="parcel-panel-body-grid">
+          <section class="parcel-panel-cad">
+            <div class="parcel-panel-section-title">CAD</div>
+            <table class="popup-table">
+              ${_buildParcelDetailTableRow("Owner", _panelDisplayValue(p.owner))}
+              ${_buildParcelDetailTableRow("Land Value", _panelDisplayValue(p.land_val))}
+              ${_buildParcelDetailTableRow("Total Value", _panelDisplayValue(p.tot_val))}
+              ${listingDelta ? _buildParcelDetailTableRow(listingDelta.label, `<span style="color:${listingDelta.color}">${_propelioEscape(listingDelta.text)}</span>`) : ""}
+              ${compDelta ? _buildParcelDetailTableRow(compDelta.label, `<span style="color:${compDelta.color}">${_propelioEscape(compDelta.text)}</span>`) : ""}
+              ${_buildParcelDetailTableRow("Land % of Total", _panelDisplayValue(p.land_pct))}
+              ${_buildParcelDetailTableRow("Lot Size", _panelDisplayValue(p.lot_sqft))}
+              ${_buildParcelDetailTableRow("Acres", _panelDisplayValue(p.lot_acres))}
+              ${_buildParcelDetailTableRow("Frontage", _panelDisplayValue(p.frontage))}
+              ${_buildParcelDetailTableRow("Depth", _panelDisplayValue(p.depth))}
+              ${_buildParcelDetailTableRow("State Code", _panelDisplayValue(p.state_code))}
+              ${_buildParcelDetailTableRow("Zoning", _panelDisplayValue(p.zoning))}
+              ${_buildParcelDetailTableRow("School District", _panelDisplayValue(p.school))}
+              ${_buildParcelDetailTableRow("Year Built", _panelDisplayValue(p.yr_built))}
+              ${_buildParcelDetailTableRow("Living Area", p.sqft && p.sqft !== "N/A" ? `${p.sqft} sf` : "N/A")}
+              ${p.on_redfin && p.redfin_url ? _buildParcelDetailTableRow("Listing", `<a href="${p.redfin_url}" target="_blank" rel="noopener noreferrer">View listing</a>`) : ""}
+              ${soldCompRows}
+            </table>
+          </section>
+          <section class="parcel-panel-mls">
+            <div class="parcel-panel-section-title">MLS</div>
+            ${mlsHtml}
+          </section>
+        </div>
+        <section class="parcel-panel-agents">
+          ${compDetails
+            ? _buildPanelAgentBlockHtml("Listing Agent", compDetails.listingAgent, "No listing agent details available.")
+            : _buildPanelAgentBlockHtml("Listing Agent", null, "No listing agent details available.")}
+          ${compDetails && compDetails.status === "sold"
+            ? _buildPanelAgentBlockHtml("Buyer Agent", compDetails.buyerAgent, "No buyer agent details available.")
+            : _buildPanelAgentBlockHtml("Buyer Agent", null, "Buyer agent only appears on sold comps.")}
+        </section>
+        <section class="parcel-panel-remarks">
+          <div class="parcel-panel-section-title">Remarks</div>
+          ${compDetails?.remarks
+            ? `<div class="propelio-popup-remarks-full parcel-panel-remarks-box">${_propelioEscape(compDetails.remarks)}</div>`
+            : `<div class="parcel-panel-empty-copy">No remarks available for this parcel.</div>`}
+        </section>
+        <section class="parcel-panel-actions">
+          <div class="parcel-panel-action-slot">
+            ${realtorLinkHtml || '<span class="parcel-panel-action-muted">No Realtor.com lookup</span>'}
+          </div>
+          <div class="parcel-panel-action-slot parcel-panel-action-ratings">
+            ${ratingButtonsHtml || '<span class="parcel-panel-action-muted">No MLS comp to rate</span>'}
+          </div>
+          <div class="parcel-panel-action-slot parcel-panel-action-save">
+            ${saveLinkHtml}
+          </div>
+        </section>
+      </div>`,
+  };
+}
+
+function _flyToParcelDetailLatLng(latlng) {
+  if (!latlng) return;
+  const ll = Array.isArray(latlng) ? L.latLng(latlng[0], latlng[1]) : L.latLng(latlng);
+  const panel = document.getElementById("parcel-detail-panel");
+  const targetZoom = Math.max(map.getZoom(), 17);
+  const xOffset = panel ? Math.round(Math.min(panel.offsetWidth || 0, 820) * 0.18) : 0;
+  const shiftedCenter = map.unproject(map.project(ll, targetZoom).add([xOffset, 0]), targetZoom);
+  map.flyTo(shiftedCenter, targetZoom, { duration: 0.35, animate: true });
+}
+
+function closeParcelDetailPanel() {
+  const panel = document.getElementById("parcel-detail-panel");
+  if (!panel) return;
+  panel.classList.add("hidden");
+  panel.classList.remove("is-open");
+  panel.setAttribute("aria-hidden", "true");
+  panel.innerHTML = "";
+  _activeParcelPopupState = null;
+}
+
+function openParcelDetailPanel(parcelProps, opts = {}) {
+  const panel = document.getElementById("parcel-detail-panel");
+  if (!panel || !parcelProps) return;
+
+  const matchedComp = Object.prototype.hasOwnProperty.call(opts, "matchedComp")
+    ? opts.matchedComp
+    : _findMatchedCompForAccount(parcelProps?.account_num);
+  const render = _buildParcelDetailPanelHtml(parcelProps, matchedComp);
+
+  panel.innerHTML = render.html;
+  panel.classList.remove("hidden");
+  panel.classList.add("is-open");
+  panel.setAttribute("aria-hidden", "false");
+  const body = panel.querySelector(".parcel-panel-body");
+  if (body) body.scrollTop = 0;
+
+  panel.querySelector(".parcel-panel-close")?.addEventListener("click", closeParcelDetailPanel);
+  _wireParcelInteractiveUi(panel, { close: closeParcelDetailPanel });
+
+  if (render.photos.length > 1) {
+    let currentPhotoIndex = 0;
+    const img = panel.querySelector("[data-photo-hero]");
+    const counter = panel.querySelector("[data-photo-counter]");
+    const updatePhoto = () => {
+      if (!img) return;
+      const photo = render.photos[currentPhotoIndex];
+      if (!photo?.url) return;
+      img.src = `/api/propelio/photo?url=${encodeURIComponent(photo.url)}`;
+      img.alt = `MLS listing photo ${currentPhotoIndex + 1} of ${render.photos.length}`;
+      if (counter) counter.textContent = `${currentPhotoIndex + 1} / ${render.photos.length}`;
+    };
+    panel.querySelector('[data-photo-nav="prev"]')?.addEventListener("click", () => {
+      currentPhotoIndex = (currentPhotoIndex - 1 + render.photos.length) % render.photos.length;
+      updatePhoto();
+    });
+    panel.querySelector('[data-photo-nav="next"]')?.addEventListener("click", () => {
+      currentPhotoIndex = (currentPhotoIndex + 1) % render.photos.length;
+      updatePhoto();
+    });
+  }
+
+  _activeParcelPopupState = {
+    accountNum: String(parcelProps?.account_num || ""),
+    props: parcelProps,
+    latlng: opts.latlng || null,
+    matchedComp: matchedComp || null,
+  };
+
+  map.closePopup();
+  closeTransientSoldSidebarPopup();
+
+  if (opts.latlng && !opts.suppressFly) {
+    _suspendViewportRender(500);
+    _flyToParcelDetailLatLng(opts.latlng);
+  }
+}
+
 function makePopupHtml(p) {
   const pseudoFeature = { properties: p };
   const hasVisibleSoldComp = Boolean(p?.sold_comp);
@@ -5540,12 +5964,10 @@ function renderFeatures(geojson) {
           weight: parcelBorderWeight,
           opacity: 0.85,
         },
-      }).bindPopup(() => makePopupHtml(p), {
-        minWidth: 480,
-        maxWidth: 480,
-        autoPan: true,
-        autoPanPadding: [10, 50],
-        keepInView: true,
+      });
+      layer.on("click", (ev) => {
+        L.DomEvent.stopPropagation(ev);
+        openParcelDetailPanel(p, { latlng: ev.latlng });
       });
       // L.geoJSON returns a FeatureGroup wrapper; click events fire on inner child layers,
       // so popup._source is the child, not the wrapper. Propagate metadata to children
@@ -5579,12 +6001,10 @@ function renderFeatures(geojson) {
         opacity: 1,
         fillOpacity: 0.9,
         bubblingMouseEvents: false,
-      }).bindPopup(() => makePopupHtml(p), {
-        minWidth: 480,
-        maxWidth: 480,
-        autoPan: true,
-        autoPanPadding: [10, 50],
-        keepInView: true,
+      });
+      layer.on("click", (ev) => {
+        L.DomEvent.stopPropagation(ev);
+        openParcelDetailPanel(p, { latlng: ev.latlng });
       });
       layer._lotLedgerPopupMeta = { type: "parcel", accountNum: String(p.account_num || "") };
       layer.addTo(circleLayer);
@@ -7039,10 +7459,7 @@ map.on("click", async (ev) => {
     const resp = await fetch(`/api/parcel/${county}/${accountNum}`);
     if (!resp.ok) return;
     const detail = await resp.json();
-    L.popup({ minWidth: 480, maxWidth: 480, autoPan: true, autoPanPadding: [10, 50], keepInView: true })
-      .setLatLng(ev.latlng)
-      .setContent(makePopupHtml(detail.properties || detail))
-      .openOn(map);
+    openParcelDetailPanel(detail.properties || detail, { latlng: ev.latlng });
   } catch (e) {
     console.error("Browse popup failed", e);
   }
@@ -7056,17 +7473,11 @@ map.on("click", () => {
   _clearSelectedOutline();
 });
 
-// Wire up "Save parcel" link in any popup — uses data attributes from makePopupHtml.
-map.on("popupopen", (e) => {
-  const popupMeta = e.popup?._source?._lotLedgerPopupMeta;
-  if (popupMeta?.type === "parcel") {
-    _captureParcelPopupState(popupMeta);
-    _suspendViewportRender();
-  }
-  const el = e.popup.getElement();
-  if (!el) return;
+function _wireParcelInteractiveUi(root, options = {}) {
+  if (!root) return;
+  const close = typeof options.close === "function" ? options.close : () => {};
 
-  const saveLink = el.querySelector(".parcel-save-link");
+  const saveLink = root.querySelector(".parcel-save-link");
   if (saveLink) {
     saveLink.addEventListener("click", async (ev) => {
       ev.preventDefault();
@@ -7080,7 +7491,7 @@ map.on("popupopen", (e) => {
             geometry = detail.geometry;
           }
         }
-      } catch { /* geometry stays null — outline skipped */ }
+      } catch {}
       try {
         await saveParcel(account, county, addr, parseFloat(lat), parseFloat(lng), geometry);
         saveLink.textContent = "✓ Saved";
@@ -7093,9 +7504,8 @@ map.on("popupopen", (e) => {
     });
   }
 
-  const clearLink = el.querySelector(".parcel-clear-link");
+  const clearLink = root.querySelector(".parcel-clear-link");
   if (clearLink) {
-    // Hide the clear link if there's no active search highlight.
     if (!window._searchHighlight) clearLink.style.display = "none";
     clearLink.addEventListener("click", (ev) => {
       ev.preventDefault();
@@ -7104,40 +7514,50 @@ map.on("popupopen", (e) => {
     });
   }
 
-  // Verify buttons
-  const verifyYes = el.querySelector(".parcel-verify-yes");
+  const verifyYes = root.querySelector(".parcel-verify-yes");
   if (verifyYes) {
     verifyYes.addEventListener("click", (ev) => {
       ev.preventDefault();
       const { account, lat, lng } = verifyYes.dataset;
       setVerification(account, "yes", parseFloat(lat), parseFloat(lng));
       persistSingleTag(account, "verified_vacant", "yes");
-      e.popup.close();
+      close();
     });
   }
 
-  const verifyNo = el.querySelector(".parcel-verify-no");
+  const verifyNo = root.querySelector(".parcel-verify-no");
   if (verifyNo) {
     verifyNo.addEventListener("click", (ev) => {
       ev.preventDefault();
       const { account, lat, lng } = verifyNo.dataset;
       setVerification(account, "no", parseFloat(lat), parseFloat(lng));
       persistSingleTag(account, "verified_vacant", "no");
-      e.popup.close();
+      close();
     });
   }
 
-  const verifyClear = el.querySelector(".parcel-verify-clear");
+  const verifyClear = root.querySelector(".parcel-verify-clear");
   if (verifyClear) {
     verifyClear.addEventListener("click", (ev) => {
       ev.preventDefault();
       const { account } = verifyClear.dataset;
       setVerification(account, null);
       persistSingleTag(account, "verified_vacant", null);
-      e.popup.close();
+      close();
     });
   }
+}
 
+// Wire up parcel action links for any remaining popup paths.
+map.on("popupopen", (e) => {
+  const popupMeta = e.popup?._source?._lotLedgerPopupMeta;
+  if (popupMeta?.type === "parcel") {
+    _captureParcelPopupState(popupMeta);
+    _suspendViewportRender();
+  }
+  const el = e.popup.getElement();
+  if (!el) return;
+  _wireParcelInteractiveUi(el, { close: () => e.popup.close() });
 });
 
 map.on("popupclose", (e) => {

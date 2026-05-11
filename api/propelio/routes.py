@@ -17,8 +17,11 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any
 
+import requests
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from starlette.background import BackgroundTask
 
 from api.config import get_conn, get_session_conn, release_conn, release_session_conn
 from api.geo import haversine_miles, point_in_polygon, polygon_centroid
@@ -34,6 +37,9 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/propelio", tags=["propelio"])
 
 
+_PROPELIO_PHOTO_PREFIX = "https://api.propelio.com/mls-media/"
+
+
 class PolygonRequest(BaseModel):
     polygon: list[list[float]]
     months: int = 24
@@ -45,6 +51,38 @@ class RefreshRequest(BaseModel):
     saved_area_id: str
     months: int = 24
     range_override_mi: float | None = None
+
+
+def _fetch_propelio_photo_response(photo_url: str):
+    last_status: int | None = None
+
+    for attempt in range(2):
+        client = scraper_mod.login_propelio()
+        try:
+            response = client.session.get(
+                photo_url,
+                timeout=scraper_mod.config.HTTP_TIMEOUT_SECONDS,
+                stream=True,
+            )
+        except requests.RequestException as exc:
+            raise HTTPException(status_code=502, detail=f"Propelio photo fetch failed: {exc}") from exc
+
+        if response.status_code == 200:
+            return response
+
+        last_status = int(response.status_code)
+        response.close()
+
+        if response.status_code in {401, 403} and attempt == 0:
+            logger.info("Propelio photo fetch got %s; retrying after re-login", response.status_code)
+            continue
+
+        if response.status_code in {401, 403}:
+            raise HTTPException(status_code=502, detail="Propelio photo auth failed after re-login")
+
+        raise HTTPException(status_code=502, detail=f"Propelio photo upstream returned {response.status_code}")
+
+    raise HTTPException(status_code=502, detail=f"Propelio photo upstream returned {last_status or 'unknown'}")
 
 
 def _extract_balance(subject_extra: dict[str, Any]) -> int | None:
@@ -498,6 +536,22 @@ async def get_by_address(
     cache_mod.log_quota(payload.get("balance"), address_key)
     cache_mod.put_cached(address_key, payload)
     return {"cached": False, **payload}
+
+
+@router.get("/photo")
+def get_photo(url: str = Query(..., min_length=1)) -> StreamingResponse:
+    photo_url = str(url or "").strip()
+    if not photo_url.startswith(_PROPELIO_PHOTO_PREFIX):
+        raise HTTPException(status_code=400, detail="Invalid Propelio photo URL")
+
+    response = _fetch_propelio_photo_response(photo_url)
+    media_type = response.headers.get("Content-Type") or "application/octet-stream"
+    return StreamingResponse(
+        response.iter_content(chunk_size=64 * 1024),
+        media_type=media_type,
+        headers={"Cache-Control": "public, max-age=2419200, immutable"},
+        background=BackgroundTask(response.close),
+    )
 
 
 @router.post("/by-polygon")
