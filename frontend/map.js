@@ -318,6 +318,14 @@ map.createPane("savedParcelPane");
 map.getPane("savedParcelPane").style.zIndex = "620";
 map.getPane("savedParcelPane").style.pointerEvents = "none";
 
+// Selected-item outline pane — sits above the gold-halo savedParcelPane
+// so when a saved target is also the current selection, the crisp purple
+// line stays visible on top of the gold halo's diffuse glow. Decorative
+// only; pointer-events: none lets clicks pass through to layers below.
+map.createPane("selectedOutlinePane");
+map.getPane("selectedOutlinePane").style.zIndex = "625";
+map.getPane("selectedOutlinePane").style.pointerEvents = "none";
+
 // Apply saved basemap BEFORE browseLayer is added. If we switch after protomaps
 // is on the map, the tile layer removal fires viewprereset → _invalidateAll on
 // protomaps → _tileZoom = undefined → browse layer goes blank until next pan/zoom.
@@ -431,6 +439,10 @@ const savedParcelLayers = {};
 // is what actually opens the popup. Keyed by account_num.
 const savedParcelClickLayer = L.layerGroup().addTo(map);
 const savedParcelClickLayers = {};
+// Selected-item outline. Holds at most one L.geoJSON at a time — a new
+// selection clears the previous. Cleared by any map click. Sources:
+// saved-areas-list click + propelio-comp-list click.
+const selectedOutlineLayer = L.layerGroup().addTo(map);
 // Propelio comps rendered from address/polygon pulls.
 // Parcel geometry is preferred (purple glowing footprints); missing geometry
 // falls back to compact purple dots.
@@ -2039,6 +2051,26 @@ function _renderSavedParcelOutline(area) {
   savedParcelClickLayers[accountNum] = clickLayer;
 }
 
+function _clearSelectedOutline() {
+  selectedOutlineLayer.clearLayers();
+}
+
+// Render a crisp purple outline of `geometry` (Polygon or MultiPolygon)
+// in selectedOutlinePane. No-op if geometry is missing or not a polygon
+// type — point-only selections (e.g., type=location saved items) don't
+// get a polygon outline.
+function _renderSelectedOutline(geometry) {
+  _clearSelectedOutline();
+  if (!geometry) return;
+  if (geometry.type !== "Polygon" && geometry.type !== "MultiPolygon") return;
+  L.geoJSON({ type: "Feature", geometry, properties: {} }, {
+    pane: "selectedOutlinePane",
+    className: "selected-outline-glow",
+    style: { color: "#a855f7", weight: 3, fill: false, interactive: false },
+    interactive: false,
+  }).addTo(selectedOutlineLayer);
+}
+
 async function saveParcel(account_num, county, addr, lat, lng, geometry) {
   if (!account_num) return;
   bumpUndoPillVersion();
@@ -2694,6 +2726,8 @@ function _renderList(sectionId, listId, items) {
         return;
       }
       _selectedSavedItemId = area.id;
+      // Show a crisp purple outline on the map for the clicked item.
+      _renderSelectedOutline(area.geometry || area.polygon || null);
       document.querySelectorAll(".saved-area-row-active").forEach((el) => {
         if (el !== row) el.classList.remove("saved-area-row-active");
       });
@@ -3852,6 +3886,25 @@ function _findPropelioCompByKey(key) {
 function flyToAndOpenPropelioComp(compKey) {
   const layer = propelioCompLayerByKey.get(String(compKey || "").trim());
   if (!layer) return;
+
+  // Show a crisp purple outline on the map for the clicked comp. If the
+  // comp rendered as a footprint, outline its polygon; if it's a fallback
+  // dot, skip the outline (no polygon to draw) — the fly-to still happens.
+  try {
+    if (typeof layer.toGeoJSON === "function") {
+      const gj = layer.toGeoJSON();
+      // L.geoJSON returns a FeatureCollection wrapping one Feature, OR a
+      // single Feature, depending on Leaflet version. Handle both shapes.
+      const feat = gj?.type === "FeatureCollection"
+        ? (gj.features && gj.features[0])
+        : gj;
+      _renderSelectedOutline(feat?.geometry || null);
+    } else {
+      _clearSelectedOutline();
+    }
+  } catch (_) {
+    _clearSelectedOutline();
+  }
 
   // Resolve a bounds (preferred) and a center point for the layer.
   let bounds = null;
@@ -6843,6 +6896,14 @@ map.on("click", async (ev) => {
   } catch (e) {
     console.error("Browse popup failed", e);
   }
+});
+
+// Clear the selected outline on any map click. Sidebar and comp-list
+// clicks go through DOM event paths, NOT map clicks — so the only way
+// to reach this listener is by clicking the map proper. Always-clears
+// is intentional and runs even during an active draw.
+map.on("click", () => {
+  _clearSelectedOutline();
 });
 
 // Wire up "Save parcel" link in any popup — uses data attributes from makePopupHtml.

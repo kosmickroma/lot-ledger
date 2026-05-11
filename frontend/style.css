@@ -2076,6 +2076,16 @@ h1 {
     drop-shadow(0 0 12px rgba(2, 132, 199, 0.55));
 }
 
+/* ── Selected-item outline ──────────────────────────────────────────────
+   Crisp purple ring drawn on selectedOutlinePane when a user clicks an
+   item from the saved-areas sidebar or the propelio comp list. ONE subtle
+   drop-shadow only — explicitly NOT the multi-layer fuzzy glow style of
+   .propelio-fallback-dot. Goal: clearly says "selected" without obscuring
+   what's underneath. */
+.selected-outline-glow {
+  filter: drop-shadow(0 0 3px rgba(168, 85, 247, 0.7));
+}
+
 /*
 @keyframes propelioFootprintPulse {
   0%, 100% {
