@@ -5101,7 +5101,7 @@ function makePopupHtml(p) {
   // over/under-CAD at a glance across all counties.
   let propelioDeltaRow = "";
   if (matchedComp && Number.isFinite(Number(matchedComp.price))) {
-    propelioDeltaRow = buildDeltaRow("Comp $ vs CAD", Number(matchedComp.price));
+    propelioDeltaRow = buildDeltaRow("Comp vs CAD", Number(matchedComp.price));
   }
 
   let soldCompRows = "";
