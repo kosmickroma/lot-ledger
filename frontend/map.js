@@ -5363,9 +5363,6 @@ function _buildParcelDetailPanelHtml(p, matchedComp) {
         </section>
       </div>
       <section class="parcel-panel-actions">
-        <div class="parcel-panel-action-slot">
-          ${realtorLinkHtml || '<span class="parcel-panel-action-muted">No Realtor.com lookup</span>'}
-        </div>
         <div class="parcel-panel-action-slot parcel-panel-action-ratings">
           ${ratingButtonsHtml || '<span class="parcel-panel-action-muted">No MLS comp to rate</span>'}
         </div>

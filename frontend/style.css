@@ -1083,6 +1083,7 @@ h1 {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
+  justify-content: center;
   gap: 12px;
   padding: 12px 20px;
   flex: 0 0 auto;
@@ -1111,7 +1112,8 @@ h1 {
 }
 
 .parcel-panel-action-save {
-  margin-left: auto;
+  /* Save slot used to be margin-left:auto-pushed when there were 3 slots.
+     Now the action bar is justify-content:center so all slots flow together. */
 }
 
 .parcel-panel-action-muted {
