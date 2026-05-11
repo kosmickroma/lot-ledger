@@ -357,7 +357,21 @@ async def _run_by_polygon(request: PolygonRequest, *, use_cache: bool) -> dict[s
         )
     except scraper_mod.PropelioScraperError as exc:
         msg = str(exc)
-        if "empty list" in msg.lower():
+        msg_lower = msg.lower()
+        # Treat the "no MLS coverage in this area" upstream error the same way
+        # as the empty-list case — it's not a service failure, just a data
+        # limitation Propelio's surfacing for this polygon. Return 200 with
+        # an empty comps payload + warning so the frontend can show a soft
+        # message instead of a black-box 503 in the console.
+        is_empty = "empty list" in msg_lower
+        is_no_coverage = "mls_coverage_error" in msg_lower or "we don't have coverage" in msg_lower
+        if is_empty or is_no_coverage:
+            warning_text = (
+                "Propelio reports no MLS coverage for this area. Try drawing inside a covered county "
+                "(Dallas / Tarrant / Collin / Denton) or pick a higher-activity neighborhood."
+                if is_no_coverage
+                else "Propelio resolved the centroid parcel but returned 0 comps for the polygon pull under the current filter settings."
+            )
             empty_payload = {
                 "fetched_at": _now_iso(),
                 "balance": None,
@@ -397,7 +411,7 @@ async def _run_by_polygon(request: PolygonRequest, *, use_cache: bool) -> dict[s
                     "comps_in_polygon": 0,
                     "comps_outside_polygon": 0,
                 },
-                "warning": "Propelio resolved the centroid parcel but returned 0 comps for the polygon pull under the current filter settings.",
+                "warning": warning_text,
             }
             if saved_area_id:
                 empty_payload["archive_meta"] = merge_comps_into_archive(saved_area_id, [])
@@ -492,12 +506,21 @@ async def get_by_address(
         )
     except scraper_mod.PropelioScraperError as exc:
         msg = str(exc)
-        # Empty CMA / lead-details lists are not real failures — they mean
-        # Propelio resolved the address but has no nearby comps in the time
-        # window. Return 200 with empty comps so the frontend can show
-        # "no comps for this address" rather than an error toast.
-        if "empty list" in msg.lower():
-            logger.info("Propelio returned empty pool for %r — returning 200 with no comps", address)
+        msg_lower = msg.lower()
+        # Empty CMA / lead-details lists AND "no MLS coverage" upstream errors
+        # are not real failures — they mean Propelio either resolved the
+        # address with no nearby comps in the time window OR doesn't license
+        # MLS data in this geographic area. Return 200 with empty comps so
+        # the frontend can show a soft message rather than an error toast.
+        is_empty = "empty list" in msg_lower
+        is_no_coverage = "mls_coverage_error" in msg_lower or "we don't have coverage" in msg_lower
+        if is_empty or is_no_coverage:
+            if is_no_coverage:
+                logger.info("Propelio reports no MLS coverage for %r — returning 200 with no comps", address)
+                warning_text = "Propelio reports no MLS coverage for this area. Try an address in Dallas / Tarrant / Collin / Denton county."
+            else:
+                logger.info("Propelio returned empty pool for %r — returning 200 with no comps", address)
+                warning_text = "Propelio resolved this address but returned 0 comps under their default filter (typically 0.5mi · 6mo · similar lot size). Try a higher-activity neighborhood, or wait for the filter-widen feature."
             empty_payload = {
                 "fetched_at": _now_iso(),
                 "balance": None,
@@ -511,7 +534,7 @@ async def get_by_address(
                             "parcel_enrichment": None, "valuation": None,
                             "transfer_history": None, "raw": None},
                 "comps": [],
-                "warning": "Propelio resolved this address but returned 0 comps under their default filter (typically 0.5mi · 6mo · similar lot size). Try a higher-activity neighborhood, or wait for the filter-widen feature.",
+                "warning": warning_text,
             }
             return {"cached": False, **empty_payload}
         logger.warning("[propelio] by-address scraper error: %s", msg)
