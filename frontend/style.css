@@ -490,6 +490,15 @@ h1 {
   color: #8B0000;
   border: 1.5px solid #D92228;
   box-shadow: 0 2px 6px rgba(80, 0, 0, 0.34);
+  padding: 2px 6px 3px;
+  text-align: center;
+  line-height: 1.15;
+}
+.propelio-price-label.sold .propelio-price-label-date {
+  font-size: 9px;
+  font-weight: 600;
+  opacity: 0.85;
+  margin-top: 1px;
 }
 
 .propelio-price-label.active {

@@ -1112,14 +1112,17 @@ function refreshPropelioPriceLabels() {
   const occupied = new Set();
   let shown = 0;
 
-  for (const { marker, priceLabel, bucket } of propelioPriceMarkers) {
+  for (const { marker, priceLabel, bucket, soldDateLabel } of propelioPriceMarkers) {
     if (shown >= maxLabels) break;
     if (!priceLabel) continue;
     const p = map.latLngToContainerPoint(marker.getLatLng());
     const key = `${Math.floor(p.x / cellPx)}:${Math.floor(p.y / cellPx)}`;
     if (occupied.has(key)) continue;
     occupied.add(key);
-    marker.bindTooltip(priceLabel, {
+    const tooltipHtml = (bucket === "sold" && soldDateLabel)
+      ? `<div class="propelio-price-label-price">${priceLabel}</div><div class="propelio-price-label-date">${soldDateLabel}</div>`
+      : priceLabel;
+    marker.bindTooltip(tooltipHtml, {
       permanent: true,
       direction: "top",
       offset: [10, -8],
@@ -3854,10 +3857,13 @@ function _renderPropelioComps(data) {
       interactive: false,
     });
     anchor.addTo(propelioCompLayer);
+    const bucket = _propelioStatusBucket(comp);
+    const soldDateLabel = bucket === "sold" ? formatSoldDateLabel(comp?.extra?.close_date) : "";
     propelioPriceMarkers.push({
       marker: anchor,
       priceLabel,
-      bucket: _propelioStatusBucket(comp),
+      bucket,
+      soldDateLabel,
     });
   });
   refreshPropelioPriceLabels();
