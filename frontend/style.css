@@ -360,6 +360,10 @@ h1 {
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.25);
 }
 
+.filter-swatch.is-dot {
+  border-radius: 50%;
+}
+
 .swatch-multifamily {
   --sw: #2c2c2c;
 }
