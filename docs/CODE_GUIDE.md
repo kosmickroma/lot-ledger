@@ -1,7 +1,54 @@
 # LotLedger — Code Guide
-# Plain English. Interview-ready. Updated after every chunk.
-# Internal only — gitignored
-# Last updated: 2026-05-01
+# Plain English. Interview-ready.
+# Last reviewed: 2026-05-11
+# Original draft: 2026-05-01
+
+---
+
+## ⚠️ Status (2026-05-11)
+
+This guide stopped getting per-chunk updates after ~2026-05-02. The
+chunk sections at the bottom (Chunks 1–6) are accurate but pre-date
+~80% of the current codebase. Read this guide for the WHY (technology
+choices, business logic, classification rules — all still accurate);
+treat the chunk inventory as historical.
+
+**Major systems added since 2026-05-02 (NOT yet detailed in this guide):**
+- **Two more counties** — Collin and Denton joined Dallas + Tarrant.
+  Centroid-based county routing in `api/main.py`; classification rules
+  unchanged. Browse layer is now 4-county PMTiles (~569MB).
+- **Auth + RBAC** — cookie sessions via `itsdangerous`, three roles
+  (developer/owner/member), admin panel for user management. See
+  `api/auth.py`, `api/main.py:auth_gate middleware`.
+- **Saved areas + parcels (persistent)** — moved from localStorage to
+  Cloud SQL, scoped by `user_id`. Each saved area gets a `share_id`
+  for cross-user sharing. See `restoreSavedArea` in `frontend/map.js`
+  and `api/main.py` saved-areas routes.
+- **Propelio comps integration** — three phases shipped:
+  - V1 (`docs/propelio/_archive/SPEC_V1.md`) — per-address scraper
+  - V2 (`docs/propelio/_archive/SPEC_V2_POLYGON.md`) — polygon-driven
+    pulls with footprint glow
+  - V3 (`docs/propelio/SPEC_V3_WORKSPACE.md`) — workspace-anchored
+    flow, two-tier filters, good/bad curation. **This is current.**
+  Code: `api/propelio/{routes,scraper,archive,cache,parcel_match}.py`,
+  Propelio frontend logic spread across `frontend/map.js`.
+- **Parcel detail panel** — replaced Leaflet popups with a
+  fixed-position side panel. Photo carousel, MLS info, agent contacts,
+  good/bad rating, save controls. Search for `openParcelDetailPanel`.
+- **Map control stack** — toolbar buttons (ZOOM, OAC, basemap switcher,
+  county boundaries) in a stacked control on the map. Bidirectional
+  sync with sidebar checkboxes.
+- **Cloud deployment** — Render fully decommissioned. `develop` →
+  `lot-ledger-dev` Cloud Run via Cloud Build auto-trigger. Preview
+  branch deploys to `lot-ledger-preview` via manual
+  `gcloud builds submit --config cloudbuild-preview.yaml`.
+
+`frontend/map.js` is now ~8,300 lines (was ~1,300 at original draft).
+
+For the running TODO list and current priorities, see
+`docs/ROADMAP.md` and `docs/lot-ledger/_master_todo.md`.
+
+---
 
 ---
 
