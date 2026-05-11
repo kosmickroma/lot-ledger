@@ -5361,18 +5361,18 @@ function _buildParcelDetailPanelHtml(p, matchedComp) {
             ? `<div class="propelio-popup-remarks-full parcel-panel-remarks-box">${_propelioEscape(compDetails.remarks)}</div>`
             : `<div class="parcel-panel-empty-copy">No remarks available for this parcel.</div>`}
         </section>
-        <section class="parcel-panel-actions">
-          <div class="parcel-panel-action-slot">
-            ${realtorLinkHtml || '<span class="parcel-panel-action-muted">No Realtor.com lookup</span>'}
-          </div>
-          <div class="parcel-panel-action-slot parcel-panel-action-ratings">
-            ${ratingButtonsHtml || '<span class="parcel-panel-action-muted">No MLS comp to rate</span>'}
-          </div>
-          <div class="parcel-panel-action-slot parcel-panel-action-save">
-            ${saveLinkHtml}
-          </div>
-        </section>
-      </div>`,
+      </div>
+      <section class="parcel-panel-actions">
+        <div class="parcel-panel-action-slot">
+          ${realtorLinkHtml || '<span class="parcel-panel-action-muted">No Realtor.com lookup</span>'}
+        </div>
+        <div class="parcel-panel-action-slot parcel-panel-action-ratings">
+          ${ratingButtonsHtml || '<span class="parcel-panel-action-muted">No MLS comp to rate</span>'}
+        </div>
+        <div class="parcel-panel-action-slot parcel-panel-action-save">
+          ${saveLinkHtml}
+        </div>
+      </section>`,
   };
 }
 
@@ -5414,6 +5414,18 @@ function openParcelDetailPanel(parcelProps, opts = {}) {
 
   panel.querySelector(".parcel-panel-close")?.addEventListener("click", closeParcelDetailPanel);
   _wireParcelInteractiveUi(panel, { close: closeParcelDetailPanel });
+
+  // Pre-fetch every photo through the proxy as soon as the panel opens so
+  // next/prev clicks pull from browser cache (Cache-Control: immutable from
+  // the proxy) instead of doing a fresh round-trip each time. Skip the hero
+  // — it's already loading via the visible <img>. Fire-and-forget; browser
+  // limits concurrency naturally.
+  for (let i = 1; i < render.photos.length; i += 1) {
+    const url = render.photos[i]?.url;
+    if (!url) continue;
+    const preloader = new Image();
+    preloader.src = `/api/propelio/photo?url=${encodeURIComponent(url)}`;
+  }
 
   if (render.photos.length > 1) {
     let currentPhotoIndex = 0;

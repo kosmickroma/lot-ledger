@@ -954,8 +954,7 @@ h1 {
 .parcel-panel-cad,
 .parcel-panel-mls,
 .parcel-panel-agents,
-.parcel-panel-remarks,
-.parcel-panel-actions {
+.parcel-panel-remarks {
   border: 1px solid #e2e8f0;
   border-radius: 10px;
   background: #ffffff;
@@ -1013,7 +1012,7 @@ h1 {
 
 .parcel-panel-photo-nav {
   position: absolute;
-  top: 30%;
+  top: 50%;
   transform: translateY(-50%);
   width: 32px;
   height: 32px;
@@ -1085,8 +1084,11 @@ h1 {
   flex-wrap: wrap;
   align-items: center;
   gap: 12px;
-  margin-top: 18px;
-  padding: 14px 16px;
+  padding: 12px 20px;
+  flex: 0 0 auto;
+  border-top: 1px solid #e2e8f0;
+  border-radius: 0 0 10px 10px;
+  background: linear-gradient(0deg, rgba(248, 250, 252, 0.96) 0%, #ffffff 100%);
 }
 
 .parcel-panel-action-slot {
