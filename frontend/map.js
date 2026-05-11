@@ -857,6 +857,11 @@ function restoreFilterState(state) {
   }
   if (Number(state.v || 0) !== 1) return;
   if (state.checkboxes && typeof state.checkboxes === "object") Object.assign(filterState, state.checkboxes);
+  // Legacy R.F. filters never auto-enable from saved state — mirrors the
+  // localStorage-restore guard above. Old saved areas baked R.F. on when
+  // those filters lived in Map Filters; chunk 2 made them opt-in only.
+  filterState.active = false;
+  filterState.sold = false;
   if (state.numeric && typeof state.numeric === "object") Object.assign(numericFilters, state.numeric);
   if (state.comp && typeof state.comp === "object") Object.assign(compNumericFilters, state.comp);
   if (state.sold && typeof state.sold === "object") {
