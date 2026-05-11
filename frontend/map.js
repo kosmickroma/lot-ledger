@@ -265,7 +265,7 @@ function areaBoundsInViewport(bounds) {
 // during startup before the rest of the module wiring runs.
 let lastAnalysisGeojson = null;
 
-const map = L.map("map", { zoomControl: true, closePopupOnClick: false }).setView(DALLAS_CENTER, DEFAULT_ZOOM);
+const map = L.map("map", { zoomControl: true }).setView(DALLAS_CENTER, DEFAULT_ZOOM);
 const MAP_CANVAS_RENDERER = L.canvas();
 const MAP_SVG_RENDERER = L.svg();
 
