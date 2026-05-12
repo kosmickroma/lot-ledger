@@ -1,6 +1,12 @@
 # Phase 2A — Pass 1 Polish Bundle
 
-> **Status:** spec v1, not yet implemented. Small bundle of two unrelated fixes that surfaced during Phase 2A Pass 1 testing.
+> **Status:** spec v1.1, not yet implemented. Small bundle of two unrelated fixes that surfaced during Phase 2A Pass 1 testing.
+>
+> **Revision v1.1 (2026-05-12):** Applied Copilot first-review cleanups:
+> - Schema migration now uses `_run_schema_steps` centralized pattern (matches existing codebase convention)
+> - Status endpoint row indexes explicitly mapped (net_new_comps at index 4, subsequent fields shifted)
+> - Frontend uses defensive `Number(... || 0)` defaulting for pre-fix jobs without the new field
+> - Removed stale "alert(...)" wording — both code paths use banners, not alerts
 >
 > **Branch:** `feat/propelio-deep-pull-experiment` (continue)
 >
@@ -90,18 +96,22 @@ For Quick Refresh later: "Captured 8 · 0 net-new" = saturated, "Captured 8 · 3
 
 #### Backend schema
 
-Add a new column to `propelio_deep_pull_jobs` in the `_ensure_session_schema()` block at `api/main.py:~184`:
+Add to the project's existing centralized post-create migration block via `_run_schema_steps` at `api/main.py:462-533`. This is the established pattern for additive column migrations:
 
 ```python
-# Add as part of the existing CREATE TABLE — but since the table already
-# exists (Chunk 1), this needs ALTER TABLE ADD COLUMN IF NOT EXISTS:
-cur.execute(
-    "ALTER TABLE propelio_deep_pull_jobs "
-    "ADD COLUMN IF NOT EXISTS net_new_comps INTEGER NOT NULL DEFAULT 0"
-)
+# Inside the _run_schema_steps([...]) list, add a new step:
+(
+    "deep_pull_jobs_net_new_comps",
+    "ALTER TABLE propelio_deep_pull_jobs ADD COLUMN IF NOT EXISTS "
+    "net_new_comps INTEGER NOT NULL DEFAULT 0",
+),
 ```
 
-Place this alongside the existing experimental table DDL, inside the existing `if os.environ.get("DEEP_PULL_EXPERIMENT") == "true":` guard.
+The step name `deep_pull_jobs_net_new_comps` is just an identifier for the migration log. The ALTER is idempotent so re-runs are safe.
+
+**Note:** the `propelio_deep_pull_jobs` table itself is only created when `DEEP_PULL_EXPERIMENT=true` is set, but `_run_schema_steps` runs unconditionally. Make sure the ALTER step is also gated on the table existing OR is positioned to fail-soft if the table is absent.
+
+**Acceptable alternative** (if `_run_schema_steps` gating gets messy): add the ALTER inline inside the existing `if os.environ.get("DEEP_PULL_EXPERIMENT") == "true":` guard immediately after the jobs table CREATE. Less centralized but simpler.
 
 **Existing rows get DEFAULT 0.** That's fine — the metric only matters for NEW runs going forward.
 
@@ -149,15 +159,47 @@ Same try/except/swallow pattern as the existing global write. The metric is best
 
 #### Backend status endpoint
 
-In `api/propelio/routes.py`, the existing `get_deep_pull_status` endpoint already returns the job row's fields. The new `net_new_comps` column comes along for free — just add to the SELECT and to the response dict.
+In `api/propelio/routes.py`, the existing `get_deep_pull_status` endpoint at `routes.py:804-857` has a SELECT and response dict mapping. Update both.
 
-Modify the SELECT to include `net_new_comps`. Modify the response dict to include `"net_new_comps": int(row[N] or 0)` where N is the new column's position.
+**Current SELECT** (routes.py:804-807):
+```sql
+SELECT job_id, status, passes_completed, total_unique_comps,
+       last_pass_at, next_pass_at, last_error, started_at, stop_requested
+FROM propelio_deep_pull_jobs WHERE job_id = %s
+```
 
-(Copilot: find the exact SELECT in routes.py and add the column properly.)
+**Updated SELECT** — insert `net_new_comps` after `total_unique_comps`:
+```sql
+SELECT job_id, status, passes_completed, total_unique_comps, net_new_comps,
+       last_pass_at, next_pass_at, last_error, started_at, stop_requested
+FROM propelio_deep_pull_jobs WHERE job_id = %s
+```
+
+**Updated row index mapping** in the response dict (was: 0=job_id, 1=status, 2=passes_completed, 3=total_unique_comps, 4=last_pass_at, ...). After insertion:
+
+| Index | Field |
+|---|---|
+| 0 | job_id |
+| 1 | status |
+| 2 | passes_completed |
+| 3 | total_unique_comps |
+| **4** | **net_new_comps** (NEW) |
+| 5 | last_pass_at |
+| 6 | next_pass_at |
+| 7 | last_error |
+| 8 | started_at |
+| 9 | stop_requested |
+
+Add to the response dict:
+```python
+"net_new_comps": int(row[4] or 0),
+```
+
+Shift the subsequent indexes by 1 (last_pass_at goes from row[4] → row[5], etc).
 
 #### Frontend banner
 
-In `frontend/map.js`, `_updateDeepPullBanner` (around line 8390-ish):
+In `frontend/map.js`, `_updateDeepPullBanner` at `map.js:8400`:
 
 ```javascript
 // Before:
@@ -166,18 +208,22 @@ textEl.textContent = `${status.status} - Pass ${passCount}, ${status.total_uniqu
 
 // After:
 const passCount = `${status.passes_completed}/6`;
-const captured = status.total_unique_comps || 0;
-const netNew = status.net_new_comps || 0;
+const captured = Number(status?.total_unique_comps || 0);
+const netNew = Number(status?.net_new_comps || 0);
 textEl.textContent = `${status.status} - Pass ${passCount}, ${captured} captured (${netNew} net-new). Don't refresh.`;
 ```
 
-Same pattern in `_pollDeepPullStatus` for the final summary message:
+Same pattern in `_pollDeepPullStatus` final summary banner at `map.js:8459-8462`:
 
 ```javascript
+const captured = Number(resp?.total_unique_comps || 0);
+const netNew = Number(resp?.net_new_comps || 0);
 _showDeepPullBanner(
-  `Job ${resp.status} - ${resp.passes_completed}/6 passes, ${resp.total_unique_comps} captured (${resp.net_new_comps || 0} net-new). Job ID: ${finishedJobId}`
+  `Job ${resp.status} - ${resp.passes_completed}/6 passes, ${captured} captured (${netNew} net-new). Job ID: ${finishedJobId}`
 );
 ```
+
+**Defensive defaulting:** `Number(... || 0)` ensures pre-fix jobs (where `net_new_comps` field is missing or zero) render as "0 net-new" instead of "undefined net-new" or "null net-new." Backward compat with any pending old jobs.
 
 ### Files modified
 - `api/main.py` — add ALTER TABLE inside the existing DEEP_PULL_EXPERIMENT-guarded DDL block
@@ -198,13 +244,12 @@ _showDeepPullBanner(
 
 ---
 
-## Open question (resolve in review or implementation)
+## Resolved (Copilot review)
 
-**Should `_pollDeepPullStatus` also surface "net_new" in the post-completion `alert(...)` (currently shows total uniques)?**
-
-Looking at the existing experimental code at `_pollDeepPullStatus`, the dev-button completion path shows the totals. We've already updated the in-progress banner — should the completion popup also reflect net-new?
-
-**Recommendation:** YES, update for consistency. Banner format should be the same whether running or final.
+- Schema migration uses `_run_schema_steps` pattern at `main.py:462-533` (with optional fall-back to inline if gating is awkward).
+- Status endpoint row indexes explicitly mapped (net_new_comps at index 4, subsequent fields shifted by 1).
+- Frontend uses defensive `Number(... || 0)` defaulting so missing fields on pre-fix jobs don't break rendering.
+- Both in-progress banner (`_updateDeepPullBanner` at `map.js:8400`) AND completion banner (`_pollDeepPullStatus` at `map.js:8459-8462`) updated for consistency. No `alert()` involved — those code paths use the banner.
 
 ---
 
