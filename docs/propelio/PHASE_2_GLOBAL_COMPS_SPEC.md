@@ -20,7 +20,7 @@
 
 Today: every workspace has its own `propelio_comp_archive` rows. Same comp appearing in 5 workspaces = 5 duplicate JSONB blobs.
 
-After Phase 2 MVP: ONE `propelio_comps` table holds each unique comp once. Workspaces don't "attach" to comps — they query them by geography (PostGIS `ST_DWithin` or `ST_Contains`). Ratings move to a thin `comp_ratings` table keyed by `(workspace_id, comp_id)`.
+After Phase 2 MVP: ONE `propelio_comps` table holds each unique comp once. Workspaces don't "attach" to comps — they query them by geography (PostGIS `ST_Within`, comp's POINT inside the workspace polygon). Ratings move to a thin `comp_ratings` table keyed by `(workspace_id, comp_id)`.
 
 ### The new tables
 
@@ -183,11 +183,15 @@ Two scrape paths feed `propelio_comps`:
 **Required fix in Chunk 2:** the deep-pull path must normalize via `_parse_property` BEFORE computing keys or writing to `propelio_comps`. Pseudocode:
 
 ```python
-# Inside deep_pull._insert_pass_comps, when also writing to global table:
+# Inside deep_pull._insert_pass_comps, when also writing to global table.
+# Signature is _parse_property(raw: Dict[str, Any]) -> Property — single arg.
+from api.propelio.scraper import _parse_property
+
 for raw_comp in comps:
-    parsed = scraper._parse_property(raw_comp, searched_address="", ...)
-    if parsed is None:
-        continue  # malformed comp, skip
+    try:
+        parsed = _parse_property(raw_comp)
+    except Exception:
+        continue  # malformed comp, skip silently
     parsed_dict = asdict(parsed)
     comp_key = _comp_address_key(parsed_dict)
     # Now both paths produce the same key for the same comp.
@@ -485,7 +489,7 @@ This produces identical structure to a fresh scrape — frontend renders without
 
 ### Schema migration risks
 
-- **PostGIS extension may not be enabled on the session DB.** Check before Chunk 1 lands. If not enabled, `CREATE EXTENSION postgis` is the fix (requires Cloud SQL config change, not just SQL).
+- **PostGIS extension prerequisite.** `CREATE EXTENSION IF NOT EXISTS postgis` is added to `_ensure_session_schema()` per the spec. Cloud SQL ships PostGIS as a pre-installed contrib module so no instance-flag change should be needed. **Verify after Chunk 1 ships** by running `SELECT PostGIS_Version()` against the session DB. If `CREATE EXTENSION` fails (Cloud SQL refuses), escalate — that's a config change, not a code one.
 - **Backfill script could lose data on edge cases.** Address-key collisions where two `propelio_comp_archive` rows for different workspaces had identical `comp_address_key` but slightly different `comp_data` — we keep most recent `last_seen_at`. Log discards.
 
 ### Read-path risks
