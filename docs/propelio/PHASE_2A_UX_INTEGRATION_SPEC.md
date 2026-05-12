@@ -1,14 +1,25 @@
 # Phase 2A — UX Integration Pass 1
 
-> **Status:** spec v1, not yet implemented. Builds on Phase 2 MVP (already shipped) + parcel-match fix.
+> **Status:** spec v2, not yet implemented. Builds on Phase 2 MVP (already shipped) + parcel-match fix.
 >
 > **Branch (continue on):** `feat/propelio-deep-pull-experiment`
 >
-> **Goal:** Turn Phase 2's shipped infrastructure into the team's actual workflow. Right now the cache + deep-pull engine work but the team still has to click Get Comps to see anything. After this spec ships:
+> **Revision v2 (2026-05-12):** Addresses Copilot first-review findings. Key changes:
+> - Cache_only miss response shape FULLY enumerated (was missing polygon_meta/cma_settings/balance/subject parity)
+> - Get Comps button architecture corrected — it's a DYNAMIC sticky map control created at `map.js:4385-4392`, NOT static HTML. Modify the JS that creates it, not index.html.
+> - Auto-save reuses existing pattern from `_pullPropelioByPolygon` (`map.js:4448-4457`) — no new save semantics
+> - Name derivation uses existing helper `_suggestAreaNameFromContainedParcels` (`map.js:7188`) with timestamp fallback
+> - Deep-pull role gate decision documented (drop or keep). New blocker section explicitly addresses this.
+> - Cache_only handler ordering: explicit early-return BEFORE polygon cache lookup, scraper, archive merge, quota logging
+> - Existing "Refresh from source" button: KEEP unchanged (not repurposed, not removed)
+> - Open design Q1-Q5 all resolved with confirmed answers
+> - Workspace name dedupe explicitly deferred to Pass 2 (v1 accepts duplicate auto-saves on redraw)
+>
+> **Goal:** Turn Phase 2's shipped infrastructure into the team's actual workflow. After this spec ships:
 > - **Draw a polygon** → cached comps appear automatically, instantly, without clicking anything
 > - **Click Get Comps** → triggers a full deep-pull (the 5-min saturation refresh)
-> - **Visual progress** during the deep-pull so users know it's running
 > - **Auto-save the workspace** on draw (so Get Comps doesn't have to)
+> - **Visual progress** during the deep-pull
 >
 > **Pass 2 (deferred):** batched render — comps appearing as each pass completes during the deep-pull run. Requires backend endpoint changes. Track in testing notes item 3.
 
@@ -20,6 +31,29 @@
 2. **Backward compat**: the existing scrape path keeps working unchanged when `PHASE_2_CACHE_READ` env var is off.
 3. **No new Propelio scraping triggers**: auto-cache-on-draw is CACHE-ONLY (never falls through to scraper). The only scrape trigger remains the user-clicked Get Comps button.
 4. **User-visible scrape ops are explicit**: Get Comps now triggers a 5-min deep-pull. Progress UI keeps the user informed; navigation warning prevents accidental loss.
+5. **Preserve existing Refresh from source button**: do NOT remove or repurpose. Keep as power-user single-pass escape hatch.
+
+---
+
+## ⚠️ Blocker: deep-pull role gate decision (must resolve before implementation)
+
+Current state: `/api/propelio/deep-pull/start` and friends are gated to `developer` and `owner` roles only at `api/propelio/routes.py:65-68`. Per Mike's team's role structure (developer / owner / power_user / user / member), the `user` and `member` roles WOULD 403 if they clicked the new Get Comps button.
+
+Three options to decide before implementation:
+
+**A. Drop the role gate entirely.** Any authenticated user can trigger a deep-pull. Simplest. Risk: quota burn if power users / members button-mash. Mitigation: add a per-user daily rate limit (Phase 2.5 follow-on).
+
+**B. Keep the role gate.** Get Comps only works for developer/owner/power_user. user/member roles see Get Comps disabled with tooltip "Deep refresh requires power_user+. Use Refresh from source for single-pass scrape."
+
+**C. New non-gated endpoint.** Create `/api/propelio/deep-pull/start-public` that's open to all users but with built-in rate limiting (e.g., max 1 per user per hour, max 3 per workspace per day).
+
+**Recommendation: A** (drop the gate), pair with a per-user rate-limit added in a Phase 2.5 chunk. Simpler now, adds the safety later when quota patterns are known. Document the trade-off in testing notes.
+
+**This decision determines:**
+- Whether the Get Comps button check role at all
+- What the visible behavior is for low-privilege users
+
+Spec assumes Option A below. Toggle if KK decides differently.
 
 ---
 
@@ -29,170 +63,294 @@
 
 #### 1. Add `cache_only` query parameter to `/api/propelio/by-polygon`
 
-Add to `api/propelio/routes.py` — modify `_run_by_polygon` and/or the route handler.
+**Add to** `api/propelio/routes.py` — modify the route handler signature and the cache gate block inside `_run_by_polygon`.
 
-**Behavior:**
-- Request: `POST /api/propelio/by-polygon?cache_only=true` with the usual body
-- When `cache_only=true` AND `PHASE_2_CACHE_READ=true` env var set:
-  - Cache hit (rows returned): return cached comps in existing format with `cached: true`
-  - Cache miss (zero rows): return `{cached: false, comps: [], cache_only: true, polygon_meta: {comps_in_polygon: 0, comps_outside_polygon: 0, comps_pulled: 0, centroid: {lat, lng}, subject_parcel: <derived or None>}}` WITHOUT triggering scrape
-- When `cache_only=false` or not set: existing behavior unchanged (cache-first if env var on, scrape if cold)
-- When `PHASE_2_CACHE_READ` env var NOT set: `cache_only` is ignored (falls through to existing behavior — protects against accidental enablement on dev)
+```python
+# At the route handler (~routes.py:693)
+@router.post("/by-polygon")
+async def by_polygon(
+    request: PolygonRequest,
+    cache_only: bool = Query(False),
+) -> dict[str, Any]:
+    return await _run_by_polygon(request, use_cache=True, cache_only=cache_only)
+```
 
-**Pydantic schema:** `PolygonRequest` may stay as-is; pass `cache_only` as a Query param on the route handler. Default: `cache_only: bool = Query(False)`.
+**Behavior in `_run_by_polygon`** — add at the TOP of the existing cache gate block (currently at `routes.py:325-401`), BEFORE the polygon cache lookup, scraper call, archive merge, or quota log:
+
+```python
+if os.environ.get("PHASE_2_CACHE_READ") == "true":
+    cached_global = load_comps_by_polygon(polygon, saved_area_id)
+    # ... existing centroid + subject derivation
+    
+    # When cache_only=true, ALWAYS return immediately — whether cache hit or miss.
+    # NEVER fall through to scraper, polygon cache, or archive merge.
+    if cache_only:
+        return {
+            "cached": bool(cached_global),
+            "cache_only": True,
+            "comps": cached_global if cached_global else [],
+            "polygon_meta": polygon_meta,  # same shape as cache-hit (centroid, comps_in_polygon, comps_outside_polygon, comps_pulled, subject_parcel)
+            "cma_settings": {
+                "months": int(request.months),
+                "range": "(cached)" if cached_global else "(cache-only)",
+                "sales_count": len(cached_global),
+            },
+            "balance": cache_mod.latest_quota_balance() if cached_global else None,
+            "subject": subject,
+            # archive_meta intentionally omitted in cache_only path
+        }
+    
+    # cache_only=false → existing behavior (cache-hit returns, cache-miss falls through)
+    if cached_global:
+        # ... existing rich-response build
+        return { ... }
+    # ... existing fall-through to scrape path
+```
+
+**Key invariants:**
+- `cache_only=true` ALWAYS returns from this block (whether comps found or not)
+- `cache_only=true` NEVER triggers `propelio_cache.get_cached`, scraper, archive merge, or quota log
+- `cache_only=false` preserves all existing behavior exactly
+- Response shape on cache_only-miss matches cache-hit shape (all parity fields populated) so frontend renders normally
+
+**When `PHASE_2_CACHE_READ` env var is NOT set:** `cache_only` is silently ignored. The existing scrape path runs as today. (Protects dev from accidental enablement.)
 
 ---
 
 ### Frontend changes
 
-#### 2. Auto-cache-on-draw
+#### 2. Auto-cache-on-draw + auto-save
 
-In `frontend/map.js`, find where the polygon draw completes (likely after `L.Draw.Event.CREATED` handler or equivalent — currently fires the analysis flow). After the polygon is finalized:
+**Integration point:** in `frontend/map.js`, the polygon-completion handler is the `draw:created` event handler at `map.js:6894`. The polygon state is finalized at `map.js:6929-6936` (where `lastPolygon` and `lastDrawnLatLngs` are set). Hook right after that, BEFORE the existing Get Comps button is shown at `map.js:6943`.
 
-a. **Auto-save the workspace.** Call the existing `saveCurrentArea(name)` flow (or its current equivalent) with a derived name. Pass the polygon and any derived metadata.
+**Logic:**
 
-b. **Fire cache-only lookup.** Call `POST /api/propelio/by-polygon?cache_only=true` with the saved area's `area_id` and polygon.
+```javascript
+// After lastPolygon is set at map.js:6929-6936:
 
-c. **Render cached comps.** If response has comps, call existing `_renderPropelioComps(data)`. If empty, silently show a small chip near the Get Comps button: "Cache empty for this area — click Get Comps to scrape" (low-key, non-modal).
+// Step 1: auto-save the workspace using the same pattern as the
+// existing pre-pull auto-save at map.js:4448-4457.
+// Use _suggestAreaNameFromContainedParcels (map.js:7188) as the
+// primary name source; fall back to timestamp if no parcels matched.
+const suggestedName = _suggestAreaNameFromContainedParcels()
+    || `Workspace ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`;
 
-d. **Both calls are non-fatal.** Save failure (e.g., user not logged in) → log + skip cache lookup. Cache lookup failure → log + leave map empty so user can click Get Comps.
+let savedAreaId = null;
+try {
+    const saved = await saveCurrentArea(suggestedName);
+    savedAreaId = saved?.id || null;
+} catch (err) {
+    console.warn("[auto-cache-on-draw] auto-save failed, continuing without area_id:", err);
+}
 
-**Order matters:** save FIRST (gets `area_id`), THEN cache-only lookup (uses `area_id` for workspace-scoped rating join).
+// Step 2: fire cache-only lookup
+try {
+    const resp = await _apiJson("/api/propelio/by-polygon?cache_only=true", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({
+            polygon: lastPolygon,
+            months: 24,
+            saved_area_id: savedAreaId,
+        }),
+    });
+    
+    if (resp.comps && resp.comps.length > 0) {
+        // Render cached comps using existing path
+        _renderPropelioComps(resp);
+        console.log("[auto-cache-on-draw] cache hit:", resp.comps.length, "comps");
+    } else {
+        // Cache miss — show small inline chip (Q2 answer)
+        _showCacheEmptyChip();
+        console.log("[auto-cache-on-draw] cache miss for this area");
+    }
+} catch (err) {
+    console.warn("[auto-cache-on-draw] cache lookup failed:", err);
+}
+```
+
+**Helper to add:**
+
+```javascript
+function _showCacheEmptyChip() {
+    // Show a small dismissable chip near the Get Comps button:
+    // "Cache empty — click Get Comps for fresh data"
+    // Auto-fade after 6s
+}
+```
+
+**Known limitation (v1, deferred polish):** re-drawing the polygon creates a new auto-saved workspace each time. No dedupe in v1. User can delete duplicates from the sidebar. Track in testing notes for Pass 2 cleanup.
 
 #### 3. Get Comps button repurpose
 
-**HTML (in `frontend/index.html`):** keep the existing button ID, restructure inner content to show two-line label:
+**IMPORTANT:** the Get Comps button is NOT static HTML — it's a dynamic sticky map control created at `map.js:4385-4392`. Modify the JS that creates it, not index.html.
 
-```html
-<button id="btn-get-comps" class="btn-primary get-comps-btn">
-  <span class="get-comps-main">Get Comps</span>
-  <span class="get-comps-subtitle">Deep Pull · 5 min</span>
-</button>
+**Steps:**
+
+a. **At creation (`map.js:4385-4392`):** when the button element is constructed, restructure its inner HTML to show two lines:
+
+```javascript
+btn.innerHTML = `
+    <span class="get-comps-main">Get Comps</span>
+    <span class="get-comps-subtitle">Deep Pull · ~5 min</span>
+`;
 ```
 
-**JS (in `frontend/map.js`):** modify the Get Comps click handler. Instead of triggering the existing single-pass scrape via `/api/propelio/by-polygon`:
+b. **Click handler (`map.js:4475`)** — currently calls `/api/propelio/by-polygon`. Change to call `/api/propelio/deep-pull/start` instead. The deep-pull endpoint requires `target_address`:
 
-a. Validate state — must have a saved workspace (`_currentLoadedAreaId`) and a derivable target address.
+```javascript
+btn.addEventListener("click", async () => {
+    // Guard: don't allow click if a deep-pull is already running
+    if (_activeDeepPullJobId) {
+        return;  // button is also visually disabled in this state
+    }
+    
+    // Derive target address. Preference order:
+    //   1. _lastSearchedAddress (typeahead-set)
+    //   2. _suggestAreaNameFromContainedParcels (saved parcels in polygon)
+    //   3. fallback: workspace name (less ideal — has timestamp prefix)
+    const targetAddress = _lastSearchedAddress
+        || _suggestAreaNameFromContainedParcels()
+        || (workspace?.name);  // last resort
+    
+    if (!targetAddress) {
+        _showInlineWarning("Search for an address or save a parcel first");
+        return;
+    }
+    
+    try {
+        const resp = await _apiJson("/api/propelio/deep-pull/start", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", ...authHeaders() },
+            body: JSON.stringify({
+                target_address: targetAddress,
+                saved_area_id: _currentLoadedAreaId || null,
+            }),
+        });
+        _activeDeepPullJobId = resp.job_id;
+        _disableGetCompsButton();
+        _showDeepPullBanner(`Pass 0/6 — queued. ${resp.job_id}`);
+        _showDoNotRefreshWarning();
+        _startDeepPullPolling();
+    } catch (err) {
+        console.error("[get-comps] deep-pull failed to start:", err);
+    }
+});
+```
 
-b. Call `POST /api/propelio/deep-pull/start` with the target address.
+c. **Disabled state when deep-pull running** — add CSS class + visual:
 
-c. Show progress banner with two parts:
-   - Pass counter ("Pass 3 of 6")
-   - Comp count so far ("87 comps captured")
-   - Optional progress bar (visual fill 0/6 → 6/6)
+```css
+#btn-get-comps[disabled],
+#btn-get-comps.is-running {
+    opacity: 0.55;
+    cursor: not-allowed;
+    pointer-events: none;
+}
+```
 
-d. Show prominent warning text: **"Don't refresh — comps are being saved in the background"**.
+d. **Progress banner — reuse existing `.deep-pull-banner` CSS at `style.css:3049`.** The polling logic from `_pollDeepPullStatus` at `map.js:8369` is reusable. Just swap the trigger source from the experimental Deep Pull button to the production Get Comps button.
 
-e. Show Cancel button — calls `/deep-pull/stop/{job_id}`.
+e. **Cancel button** — visible during the run inside the banner, calls `/deep-pull/stop/{job_id}` (existing).
 
-f. Disable the Get Comps button while a deep-pull is running (greyed, cursor: not-allowed, tooltip: "Deep pull in progress").
+f. **On deep-pull completion:** banner shows summary, then after 6s:
+- Hide banner
+- Re-enable Get Comps button
+- Re-fire the cache-only lookup to pull the freshly-deep-pulled comps into the map
+- Render the updated set
 
-g. Poll `/deep-pull/status/{job_id}` every 5s (existing pattern, reuse).
-
-h. On completion: re-fire the cache-only lookup to pull the freshly-deep-pulled comps into the map. Hide banner after 6s "Job completed — N unique comps captured."
-
-**Backwards compatibility:** the existing scrape path on `/api/propelio/by-polygon` (without `cache_only=true`) stays untouched and still works. We're just changing what the Get Comps BUTTON does.
+g. **Deep-pull role gate** — assuming Option A from blocker section: drop the role gate. If we keep it: Get Comps shows as disabled for user/member roles with tooltip "Requires power_user+ — use Refresh from source for quick refresh."
 
 #### 4. Quick Refresh placeholder button
 
-Add a new button visually adjacent to Get Comps (split button or separate, designer's call). 
+Add a new button visually adjacent to Get Comps (also dynamic — created in the same map.js section). 
 
-**HTML:**
-```html
-<button id="btn-quick-refresh"
-        class="btn-secondary quick-refresh-placeholder"
-        disabled
-        title="Coming soon — rapid scan for new comps in the last 30 days within 1mi of target">
-  <span class="quick-refresh-main">Quick Refresh</span>
-  <span class="quick-refresh-subtitle">Coming soon</span>
-</button>
+```javascript
+const quickRefreshBtn = L.DomUtil.create("button", "quick-refresh-placeholder", container);
+quickRefreshBtn.disabled = true;
+quickRefreshBtn.innerHTML = `
+    <span class="quick-refresh-main">Quick Refresh</span>
+    <span class="quick-refresh-subtitle">Coming soon</span>
+`;
+quickRefreshBtn.title = "Coming soon — rapid scan for new comps in last 30 days within 1mi of target";
 ```
 
 **CSS:**
-- `.quick-refresh-placeholder { opacity: 0.5; cursor: not-allowed; }`
-- `.quick-refresh-placeholder:hover { opacity: 0.6; }`
 
-No backend wiring. Visual only. Purpose: tease future capability for team rollout — "ohh something new coming."
+```css
+.quick-refresh-placeholder {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+.quick-refresh-placeholder:hover {
+    opacity: 0.6;
+}
+.quick-refresh-subtitle {
+    font-size: 0.8em;
+    font-style: italic;
+}
+```
+
+No backend wiring. Visual only.
 
 #### 5. Workspace navigation warning during deep-pull
 
-When `_activeDeepPullJobId` is set and the user attempts to:
-- Click a different workspace in the saved-areas sidebar
-- Draw a new polygon
-- Open a saved parcel
+Use `window.confirm` for v1 (consistent with existing use at `map.js:8028`).
 
-...show a confirm dialog (use `window.confirm` for simplicity, or a custom inline notice):
+Hook into the existing workspace-switch handler (find via search for `restoreSavedArea` or sidebar click handler) and the draw-mode entry handler:
 
+```javascript
+function _navigationGuardForActiveDeepPull(action_description) {
+    if (!_activeDeepPullJobId) return true;
+    return window.confirm(
+        "A deep pull is still running on this workspace. " +
+        "It will continue saving comps in the background even if you switch. " +
+        `Do you want to ${action_description} anyway?`
+    );
+}
+
+// Wrap calls to restoreSavedArea, draw-start, etc.:
+if (!_navigationGuardForActiveDeepPull("switch workspace")) return;
+restoreSavedArea(area);
 ```
-"A deep pull is still running on this workspace.
-It will continue saving comps in the background even if you switch.
-Do you want to switch anyway?"
-```
 
-If user confirms: proceed with the new action. The deep-pull keeps running server-side; client-side polling can stop cleanly.
-
-If user cancels: stay on current workspace.
+If user proceeds: deep-pull continues server-side, client just stops polling. If they return to the workspace later (e.g., re-open it), the polling can resume via the saved job_id IF we store it (in-memory only for v1 — survives session, not page refresh).
 
 ---
 
-### Files to modify
+## Files to modify
 
-- `api/propelio/routes.py` — add `cache_only` query param handling
-- `frontend/map.js` — auto-cache-on-draw, Get Comps repurpose, Quick Refresh wire-up, navigation warning
-- `frontend/index.html` — Get Comps subtitle markup, Quick Refresh placeholder markup
-- `frontend/style.css` — subtitle styling, disabled button, progress UI refinements
+- `api/propelio/routes.py` — add `cache_only` query param + explicit early-return logic
+- `frontend/map.js` — auto-cache-on-draw at draw completion, Get Comps button creation modifications (subtitle + click handler swap), Quick Refresh placeholder creation, navigation warning hooks
+- `frontend/style.css` — subtitle styles, disabled button, quick-refresh-placeholder, cache-empty chip
 
-### Files NOT to modify
+## Files NOT to modify
 
 - `api/propelio/scraper.py` (unchanged)
-- `api/propelio/archive.py` (unchanged from Phase 2 / parcel match fix)
-- `api/propelio/deep_pull.py` (unchanged — the engine already supports what we need)
+- `api/propelio/archive.py` (unchanged)
+- `api/propelio/deep_pull.py` (unchanged)
 - `api/main.py` (no schema changes)
+- `frontend/index.html` (Get Comps + Quick Refresh are dynamic, not static — no HTML changes needed)
+- The existing "Refresh from source" button (`index.html:95` + handler `map.js:4246`) stays UNCHANGED
 
 ---
 
-## Open design questions (decide during Copilot review)
+## Resolved open design questions
 
-### Q1. Workspace auto-save name on draw
+**Q1. Auto-save name derivation:**
+✓ Use existing `_suggestAreaNameFromContainedParcels` (`map.js:7188`) as primary, timestamp-formatted name as fallback. Matches existing auto-save pattern from `_pullPropelioByPolygon`.
 
-What's the default workspace name when auto-saved on polygon completion?
+**Q2. Cache-miss messaging on auto-pull:**
+✓ Small inline chip "Cache empty — click Get Comps for fresh data" near the Get Comps button. Auto-fade after 6s.
 
-- **A.** Derived from nearest-parcel address (e.g., "Workspace near 6800 Lakewood Blvd")
-- **B.** Timestamp-based ("Workspace 2026-05-12 14:30")
-- **C.** Generic ("Untitled Workspace N")
-- **My lean:** A, falling back to B if no parcel match found
+**Q3. Existing "Refresh from source" button:**
+✓ KEEP unchanged. Acts as the explicit single-pass refresh escape hatch. Revisit retirement after Pass 1 adoption data.
 
-### Q2. Cache-miss messaging on auto-pull
+**Q4. Get Comps state while deep-pull running:**
+✓ Visually disabled (opacity 0.55, not-allowed cursor) + click handler bails. Aligned with existing `_activeDeepPullJobId` guard.
 
-What does the user see if cache is empty after a draw?
-
-- **A.** Nothing — silently fail (user doesn't know cache was tried)
-- **B.** Small inline chip "Cache empty — click Get Comps to scrape" near the Get Comps button
-- **C.** Modal/banner "No cached comps for this area"
-- **My lean:** B (informative without interrupting flow)
-
-### Q3. Existing "Refresh from source" button — keep or remove?
-
-The existing button fires the single-pass scrape (the OLD behavior). Now that Get Comps does deep-pull, what happens to it?
-
-- **A.** Keep as "quick single-pass refresh" — power user escape hatch
-- **B.** Remove entirely (Get Comps replaces it)
-- **C.** Repurpose as the Quick Refresh placeholder (but it's a different feature target)
-- **My lean:** A in short term (less disruptive), revisit when batched render ships and quota dynamics are clearer
-
-### Q4. Get Comps state when a deep-pull is already running
-
-- **A.** Button disabled while running (visual + functional)
-- **B.** Warning dialog "Deep pull in progress — wait or cancel first"
-- **C.** Silently start a NEW deep-pull (multiple concurrent jobs)
-- **My lean:** A (cleanest, prevents confusing parallel-job UX)
-
-### Q5. Workspace navigation block — confirm vs hard-lock vs warning toast
-
-- **A.** Browser-style confirm dialog (current spec) — interruptive but clear
-- **B.** Inline warning toast: "Deep pull running. Switch anyway?" with explicit confirm/dismiss buttons
-- **C.** Hard-lock: physically disable sidebar buttons until done
-- **My lean:** A for v1 (simplest), upgrade to B if confirm dialogs feel too modal
+**Q5. Navigation warning UX:**
+✓ `window.confirm` for v1 (consistent with `map.js:8028` existing use). Upgrade to inline toast if confirm dialogs feel too modal.
 
 ---
 
@@ -202,67 +360,86 @@ After deploy:
 
 ### Auto-cache-on-draw
 
-1. Open preview, log in as developer, hard refresh
-2. Confirm `PHASE_2_CACHE_READ=true` is set on the Cloud Run service
+1. Open preview, log in, hard refresh
+2. Confirm `PHASE_2_CACHE_READ=true` is set on Cloud Run service
 3. Draw a polygon over Lakewood (or any pre-seeded area)
-4. **EXPECTED:** workspace auto-saves (toast or sidebar update), cached comps appear within ~500ms, no Get Comps click needed
-5. Check Cloud SQL: workspace row exists in `saved_areas`, cache-only request logged
-6. Draw a polygon over a NEW area (no cache)
-7. **EXPECTED:** workspace saves, but no comps render. Small "Cache empty" chip appears. No Propelio call fired (verify in quota log).
+4. **EXPECTED:** workspace auto-saves (visible in sidebar), cached comps appear within ~500ms WITHOUT clicking anything
+5. Check Cloud SQL: workspace row exists in `saved_areas`
+6. Draw a polygon over a NEW area (no cache coverage)
+7. **EXPECTED:** workspace saves, no comps render, small "Cache empty" chip appears. Verify in Propelio quota log: NO new call fired.
 
 ### Get Comps repurpose
 
 1. With a saved workspace loaded, click Get Comps
-2. **EXPECTED:** progress banner appears: "Pass 0/6, queued — first pass in ~10-30s"
+2. **EXPECTED:** progress banner "Pass 0/6 — queued. dp_xxx"
 3. Watch banner cycle Pass 1 → 6 over ~5-7 minutes
-4. Try clicking Get Comps again during the run
-5. **EXPECTED:** button disabled (greyed, not-allowed cursor, tooltip)
-6. Try clicking a different workspace in the sidebar
-7. **EXPECTED:** confirm dialog appears, "Deep pull is still running..."
-8. Wait for completion
-9. **EXPECTED:** banner shows "Job completed — N unique comps", cache refreshes, new comps appear on map
+4. Click Get Comps again during run
+5. **EXPECTED:** disabled state (opacity 0.55, no action)
+6. Click different workspace in sidebar
+7. **EXPECTED:** window.confirm dialog "Deep pull still running..."
+8. Wait for deep-pull completion
+9. **EXPECTED:** banner summary, then ~6s later cache refreshes and new comps appear on map
 
 ### Quick Refresh placeholder
 
-1. Verify button is visible
-2. Verify it's greyed/disabled
-3. Hover over it → tooltip "Coming soon — rapid scan for new comps..."
-4. Click it → nothing happens (or visible feedback that it's disabled)
+1. Hover button → tooltip "Coming soon — rapid scan..."
+2. Visible but disabled (opacity 0.5, no click action)
 
-### Cache-only flag (backend)
+### cache_only=true endpoint smoke
 
-1. `curl https://lot-ledger-preview-qa7hokv3ma-uc.a.run.app/api/propelio/by-polygon?cache_only=true -X POST -H "Content-Type: application/json" -d '{"polygon": [[...], ...], "months": 24}'`
-2. With covered area: returns cached comps, no Propelio call fired
-3. With uncovered area: returns `{cached: false, comps: [], cache_only: true}`
-4. Toggle `PHASE_2_CACHE_READ` off → `cache_only=true` should be ignored, behavior reverts to scrape
+```bash
+# Cache hit (covered area)
+curl -X POST 'https://lot-ledger-preview-qa7hokv3ma-uc.a.run.app/api/propelio/by-polygon?cache_only=true' \
+  -H "Cookie: lot_ledger_session=..." \
+  -H "Content-Type: application/json" \
+  -d '{"polygon": [[lng1,lat1],...], "months": 24}'
+# Expect: {cached: true, cache_only: true, comps: [...], polygon_meta: {...}, cma_settings: {...}, balance: ..., subject: ...}
+
+# Cache miss (uncovered area)
+# Same call with polygon over a new area
+# Expect: {cached: false, cache_only: true, comps: [], polygon_meta: {...}, cma_settings: {...}, balance: null, subject: ...}
+
+# Verify NO new Propelio call
+# Check propelio_quota_log: latest entry should be unchanged from before the request
+```
+
+### Verify cache_only is ignored when env var off
+
+1. Toggle `PHASE_2_CACHE_READ` off on a test deploy (don't do this on preview during testing)
+2. Same `cache_only=true` request
+3. **EXPECTED:** falls through to existing scrape path, returns scrape results
 
 ---
 
-## What this does NOT do (Pass 2 work — track in testing notes item 3)
+## What this does NOT do (Pass 2 work)
 
-- **Batched render**: comps appearing on the map as each pass completes during a deep-pull run. Requires new backend endpoint for incremental comp fetches.
-- **Auto-cache on workspace load**: when restoring a saved area, also auto-fire cache-only lookup before user has to interact. Phase 2A Pass 2.
-- **Cache freshness indicators**: "Cached 4 days ago" + color cues. Phase 2A Pass 2.
-- **Daily rate limits on Get Comps**: prevent quota burn from button-mashing. Phase 2.5.
+- **Batched render** (comps appearing on map as each pass completes during a deep-pull run). Requires new backend endpoint. Phase 2A Pass 2.
+- **Auto-cache on workspace load** (restoring a saved area also auto-fires cache-only lookup). Phase 2A Pass 2.
+- **Cache freshness indicators** ("Cached 4 days ago" + color cues). Phase 2A Pass 2.
+- **Daily rate limits on Get Comps** to prevent quota burn. Phase 2.5.
+- **Auto-save dedupe** to prevent workspace spam on re-draws. Phase 2.5.
+- **Workspace name dedupe** if multiple draws produce identical-looking polygons. Phase 2.5.
+- **Page-refresh recovery for active deep-pulls** (currently `_activeDeepPullJobId` is in-memory only). Phase 2.5.
 
 ---
 
 ## Estimated effort
 
-- Backend (cache_only param): ~30 min
+- Backend (cache_only param + response shape parity): ~45 min
 - Frontend auto-cache-on-draw + auto-save: ~45 min
-- Frontend Get Comps repurpose + progress banner: ~60 min
+- Frontend Get Comps button: subtitle + click handler swap + disabled state: ~60 min
 - Frontend Quick Refresh placeholder: ~15 min
 - Frontend navigation warning: ~30 min
-- CSS polish (subtitles, disabled state, button arrangement): ~15-20 min
-- **Total: ~3-4 hours Copilot work**
+- CSS polish (subtitle, disabled, chip): ~15-20 min
+- **Total: ~3.5-4 hours Copilot work**
 
 ## Architecture compatibility check
 
-All of these changes leverage already-shipped Phase 2 infrastructure:
-- The cache-first read path in `_run_by_polygon` (Chunk 3)
-- The deep-pull job lifecycle (`run_deep_pull`, `/deep-pull/start`, `/deep-pull/status`, `/deep-pull/stop`)
-- The propelio_comps + comp_ratings tables (Chunk 1)
-- Parcel match writes from deep-pull (the recent fix)
+All changes leverage already-shipped Phase 2 infrastructure:
+- Cache-first read path in `_run_by_polygon` (Chunk 3) — extended with `cache_only` flag
+- Deep-pull job lifecycle (`/start`, `/status`, `/stop`) — reused
+- propelio_comps + comp_ratings tables (Chunk 1) — unchanged
+- Parcel match writes from deep_pull (recent fix) — unchanged
+- Existing `_renderPropelioComps`, `_suggestAreaNameFromContainedParcels`, `saveCurrentArea`, `_apiJson`, `authHeaders` JS helpers — all reused
 
-No new architectural concepts — just wiring the existing pieces into the team's actual workflow.
+No new architectural concepts.
