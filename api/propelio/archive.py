@@ -533,7 +533,10 @@ def load_comps_by_polygon(
         for point_lng, point_lat in polygon_latlngs
     )
     buffered_radius_mi = circumradius_mi * 1.05
-    effective_radius_mi = min(max(buffered_radius_mi, 0.1), 10.0)
+    # Floor at 2mi so tight polygons still catch nearby pendings/actives
+    # within reasonable distance (matches user mental model — when drawing
+    # a tight polygon, you still expect to see comps a couple miles away).
+    effective_radius_mi = min(max(buffered_radius_mi, 2.0), 10.0)
     circumradius_meters = effective_radius_mi * 1609.344
 
     geojson_polygon = {
