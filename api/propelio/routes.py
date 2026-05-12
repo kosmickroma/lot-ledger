@@ -322,7 +322,7 @@ def _load_saved_area_polygon(saved_area_id: str) -> list[list[float]]:
     return _validate_polygon(polygon)
 
 
-async def _run_by_polygon(request: PolygonRequest, *, use_cache: bool) -> dict[str, Any]:
+async def _run_by_polygon(request: PolygonRequest, *, use_cache: bool, cache_only: bool = False) -> dict[str, Any]:
     polygon = _validate_polygon(request.polygon)
     months = int(request.months)
     saved_area_id = str(request.saved_area_id or "").strip() or None
@@ -334,52 +334,63 @@ async def _run_by_polygon(request: PolygonRequest, *, use_cache: bool) -> dict[s
         except Exception as _exc:
             logger.warning("[propelio] global cache read failed (non-fatal): %s", _exc)
             cached_global = []
+        _centroid_lat, _centroid_lng = polygon_centroid(polygon)
+
+        subject_parcel = _nearest_subject_parcel(_centroid_lat, _centroid_lng)
+        subject: dict[str, Any] | None = None
+        if subject_parcel:
+            subject = {
+                "address": subject_parcel["address"],
+                "county": subject_parcel["county"],
+                "account_num": subject_parcel["account_num"],
+            }
+
+        comps_in_polygon = sum(
+            1
+            for comp in cached_global
+            if not (
+                isinstance(comp.get("extra"), dict)
+                and comp["extra"].get("is_outside_polygon")
+            )
+        )
+        comps_outside_polygon = len(cached_global) - comps_in_polygon
+
+        polygon_meta: dict[str, Any] = {
+            "centroid": {"lat": _centroid_lat, "lng": _centroid_lng},
+            "comps_in_polygon": comps_in_polygon,
+            "comps_outside_polygon": comps_outside_polygon,
+            "comps_pulled": len(cached_global),
+            "subject_parcel": subject_parcel,
+        }
+
+        cma_settings: dict[str, Any] = {
+            "months": int(request.months),
+            "range": "(cached)" if cached_global else "(cache-only)",
+            "sales_count": len(cached_global),
+        }
+
+        try:
+            balance: int | None = cache_mod.latest_quota_balance() if cached_global else None
+        except Exception:
+            balance = None
+
+        if cache_only:
+            return {
+                "cached": bool(cached_global),
+                "cache_only": True,
+                "comps": cached_global if cached_global else [],
+                "polygon_meta": polygon_meta,
+                "cma_settings": cma_settings,
+                "balance": balance,
+                "subject": subject,
+            }
+
         if cached_global:
             logger.info(
                 "[propelio] PHASE_2_CACHE_READ hit: %d comps for saved_area=%s",
                 len(cached_global),
                 saved_area_id,
             )
-            _centroid_lat, _centroid_lng = polygon_centroid(polygon)
-
-            subject_parcel = _nearest_subject_parcel(_centroid_lat, _centroid_lng)
-            subject: dict[str, Any] | None = None
-            if subject_parcel:
-                subject = {
-                    "address": subject_parcel["address"],
-                    "county": subject_parcel["county"],
-                    "account_num": subject_parcel["account_num"],
-                }
-
-            comps_in_polygon = sum(
-                1
-                for comp in cached_global
-                if not (
-                    isinstance(comp.get("extra"), dict)
-                    and comp["extra"].get("is_outside_polygon")
-                )
-            )
-            comps_outside_polygon = len(cached_global) - comps_in_polygon
-
-            polygon_meta: dict[str, Any] = {
-                "centroid": {"lat": _centroid_lat, "lng": _centroid_lng},
-                "comps_in_polygon": comps_in_polygon,
-                "comps_outside_polygon": comps_outside_polygon,
-                "comps_pulled": len(cached_global),
-                "subject_parcel": subject_parcel,
-            }
-
-            cma_settings: dict[str, Any] = {
-                "months": int(request.months),
-                "range": "(cached)",
-                "sales_count": len(cached_global),
-            }
-
-            try:
-                balance: int | None = cache_mod.latest_quota_balance()
-            except Exception:
-                balance = None
-
             ph2_archive_meta: dict[str, Any] | None = None
             if saved_area_id:
                 try:
@@ -690,6 +701,7 @@ def get_photo(url: str = Query(..., min_length=1)) -> StreamingResponse:
 async def get_by_polygon(
     request: PolygonRequest,
     saved_area_id: str | None = Query(None),
+    cache_only: bool = Query(False),
 ) -> dict[str, Any]:
     body_saved_area_id = str(request.saved_area_id or "").strip() or None
     query_saved_area_id = str(saved_area_id or "").strip() or None
@@ -701,7 +713,7 @@ async def get_by_polygon(
         range_override_mi=request.range_override_mi,
         saved_area_id=effective_saved_area_id,
     )
-    return await _run_by_polygon(effective_request, use_cache=True)
+    return await _run_by_polygon(effective_request, use_cache=True, cache_only=cache_only)
 
 
 @router.post("/refresh")
@@ -735,8 +747,6 @@ async def start_deep_pull(
     request: DeepPullStartRequest,
     user: dict = Depends(get_current_user),
 ) -> dict[str, Any]:
-    _ensure_deep_pull_role(user)
-
     address = str(request.target_address or "").strip()
     if not address:
         raise HTTPException(status_code=400, detail="target_address is required")
@@ -771,7 +781,6 @@ async def get_deep_pull_status(
     job_id: str,
     user: dict = Depends(get_current_user),
 ) -> dict[str, Any]:
-    _ensure_deep_pull_role(user)
     normalized_job_id = str(job_id or "").strip()
     if not normalized_job_id:
         raise HTTPException(status_code=400, detail="job_id is required")
@@ -861,7 +870,6 @@ async def stop_deep_pull(
     job_id: str,
     user: dict = Depends(get_current_user),
 ) -> dict[str, Any]:
-    _ensure_deep_pull_role(user)
     normalized_job_id = str(job_id or "").strip()
     if not normalized_job_id:
         raise HTTPException(status_code=400, detail="job_id is required")

@@ -2486,6 +2486,12 @@ h1 {
   pointer-events: auto;
 }
 
+.propelio-action-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
 /* Legacy wrap class — older marker-based render path. Retained
    harmlessly in case any css selector still references it. */
 .propelio-get-comps-wrap {
@@ -2501,7 +2507,7 @@ h1 {
   font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.01em;
-  padding: 8px 18px;
+  padding: 8px 16px;
   min-width: 132px;
   box-shadow:
     0 10px 24px rgba(120, 90, 30, 0.35),
@@ -2512,6 +2518,21 @@ h1 {
   cursor: pointer;
   position: relative;
   overflow: hidden;
+  line-height: 1.1;
+  text-align: center;
+}
+
+.propelio-get-comps-btn .get-comps-main {
+  display: block;
+  font-weight: 700;
+}
+
+.propelio-get-comps-btn .get-comps-subtitle {
+  display: block;
+  font-size: 0.78em;
+  font-style: italic;
+  opacity: 0.88;
+  margin-top: 1px;
 }
 
 .propelio-get-comps-btn::after {
@@ -2538,6 +2559,58 @@ h1 {
 .propelio-get-comps-btn:disabled {
   opacity: 0.92;
   cursor: wait;
+}
+
+.propelio-get-comps-btn[disabled],
+.propelio-get-comps-btn.is-running {
+  opacity: 0.55;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.quick-refresh-placeholder {
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  border-radius: 999px;
+  background: linear-gradient(135deg, #b4b4b4 0%, #8e8e8e 100%);
+  color: #f8f8f8;
+  font-size: 12px;
+  min-width: 126px;
+  padding: 8px 14px;
+  line-height: 1.1;
+  text-align: center;
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.quick-refresh-placeholder:hover {
+  opacity: 0.6;
+}
+
+.quick-refresh-main {
+  display: block;
+  font-weight: 600;
+}
+
+.quick-refresh-subtitle {
+  display: block;
+  font-size: 0.78em;
+  font-style: italic;
+  margin-top: 1px;
+}
+
+.propelio-cache-empty-chip {
+  margin-top: 8px;
+  padding: 6px 10px;
+  font-size: 11px;
+  text-align: center;
+  color: #f7f7f7;
+  background: rgba(8, 12, 18, 0.82);
+  border: 1px solid rgba(226, 192, 117, 0.65);
+  border-radius: 999px;
+}
+
+.propelio-cache-empty-chip.hidden {
+  display: none;
 }
 
 @keyframes propelioPillPulse {

@@ -2760,6 +2760,9 @@ function _renderList(sectionId, listId, items) {
         await _renameSavedItemInline(area, row);
         return;
       }
+      if (!_navigationGuardForActiveDeepPull("switch workspaces")) {
+        return;
+      }
       _selectedSavedItemId = area.id;
       // Purple selection outline highlights a single parcel footprint.
       // Skip for saved area drawings (type="area" — the polygon wraps many
@@ -2850,6 +2853,9 @@ function _renderSessionsList(sectionId, listId, items) {
       if (actionEl?.dataset.action === "rename") {
         e.stopPropagation();
         await _renameSavedSessionInline(session, row);
+        return;
+      }
+      if (!_navigationGuardForActiveDeepPull("switch snapshots")) {
         return;
       }
       bumpUndoPillVersion();
@@ -3023,6 +3029,7 @@ const MapToolbar = L.Control.extend({
     drawBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="16 3 21 8 8 21 3 21 3 16 16 3"></polygon></svg>';
     L.DomEvent.on(drawBtn, "click", (e) => {
       L.DomEvent.preventDefault(e);
+      if (!_navigationGuardForActiveDeepPull("draw a new area")) return;
       const handler = getPolygonDrawHandler();
       if (!handler) return;
       if (handler.enabled()) {
@@ -4379,15 +4386,116 @@ function resetPropelioFilters() {
 // and recenters when the sidebar collapses/expands.
 let propelioStickyAnchor = null;
 let propelioStickyBtn = null;
+let propelioQuickRefreshBtn = null;
+let propelioCacheEmptyChip = null;
+
+function _hideCacheEmptyChip() {
+  if (propelioCacheEmptyChip) propelioCacheEmptyChip.classList.add("hidden");
+}
+
+function _showCacheEmptyChip() {
+  if (!propelioStickyAnchor) return;
+  if (!propelioCacheEmptyChip) {
+    propelioCacheEmptyChip = document.createElement("div");
+    propelioCacheEmptyChip.className = "propelio-cache-empty-chip hidden";
+    propelioCacheEmptyChip.textContent = "Cache empty - click Get Comps for fresh data";
+    propelioStickyAnchor.appendChild(propelioCacheEmptyChip);
+  }
+  propelioCacheEmptyChip.classList.remove("hidden");
+  setTimeout(_hideCacheEmptyChip, 6000);
+}
+
+function _setPropelioGetCompsLabel(main, subtitle = "Deep Pull · ~5 min") {
+  if (!propelioStickyBtn) return;
+  propelioStickyBtn.innerHTML = `
+    <span class="get-comps-main">${_esc(main || "Get Comps")}</span>
+    <span class="get-comps-subtitle">${_esc(subtitle)}</span>
+  `;
+}
+
+async function _fetchPolygonCacheOnly() {
+  if (!Array.isArray(lastPolygon) || lastPolygon.length < 3) return null;
+  const savedAreaId = (typeof _currentLoadedAreaId === "string" ? _currentLoadedAreaId : "") || "";
+  const reqBody = {
+    polygon: lastPolygon,
+    months: PROPELIO_POLYGON_MONTHS,
+  };
+  if (savedAreaId) reqBody.saved_area_id = savedAreaId;
+
+  const resp = await _apiJson("/api/propelio/by-polygon?cache_only=true", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify(reqBody),
+  });
+
+  if (Array.isArray(resp?.comps) && resp.comps.length > 0) {
+    window._propelioLast = resp;
+    applyPropelioClientFilters();
+    _hideCacheEmptyChip();
+  } else {
+    _showCacheEmptyChip();
+  }
+  return resp;
+}
+
+async function _autoCacheOnDraw() {
+  const suggestedName = _suggestAreaNameFromContainedParcels()
+    || `Workspace ${new Date().toISOString().slice(0, 16).replace("T", " ")}`;
+
+  try {
+    await saveCurrentArea(suggestedName);
+  } catch (err) {
+    console.warn("[auto-cache-on-draw] auto-save failed, continuing without saved area id:", err);
+  }
+
+  try {
+    await _fetchPolygonCacheOnly();
+  } catch (err) {
+    console.warn("[auto-cache-on-draw] cache lookup failed:", err);
+  }
+}
+
+function _navigationGuardForActiveDeepPull(actionDescription) {
+  if (!_activeDeepPullJobId) return true;
+  return window.confirm(
+    "A deep pull is still running on this workspace. "
+    + "It will continue saving comps in the background even if you switch. "
+    + `Do you want to ${actionDescription} anyway?`
+  );
+}
+
+function _deriveDeepPullTargetAddress() {
+  const currentWorkspace = _currentLoadedAreaId
+    ? _savedAreasCache.find((a) => a.id === _currentLoadedAreaId)
+    : null;
+  return _lastSearchedAddress
+    || _suggestAreaNameFromContainedParcels()
+    || (currentWorkspace?.name || null);
+}
 
 function _ensureStickyPropelioButton() {
   if (propelioStickyBtn) return propelioStickyBtn;
   propelioStickyAnchor = L.DomUtil.create("div", "propelio-get-comps-anchor");
+  const controlsWrap = document.createElement("div");
+  controlsWrap.className = "propelio-action-row";
   propelioStickyBtn = document.createElement("button");
   propelioStickyBtn.type = "button";
   propelioStickyBtn.className = "propelio-get-comps-btn";
-  propelioStickyBtn.textContent = "Get Comps";
-  propelioStickyAnchor.appendChild(propelioStickyBtn);
+  _setPropelioGetCompsLabel("Get Comps");
+  controlsWrap.appendChild(propelioStickyBtn);
+
+  propelioQuickRefreshBtn = document.createElement("button");
+  propelioQuickRefreshBtn.type = "button";
+  propelioQuickRefreshBtn.className = "quick-refresh-placeholder";
+  propelioQuickRefreshBtn.disabled = true;
+  propelioQuickRefreshBtn.title = "Coming soon - rapid scan for new comps in last 30 days within 1mi of target";
+  propelioQuickRefreshBtn.innerHTML = `
+    <span class="quick-refresh-main">Quick Refresh</span>
+    <span class="quick-refresh-subtitle">Coming soon</span>
+  `;
+  controlsWrap.appendChild(propelioQuickRefreshBtn);
+
+  propelioStickyAnchor.appendChild(controlsWrap);
   L.DomEvent.disableClickPropagation(propelioStickyAnchor);
   L.DomEvent.disableScrollPropagation(propelioStickyAnchor);
   L.DomEvent.on(propelioStickyBtn, "click", (evt) => {
@@ -4406,8 +4514,9 @@ function _removePropelioPolygonButton() {
 
 function _setPropelioPolygonButtonState({ text, disabled }) {
   if (!propelioStickyBtn) return;
-  if (typeof text === "string") propelioStickyBtn.textContent = text;
+  if (typeof text === "string") _setPropelioGetCompsLabel(text, "Deep Pull · ~5 min");
   if (typeof disabled === "boolean") propelioStickyBtn.disabled = disabled;
+  propelioStickyBtn.classList.toggle("is-running", Boolean(disabled));
 }
 
 function _polygonButtonLatLng(latlngs) {
@@ -4440,78 +4549,37 @@ function _polygonButtonLatLng(latlngs) {
 
 async function _pullPropelioByPolygon() {
   if (propelioPolygonPullInFlight || !Array.isArray(lastPolygon) || lastPolygon.length < 3) return;
+  if (_activeDeepPullJobId) return;
 
-  // Auto-save the workspace before pulling comps when there's a saved
-  // target inside the polygon and no workspace is loaded yet. Uses the
-  // target parcel's address as the workspace name (user can rename via
-  // the active-item slot pencil). This guarantees the comps land in
-  // the archive with stable keys, so rating buttons go live on the
-  // first click — no "save twice" race.
-  if (!_currentLoadedAreaId) {
-    const suggestedName = _suggestAreaNameFromContainedParcels();
-    if (suggestedName) {
-      _setPropelioPolygonButtonState({ text: "Saving…", disabled: true });
-      try {
-        await saveCurrentArea(suggestedName);
-      } catch (err) {
-        console.warn("[propelio] auto-save before Get Comps failed:", err);
-      }
-    }
+  const targetAddress = _deriveDeepPullTargetAddress();
+  if (!targetAddress) {
+    _showDeepPullBanner("Search for an address or save a parcel first.");
+    setTimeout(_hideDeepPullBanner, 4000);
+    return;
   }
 
   propelioPolygonPullInFlight = true;
-  _setPropelioPolygonButtonState({ text: "Pulling...", disabled: true });
-  propelioCompLayer.clearLayers();
-  propelioCmaChip.hide();
-
-  let shouldHideButton = false;
+  _setPropelioPolygonButtonState({ text: "Get Comps", disabled: true });
+  _showDeepPullBanner("Pass 0/6, queued - don't refresh, comps are saving in the background...");
   try {
-    const savedAreaId = (typeof _currentLoadedAreaId === "string" ? _currentLoadedAreaId : "") || "";
-    const reqBody = {
-      polygon: lastPolygon,
-      months: PROPELIO_POLYGON_MONTHS,
-    };
-    if (savedAreaId) reqBody.saved_area_id = savedAreaId;
-    const resp = await fetch("/api/propelio/by-polygon", {
+    const resp = await _apiJson("/api/propelio/deep-pull/start", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...authHeaders() },
-      body: JSON.stringify(reqBody),
+      body: JSON.stringify({
+        target_address: targetAddress,
+        saved_area_id: _currentLoadedAreaId || null,
+      }),
     });
-
-    if (!resp.ok) {
-      console.warn("[propelio] by-polygon fetch failed:", resp.status);
-      return;
-    }
-
-    const data = await resp.json();
-    window._propelioLast = data;
-    // applyPropelioClientFilters renders + sets chip + updates count chip
-    applyPropelioClientFilters();
-    console.info(
-      `[propelio] received ${Array.isArray(data?.comps) ? data.comps.length : 0} polygon comp(s)${data.cached ? " (cached)" : ""}`
-    );
-
-    // Race guard: if the user saved an area DURING this in-flight pull,
-    // savedAreaId was empty when the request went out, the backend never
-    // ran the archive merge, and the comps came back without
-    // comp_address_keys — meaning the rating buttons would be disabled.
-    // Detect this and run an attach-to-area pass so the buttons go live
-    // without forcing the user to save twice.
-    const savedAreaIdNow = (typeof _currentLoadedAreaId === "string" ? _currentLoadedAreaId : "") || "";
-    const compsArr = Array.isArray(data?.comps) ? data.comps : [];
-    const compsAreKeyed = compsArr.length > 0 && compsArr.every((c) => Boolean(c?.comp_address_key));
-    if (savedAreaIdNow && compsArr.length > 0 && !compsAreKeyed) {
-      await _reattachPropelioToSavedArea(savedAreaIdNow);
-    }
-
-    shouldHideButton = true;
+    _activeDeepPullJobId = resp.job_id;
+    if (_deepPullPollTimer) clearInterval(_deepPullPollTimer);
+    _deepPullPollTimer = setInterval(_pollDeepPullStatus, 5000);
   } catch (err) {
-    console.error("[propelio] by-polygon fetch error:", err);
+    console.error("[propelio] deep-pull start failed:", err);
+    _showDeepPullBanner("Deep pull failed to start (see console)");
+    setTimeout(_hideDeepPullBanner, 4000);
   } finally {
     propelioPolygonPullInFlight = false;
-    if (shouldHideButton) {
-      _removePropelioPolygonButton();
-    } else {
+    if (!_activeDeepPullJobId) {
       _setPropelioPolygonButtonState({ text: "Get Comps", disabled: false });
     }
   }
@@ -4523,8 +4591,9 @@ function _showPropelioPolygonButton(_latlngs) {
   // sites don't have to change.
   _ensureStickyPropelioButton();
   if (!propelioStickyBtn) return;
-  propelioStickyBtn.textContent = "Get Comps";
+  _setPropelioGetCompsLabel("Get Comps");
   propelioStickyBtn.disabled = false;
+  propelioStickyBtn.classList.remove("is-running");
   if (propelioStickyAnchor) {
     propelioStickyAnchor.classList.add("visible");
   }
@@ -6939,6 +7008,7 @@ map.on("draw:created", async (e) => {
   propelioCompLayerByKey.clear();
   renderPropelioCompList([]);
   propelioCmaChip.hide();
+  void _autoCacheOnDraw();
   _showPropelioPolygonButton(e.layer.getLatLngs()[0]);
   const analysisRequest = beginLatestAnalysisRequest();
 
@@ -7088,6 +7158,11 @@ function clearDrawResults() {
 }
 
 map.on("draw:drawstart", () => {
+  if (!_navigationGuardForActiveDeepPull("draw a new area")) {
+    const handler = getPolygonDrawHandler();
+    if (handler && handler.enabled()) handler.disable();
+    return;
+  }
   bumpUndoPillVersion();
   drawHelper.classList.remove("hidden");
   document.getElementById("btn-draw")?.classList.add("active");
@@ -8322,7 +8397,7 @@ function _updateDeepPullBanner(status) {
   const textEl = document.getElementById("deep-pull-banner-text");
   if (!textEl) return;
   const passCount = `${status.passes_completed}/6`;
-  textEl.textContent = `${status.status} - Pass ${passCount}, ${status.total_unique_comps} unique so far`;
+  textEl.textContent = `${status.status} - Pass ${passCount}, ${status.total_unique_comps} unique so far. Don't refresh.`;
 }
 
 function _hideDeepPullBanner() {
@@ -8356,7 +8431,8 @@ async function startDeepPull() {
     });
     _activeDeepPullJobId = resp.job_id;
     console.log("[deep-pull] job started:", resp);
-    _showDeepPullBanner("Pass 0/6, queued - warming up...");
+    _setPropelioPolygonButtonState({ text: "Get Comps", disabled: true });
+    _showDeepPullBanner("Pass 0/6, queued - warming up... Don't refresh.");
     if (_deepPullPollTimer) clearInterval(_deepPullPollTimer);
     _deepPullPollTimer = setInterval(_pollDeepPullStatus, 5000);
   } catch (err) {
@@ -8383,6 +8459,12 @@ async function _pollDeepPullStatus() {
       _showDeepPullBanner(
         `Job ${resp.status} - ${resp.passes_completed}/6 passes, ${resp.total_unique_comps} unique comps. Job ID: ${finishedJobId}`
       );
+      try {
+        await _fetchPolygonCacheOnly();
+      } catch (err) {
+        console.warn("[deep-pull] post-complete cache refresh failed:", err);
+      }
+      _setPropelioPolygonButtonState({ text: "Get Comps", disabled: false });
       setTimeout(_hideDeepPullBanner, 6000);
     }
   } catch (err) {
