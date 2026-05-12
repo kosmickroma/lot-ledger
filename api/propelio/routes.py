@@ -351,10 +351,20 @@ async def _run_by_polygon(request: PolygonRequest, *, use_cache: bool) -> dict[s
                     "account_num": subject_parcel["account_num"],
                 }
 
+            comps_in_polygon = sum(
+                1
+                for comp in cached_global
+                if not (
+                    isinstance(comp.get("extra"), dict)
+                    and comp["extra"].get("is_outside_polygon")
+                )
+            )
+            comps_outside_polygon = len(cached_global) - comps_in_polygon
+
             polygon_meta: dict[str, Any] = {
                 "centroid": {"lat": _centroid_lat, "lng": _centroid_lng},
-                "comps_in_polygon": len(cached_global),
-                "comps_outside_polygon": 0,
+                "comps_in_polygon": comps_in_polygon,
+                "comps_outside_polygon": comps_outside_polygon,
                 "comps_pulled": len(cached_global),
                 "subject_parcel": subject_parcel,
             }

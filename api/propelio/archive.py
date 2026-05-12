@@ -15,6 +15,7 @@ from typing import Any
 from psycopg2.extras import Json
 
 from api.config import get_session_conn, release_session_conn
+from api.geo import haversine_miles, polygon_centroid
 from api.redfin import normalize_addr_key
 
 
@@ -526,6 +527,15 @@ def load_comps_by_polygon(
     if ring[0] != ring[-1]:
         ring = ring + [ring[0]]
 
+    centroid_lat, centroid_lng = polygon_centroid(polygon_latlngs)
+    circumradius_mi = max(
+        haversine_miles(centroid_lat, centroid_lng, point_lat, point_lng)
+        for point_lng, point_lat in polygon_latlngs
+    )
+    buffered_radius_mi = circumradius_mi * 1.05
+    effective_radius_mi = min(max(buffered_radius_mi, 0.1), 10.0)
+    circumradius_meters = effective_radius_mi * 1609.344
+
     geojson_polygon = {
         "type": "Polygon",
         "coordinates": [ring],
@@ -546,17 +556,31 @@ def load_comps_by_polygon(
                     pc.parcel_geom,
                     pc.parcel_account_num,
                     pc.parcel_county,
-                    cr.rating AS user_rating
+                                        cr.rating AS user_rating,
+                                        NOT ST_Within(
+                                                pc.geom,
+                                                ST_GeomFromGeoJSON(%(polygon)s)::geometry
+                                        ) AS is_outside_polygon
                 FROM propelio_comps pc
                 LEFT JOIN comp_ratings cr
                     ON cr.comp_id = pc.comp_id
                     AND cr.workspace_id = %(workspace_id)s
                 WHERE pc.geom IS NOT NULL
-                  AND ST_Within(pc.geom, ST_GeomFromGeoJSON(%(polygon)s)::geometry)
+                                    AND (
+                                        ST_Within(pc.geom, ST_GeomFromGeoJSON(%(polygon)s)::geometry)
+                                        OR ST_DWithin(
+                                                pc.geom::geography,
+                                                ST_SetSRID(ST_MakePoint(%(centroid_lng)s, %(centroid_lat)s), 4326)::geography,
+                                                %(circumradius_meters)s
+                                        )
+                                    )
                 """,
                 {
                     "workspace_id": workspace_id,
                     "polygon": geojson_str,
+                                        "centroid_lat": centroid_lat,
+                                        "centroid_lng": centroid_lng,
+                                        "circumradius_meters": circumradius_meters,
                 },
             )
             rows = cur.fetchall() or []
@@ -565,13 +589,25 @@ def load_comps_by_polygon(
 
     result: list[dict[str, Any]] = []
     for row in rows:
-        parsed_payload, comp_address_key, parcel_geom, parcel_account_num, parcel_county, user_rating = row
+        (
+            parsed_payload,
+            comp_address_key,
+            parcel_geom,
+            parcel_account_num,
+            parcel_county,
+            user_rating,
+            is_outside_polygon,
+        ) = row
         comp = dict(parsed_payload) if isinstance(parsed_payload, dict) else {}
         comp["comp_address_key"] = comp_address_key
         comp["parcel_geom"] = parcel_geom if isinstance(parcel_geom, (dict, list)) else None
         comp["parcel_account_num"] = str(parcel_account_num or "").strip() or None
         comp["parcel_county"] = str(parcel_county or "").strip() or None
         comp["user_rating"] = str(user_rating).strip().lower() if user_rating is not None else None
+        if is_outside_polygon:
+            extra = comp.setdefault("extra", {})
+            if isinstance(extra, dict):
+                extra["is_outside_polygon"] = True
         result.append(comp)
 
     return result
