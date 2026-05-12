@@ -293,12 +293,13 @@ KK's call which path to take. Recommended: add deep-pull → global write as a t
 
 ---
 
-## Open decisions to confirm before writing Copilot prompts
+## Decisions locked (KK confirmed 2026-05-11)
 
-1. **Does deep-pull write to global table during MVP?** (Recommended yes, for pre-seeding.) If yes, that's a small addition to Chunk 2 — deep-pull's `_insert_pass_comps` ALSO writes to global. ~30 min.
-2. **Feature flag for cache read?** (`PHASE_2_CACHE_READ=true` to enable cache-first behavior.) Conservative option: ship Chunks 1+2 first (writing-only, no read change), let cache fill, then enable read in a separate deploy. Aggressive option: ship all three chunks at once with the read change live. Aggressive is faster but riskier.
-3. **Where does the cache-or-scrape fallback decision live?** Inside `_run_by_polygon` (current proposal) or a new orchestrator function? Probably current — minimal disruption.
-4. **PostGIS extension verification needed before Chunk 1.** I'll add a check to the spec.
+1. **Deep-pull DOES write to global table during MVP.** ~30 min addition to Chunk 2: `api/propelio/deep_pull.py:_insert_pass_comps` ALSO upserts into `propelio_comps`. Enables the pre-seeding strategy — KK can run the seed campaign immediately after Chunks 1+2 ship.
+2. **Conservative feature-flag rollout for cache reads.** Ship Chunks 1+2 first (write-only). Cache populates organically + via deep-pull seed runs over ~3-5 days. Then a separate deploy enables cache-first reads via the gate. The gate: env var `PHASE_2_CACHE_READ=true` set on Cloud Run, checked at request time in the read path.
+3. **Cache-or-scrape decision lives inside `_run_by_polygon`.** Minimal disruption to existing call sites. Phase 2.5 could refactor into a dedicated orchestrator function later.
+4. **PostGIS extension verification — task for Chunk 1.** Copilot must verify PostGIS is enabled on the session DB BEFORE writing the geom column DDL. If not enabled, the chunk pauses and we add `CREATE EXTENSION postgis` to `_ensure_session_schema` (requires confirming Cloud SQL flag allows it).
+5. **Implementation branch:** continue on `feat/propelio-deep-pull-experiment`. Adds Phase 2 commits on top of the experimental work. Less clean than branching off develop fresh, but simpler workflow.
 
 ---
 
