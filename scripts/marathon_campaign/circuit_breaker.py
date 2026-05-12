@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import logging
 
+from psycopg2.extras import Json
+
 from api.config import get_session_conn, release_session_conn
 
 
@@ -142,7 +144,7 @@ class CircuitBreaker:
                             self.last_failure_at,
                             self.cooldown_until,
                             int(self.consecutive_rate_limits),
-                            self.error_window,
+                            Json(self.error_window),
                             int(self._persist_fail_count),
                             self._last_persist_fail_at,
                             int(self.campaign_id),
