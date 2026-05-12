@@ -1854,6 +1854,7 @@ async function _hydratePropelioFromArchive(savedAreaId) {
   if (!savedAreaId) return;
   // Reset any prior workspace's propelio state first.
   window._propelioLast = null;
+  _updatePropelioStatusCounts();
   propelioCompLayer.clearLayers();
   propelioCompLayerByKey.clear();
   renderPropelioCompList([]);
@@ -1874,6 +1875,7 @@ async function _hydratePropelioFromArchive(savedAreaId) {
     const comps = Array.isArray(data?.comps) ? data.comps : [];
     if (!comps.length) return;
     window._propelioLast = { comps };
+    _updatePropelioStatusCounts();
     applyPropelioClientFilters();
   } catch (err) {
     console.error("[propelio] hydrate error:", err);
@@ -1902,6 +1904,7 @@ async function _reattachPropelioToSavedArea(savedAreaId) {
       comps: Array.isArray(data?.comps) ? data.comps : window._propelioLast.comps,
       archive_meta: data?.archive_meta || null,
     };
+    _updatePropelioStatusCounts();
     applyPropelioClientFilters();
   } catch (err) {
     console.error("[propelio] attach-to-area error:", err);
@@ -3695,6 +3698,25 @@ const propelioCmaChip = new PropelioCmaChip().addTo(map);
 
 const PROPELIO_POLYGON_MONTHS = 24;
 
+function _updatePropelioStatusCounts() {
+  const comps = Array.isArray(window._propelioLast?.comps) ? window._propelioLast.comps : [];
+  const counts = { sold: 0, for_sale: 0, pending: 0 };
+  for (const c of comps) {
+    const s = String(c?.status || "").toLowerCase();
+    if (s === "sold") counts.sold += 1;
+    else if (s === "for_sale" || s === "active") counts.for_sale += 1;
+    else if (s === "pending") counts.pending += 1;
+  }
+  const soldEl = document.getElementById("prop-count-sold");
+  const activeEl = document.getElementById("prop-count-active");
+  const pendingEl = document.getElementById("prop-count-pending");
+  if (soldEl) soldEl.textContent = String(counts.sold);
+  if (activeEl) activeEl.textContent = String(counts.for_sale);
+  if (pendingEl) pendingEl.textContent = String(counts.pending);
+}
+
+_updatePropelioStatusCounts();
+
 function _propelioCompLatLng(comp) {
   const lat = Number(comp?.extra?.lat);
   const lng = Number(comp?.extra?.lon ?? comp?.extra?.lng);
@@ -4290,6 +4312,7 @@ async function pullPropelioRefresh() {
       data = await resp.json();
     }
     window._propelioLast = data;
+    _updatePropelioStatusCounts();
     applyPropelioClientFilters();
   } catch (err) {
     console.error("[propelio] refresh error:", err);
@@ -4430,6 +4453,7 @@ async function _fetchPolygonCacheOnly() {
 
   if (Array.isArray(resp?.comps) && resp.comps.length > 0) {
     window._propelioLast = resp;
+    _updatePropelioStatusCounts();
     applyPropelioClientFilters();
     _hideCacheEmptyChip();
   } else {
@@ -4620,6 +4644,7 @@ async function firePropelioFetch(addressString) {
     }
     const data = await resp.json();
     window._propelioLast = data;
+    _updatePropelioStatusCounts();
     // applyPropelioClientFilters renders + sets chip + updates count chip
     applyPropelioClientFilters();
     console.info(
@@ -7120,6 +7145,7 @@ function clearDrawResults() {
   propelioCompLayer.clearLayers();
   propelioCompLayerByKey.clear();
   window._propelioLast = null;
+  _updatePropelioStatusCounts();
   propelioCmaChip.hide();
   renderPropelioCompList([]);
   const _propelioCountEl = document.getElementById("propelio-filter-count");
