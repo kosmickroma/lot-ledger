@@ -393,8 +393,14 @@ def _parse_cma_envelope_comps(envelope: dict[str, Any]) -> list[dict[str, Any]]:
     return [item for item in sales if isinstance(item, dict)]
 
 
-async def run_deep_pull(job_id: str) -> None:
-    """Detached worker that executes multi-pass deep pull for one job."""
+async def run_deep_pull(job_id: str, passes: list[dict[str, Any]] | None = None) -> None:
+    """Detached worker that executes multi-pass deep pull for one job.
+
+    passes: optional per-job pass config (used by marathon runner for
+    density-aware urban/rural splits). Defaults to module-level PASSES.
+    """
+    passes_config = passes if passes is not None else PASSES
+
     try:
         target_address = _claim_job_for_running(job_id)
         if target_address is None:
@@ -409,7 +415,7 @@ async def run_deep_pull(job_id: str) -> None:
                 _mark_job_status(job_id, "stopped")
             return
 
-        first_cfg = PASSES[0]
+        first_cfg = passes_config[0]
         logger.info(
             "[deep-pull job=%s] Pass 1: months=%d range=%.2fmi label=%s",
             job_id,
@@ -453,7 +459,7 @@ async def run_deep_pull(job_id: str) -> None:
             _mark_job_status(job_id, "saturated")
             return
 
-        for pass_num in range(2, len(PASSES) + 1):
+        for pass_num in range(2, len(passes_config) + 1):
             if _is_stop_requested(job_id):
                 current_status = _get_job_status(job_id)
                 if current_status not in {"error", "blocked", "completed", "saturated", "stopped"}:
@@ -471,7 +477,7 @@ async def run_deep_pull(job_id: str) -> None:
                     _mark_job_status(job_id, "stopped")
                 return
 
-            cfg = PASSES[pass_num - 1]
+            cfg = passes_config[pass_num - 1]
             logger.info(
                 "[deep-pull job=%s] Pass %d: months=%d range=%.2fmi label=%s",
                 job_id,
@@ -505,7 +511,7 @@ async def run_deep_pull(job_id: str) -> None:
                 return
 
         _mark_job_status(job_id, "completed")
-        logger.info("[deep-pull job=%s] completed all %d passes", job_id, len(PASSES))
+        logger.info("[deep-pull job=%s] completed all %d passes", job_id, len(passes_config))
 
     except Exception as exc:
         terminal_status = _classify_propelio_error(exc)
