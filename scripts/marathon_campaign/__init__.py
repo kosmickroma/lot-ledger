@@ -10,6 +10,7 @@
 from .state import ALLOWED_TRANSITIONS, IllegalStateTransition, transition
 from .circuit_breaker import CircuitBreaker
 from .cooldown import wait_for_cooldown_or_exit
+from .pacing import inter_seed_pause_seconds, maybe_take_break
 
 __all__ = [
     "ALLOWED_TRANSITIONS",
@@ -17,4 +18,6 @@ __all__ = [
     "transition",
     "CircuitBreaker",
     "wait_for_cooldown_or_exit",
+    "inter_seed_pause_seconds",
+    "maybe_take_break",
 ]
