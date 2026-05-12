@@ -16,9 +16,12 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import logging
 import os
 import random
+import signal
 import socket
+import sys
 import uuid
 from typing import Any
 
@@ -30,6 +33,13 @@ from .circuit_breaker import CircuitBreaker
 from .cooldown import wait_for_cooldown_or_exit
 from .pacing import inter_seed_pause_seconds, maybe_take_break
 from .state import IllegalStateTransition, transition
+
+
+logger = logging.getLogger(__name__)
+
+
+_current_seed: dict[str, Any] | None = None
+_run_end_reason: str | None = None
 
 
 def _utcnow() -> datetime:
@@ -58,6 +68,63 @@ class PropelioAuthError(Exception):
 
 class PropelioRateLimitError(Exception):
     pass
+
+
+def get_run_end_reason() -> str | None:
+    return _run_end_reason
+
+
+def stop_deep_pull_remote(job_id: str) -> None:
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE propelio_deep_pull_jobs SET stop_requested = TRUE WHERE job_id = %s",
+                (str(job_id),),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        release_session_conn(conn)
+
+
+def _handle_sigint_transition() -> None:
+    global _run_end_reason
+
+    seed = _current_seed
+    if seed is None:
+        _run_end_reason = "sigint"
+        return
+
+    try:
+        seed_id = int(seed["seed_id"])
+        job_id = str(seed.get("job_id") or "").strip() or None
+
+        if job_id:
+            result = transition(seed_id, "running", "stopping_requested")
+            if result.success:
+                stop_deep_pull_remote(job_id)
+        else:
+            transition(seed_id, "running", "queued", retry_after=None)
+    except IllegalStateTransition:
+        # Race-safe: seed may already have transitioned in another worker path.
+        pass
+    except Exception:
+        logger.exception("sigint handler transition failed (non-fatal)")
+    finally:
+        _run_end_reason = "sigint"
+
+
+def on_sigint(signum: int, frame: Any) -> None:
+    _handle_sigint_transition()
+    sys.exit(0)
+
+
+def setup_sigint_handler() -> None:
+    signal.signal(signal.SIGINT, on_sigint)
+    signal.signal(signal.SIGTERM, on_sigint)
 
 
 def _truncate_error(value: object, limit: int = 500) -> str:
@@ -645,7 +712,13 @@ async def run_campaign(
     *,
     mock: bool = False,
     max_seeds: int | None = None,
-) -> None:
+) -> int:
+    global _current_seed, _run_end_reason
+
+    _current_seed = None
+    _run_end_reason = None
+    setup_sigint_handler()
+
     campaign = _load_campaign(campaign_key)
     if campaign is None:
         raise ValueError(f"campaign not found: {campaign_key}")
@@ -673,8 +746,11 @@ async def run_campaign(
 
         seed = claim_next_seed(campaign_id, runner_id)
         if seed is None:
+            _run_end_reason = "completed"
             print(f"campaign={campaign_key} done — no claimable seeds remaining")
             break
+
+        _current_seed = dict(seed)
 
         seed_id = int(seed["seed_id"])
 
@@ -692,6 +768,7 @@ async def run_campaign(
                         (job_id, seed_id),
                     )
                 conn.commit()
+                _current_seed = {**seed, "job_id": job_id}
             except Exception:
                 conn.rollback()
                 raise
@@ -744,6 +821,7 @@ async def run_campaign(
                 )
                 breaker.record_outcome("error")
         except PropelioAuthError:
+            _run_end_reason = "auth_block"
             raise
         except PropelioRateLimitError as exc:
             breaker.trip("rate_limit", cooldown_min=30)
@@ -775,6 +853,7 @@ async def run_campaign(
         seeds_processed += 1
 
         if max_seeds is not None and seeds_processed >= int(max_seeds):
+            _run_end_reason = "max_seeds_reached"
             print(f"[marathon-runner] max_seeds={max_seeds} reached, exiting clean")
             break
 
@@ -787,6 +866,13 @@ async def run_campaign(
                 print(f"[marathon-runner] {kind}_break {duration:.0f}s")
                 await asyncio.sleep(duration)
                 last_break_at = asyncio.get_running_loop().time()
+
+        _current_seed = None
+
+    _current_seed = None
+    if _run_end_reason is None:
+        _run_end_reason = "completed"
+    return seeds_processed
 
 
 def status_campaign(campaign_key: str) -> dict[str, int]:

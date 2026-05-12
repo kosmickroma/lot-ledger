@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 
-from .runner import default_runner_id, run_campaign, status_campaign
+from .runner import default_runner_id, get_run_end_reason, run_campaign, status_campaign
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -35,13 +35,18 @@ def main() -> None:
 
     if args.cmd == "run":
         runner_id = args.runner_id or default_runner_id()
-        asyncio.run(
+        seeds_processed = asyncio.run(
             run_campaign(
                 campaign_key=args.campaign,
                 runner_id=runner_id,
                 mock=bool(args.mock_pull),
                 max_seeds=args.max_seeds,
             )
+        )
+        run_end_reason = get_run_end_reason() or "unknown"
+        print(
+            f"[marathon-runner] campaign={args.campaign} "
+            f"run_end_reason={run_end_reason} seeds_processed={int(seeds_processed)}"
         )
         return
 
