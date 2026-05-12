@@ -13,21 +13,24 @@ import asyncio
 import hashlib
 import json
 import logging
+import secrets
 from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any
 
 import requests
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
+from api.auth import get_current_user
 from api.config import get_conn, get_session_conn, release_conn, release_session_conn
 from api.geo import haversine_miles, point_in_polygon, polygon_centroid
 from api.redfin import normalize_addr_key
 
 from .archive import load_archived_comps, merge_comps_into_archive, set_comp_rating
+from .deep_pull import STALE_JOB_THRESHOLD_MINUTES, run_deep_pull
 from .parcel_match import match_comps_to_parcels
 from . import cache as cache_mod
 from . import scraper as scraper_mod
@@ -51,6 +54,17 @@ class RefreshRequest(BaseModel):
     saved_area_id: str
     months: int = 24
     range_override_mi: float | None = None
+
+
+class DeepPullStartRequest(BaseModel):
+    target_address: str
+    saved_area_id: str | None = None
+
+
+def _ensure_deep_pull_role(user: dict[str, Any]) -> None:
+    role = str(user.get("role") or "").strip().lower()
+    if role not in {"developer", "owner"}:
+        raise HTTPException(status_code=403, detail="Deep pull is developer-only")
 
 
 def _fetch_propelio_photo_response(photo_url: str):
@@ -619,6 +633,162 @@ async def get_by_saved_area(saved_area_id: str = Query(..., min_length=1)) -> di
     if not normalized:
         raise HTTPException(status_code=400, detail="saved_area_id is required")
     return {"comps": load_archived_comps(normalized)}
+
+
+@router.post("/deep-pull/start")
+async def start_deep_pull(
+    request: DeepPullStartRequest,
+    user: dict = Depends(get_current_user),
+) -> dict[str, Any]:
+    _ensure_deep_pull_role(user)
+
+    address = str(request.target_address or "").strip()
+    if not address:
+        raise HTTPException(status_code=400, detail="target_address is required")
+    saved_area_id = str(request.saved_area_id or "").strip() or None
+
+    job_id = "dp_" + secrets.token_urlsafe(8)
+
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO propelio_deep_pull_jobs
+                    (job_id, target_address, saved_area_id, started_by_user_id, status)
+                VALUES (%s, %s, %s, %s, 'queued')
+                """,
+                (job_id, address, saved_area_id, int(user["id"])),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        release_session_conn(conn)
+
+    asyncio.create_task(run_deep_pull(job_id))
+    return {"job_id": job_id}
+
+
+@router.get("/deep-pull/status/{job_id}")
+async def get_deep_pull_status(
+    job_id: str,
+    user: dict = Depends(get_current_user),
+) -> dict[str, Any]:
+    _ensure_deep_pull_role(user)
+    normalized_job_id = str(job_id or "").strip()
+    if not normalized_job_id:
+        raise HTTPException(status_code=400, detail="job_id is required")
+
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE propelio_deep_pull_jobs
+                SET status='error',
+                    last_error='Worker interrupted (stale)',
+                    stop_requested=TRUE
+                WHERE job_id = %s
+                  AND status='running'
+                  AND started_at < NOW() - (%s * INTERVAL '1 minute')
+                  AND (last_pass_at IS NULL OR last_pass_at < NOW() - (%s * INTERVAL '1 minute'))
+                  AND (next_pass_at IS NULL OR next_pass_at < NOW())
+                """,
+                (normalized_job_id, STALE_JOB_THRESHOLD_MINUTES, STALE_JOB_THRESHOLD_MINUTES),
+            )
+
+            cur.execute(
+                """
+                SELECT job_id, status, passes_completed, total_unique_comps,
+                       last_pass_at, next_pass_at, last_error, started_at, stop_requested
+                FROM propelio_deep_pull_jobs
+                WHERE job_id = %s
+                """,
+                (normalized_job_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Job not found")
+
+            cur.execute(
+                """
+                SELECT pass_num,
+                       months,
+                       range_mi,
+                       pass_label,
+                       COUNT(*) AS returned,
+                       COUNT(*) FILTER (WHERE is_first_seen_in_job) AS new_comps,
+                       MAX(fetched_at) AS completed_at
+                FROM propelio_deep_pull_experiment
+                WHERE job_id = %s
+                GROUP BY pass_num, months, range_mi, pass_label
+                ORDER BY pass_num
+                """,
+                (normalized_job_id,),
+            )
+            per_pass = [
+                {
+                    "pass_num": r[0],
+                    "months": r[1],
+                    "range_mi": float(r[2]),
+                    "label": r[3],
+                    "returned": int(r[4] or 0),
+                    "new": int(r[5] or 0),
+                    "completed_at": r[6].isoformat() if r[6] else None,
+                }
+                for r in (cur.fetchall() or [])
+            ]
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        release_session_conn(conn)
+
+    return {
+        "job_id": row[0],
+        "status": row[1],
+        "passes_completed": int(row[2] or 0),
+        "total_unique_comps": int(row[3] or 0),
+        "last_pass_at": row[4].isoformat() if row[4] else None,
+        "next_pass_at": row[5].isoformat() if row[5] else None,
+        "last_error": row[6],
+        "started_at": row[7].isoformat() if row[7] else None,
+        "stop_requested": bool(row[8]),
+        "per_pass": per_pass,
+    }
+
+
+@router.post("/deep-pull/stop/{job_id}")
+async def stop_deep_pull(
+    job_id: str,
+    user: dict = Depends(get_current_user),
+) -> dict[str, Any]:
+    _ensure_deep_pull_role(user)
+    normalized_job_id = str(job_id or "").strip()
+    if not normalized_job_id:
+        raise HTTPException(status_code=400, detail="job_id is required")
+
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE propelio_deep_pull_jobs
+                SET stop_requested = TRUE
+                WHERE job_id = %s
+                """,
+                (normalized_job_id,),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        release_session_conn(conn)
+    return {"ok": True}
 
 
 class AttachExistingRequest(BaseModel):

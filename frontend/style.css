@@ -3045,3 +3045,33 @@ h1 {
   margin-top: 4px;
   text-align: center;
 }
+
+.deep-pull-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  margin: 6px 0;
+  background: rgba(247, 227, 161, 0.18);
+  border: 1px solid rgba(212, 175, 55, 0.6);
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.deep-pull-banner.hidden {
+  display: none;
+}
+
+.deep-pull-banner-icon {
+  display: inline-block;
+  animation: deep-pull-spin 1.5s linear infinite;
+}
+
+@keyframes deep-pull-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}

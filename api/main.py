@@ -291,6 +291,60 @@ def _ensure_session_schema() -> None:
                 )
                 """
             )
+            if os.environ.get("DEEP_PULL_EXPERIMENT") == "true":
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS propelio_deep_pull_jobs (
+                        job_id TEXT PRIMARY KEY,
+                        saved_area_id TEXT,
+                        started_by_user_id INTEGER REFERENCES users(id),
+                        target_address TEXT NOT NULL,
+                        target_lat NUMERIC,
+                        target_lng NUMERIC,
+                        lead_id TEXT,
+                        cma_id TEXT,
+                        status TEXT NOT NULL DEFAULT 'queued'
+                            CHECK (status IN ('queued', 'running', 'completed', 'stopped',
+                                              'error', 'saturated', 'blocked')),
+                        started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        last_pass_at TIMESTAMPTZ,
+                        next_pass_at TIMESTAMPTZ,
+                        passes_completed INTEGER NOT NULL DEFAULT 0,
+                        total_unique_comps INTEGER NOT NULL DEFAULT 0,
+                        last_error TEXT,
+                        stop_requested BOOLEAN NOT NULL DEFAULT FALSE
+                    )
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_deep_pull_jobs_status
+                        ON propelio_deep_pull_jobs (status, next_pass_at)
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS propelio_deep_pull_experiment (
+                        id BIGSERIAL PRIMARY KEY,
+                        job_id TEXT NOT NULL REFERENCES propelio_deep_pull_jobs(job_id) ON DELETE CASCADE,
+                        pass_num INTEGER NOT NULL,
+                        months INTEGER NOT NULL,
+                        range_mi NUMERIC NOT NULL,
+                        pass_label TEXT,
+                        comp_address_key TEXT NOT NULL,
+                        comp_data JSONB NOT NULL,
+                        is_first_seen_in_job BOOLEAN NOT NULL,
+                        fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        UNIQUE (job_id, pass_num, comp_address_key)
+                    )
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_deep_pull_exp_job
+                        ON propelio_deep_pull_experiment (job_id, pass_num)
+                    """
+                )
             _run_schema_steps(
                 cur,
                 [

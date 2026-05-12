@@ -527,6 +527,9 @@ let _savedParcelsCache = [];
 let _currentSessionIsNamed = false;
 let _savedSessionsCache = [];
 let _currentLoadedAreaId = null;
+// Tracks the most recent address the user searched or selected via typeahead.
+// Deep Pull uses this as the target address for the experimental run.
+let _lastSearchedAddress = null;
 let _selectedSavedItemId = null;
 const _initialAreaShareId = (() => {
   try {
@@ -4678,6 +4681,7 @@ const AddressSearch = L.Control.extend({
     const selectSuggestion = (idx) => {
       const item = suggestItems[idx];
       if (!item) return;
+      _lastSearchedAddress = item.address;
       highlightSearchResult([Number(item.lat), Number(item.lng)]);
     };
 
@@ -4748,6 +4752,7 @@ const AddressSearch = L.Control.extend({
     const doSearch = async () => {
       const q = input.value.trim();
       if (!q) return;
+      _lastSearchedAddress = q;
       clearSuggestList();
       btn.disabled = true;
       btn.textContent = "…";
@@ -7791,6 +7796,7 @@ function _showLoginForm(errorMsg = "") {
       if (resp.ok) {
         _hideAuthModal();
         _currentUser = data.user || data;
+        _maybeShowDeepPullButton();
         _renderUserBar(_currentUser);
         await _reloadSavedResources().catch((err) => console.error("load saved resources failed", err));
         _maybeShowImportBanner();
@@ -8253,6 +8259,7 @@ async function _loadAreaFromShareId(shareId) {
     if (resp.ok) {
       const data = await resp.json().catch(() => ({}));
       _currentUser = data.user || data;
+      _maybeShowDeepPullButton();
       _renderUserBar(_currentUser);
       await _reloadSavedResources().catch((err) => console.error("load saved resources failed", err));
       _maybeShowImportBanner();
@@ -8284,3 +8291,117 @@ function _esc(str) {
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
 }
+
+// =============================================================================
+// EXPERIMENTAL: Propelio Deep Pull (dev-only, throwaway scaffold)
+// Removed once the permanent comps DB + production deep-pull is built.
+// =============================================================================
+
+let _deepPullPollTimer = null;
+let _activeDeepPullJobId = null;
+
+function _maybeShowDeepPullButton() {
+  const btn = document.getElementById("btn-deep-pull");
+  if (!btn) return;
+  const role = (_currentUser && _currentUser.role) || "";
+  if (role === "developer" || role === "owner") {
+    btn.style.display = "inline-block";
+  } else {
+    btn.style.display = "none";
+  }
+}
+
+function _showDeepPullBanner(text) {
+  const banner = document.getElementById("deep-pull-banner");
+  const textEl = document.getElementById("deep-pull-banner-text");
+  if (banner) banner.classList.remove("hidden");
+  if (textEl) textEl.textContent = text;
+}
+
+function _updateDeepPullBanner(status) {
+  const textEl = document.getElementById("deep-pull-banner-text");
+  if (!textEl) return;
+  const passCount = `${status.passes_completed}/6`;
+  textEl.textContent = `${status.status} - Pass ${passCount}, ${status.total_unique_comps} unique so far`;
+}
+
+function _hideDeepPullBanner() {
+  const banner = document.getElementById("deep-pull-banner");
+  if (banner) banner.classList.add("hidden");
+}
+
+async function startDeepPull() {
+  const address = _lastSearchedAddress;
+  if (!address) {
+    console.warn("[deep-pull] no target address. Search for an address first.");
+    _showDeepPullBanner("No target address - search for an address first");
+    setTimeout(_hideDeepPullBanner, 4000);
+    return;
+  }
+
+  if (_activeDeepPullJobId) {
+    console.log("[deep-pull] already running, ignoring duplicate start");
+    return;
+  }
+
+  console.log("[deep-pull] starting for address:", address);
+  try {
+    const resp = await _apiJson("/api/propelio/deep-pull/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify({
+        target_address: address,
+        saved_area_id: _currentLoadedAreaId || null,
+      }),
+    });
+    _activeDeepPullJobId = resp.job_id;
+    console.log("[deep-pull] job started:", resp);
+    _showDeepPullBanner("Pass 0/6, queued - warming up...");
+    if (_deepPullPollTimer) clearInterval(_deepPullPollTimer);
+    _deepPullPollTimer = setInterval(_pollDeepPullStatus, 5000);
+  } catch (err) {
+    console.error("[deep-pull] start failed:", err);
+    _showDeepPullBanner("Deep pull failed to start (see console)");
+    setTimeout(_hideDeepPullBanner, 4000);
+  }
+}
+
+async function _pollDeepPullStatus() {
+  if (!_activeDeepPullJobId) return;
+  try {
+    const resp = await _apiJson(`/api/propelio/deep-pull/status/${_activeDeepPullJobId}`);
+    console.log("[deep-pull] status tick:", resp);
+    _updateDeepPullBanner(resp);
+    if (["completed", "saturated", "stopped", "error", "blocked"].includes(resp.status)) {
+      if (_deepPullPollTimer) {
+        clearInterval(_deepPullPollTimer);
+        _deepPullPollTimer = null;
+      }
+      const finishedJobId = _activeDeepPullJobId;
+      _activeDeepPullJobId = null;
+      console.log("[deep-pull] FINAL summary:", resp);
+      _showDeepPullBanner(
+        `Job ${resp.status} - ${resp.passes_completed}/6 passes, ${resp.total_unique_comps} unique comps. Job ID: ${finishedJobId}`
+      );
+      setTimeout(_hideDeepPullBanner, 6000);
+    }
+  } catch (err) {
+    console.error("[deep-pull] poll failed:", err);
+  }
+}
+
+async function stopDeepPull() {
+  if (!_activeDeepPullJobId) return;
+  console.log("[deep-pull] stop requested for", _activeDeepPullJobId);
+  try {
+    await _apiJson(`/api/propelio/deep-pull/stop/${_activeDeepPullJobId}`, {
+      method: "POST",
+      headers: authHeaders(),
+    });
+  } catch (err) {
+    console.error("[deep-pull] stop failed:", err);
+  }
+}
+
+document.getElementById("btn-deep-pull")?.addEventListener("click", startDeepPull);
+document.getElementById("btn-deep-pull-stop")?.addEventListener("click", stopDeepPull);
