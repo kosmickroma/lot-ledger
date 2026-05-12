@@ -3698,8 +3698,10 @@ const propelioCmaChip = new PropelioCmaChip().addTo(map);
 
 const PROPELIO_POLYGON_MONTHS = 24;
 
-function _updatePropelioStatusCounts() {
-  const comps = Array.isArray(window._propelioLast?.comps) ? window._propelioLast.comps : [];
+function _updatePropelioStatusCounts(visibleComps) {
+  const comps = Array.isArray(visibleComps)
+    ? visibleComps
+    : (Array.isArray(window._propelioLast?.comps) ? window._propelioLast.comps : []);
   const counts = { sold: 0, for_sale: 0, pending: 0 };
   for (const c of comps) {
     const s = String(c?.status || "").toLowerCase();
@@ -4052,6 +4054,7 @@ function applyPropelioClientFilters() {
   // Map view: render every passing comp (good/unrated AND bad — bad gets
   // the `.bad-comp` class for visual de-emphasis but stays on the map).
   const visibleOnMap = all.filter((c) => compPassesPropelioFilters(c, propelioFilterState));
+  _updatePropelioStatusCounts(visibleOnMap);
   _renderPropelioComps({ ...window._propelioLast, comps: visibleOnMap });
   // Re-set the chip from the ORIGINAL data so chip totals reflect raw pull
   // (filtering is for the map; chip stays accurate to what Propelio sent).
