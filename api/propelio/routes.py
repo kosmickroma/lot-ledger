@@ -340,11 +340,57 @@ async def _run_by_polygon(request: PolygonRequest, *, use_cache: bool) -> dict[s
                 len(cached_global),
                 saved_area_id,
             )
-            return {
-                "cached": True,
-                "comps": cached_global,
-                "phase2_cache": True,
+            _centroid_lat, _centroid_lng = polygon_centroid(polygon)
+
+            subject_parcel = _nearest_subject_parcel(_centroid_lat, _centroid_lng)
+            subject: dict[str, Any] | None = None
+            if subject_parcel:
+                subject = {
+                    "address": subject_parcel["address"],
+                    "county": subject_parcel["county"],
+                    "account_num": subject_parcel["account_num"],
+                }
+
+            polygon_meta: dict[str, Any] = {
+                "centroid": {"lat": _centroid_lat, "lng": _centroid_lng},
+                "comps_in_polygon": len(cached_global),
+                "comps_outside_polygon": 0,
+                "comps_pulled": len(cached_global),
+                "subject_parcel": subject_parcel,
             }
+
+            cma_settings: dict[str, Any] = {
+                "months": int(request.months),
+                "range": "(cached)",
+                "sales_count": len(cached_global),
+            }
+
+            try:
+                balance: int | None = cache_mod.latest_quota_balance()
+            except Exception:
+                balance = None
+
+            ph2_archive_meta: dict[str, Any] | None = None
+            if saved_area_id:
+                try:
+                    ph2_archive_meta = merge_comps_into_archive(saved_area_id, cached_global)
+                except Exception as _ae:
+                    logger.warning(
+                        "[propelio] archive sync failed on cache-hit (non-fatal): %s", _ae
+                    )
+
+            response: dict[str, Any] = {
+                "cached": True,
+                "phase2_cache": True,
+                "comps": cached_global,
+                "polygon_meta": polygon_meta,
+                "cma_settings": cma_settings,
+                "balance": balance,
+                "subject": subject,
+            }
+            if ph2_archive_meta is not None:
+                response["archive_meta"] = ph2_archive_meta
+            return response
     # --- end Chunk 3 gate ---
 
     centroid_lat, centroid_lng = polygon_centroid(polygon)
