@@ -563,6 +563,179 @@ def _ensure_session_schema() -> None:
                           ADD COLUMN IF NOT EXISTS photo_timestamp TIMESTAMPTZ
                         """,
                     ),
+                    (
+                        "propelio_marathon_seed_state_enum",
+                        """
+                        DO $$
+                        BEGIN
+                            IF NOT EXISTS (
+                                SELECT 1 FROM pg_type WHERE typname = 'propelio_marathon_seed_state'
+                            ) THEN
+                                CREATE TYPE propelio_marathon_seed_state AS ENUM (
+                                    'queued',
+                                    'running',
+                                    'verifying',
+                                    'completed',
+                                    'stopping_requested',
+                                    'failed_retryable',
+                                    'failed_final',
+                                    'skipped'
+                                );
+                            END IF;
+                        END$$;
+                        """,
+                    ),
+                    (
+                        "propelio_marathon_campaign_state_enum",
+                        """
+                        DO $$
+                        BEGIN
+                            IF NOT EXISTS (
+                                SELECT 1 FROM pg_type WHERE typname = 'propelio_marathon_campaign_state'
+                            ) THEN
+                                CREATE TYPE propelio_marathon_campaign_state AS ENUM (
+                                    'queued',
+                                    'running',
+                                    'completed',
+                                    'failed',
+                                    'blocked',
+                                    'stopped'
+                                );
+                            END IF;
+                        END$$;
+                        """,
+                    ),
+                    (
+                        "propelio_marathon_campaigns",
+                        """
+                        CREATE TABLE IF NOT EXISTS propelio_marathon_campaigns (
+                            campaign_id BIGSERIAL PRIMARY KEY,
+                            campaign_key TEXT NOT NULL UNIQUE,
+                            status propelio_marathon_campaign_state NOT NULL DEFAULT 'queued',
+                            runner_instance_id TEXT,
+                            started_at TIMESTAMPTZ,
+                            ended_at TIMESTAMPTZ,
+                            end_reason TEXT,
+                            seeds_total INTEGER NOT NULL DEFAULT 0,
+                            seeds_running INTEGER NOT NULL DEFAULT 0,
+                            seeds_completed INTEGER NOT NULL DEFAULT 0,
+                            seeds_failed INTEGER NOT NULL DEFAULT 0,
+                            seeds_retryable INTEGER NOT NULL DEFAULT 0,
+                            seeds_skipped INTEGER NOT NULL DEFAULT 0,
+                            comps_captured INTEGER NOT NULL DEFAULT 0,
+                            net_new_comps INTEGER NOT NULL DEFAULT 0,
+                            cb_failure_count INTEGER NOT NULL DEFAULT 0,
+                            cb_last_failure_at TIMESTAMPTZ,
+                            cb_cooldown_until TIMESTAMPTZ,
+                            cb_last_error TEXT,
+                            cb_error_window JSONB NOT NULL DEFAULT '[]'::jsonb,
+                            cb_consecutive_rate_limits INTEGER NOT NULL DEFAULT 0,
+                            cb_persist_fail_count INTEGER NOT NULL DEFAULT 0,
+                            cb_last_persist_fail_at TIMESTAMPTZ,
+                            notes TEXT,
+                            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                        )
+                        """,
+                    ),
+                    (
+                        "propelio_marathon_campaigns_indexes",
+                        """
+                        CREATE INDEX IF NOT EXISTS idx_marathon_campaigns_status
+                            ON propelio_marathon_campaigns (status);
+                        CREATE INDEX IF NOT EXISTS idx_marathon_campaigns_updated_at
+                            ON propelio_marathon_campaigns (updated_at);
+                        """,
+                    ),
+                    (
+                        "propelio_marathon_seeds",
+                        """
+                        CREATE TABLE IF NOT EXISTS propelio_marathon_seeds (
+                            seed_id BIGSERIAL PRIMARY KEY,
+                            campaign_id BIGINT NOT NULL REFERENCES propelio_marathon_campaigns(campaign_id) ON DELETE CASCADE,
+                            parcel_account_num TEXT NOT NULL,
+                            parcel_county TEXT NOT NULL,
+                            grid_lat NUMERIC(10,7) NOT NULL,
+                            grid_lng NUMERIC(10,7) NOT NULL,
+                            seed_address TEXT NOT NULL,
+                            seed_lat NUMERIC(10,7) NOT NULL,
+                            seed_lng NUMERIC(10,7) NOT NULL,
+                            density_class TEXT NOT NULL CHECK (density_class IN ('urban', 'suburban', 'rural')),
+                            parcels_within_1mi INTEGER NOT NULL,
+                            status propelio_marathon_seed_state NOT NULL DEFAULT 'queued',
+                            claimed_by TEXT,
+                            heartbeat_at TIMESTAMPTZ,
+                            job_id TEXT,
+                            attempts INTEGER NOT NULL DEFAULT 0,
+                            max_attempts INTEGER NOT NULL DEFAULT 3,
+                            retry_after TIMESTAMPTZ,
+                            last_error TEXT,
+                            last_error_class TEXT,
+                            queued_at TIMESTAMPTZ,
+                            running_at TIMESTAMPTZ,
+                            verifying_at TIMESTAMPTZ,
+                            stopping_requested_at TIMESTAMPTZ,
+                            completed_at TIMESTAMPTZ,
+                            failed_final_at TIMESTAMPTZ,
+                            skipped_at TIMESTAMPTZ,
+                            last_transition_at TIMESTAMPTZ,
+                            attempt_started_at TIMESTAMPTZ,
+                            comps_captured INTEGER,
+                            net_new_comps INTEGER,
+                            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                            UNIQUE (campaign_id, parcel_county, parcel_account_num)
+                        )
+                        """,
+                    ),
+                    (
+                        "propelio_marathon_seeds_indexes",
+                        """
+                        CREATE INDEX IF NOT EXISTS idx_marathon_seeds_status
+                            ON propelio_marathon_seeds (campaign_id, status);
+                        CREATE INDEX IF NOT EXISTS idx_marathon_seeds_retry_after
+                            ON propelio_marathon_seeds (campaign_id, retry_after)
+                            WHERE status = 'failed_retryable';
+                        CREATE INDEX IF NOT EXISTS idx_marathon_seeds_heartbeat
+                            ON propelio_marathon_seeds (heartbeat_at)
+                            WHERE status IN ('running', 'verifying', 'stopping_requested');
+                        """,
+                    ),
+                    (
+                        "propelio_marathon_allowed_transitions",
+                        """
+                        CREATE TABLE IF NOT EXISTS propelio_marathon_allowed_transitions (
+                            from_state propelio_marathon_seed_state NOT NULL,
+                            to_state propelio_marathon_seed_state NOT NULL,
+                            PRIMARY KEY (from_state, to_state)
+                        );
+
+                        INSERT INTO propelio_marathon_allowed_transitions (from_state, to_state)
+                        VALUES
+                            ('queued', 'running'),
+                            ('queued', 'skipped'),
+                            ('running', 'completed'),
+                            ('running', 'verifying'),
+                            ('running', 'failed_retryable'),
+                            ('running', 'failed_final'),
+                            ('running', 'stopping_requested'),
+                            ('running', 'queued'),
+                            ('verifying', 'completed'),
+                            ('verifying', 'running'),
+                            ('verifying', 'failed_retryable'),
+                            ('verifying', 'failed_final'),
+                            ('stopping_requested', 'completed'),
+                            ('stopping_requested', 'failed_retryable'),
+                            ('stopping_requested', 'queued'),
+                            ('stopping_requested', 'running'),
+                            ('failed_retryable', 'running'),
+                            ('failed_retryable', 'failed_final'),
+                            ('failed_retryable', 'skipped'),
+                            ('failed_final', 'queued'),
+                            ('failed_final', 'skipped')
+                        ON CONFLICT DO NOTHING;
+                        """,
+                    ),
                 ],
             )
             _backfill_saved_area_share_ids(cur)
