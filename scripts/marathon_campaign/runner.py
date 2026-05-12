@@ -890,8 +890,14 @@ async def run_campaign(
                         from_state="running",
                     )
                     breaker.record_outcome("error")
-            except PropelioAuthError:
+            except PropelioAuthError as exc:
                 _run_end_reason = "auth_block"
+                handle_transient_failure(
+                    seed,
+                    exc,
+                    error_class="auth_block",
+                    from_state="running",
+                )
                 alert(
                     "CRITICAL",
                     "auth block detected",
@@ -1097,3 +1103,55 @@ def status_campaign(campaign_key: str) -> dict[str, int]:
     print(f"Last update:      {last_update}")
 
     return {"total": total, **counts}
+
+
+_VALID_SKIP_FROM_STATES = frozenset({"queued", "failed_retryable", "failed_final"})
+
+
+def operator_skip_seed(seed_id: int, reason: str | None = None) -> None:
+    seed = _load_seed_state(int(seed_id))
+    if not seed:
+        raise ValueError(f"seed not found: {seed_id}")
+
+    from_state = str(seed.get("status") or "").strip()
+    if from_state == "skipped":
+        return
+
+    if not from_state:
+        raise ValueError(f"seed has empty status: {seed_id}")
+
+    if from_state not in _VALID_SKIP_FROM_STATES:
+        raise ValueError(
+            f"cannot skip seed in state '{from_state}'. Stop the runner first "
+            "(Ctrl+C) and let the seed settle to queued/failed_retryable/"
+            "failed_final, then retry. Orphaned active states are auto-reconciled "
+            "on next runner startup."
+        )
+
+    transition(
+        int(seed_id),
+        from_state,
+        "skipped",
+        last_error=(str(reason or "operator skip")[:500]),
+        last_error_class="operator_skip",
+    )
+
+
+def operator_requeue_seed(seed_id: int) -> None:
+    seed = _load_seed_state(int(seed_id))
+    if not seed:
+        raise ValueError(f"seed not found: {seed_id}")
+
+    from_state = str(seed.get("status") or "").strip()
+    if from_state != "failed_final":
+        raise ValueError(f"seed must be failed_final to requeue, got: {from_state}")
+
+    transition(
+        int(seed_id),
+        "failed_final",
+        "queued",
+        attempts=0,
+        retry_after=None,
+        last_error=None,
+        last_error_class=None,
+    )

@@ -10,7 +10,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 
-from .runner import default_runner_id, get_run_end_reason, run_campaign, status_campaign
+from .runner import (
+    default_runner_id,
+    get_run_end_reason,
+    operator_requeue_seed,
+    operator_skip_seed,
+    run_campaign,
+    status_campaign,
+)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -25,6 +32,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
     status_parser = sub.add_parser("status", help="Show campaign FSM status counts")
     status_parser.add_argument("--campaign", required=True, help="Campaign key")
+
+    skip_parser = sub.add_parser("skip", help="Mark a seed as skipped")
+    skip_parser.add_argument("--seed-id", type=int, required=True, help="Seed id to skip")
+    skip_parser.add_argument("--reason", default="", help="Operator reason for skipping")
+
+    requeue_parser = sub.add_parser("requeue", help="Requeue a failed_final seed")
+    requeue_parser.add_argument("--seed-id", type=int, required=True, help="Seed id to requeue")
 
     return parser
 
@@ -52,6 +66,16 @@ def main() -> None:
 
     if args.cmd == "status":
         status_campaign(args.campaign)
+        return
+
+    if args.cmd == "skip":
+        operator_skip_seed(args.seed_id, reason=args.reason)
+        print(f"[marathon-runner] seed_id={args.seed_id} transitioned_to=skipped")
+        return
+
+    if args.cmd == "requeue":
+        operator_requeue_seed(args.seed_id)
+        print(f"[marathon-runner] seed_id={args.seed_id} transitioned_to=queued attempts_reset=0")
         return
 
     raise ValueError(f"unsupported command: {args.cmd}")
