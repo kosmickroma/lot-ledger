@@ -265,7 +265,33 @@ def _insert_pass_comps(job_id: str, pass_num: int, pass_config: dict[str, Any], 
                     _me,
                 )
                 matched_for_global = parsed_for_global
-            merge_comps_into_global(matched_for_global, source="deep_pull")
+            merge_result = merge_comps_into_global(matched_for_global, source="deep_pull")
+            inserted_count = int(merge_result.get("inserted", 0) or 0)
+            if inserted_count > 0:
+                try:
+                    count_conn = get_session_conn()
+                    try:
+                        with count_conn.cursor() as count_cur:
+                            count_cur.execute(
+                                """
+                                UPDATE propelio_deep_pull_jobs
+                                SET net_new_comps = net_new_comps + %s
+                                WHERE job_id = %s
+                                """,
+                                (inserted_count, job_id),
+                            )
+                        count_conn.commit()
+                    except Exception:
+                        count_conn.rollback()
+                        raise
+                    finally:
+                        release_session_conn(count_conn)
+                except Exception as _nexc:
+                    logger.warning(
+                        "[deep-pull job=%s] net_new_comps update failed (non-fatal): %s",
+                        job_id,
+                        _nexc,
+                    )
     except Exception as _exc:
         logger.warning("[deep-pull job=%s] global write failed (non-fatal): %s", job_id, _exc)
 

@@ -806,6 +806,7 @@ async def get_deep_pull_status(
             cur.execute(
                 """
                 SELECT job_id, status, passes_completed, total_unique_comps,
+                       net_new_comps,
                        last_pass_at, next_pass_at, last_error, started_at, stop_requested
                 FROM propelio_deep_pull_jobs
                 WHERE job_id = %s
@@ -856,11 +857,12 @@ async def get_deep_pull_status(
         "status": row[1],
         "passes_completed": int(row[2] or 0),
         "total_unique_comps": int(row[3] or 0),
-        "last_pass_at": row[4].isoformat() if row[4] else None,
-        "next_pass_at": row[5].isoformat() if row[5] else None,
-        "last_error": row[6],
-        "started_at": row[7].isoformat() if row[7] else None,
-        "stop_requested": bool(row[8]),
+        "net_new_comps": int(row[4] or 0),
+        "last_pass_at": row[5].isoformat() if row[5] else None,
+        "next_pass_at": row[6].isoformat() if row[6] else None,
+        "last_error": row[7],
+        "started_at": row[8].isoformat() if row[8] else None,
+        "stop_requested": bool(row[9]),
         "per_pass": per_pass,
     }
 

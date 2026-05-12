@@ -7031,7 +7031,9 @@ map.on("draw:created", async (e) => {
     });
     document.getElementById("redfin-status").textContent = "Analysis complete";
     _updateSaveSessionButtonState();
-    setActiveItem("Unsaved area", "Unsaved");
+    if (!_currentLoadedAreaId) {
+      setActiveItem("Unsaved area", "Unsaved");
+    }
     redfinLayerVisible = false;
     soldLayerVisible = Boolean(filterState.sold);
     map.removeLayer(redfinLayer);
@@ -8397,7 +8399,9 @@ function _updateDeepPullBanner(status) {
   const textEl = document.getElementById("deep-pull-banner-text");
   if (!textEl) return;
   const passCount = `${status.passes_completed}/6`;
-  textEl.textContent = `${status.status} - Pass ${passCount}, ${status.total_unique_comps} unique so far. Don't refresh.`;
+  const captured = Number(status?.total_unique_comps || 0);
+  const netNew = Number(status?.net_new_comps || 0);
+  textEl.textContent = `${status.status} - Pass ${passCount}, ${captured} captured (${netNew} net-new). Don't refresh.`;
 }
 
 function _hideDeepPullBanner() {
@@ -8456,8 +8460,10 @@ async function _pollDeepPullStatus() {
       const finishedJobId = _activeDeepPullJobId;
       _activeDeepPullJobId = null;
       console.log("[deep-pull] FINAL summary:", resp);
+      const captured = Number(resp?.total_unique_comps || 0);
+      const netNew = Number(resp?.net_new_comps || 0);
       _showDeepPullBanner(
-        `Job ${resp.status} - ${resp.passes_completed}/6 passes, ${resp.total_unique_comps} unique comps. Job ID: ${finishedJobId}`
+        `Job ${resp.status} - ${resp.passes_completed}/6 passes, ${captured} captured (${netNew} net-new). Job ID: ${finishedJobId}`
       );
       try {
         await _fetchPolygonCacheOnly();

@@ -532,6 +532,18 @@ def _ensure_session_schema() -> None:
                         "ALTER TABLE cached_jobs ADD COLUMN IF NOT EXISTS saved_area_id TEXT REFERENCES saved_areas(area_id) ON DELETE SET NULL",
                     ),
                     ("idx_cached_jobs_saved_area", "CREATE INDEX IF NOT EXISTS idx_cached_jobs_saved_area ON cached_jobs (saved_area_id)"),
+                    (
+                        "deep_pull_jobs_net_new_comps",
+                        """
+                        DO $$
+                        BEGIN
+                            IF to_regclass('public.propelio_deep_pull_jobs') IS NOT NULL THEN
+                                ALTER TABLE propelio_deep_pull_jobs
+                                ADD COLUMN IF NOT EXISTS net_new_comps INTEGER NOT NULL DEFAULT 0;
+                            END IF;
+                        END$$;
+                        """,
+                    ),
                 ],
             )
             _backfill_saved_area_share_ids(cur)
