@@ -30,8 +30,10 @@ from psycopg2 import errors
 from psycopg2.extras import RealDictCursor
 
 from api.config import get_session_conn, release_session_conn
+from .alerts import alert
 from .circuit_breaker import CircuitBreaker
 from .cooldown import wait_for_cooldown_or_exit
+from .events import emit_event
 from .pass_configs import passes_for_density_class
 from .pacing import inter_seed_pause_seconds, maybe_take_break
 from .state import IllegalStateTransition, transition
@@ -530,6 +532,13 @@ def handle_transient_failure(
 
     if attempts >= max_attempts:
         _transition_best_effort(seed_id, current_state, "failed_final", **payload)
+        emit_event(
+            "seed_failed_final",
+            campaign=seed.get("campaign_key"),
+            seed_id=seed_id,
+            error_class=payload["last_error_class"],
+            attempts=attempts,
+        )
         return "failed_final"
 
     delay_min = _retry_delay_minutes(int(retry_min), attempts)
@@ -540,6 +549,14 @@ def handle_transient_failure(
         "failed_retryable",
         retry_after=retry_after,
         **payload,
+    )
+    emit_event(
+        "seed_failed_retryable",
+        campaign=seed.get("campaign_key"),
+        seed_id=seed_id,
+        error_class=payload["last_error_class"],
+        retry_after_s=int(delay_min * 60),
+        attempts=attempts,
     )
     return "failed_retryable"
 
@@ -727,7 +744,16 @@ async def run_campaign(
         raise ValueError(f"campaign not found: {campaign_key}")
 
     campaign_id = int(campaign["campaign_id"])
+    campaign_name = str(campaign.get("campaign_key") or campaign_key)
     breaker = CircuitBreaker.load(campaign_id)
+
+    emit_event(
+        "run_start",
+        campaign=campaign_name,
+        runner_id=runner_id,
+        mock=bool(mock),
+        max_seeds=max_seeds,
+    )
 
     orphan_summary = reconcile_orphans(campaign_id)
     print(
@@ -737,144 +763,218 @@ async def run_campaign(
         f"adopted={orphan_summary['adopted']} "
         f"requeued={orphan_summary['requeued']}"
     )
+    emit_event(
+        "orphans_reconciled",
+        campaign=campaign_name,
+        count=orphan_summary["count"],
+        completed=orphan_summary["completed"],
+        adopted=orphan_summary["adopted"],
+        requeued=orphan_summary["requeued"],
+    )
 
     session_start = asyncio.get_running_loop().time()
     last_break_at = session_start
     seeds_processed = 0
+    breaker_was_open = False
 
-    while True:
-        if breaker.is_open():
-            await wait_for_cooldown_or_exit(run_id=campaign_id, circuit_breaker=breaker)
-            continue
+    try:
+        while True:
+            if breaker.is_open():
+                breaker_was_open = True
+                await wait_for_cooldown_or_exit(run_id=campaign_id, circuit_breaker=breaker)
+                continue
+            if breaker_was_open:
+                emit_event("breaker_reset", campaign=campaign_name)
+                breaker_was_open = False
 
-        seed = claim_next_seed(campaign_id, runner_id)
-        if seed is None:
-            _run_end_reason = "completed"
-            print(f"campaign={campaign_key} done — no claimable seeds remaining")
-            break
+            seed = claim_next_seed(campaign_id, runner_id)
+            if seed is None:
+                _run_end_reason = "completed"
+                print(f"campaign={campaign_key} done — no claimable seeds remaining")
+                break
 
-        _current_seed = dict(seed)
+            _current_seed = dict(seed)
+            seed = {**seed, "campaign_key": campaign_name}
 
-        seed_id = int(seed["seed_id"])
+            seed_id = int(seed["seed_id"])
+            seed_started = asyncio.get_running_loop().time()
+            emit_event(
+                "seed_claim",
+                campaign=campaign_name,
+                seed_id=seed_id,
+                address=seed.get("seed_address"),
+                density=seed.get("density_class"),
+                attempts=seed.get("attempts"),
+            )
 
-        try:
-            job_id = await start_deep_pull_for_seed(seed, mock=mock)
-            conn = get_session_conn()
             try:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        UPDATE propelio_marathon_seeds
-                        SET job_id = %s, updated_at = NOW()
-                        WHERE seed_id = %s
-                        """,
-                        (job_id, seed_id),
+                job_id = await start_deep_pull_for_seed(seed, mock=mock)
+                conn = get_session_conn()
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            UPDATE propelio_marathon_seeds
+                            SET job_id = %s, updated_at = NOW()
+                            WHERE seed_id = %s
+                            """,
+                            (job_id, seed_id),
+                        )
+                    conn.commit()
+                    _current_seed = {**seed, "job_id": job_id}
+                    seed = {**seed, "job_id": job_id}
+                except Exception:
+                    conn.rollback()
+                    raise
+                finally:
+                    release_session_conn(conn)
+
+                outcome = await wait_for_job_with_heartbeat(job_id, seed_id)
+                if outcome.status in {"completed", "saturated"}:
+                    _transition_best_effort(
+                        seed_id,
+                        "running",
+                        "completed",
+                        comps_captured=int(outcome.total or 0),
+                        net_new_comps=int(outcome.net_new or 0),
                     )
-                conn.commit()
-                _current_seed = {**seed, "job_id": job_id}
-            except Exception:
-                conn.rollback()
-                raise
-            finally:
-                release_session_conn(conn)
-
-            outcome = await wait_for_job_with_heartbeat(job_id, seed_id)
-            if outcome.status in {"completed", "saturated"}:
-                _transition_best_effort(
-                    seed_id,
-                    "running",
-                    "completed",
-                    comps_captured=int(outcome.total or 0),
-                    net_new_comps=int(outcome.net_new or 0),
-                )
-                breaker.record_outcome("ok")
-            elif outcome.status == "timeout":
-                verified = await verify_remote_state(
-                    {
-                        **seed,
-                        "seed_id": seed_id,
-                        "job_id": job_id,
-                        "status": "running",
-                    },
-                    mock=mock,
-                )
-                if verified.status in {"completed", "saturated"}:
+                    emit_event(
+                        "seed_completed",
+                        campaign=campaign_name,
+                        seed_id=seed_id,
+                        comps=int(outcome.total or 0),
+                        net_new=int(outcome.net_new or 0),
+                        duration_s=round(asyncio.get_running_loop().time() - seed_started, 2),
+                    )
                     breaker.record_outcome("ok")
-                elif verified.status == "blocked":
-                    raise PropelioAuthError(verified.error or "remote blocked")
-                else:
+                elif outcome.status == "timeout":
+                    verified = await verify_remote_state(
+                        {
+                            **seed,
+                            "seed_id": seed_id,
+                            "job_id": job_id,
+                            "status": "running",
+                        },
+                        mock=mock,
+                    )
+                    if verified.status in {"completed", "saturated"}:
+                        emit_event(
+                            "seed_completed",
+                            campaign=campaign_name,
+                            seed_id=seed_id,
+                            comps=int(verified.total or 0),
+                            net_new=int(verified.net_new or 0),
+                            duration_s=round(asyncio.get_running_loop().time() - seed_started, 2),
+                        )
+                        breaker.record_outcome("ok")
+                    elif verified.status == "blocked":
+                        raise PropelioAuthError(verified.error or "remote blocked")
+                    else:
+                        breaker.record_outcome("error")
+                elif outcome.status == "blocked":
+                    raise PropelioAuthError(outcome.error or "remote blocked")
+                elif outcome.status == "stopped":
+                    handle_transient_failure(
+                        seed,
+                        outcome.error or "stopped",
+                        error_class="remote_stopped",
+                        from_state="running",
+                        retry_min=5,
+                    )
                     breaker.record_outcome("error")
-            elif outcome.status == "blocked":
-                raise PropelioAuthError(outcome.error or "remote blocked")
-            elif outcome.status == "stopped":
+                else:
+                    handle_transient_failure(
+                        seed,
+                        outcome.error or outcome.status,
+                        error_class="remote_error",
+                        from_state="running",
+                    )
+                    breaker.record_outcome("error")
+            except PropelioAuthError:
+                _run_end_reason = "auth_block"
+                alert(
+                    "CRITICAL",
+                    "auth block detected",
+                    campaign=campaign_name,
+                    seed_id=seed_id,
+                    runner_id=runner_id,
+                )
+                raise
+            except PropelioRateLimitError as exc:
+                breaker.trip("rate_limit", cooldown_min=30)
+                emit_event("breaker_trip", campaign=campaign_name, reason="rate_limit", cooldown_min=30)
+                alert(
+                    "WARNING",
+                    "circuit breaker tripped",
+                    campaign=campaign_name,
+                    reason="rate_limit",
+                    cooldown_min=30,
+                )
                 handle_transient_failure(
                     seed,
-                    outcome.error or "stopped",
-                    error_class="remote_stopped",
+                    exc,
+                    error_class="rate_limit",
                     from_state="running",
-                    retry_min=5,
+                    retry_min=30,
                 )
-                breaker.record_outcome("error")
-            else:
+                breaker.record_outcome("rate_limit")
+            except (asyncio.TimeoutError, TimeoutError, ConnectionError, socket.timeout, OSError) as exc:
                 handle_transient_failure(
                     seed,
-                    outcome.error or outcome.status,
-                    error_class="remote_error",
+                    exc,
+                    error_class="network",
                     from_state="running",
                 )
                 breaker.record_outcome("error")
-        except PropelioAuthError:
-            _run_end_reason = "auth_block"
-            raise
-        except PropelioRateLimitError as exc:
-            breaker.trip("rate_limit", cooldown_min=30)
-            handle_transient_failure(
-                seed,
-                exc,
-                error_class="rate_limit",
-                from_state="running",
-                retry_min=30,
-            )
-            breaker.record_outcome("rate_limit")
-        except (asyncio.TimeoutError, TimeoutError, ConnectionError, socket.timeout, OSError) as exc:
-            handle_transient_failure(
-                seed,
-                exc,
-                error_class="network",
-                from_state="running",
-            )
-            breaker.record_outcome("error")
-        except Exception as exc:
-            handle_transient_failure(
-                seed,
-                exc,
-                error_class="unexpected",
-                from_state="running",
-            )
-            breaker.record_outcome("error")
+            except Exception as exc:
+                handle_transient_failure(
+                    seed,
+                    exc,
+                    error_class="unexpected",
+                    from_state="running",
+                )
+                breaker.record_outcome("error")
 
-        seeds_processed += 1
+            seeds_processed += 1
 
-        if max_seeds is not None and seeds_processed >= int(max_seeds):
-            _run_end_reason = "max_seeds_reached"
-            print(f"[marathon-runner] max_seeds={max_seeds} reached, exiting clean")
-            break
+            if max_seeds is not None and seeds_processed >= int(max_seeds):
+                _run_end_reason = "max_seeds_reached"
+                print(f"[marathon-runner] max_seeds={max_seeds} reached, exiting clean")
+                break
 
-        if not mock:
-            await asyncio.sleep(inter_seed_pause_seconds())
-            elapsed_since_last_break = asyncio.get_running_loop().time() - last_break_at
-            brk = maybe_take_break(elapsed_since_last_break)
-            if brk:
-                duration, kind = brk
-                print(f"[marathon-runner] {kind}_break {duration:.0f}s")
-                await asyncio.sleep(duration)
-                last_break_at = asyncio.get_running_loop().time()
+            if not mock:
+                pause_s = inter_seed_pause_seconds()
+                emit_event("inter_seed_pause", campaign=campaign_name, duration_s=round(pause_s, 2))
+                await asyncio.sleep(pause_s)
+                elapsed_since_last_break = asyncio.get_running_loop().time() - last_break_at
+                brk = maybe_take_break(elapsed_since_last_break)
+                if brk:
+                    duration, kind = brk
+                    print(f"[marathon-runner] {kind}_break {duration:.0f}s")
+                    emit_event(
+                        "break_started",
+                        campaign=campaign_name,
+                        kind=kind,
+                        duration_s=round(float(duration), 2),
+                    )
+                    await asyncio.sleep(duration)
+                    last_break_at = asyncio.get_running_loop().time()
 
+            _current_seed = None
+    finally:
         _current_seed = None
+        if _run_end_reason is None:
+            _run_end_reason = "completed"
+        emit_event(
+            "run_end",
+            campaign=campaign_name,
+            run_end_reason=_run_end_reason,
+            seeds_processed=seeds_processed,
+            runner_id=runner_id,
+        )
+        if _run_end_reason == "auth_block":
+            alert("CRITICAL", "run ended on auth block", campaign=campaign_name, runner_id=runner_id)
 
-    _current_seed = None
-    if _run_end_reason is None:
-        _run_end_reason = "completed"
     return seeds_processed
 
 
@@ -909,6 +1009,41 @@ def status_campaign(campaign_key: str) -> dict[str, int]:
                 (campaign_id,),
             )
             rows = cur.fetchall() or []
+
+            cur.execute(
+                """
+                SELECT
+                    COALESCE(SUM(comps_captured), 0),
+                    COALESCE(SUM(net_new_comps), 0)
+                FROM propelio_marathon_seeds
+                WHERE campaign_id = %s
+                  AND status = 'completed'
+                """,
+                (campaign_id,),
+            )
+            totals_row = cur.fetchone() or (0, 0)
+
+            cur.execute(
+                """
+                SELECT MIN(retry_after)
+                FROM propelio_marathon_seeds
+                WHERE campaign_id = %s
+                  AND status = 'failed_retryable'
+                  AND retry_after IS NOT NULL
+                """,
+                (campaign_id,),
+            )
+            retry_row = cur.fetchone()
+
+            cur.execute(
+                """
+                SELECT updated_at
+                FROM propelio_marathon_campaigns
+                WHERE campaign_id = %s
+                """,
+                (campaign_id,),
+            )
+            campaign_row = cur.fetchone()
         conn.commit()
     except Exception:
         conn.rollback()
@@ -924,15 +1059,41 @@ def status_campaign(campaign_key: str) -> dict[str, int]:
         if key in counts:
             counts[key] = value
 
-    print(f"campaign={campaign_key}")
-    print(
-        "  "
-        f"total={total}  queued={counts['queued']}  running={counts['running']}  completed={counts['completed']}  "
-        f"verifying={counts['verifying']}  stopping_requested={counts['stopping_requested']}"
-    )
-    print(
-        "  "
-        f"failed_retryable={counts['failed_retryable']}  failed_final={counts['failed_final']}  skipped={counts['skipped']}"
-    )
+    completed = int(counts["completed"])
+    completed_pct = (100.0 * completed / total) if total else 0.0
+    total_comps = int((totals_row[0] or 0))
+    total_net_new = int((totals_row[1] or 0))
+    avg_per_seed = (total_comps / completed) if completed else 0.0
+
+    next_retry_at = retry_row[0] if retry_row else None
+    next_retry_label = "-"
+    if next_retry_at is not None:
+        next_retry_label = next_retry_at.astimezone(timezone.utc).strftime("%H:%M")
+
+    breaker = CircuitBreaker.load(campaign_id)
+    if breaker.is_open() and breaker.cooldown_until is not None:
+        breaker_text = f"open (cooldown until {breaker.cooldown_until.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')})"
+    else:
+        breaker_text = "closed"
+
+    last_update = _utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    if campaign_row and campaign_row[0] is not None:
+        last_update = campaign_row[0].astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    print(f"Campaign {campaign_key} - Status")
+    print("========================")
+    print(f"Total seeds:      {total:>5}")
+    print(f"Completed:        {completed:>5}  ({completed_pct:.0f}%)")
+    print(f"Failed:           {counts['failed_final']:>5}")
+    print(f"Failed retryable: {counts['failed_retryable']:>5} (next retry at {next_retry_label})")
+    print(f"Queued:           {counts['queued']:>5}")
+    print(f"Verifying:        {counts['verifying']:>5}")
+    print(f"Stopping:         {counts['stopping_requested']:>5}")
+    print("")
+    print(f"Comps captured:   {total_comps:,} total, {total_net_new:,} net-new")
+    print(f"Avg per seed:     {avg_per_seed:.0f} comps (over {completed} completed)")
+    print("")
+    print(f"Circuit breaker:   {breaker_text}")
+    print(f"Last update:      {last_update}")
 
     return {"total": total, **counts}
