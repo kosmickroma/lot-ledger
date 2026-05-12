@@ -31,7 +31,7 @@ from api.geo import haversine_miles, point_in_polygon, polygon_centroid
 from api.redfin import normalize_addr_key
 
 from .archive import load_archived_comps, load_comps_by_polygon, merge_comps_into_archive, merge_comps_into_global, set_comp_rating
-from .deep_pull import STALE_JOB_THRESHOLD_MINUTES, run_deep_pull
+from .deep_pull import PASSES_RECENT, STALE_JOB_THRESHOLD_MINUTES, run_deep_pull
 from .parcel_match import match_comps_to_parcels
 from . import cache as cache_mod
 from . import scraper as scraper_mod
@@ -789,6 +789,47 @@ async def start_deep_pull(
 
     asyncio.create_task(run_deep_pull(job_id))
     return {"job_id": job_id}
+
+
+@router.post("/refresh-recent/start")
+async def start_refresh_recent(
+    request: DeepPullStartRequest,
+    user: dict = Depends(get_current_user),
+) -> dict[str, Any]:
+    """
+    Triggers a shorter, recency-focused deep-pull on the same job
+    infrastructure. Uses PASSES_RECENT (3mo × 0.5mi, 6mo × 1mi,
+    12mo × 2mi). Total ~2-3 min. Catches stragglers — recent listings
+    (pendings, just-listed actives) the broad 24mo sweep missed due to
+    Propelio's 100-cap per call.
+    """
+    address = str(request.target_address or "").strip()
+    if not address:
+        raise HTTPException(status_code=400, detail="target_address is required")
+    saved_area_id = str(request.saved_area_id or "").strip() or None
+
+    job_id = "rr_" + secrets.token_urlsafe(8)
+
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO propelio_deep_pull_jobs
+                    (job_id, target_address, saved_area_id, started_by_user_id, status)
+                VALUES (%s, %s, %s, %s, 'queued')
+                """,
+                (job_id, address, saved_area_id, int(user["id"])),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        release_session_conn(conn)
+
+    asyncio.create_task(run_deep_pull(job_id, passes=PASSES_RECENT))
+    return {"job_id": job_id, "kind": "refresh_recent"}
 
 
 @router.get("/deep-pull/status/{job_id}")

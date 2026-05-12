@@ -3269,6 +3269,11 @@ function _buildPropelioCompSectionHtml(c) {
   const raw = c?.extra?.raw || {};
   const status = String(c?.status || "");
   const isSold = status === "sold";
+  const firstSeenDate = fmtDate(c?.first_seen_at);
+  const todayDate = new Date().toISOString().slice(0, 10);
+  const capturedLabel = firstSeenDate
+    ? (firstSeenDate === todayDate ? "🔥 Captured today" : `Captured ${firstSeenDate}`)
+    : "";
 
   const sqft = fmtNum(c?.sqft);
   const lot = fmtNum(c?.lot_size);
@@ -3395,6 +3400,7 @@ function _buildPropelioCompSectionHtml(c) {
     <div class="popup-propelio-section">
       <div class="popup-propelio-header">MLS Comp</div>
       <div class="propelio-popup-price">${priceLineParts.join(" · ")}</div>
+      ${capturedLabel ? `<div class="propelio-popup-meta">${_propelioEscape(capturedLabel)}</div>` : ""}
       ${listVsCloseHtml}
       ${soldMeta.length ? `<div class="propelio-popup-meta">${_propelioEscape(soldMeta.join(" · "))}</div>` : ""}
       ${dims.length ? `<div class="propelio-popup-meta">${_propelioEscape(dims.join(" · "))}</div>` : ""}
@@ -4514,11 +4520,10 @@ function _ensureStickyPropelioButton() {
   propelioQuickRefreshBtn = document.createElement("button");
   propelioQuickRefreshBtn.type = "button";
   propelioQuickRefreshBtn.className = "quick-refresh-placeholder";
-  propelioQuickRefreshBtn.disabled = true;
-  propelioQuickRefreshBtn.title = "Coming soon - rapid scan for new comps in last 30 days within 1mi of target";
+  propelioQuickRefreshBtn.title = "Tighter recency-focused pull — catches stragglers (recent pendings + new actives) the broad sweep missed. ~2-3 min.";
   propelioQuickRefreshBtn.innerHTML = `
-    <span class="quick-refresh-main">Quick Refresh</span>
-    <span class="quick-refresh-subtitle">Coming soon</span>
+    <span class="quick-refresh-main">Refresh Recent</span>
+    <span class="quick-refresh-subtitle">~2-3 min · recent only</span>
   `;
   controlsWrap.appendChild(propelioQuickRefreshBtn);
 
@@ -4528,6 +4533,10 @@ function _ensureStickyPropelioButton() {
   L.DomEvent.on(propelioStickyBtn, "click", (evt) => {
     L.DomEvent.stopPropagation(evt);
     void _pullPropelioByPolygon();
+  });
+  L.DomEvent.on(propelioQuickRefreshBtn, "click", (evt) => {
+    L.DomEvent.stopPropagation(evt);
+    void _refreshRecentByPolygon();
   });
   map.getContainer().appendChild(propelioStickyAnchor);
   return propelioStickyBtn;
@@ -4608,6 +4617,54 @@ async function _pullPropelioByPolygon() {
     propelioPolygonPullInFlight = false;
     if (!_activeDeepPullJobId) {
       _setPropelioPolygonButtonState({ text: "Get Comps", disabled: false });
+    }
+  }
+}
+
+async function _refreshRecentByPolygon() {
+  // "Refresh Recent" — a tighter, recency-focused deep-pull that catches
+  // stragglers (recent pendings, just-listed actives) the broad 24mo
+  // sweep missed due to Propelio's 100-cap per CMA call. Same job
+  // infrastructure as Get Comps, different pass config.
+  if (propelioPolygonPullInFlight || !Array.isArray(lastPolygon) || lastPolygon.length < 3) return;
+  if (_activeDeepPullJobId) return;
+
+  const targetAddress = _deriveDeepPullTargetAddress();
+  if (!targetAddress) {
+    _showDeepPullBanner("Search for an address or save a parcel first.");
+    setTimeout(_hideDeepPullBanner, 4000);
+    return;
+  }
+
+  propelioPolygonPullInFlight = true;
+  if (propelioQuickRefreshBtn) {
+    propelioQuickRefreshBtn.disabled = true;
+    propelioQuickRefreshBtn.classList.add("is-running");
+  }
+  _showDeepPullBanner("Refresh Recent · queued - 3 passes (3mo, 6mo, 12mo), ~2-3 min");
+  try {
+    const resp = await _apiJson("/api/propelio/refresh-recent/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify({
+        target_address: targetAddress,
+        saved_area_id: _currentLoadedAreaId || null,
+      }),
+    });
+    _activeDeepPullJobId = resp.job_id;
+    if (_deepPullPollTimer) clearInterval(_deepPullPollTimer);
+    _deepPullPollTimer = setInterval(_pollDeepPullStatus, 5000);
+  } catch (err) {
+    console.error("[propelio] refresh-recent start failed:", err);
+    _showDeepPullBanner("Refresh Recent failed to start (see console)");
+    setTimeout(_hideDeepPullBanner, 4000);
+  } finally {
+    propelioPolygonPullInFlight = false;
+    if (!_activeDeepPullJobId) {
+      if (propelioQuickRefreshBtn) {
+        propelioQuickRefreshBtn.disabled = false;
+        propelioQuickRefreshBtn.classList.remove("is-running");
+      }
     }
   }
 }
@@ -8427,7 +8484,11 @@ function _showDeepPullBanner(text) {
 function _updateDeepPullBanner(status) {
   const textEl = document.getElementById("deep-pull-banner-text");
   if (!textEl) return;
-  const passCount = `${status.passes_completed}/6`;
+  // Infer total passes from job_id prefix: rr_* = Refresh Recent (3),
+  // dp_* (default) = Get Comps deep pull (6).
+  const jobId = String(_activeDeepPullJobId || "");
+  const totalPasses = jobId.startsWith("rr_") ? 3 : 6;
+  const passCount = `${status.passes_completed}/${totalPasses}`;
   const captured = Number(status?.total_unique_comps || 0);
   const netNew = Number(status?.net_new_comps || 0);
   textEl.textContent = `${status.status} - Pass ${passCount}, ${captured} captured (${netNew} net-new). Don't refresh.`;
@@ -8491,8 +8552,9 @@ async function _pollDeepPullStatus() {
       console.log("[deep-pull] FINAL summary:", resp);
       const captured = Number(resp?.total_unique_comps || 0);
       const netNew = Number(resp?.net_new_comps || 0);
+      const totalPasses = String(finishedJobId).startsWith("rr_") ? 3 : 6;
       _showDeepPullBanner(
-        `Job ${resp.status} - ${resp.passes_completed}/6 passes, ${captured} captured (${netNew} net-new). Job ID: ${finishedJobId}`
+        `Job ${resp.status} - ${resp.passes_completed}/${totalPasses} passes, ${captured} captured (${netNew} net-new). Job ID: ${finishedJobId}`
       );
       try {
         await _fetchPolygonCacheOnly();
@@ -8500,6 +8562,11 @@ async function _pollDeepPullStatus() {
         console.warn("[deep-pull] post-complete cache refresh failed:", err);
       }
       _setPropelioPolygonButtonState({ text: "Get Comps", disabled: false });
+      // Also re-enable Refresh Recent button if it was the one that ran
+      if (propelioQuickRefreshBtn) {
+        propelioQuickRefreshBtn.disabled = false;
+        propelioQuickRefreshBtn.classList.remove("is-running");
+      }
       setTimeout(_hideDeepPullBanner, 6000);
     }
   } catch (err) {

@@ -2571,19 +2571,26 @@ h1 {
 .quick-refresh-placeholder {
   border: 1px solid rgba(255, 255, 255, 0.24);
   border-radius: 999px;
-  background: linear-gradient(135deg, #b4b4b4 0%, #8e8e8e 100%);
+  background: linear-gradient(135deg, #5a8fb8 0%, #3d6d96 100%);
   color: #f8f8f8;
   font-size: 12px;
   min-width: 126px;
   padding: 8px 14px;
   line-height: 1.1;
   text-align: center;
-  opacity: 0.5;
-  cursor: not-allowed;
+  cursor: pointer;
+  transition: background 0.18s ease, transform 0.1s ease;
 }
 
-.quick-refresh-placeholder:hover {
-  opacity: 0.6;
+.quick-refresh-placeholder:hover:not(:disabled) {
+  background: linear-gradient(135deg, #6ba0c9 0%, #4d7da6 100%);
+  transform: translateY(-1px);
+}
+
+.quick-refresh-placeholder:disabled,
+.quick-refresh-placeholder.is-running {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .quick-refresh-main {

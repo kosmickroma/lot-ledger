@@ -37,6 +37,16 @@ PASSES = [
     {"months": 24, "range_mi": 10.0, "label": "rural_fallback"},
 ]
 
+# Tighter, recency-focused pass set used by the "Refresh Recent" user
+# action. Catches stragglers — recent listings (pendings, just-listed
+# actives) that the broad 24mo sweep missed due to the 100-cap on each
+# CMA call. Three passes total, ~2-3 minutes including pacing.
+PASSES_RECENT = [
+    {"months": 3, "range_mi": 0.5, "label": "recent_tight"},
+    {"months": 6, "range_mi": 1.0, "label": "recent_neighborhood"},
+    {"months": 12, "range_mi": 2.0, "label": "year_broader"},
+]
+
 SATURATION_MIN_PASSES = 3
 SATURATION_THRESHOLD = 0.05
 STALE_JOB_THRESHOLD_MINUTES = 5
@@ -393,8 +403,15 @@ def _parse_cma_envelope_comps(envelope: dict[str, Any]) -> list[dict[str, Any]]:
     return [item for item in sales if isinstance(item, dict)]
 
 
-async def run_deep_pull(job_id: str) -> None:
-    """Detached worker that executes multi-pass deep pull for one job."""
+async def run_deep_pull(job_id: str, passes: list[dict[str, Any]] | None = None) -> None:
+    """Detached worker that executes multi-pass deep pull for one job.
+
+    passes: optional pass config override. Defaults to the standard PASSES
+    list (24mo × 0.25–10mi). Pass PASSES_RECENT for the "Refresh Recent"
+    user action — tighter recency-focused pulls.
+    """
+    if passes is None:
+        passes = PASSES
     try:
         target_address = _claim_job_for_running(job_id)
         if target_address is None:
@@ -409,10 +426,11 @@ async def run_deep_pull(job_id: str) -> None:
                 _mark_job_status(job_id, "stopped")
             return
 
-        first_cfg = PASSES[0]
+        first_cfg = passes[0]
         logger.info(
-            "[deep-pull job=%s] Pass 1: months=%d range=%.2fmi label=%s",
+            "[deep-pull job=%s] Pass 1/%d: months=%d range=%.2fmi label=%s",
             job_id,
+            len(passes),
             first_cfg["months"],
             first_cfg["range_mi"],
             first_cfg["label"],
@@ -453,7 +471,7 @@ async def run_deep_pull(job_id: str) -> None:
             _mark_job_status(job_id, "saturated")
             return
 
-        for pass_num in range(2, len(PASSES) + 1):
+        for pass_num in range(2, len(passes) + 1):
             if _is_stop_requested(job_id):
                 current_status = _get_job_status(job_id)
                 if current_status not in {"error", "blocked", "completed", "saturated", "stopped"}:
@@ -471,7 +489,7 @@ async def run_deep_pull(job_id: str) -> None:
                     _mark_job_status(job_id, "stopped")
                 return
 
-            cfg = PASSES[pass_num - 1]
+            cfg = passes[pass_num - 1]
             logger.info(
                 "[deep-pull job=%s] Pass %d: months=%d range=%.2fmi label=%s",
                 job_id,
@@ -505,7 +523,7 @@ async def run_deep_pull(job_id: str) -> None:
                 return
 
         _mark_job_status(job_id, "completed")
-        logger.info("[deep-pull job=%s] completed all %d passes", job_id, len(PASSES))
+        logger.info("[deep-pull job=%s] completed all %d passes", job_id, len(passes))
 
     except Exception as exc:
         terminal_status = _classify_propelio_error(exc)
