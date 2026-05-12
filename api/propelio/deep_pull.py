@@ -43,15 +43,16 @@ STALE_JOB_THRESHOLD_MINUTES = 5
 def _jittered_pass_sleep_seconds() -> float:
     """Inter-pass sleep with heavy-tailed mixed distribution.
 
-    80% of pauses fall in the 'normal' band (25-60s — quick filter tweaks).
-    20% are 'distracted' (60-150s — got a call, took a break, walked over to
-    a colleague). The two-band shape avoids creating a uniform-distribution
-    fingerprint that pattern-detection systems (Cloudflare, etc.) could
-    profile against. Average gap ~55s, but individual runs vary widely.
+    80% of pauses fall in the 'normal' band (15-45s — quick filter tweaks,
+    matches typical analyst cadence). 20% are 'distracted' (45-120s — got a
+    call, took a break, walked over to a colleague). The two-band shape
+    avoids creating a uniform-distribution fingerprint that pattern-detection
+    systems (Cloudflare, etc.) could profile against. Average gap ~37s, but
+    individual runs vary widely.
     """
     if random.random() < 0.8:
-        return random.uniform(25, 60)
-    return random.uniform(60, 150)
+        return random.uniform(15, 45)
+    return random.uniform(45, 120)
 
 
 def _classify_propelio_error(exc: Exception) -> str:

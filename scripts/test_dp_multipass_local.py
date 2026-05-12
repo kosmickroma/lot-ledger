@@ -33,11 +33,11 @@ SATURATION_THRESHOLD = 0.05
 
 def _jittered_pass_sleep_seconds() -> float:
     """Inter-pass sleep with heavy-tailed mixed distribution. Mirrors
-    api/propelio/deep_pull.py:_jittered_pass_sleep_seconds. 80% in 25-60s,
-    20% in 60-150s — avoids uniform-distribution fingerprinting."""
+    api/propelio/deep_pull.py:_jittered_pass_sleep_seconds. 80% in 15-45s,
+    20% in 45-120s — avoids uniform-distribution fingerprinting."""
     if random.random() < 0.8:
-        return random.uniform(25, 60)
-    return random.uniform(60, 150)
+        return random.uniform(15, 45)
+    return random.uniform(45, 120)
 
 
 def main(address: str) -> int:
