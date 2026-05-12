@@ -3269,6 +3269,11 @@ function _buildPropelioCompSectionHtml(c) {
   const raw = c?.extra?.raw || {};
   const status = String(c?.status || "");
   const isSold = status === "sold";
+  const firstSeenDate = fmtDate(c?.first_seen_at);
+  const todayDate = new Date().toISOString().slice(0, 10);
+  const capturedLabel = firstSeenDate
+    ? (firstSeenDate === todayDate ? "🔥 Captured today" : `Captured ${firstSeenDate}`)
+    : "";
 
   const sqft = fmtNum(c?.sqft);
   const lot = fmtNum(c?.lot_size);
@@ -3395,6 +3400,7 @@ function _buildPropelioCompSectionHtml(c) {
     <div class="popup-propelio-section">
       <div class="popup-propelio-header">MLS Comp</div>
       <div class="propelio-popup-price">${priceLineParts.join(" · ")}</div>
+      ${capturedLabel ? `<div class="propelio-popup-meta">${_propelioEscape(capturedLabel)}</div>` : ""}
       ${listVsCloseHtml}
       ${soldMeta.length ? `<div class="propelio-popup-meta">${_propelioEscape(soldMeta.join(" · "))}</div>` : ""}
       ${dims.length ? `<div class="propelio-popup-meta">${_propelioEscape(dims.join(" · "))}</div>` : ""}

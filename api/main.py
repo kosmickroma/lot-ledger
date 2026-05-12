@@ -544,6 +544,25 @@ def _ensure_session_schema() -> None:
                         END$$;
                         """,
                     ),
+                    (
+                        "propelio_comps_extra_typed_v1",
+                        """
+                        ALTER TABLE propelio_comps
+                          ADD COLUMN IF NOT EXISTS address_city TEXT,
+                          ADD COLUMN IF NOT EXISTS address_zip TEXT,
+                          ADD COLUMN IF NOT EXISTS address_subdivision TEXT,
+                          ADD COLUMN IF NOT EXISTS school_district TEXT,
+                          ADD COLUMN IF NOT EXISTS elementary_school TEXT,
+                          ADD COLUMN IF NOT EXISTS middle_school TEXT,
+                          ADD COLUMN IF NOT EXISTS high_school TEXT,
+                          ADD COLUMN IF NOT EXISTS stories INTEGER,
+                          ADD COLUMN IF NOT EXISTS pool BOOLEAN,
+                          ADD COLUMN IF NOT EXISTS unit_count INTEGER,
+                          ADD COLUMN IF NOT EXISTS listing_timestamp TIMESTAMPTZ,
+                          ADD COLUMN IF NOT EXISTS status_timestamp TIMESTAMPTZ,
+                          ADD COLUMN IF NOT EXISTS photo_timestamp TIMESTAMPTZ
+                        """,
+                    ),
                 ],
             )
             _backfill_saved_area_share_ids(cur)

@@ -334,6 +334,53 @@ def merge_comps_into_global(comps: list[dict[str, Any]], source: str) -> dict[st
                     except (TypeError, ValueError):
                         return None
 
+                def _txt(v: Any) -> str | None:
+                    if v is None:
+                        return None
+                    text = str(v).strip()
+                    return text or None
+
+                def _pick(*vals: Any) -> Any:
+                    for val in vals:
+                        if val not in (None, ""):
+                            return val
+                    return None
+
+                def _bool(v: Any) -> bool | None:
+                    if v in (None, ""):
+                        return None
+                    if isinstance(v, bool):
+                        return v
+                    text = str(v).strip().lower()
+                    if text in {"true", "t", "1", "yes"}:
+                        return True
+                    if text in {"false", "f", "0", "no"}:
+                        return False
+                    return None
+
+                def _timestamptz(v: Any) -> str | None:
+                    if v in (None, ""):
+                        return None
+                    if isinstance(v, datetime):
+                        dt = v if v.tzinfo is not None else v.replace(tzinfo=timezone.utc)
+                        return dt.isoformat()
+                    if isinstance(v, (int, float)):
+                        try:
+                            return datetime.fromtimestamp(float(v), tz=timezone.utc).isoformat()
+                        except (TypeError, ValueError, OSError):
+                            return None
+                    text = str(v).strip()
+                    if not text:
+                        return None
+                    iso_text = text.replace("Z", "+00:00")
+                    try:
+                        dt = datetime.fromisoformat(iso_text)
+                        if dt.tzinfo is None:
+                            dt = dt.replace(tzinfo=timezone.utc)
+                        return dt.isoformat()
+                    except ValueError:
+                        return None
+
                 def _iso(v: Any) -> str | None:
                     if v is None:
                         return None
@@ -371,6 +418,19 @@ def merge_comps_into_global(comps: list[dict[str, Any]], source: str) -> dict[st
                     "property_category": str(extra.get("property_category") or "").strip() or None,
                     "list_price": _flt(extra.get("list_price")),
                     "remarks": str(extra.get("remarks") or raw.get("remarks") or "").strip() or None,
+                    "address_city": _txt(_pick(extra.get("address_city"), raw.get("address_city"))),
+                    "address_zip": _txt(_pick(extra.get("address_zip"), raw.get("address_zip"))),
+                    "address_subdivision": _txt(_pick(extra.get("address_subdivision"), raw.get("address_subdivision"))),
+                    "school_district": _txt(_pick(extra.get("school_district"), raw.get("school_district"))),
+                    "elementary_school": _txt(_pick(extra.get("elementary_school"), raw.get("elementary_school"))),
+                    "middle_school": _txt(_pick(extra.get("middle_school"), raw.get("middle_school"), raw.get("junior_high_school"), raw.get("intermediate_school"))),
+                    "high_school": _txt(_pick(extra.get("high_school"), raw.get("high_school"), raw.get("senior_high_school"))),
+                    "stories": _int(_pick(extra.get("stories"), raw.get("stories"))),
+                    "pool": _bool(_pick(extra.get("pool"), raw.get("pool"))),
+                    "unit_count": _int(_pick(extra.get("unit_count"), raw.get("unit_count"))),
+                    "listing_timestamp": _timestamptz(_pick(extra.get("listing_timestamp"), raw.get("listing_timestamp"))),
+                    "status_timestamp": _timestamptz(_pick(extra.get("status_timestamp"), raw.get("status_timestamp"))),
+                    "photo_timestamp": _timestamptz(_pick(extra.get("photo_timestamp"), raw.get("photo_timestamp"))),
                     "listing_agent_name": str(raw.get("listing_agent_name") or "").strip() or None,
                     "listing_agent_phone": str(raw.get("listing_agent_phone") or "").strip() or None,
                     "listing_agent_email": str(raw.get("listing_agent_email") or "").strip() or None,
@@ -402,6 +462,10 @@ def merge_comps_into_global(comps: list[dict[str, Any]], source: str) -> dict[st
                         beds, baths, baths_full, baths_half, garage,
                         sqft, lot_size, year_built, mls,
                         property_type, property_category, list_price, remarks,
+                        address_city, address_zip, address_subdivision,
+                        school_district, elementary_school, middle_school, high_school,
+                        stories, pool, unit_count,
+                        listing_timestamp, status_timestamp, photo_timestamp,
                         listing_agent_name, listing_agent_phone, listing_agent_email,
                         listing_office_name, listing_office_phone,
                         buyer_agent_name, buyer_agent_phone, buyer_agent_email,
@@ -425,6 +489,10 @@ def merge_comps_into_global(comps: list[dict[str, Any]], source: str) -> dict[st
                         %(sqft)s, %(lot_size)s, %(year_built)s, %(mls)s,
                         %(property_type)s, %(property_category)s,
                         %(list_price)s, %(remarks)s,
+                        %(address_city)s, %(address_zip)s, %(address_subdivision)s,
+                        %(school_district)s, %(elementary_school)s, %(middle_school)s, %(high_school)s,
+                        %(stories)s, %(pool)s, %(unit_count)s,
+                        %(listing_timestamp)s, %(status_timestamp)s, %(photo_timestamp)s,
                         %(listing_agent_name)s, %(listing_agent_phone)s, %(listing_agent_email)s,
                         %(listing_office_name)s, %(listing_office_phone)s,
                         %(buyer_agent_name)s, %(buyer_agent_phone)s, %(buyer_agent_email)s,
@@ -464,6 +532,19 @@ def merge_comps_into_global(comps: list[dict[str, Any]], source: str) -> dict[st
                         property_category   = EXCLUDED.property_category,
                         list_price          = EXCLUDED.list_price,
                         remarks             = EXCLUDED.remarks,
+                        address_city        = EXCLUDED.address_city,
+                        address_zip         = EXCLUDED.address_zip,
+                        address_subdivision = EXCLUDED.address_subdivision,
+                        school_district     = EXCLUDED.school_district,
+                        elementary_school   = EXCLUDED.elementary_school,
+                        middle_school       = EXCLUDED.middle_school,
+                        high_school         = EXCLUDED.high_school,
+                        stories             = EXCLUDED.stories,
+                        pool                = EXCLUDED.pool,
+                        unit_count          = EXCLUDED.unit_count,
+                        listing_timestamp   = EXCLUDED.listing_timestamp,
+                        status_timestamp    = EXCLUDED.status_timestamp,
+                        photo_timestamp     = EXCLUDED.photo_timestamp,
                         listing_agent_name  = EXCLUDED.listing_agent_name,
                         listing_agent_phone = EXCLUDED.listing_agent_phone,
                         listing_agent_email = EXCLUDED.listing_agent_email,
@@ -559,31 +640,34 @@ def load_comps_by_polygon(
                     pc.parcel_geom,
                     pc.parcel_account_num,
                     pc.parcel_county,
-                                        cr.rating AS user_rating,
-                                        NOT ST_Within(
-                                                pc.geom,
-                                                ST_GeomFromGeoJSON(%(polygon)s)::geometry
-                                        ) AS is_outside_polygon
+                    pc.first_seen_at,
+                    pc.last_seen_at,
+                    pc.first_seen_source,
+                    cr.rating AS user_rating,
+                    NOT ST_Within(
+                        pc.geom,
+                        ST_GeomFromGeoJSON(%(polygon)s)::geometry
+                    ) AS is_outside_polygon
                 FROM propelio_comps pc
                 LEFT JOIN comp_ratings cr
                     ON cr.comp_id = pc.comp_id
                     AND cr.workspace_id = %(workspace_id)s
                 WHERE pc.geom IS NOT NULL
-                                    AND (
-                                        ST_Within(pc.geom, ST_GeomFromGeoJSON(%(polygon)s)::geometry)
-                                        OR ST_DWithin(
-                                                pc.geom::geography,
-                                                ST_SetSRID(ST_MakePoint(%(centroid_lng)s, %(centroid_lat)s), 4326)::geography,
-                                                %(circumradius_meters)s
-                                        )
-                                    )
+                    AND (
+                        ST_Within(pc.geom, ST_GeomFromGeoJSON(%(polygon)s)::geometry)
+                        OR ST_DWithin(
+                            pc.geom::geography,
+                            ST_SetSRID(ST_MakePoint(%(centroid_lng)s, %(centroid_lat)s), 4326)::geography,
+                            %(circumradius_meters)s
+                        )
+                    )
                 """,
                 {
                     "workspace_id": workspace_id,
                     "polygon": geojson_str,
-                                        "centroid_lat": centroid_lat,
-                                        "centroid_lng": centroid_lng,
-                                        "circumradius_meters": circumradius_meters,
+                    "centroid_lat": centroid_lat,
+                    "centroid_lng": centroid_lng,
+                    "circumradius_meters": circumradius_meters,
                 },
             )
             rows = cur.fetchall() or []
@@ -598,6 +682,9 @@ def load_comps_by_polygon(
             parcel_geom,
             parcel_account_num,
             parcel_county,
+            first_seen_at,
+            last_seen_at,
+            first_seen_source,
             user_rating,
             is_outside_polygon,
         ) = row
@@ -606,6 +693,9 @@ def load_comps_by_polygon(
         comp["parcel_geom"] = parcel_geom if isinstance(parcel_geom, (dict, list)) else None
         comp["parcel_account_num"] = str(parcel_account_num or "").strip() or None
         comp["parcel_county"] = str(parcel_county or "").strip() or None
+        comp["first_seen_at"] = first_seen_at.isoformat() if first_seen_at else None
+        comp["last_seen_at"] = last_seen_at.isoformat() if last_seen_at else None
+        comp["first_seen_source"] = str(first_seen_source or "").strip() or None
         comp["user_rating"] = str(user_rating).strip().lower() if user_rating is not None else None
         if is_outside_polygon:
             extra = comp.setdefault("extra", {})
