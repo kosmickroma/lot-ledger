@@ -20,6 +20,7 @@ import os
 import random
 import socket
 import uuid
+from typing import Any
 
 from psycopg2 import errors
 from psycopg2.extras import RealDictCursor
@@ -28,7 +29,7 @@ from api.config import get_session_conn, release_session_conn
 from .circuit_breaker import CircuitBreaker
 from .cooldown import wait_for_cooldown_or_exit
 from .pacing import inter_seed_pause_seconds, maybe_take_break
-from .state import transition
+from .state import IllegalStateTransition, transition
 
 
 def _utcnow() -> datetime:
@@ -48,6 +49,29 @@ class Outcome:
 
 
 _MOCK_JOBS: dict[str, dict[str, object]] = {}
+
+
+# TODO(phase4c): replace local stubs with canonical exceptions from api/propelio.
+class PropelioAuthError(Exception):
+    pass
+
+
+class PropelioRateLimitError(Exception):
+    pass
+
+
+def _truncate_error(value: object, limit: int = 500) -> str:
+    return str(value or "")[: int(limit)]
+
+
+def exponential_backoff(attempts: int) -> int:
+    """Return exponential multiplier for retries, starting at 1 for attempt=1."""
+    return 2 ** max(0, int(attempts) - 1)
+
+
+def _retry_delay_minutes(retry_min: int, attempts: int) -> int:
+    delay = int(retry_min) * exponential_backoff(int(attempts))
+    return max(1, min(60, int(delay)))
 
 
 def _load_campaign(campaign_key: str) -> dict[str, object] | None:
@@ -118,6 +142,55 @@ def claim_next_seed(campaign_id: int, runner_id: str) -> dict[str, object] | Non
         release_session_conn(conn)
 
 
+def _load_seed_state(seed_id: int) -> dict[str, Any] | None:
+    conn = get_session_conn()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT seed_id, status::text AS status, attempts, max_attempts, job_id
+                FROM propelio_marathon_seeds
+                WHERE seed_id = %s
+                """,
+                (int(seed_id),),
+            )
+            row = cur.fetchone()
+        conn.commit()
+        return dict(row) if row else None
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        release_session_conn(conn)
+
+
+def _transition_best_effort(
+    seed_id: int,
+    from_state: str,
+    to_state: str,
+    **fields: Any,
+) -> bool:
+    try:
+        result = transition(int(seed_id), str(from_state), str(to_state), **fields)
+        if result.success:
+            return True
+    except IllegalStateTransition:
+        pass
+
+    current = _load_seed_state(int(seed_id))
+    if not current:
+        return False
+    current_state = str(current.get("status") or "")
+    if not current_state or current_state == from_state:
+        return False
+
+    try:
+        result = transition(int(seed_id), current_state, str(to_state), **fields)
+        return bool(result.success)
+    except IllegalStateTransition:
+        return False
+
+
 async def start_deep_pull_for_seed(seed: dict[str, object], mock: bool = False) -> str:
     if mock:
         job_id = f"mock_{uuid.uuid4().hex[:10]}"
@@ -159,6 +232,123 @@ async def start_deep_pull_for_seed(seed: dict[str, object], mock: bool = False) 
 
     asyncio.create_task(run_deep_pull(job_id))
     return job_id
+
+
+def _fetch_job_snapshot(job_id: str) -> dict[str, Any] | None:
+    conn = get_session_conn()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT status, total_unique_comps, net_new_comps, last_error
+                FROM propelio_deep_pull_jobs
+                WHERE job_id = %s
+                """,
+                (str(job_id),),
+            )
+            row = cur.fetchone()
+        conn.commit()
+        return dict(row) if row else None
+    except errors.UndefinedTable:
+        conn.rollback()
+        return None
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        release_session_conn(conn)
+
+
+def reconcile_orphans(campaign_id: int) -> dict[str, int]:
+    conn = get_session_conn()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT seed_id, status::text AS status, job_id, heartbeat_at
+                FROM propelio_marathon_seeds
+                WHERE campaign_id = %s
+                  AND status IN ('running', 'verifying', 'stopping_requested')
+                  AND heartbeat_at < NOW() - INTERVAL '15 minutes'
+                ORDER BY seed_id
+                """,
+                (int(campaign_id),),
+            )
+            rows = [dict(r) for r in (cur.fetchall() or [])]
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        release_session_conn(conn)
+
+    summary = {
+        "count": 0,
+        "completed": 0,
+        "adopted": 0,
+        "requeued": 0,
+    }
+
+    for row in rows:
+        seed_id = int(row["seed_id"])
+        from_state = str(row.get("status") or "running")
+        job_id = str(row.get("job_id") or "").strip() or None
+        summary["count"] += 1
+
+        if job_id:
+            job = _fetch_job_snapshot(job_id)
+            remote_status = str((job or {}).get("status") or "").strip().lower()
+
+            if remote_status in {"completed", "saturated"}:
+                if _transition_best_effort(
+                    seed_id,
+                    from_state,
+                    "completed",
+                    comps_captured=int((job or {}).get("total_unique_comps") or 0),
+                    net_new_comps=int((job or {}).get("net_new_comps") or 0),
+                ):
+                    summary["completed"] += 1
+                continue
+
+            if remote_status == "running":
+                conn = get_session_conn()
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            UPDATE propelio_marathon_seeds
+                            SET heartbeat_at = NOW(), updated_at = NOW()
+                            WHERE seed_id = %s
+                            """,
+                            (seed_id,),
+                        )
+                    conn.commit()
+                    summary["adopted"] += 1
+                except Exception:
+                    conn.rollback()
+                    raise
+                finally:
+                    release_session_conn(conn)
+                continue
+
+            _transition_best_effort(
+                seed_id,
+                from_state,
+                "failed_retryable",
+                retry_after=_utcnow() + timedelta(minutes=5),
+                last_error="orphan reconciliation: stale seed after runner crash",
+                last_error_class="orphaned_after_crash",
+            )
+            continue
+
+        if from_state == "verifying":
+            _transition_best_effort(seed_id, "verifying", "running")
+            from_state = "running"
+
+        if _transition_best_effort(seed_id, from_state, "queued", retry_after=None):
+            summary["requeued"] += 1
+
+    return summary
 
 
 async def _update_heartbeat(seed_id: int) -> None:
@@ -208,7 +398,7 @@ async def wait_for_job_with_heartbeat(job_id: str, seed_id: int, timeout_min: in
                     net_new=int(job.get("net_new_comps") or 0),
                 )
             if status in {"error", "blocked", "stopped"}:
-                return Outcome(status="error", error=str(job.get("last_error") or status))
+                return Outcome(status=status, error=str(job.get("last_error") or status))
             await asyncio.sleep(0.25)
             continue
 
@@ -242,23 +432,211 @@ async def wait_for_job_with_heartbeat(job_id: str, seed_id: int, timeout_min: in
         if status in {"completed", "saturated"}:
             return Outcome(status=status, total=total_unique, net_new=net_new)
         if status in {"error", "blocked", "stopped"}:
-            return Outcome(status="error", error=last_error or status)
+            return Outcome(status=status, error=last_error or status)
 
         await asyncio.sleep(5.0)
 
     return Outcome(status="timeout")
 
 
-def _set_retryable(seed_id: int, from_state: str, error_msg: str, error_class: str) -> None:
-    retry_after = _utcnow() + timedelta(minutes=5)
-    transition(
-        int(seed_id),
-        str(from_state),
+def handle_transient_failure(
+    seed: dict[str, object],
+    exc: object,
+    *,
+    error_class: str,
+    from_state: str,
+    retry_min: int = 5,
+) -> str:
+    seed_id = int(seed["seed_id"])
+    runtime = _load_seed_state(seed_id) or {}
+    attempts = int(runtime.get("attempts") or seed.get("attempts") or 0)
+    max_attempts = int(runtime.get("max_attempts") or seed.get("max_attempts") or 5)
+    current_state = str(runtime.get("status") or from_state)
+
+    payload = {
+        "last_error": _truncate_error(exc),
+        "last_error_class": str(error_class or "unexpected")[:64],
+    }
+
+    if attempts >= max_attempts:
+        _transition_best_effort(seed_id, current_state, "failed_final", **payload)
+        return "failed_final"
+
+    delay_min = _retry_delay_minutes(int(retry_min), attempts)
+    retry_after = _utcnow() + timedelta(minutes=delay_min)
+    _transition_best_effort(
+        seed_id,
+        current_state,
         "failed_retryable",
         retry_after=retry_after,
-        last_error=str(error_msg or "")[:500],
-        last_error_class=str(error_class or "runner_error")[:64],
+        **payload,
     )
+    return "failed_retryable"
+
+
+async def verify_remote_state(
+    seed: dict[str, object],
+    *,
+    mock: bool = False,
+    wall_start_monotonic: float | None = None,
+    wall_cap_seconds: int = 45 * 60,
+    verify_polls: int = 3,
+    verify_sleep_seconds: float = 60.0,
+) -> Outcome:
+    seed_id = int(seed["seed_id"])
+    job_id = str(seed.get("job_id") or "").strip()
+    if not job_id:
+        raise RuntimeError(f"seed_id={seed_id} missing job_id for verify_remote_state")
+
+    loop = asyncio.get_running_loop()
+    if wall_start_monotonic is None:
+        wall_start_monotonic = loop.time()
+
+    def over_cap() -> bool:
+        return (loop.time() - float(wall_start_monotonic)) >= int(wall_cap_seconds)
+
+    _transition_best_effort(seed_id, str(seed.get("status") or "running"), "verifying")
+
+    for poll_idx in range(int(verify_polls)):
+        if over_cap():
+            handle_transient_failure(
+                seed,
+                "verify_remote_state hard timeout",
+                error_class="hard_timeout",
+                from_state="verifying",
+            )
+            return Outcome(status="timeout", error="hard_timeout")
+
+        if mock:
+            job = _MOCK_JOBS.get(job_id)
+            if job is None:
+                handle_transient_failure(
+                    seed,
+                    "mock job not found in verify_remote_state",
+                    error_class="remote_error",
+                    from_state="verifying",
+                )
+                return Outcome(status="error", error="mock job not found")
+            remote_status = str(job.get("status") or "running")
+            total_unique = int(job.get("total_unique_comps") or 0)
+            net_new = int(job.get("net_new_comps") or 0)
+            last_error = _truncate_error(job.get("last_error") or remote_status)
+        else:
+            snapshot = _fetch_job_snapshot(job_id)
+            if snapshot is None:
+                handle_transient_failure(
+                    seed,
+                    f"job missing during verify_remote_state: {job_id}",
+                    error_class="remote_error",
+                    from_state="verifying",
+                )
+                return Outcome(status="error", error="job missing")
+
+            remote_status = str(snapshot.get("status") or "").strip().lower()
+            total_unique = int(snapshot.get("total_unique_comps") or 0)
+            net_new = int(snapshot.get("net_new_comps") or 0)
+            last_error = _truncate_error(snapshot.get("last_error") or remote_status)
+
+        if remote_status in {"completed", "saturated"}:
+            _transition_best_effort(
+                seed_id,
+                "verifying",
+                "completed",
+                comps_captured=total_unique,
+                net_new_comps=net_new,
+            )
+            return Outcome(status=remote_status, total=total_unique, net_new=net_new)
+
+        if remote_status == "error":
+            handle_transient_failure(
+                seed,
+                last_error,
+                error_class="remote_error",
+                from_state="verifying",
+            )
+            return Outcome(status="error", error=last_error)
+
+        if remote_status == "stopped":
+            handle_transient_failure(
+                seed,
+                last_error,
+                error_class="remote_stopped",
+                from_state="verifying",
+                retry_min=5,
+            )
+            return Outcome(status="stopped", error=last_error)
+
+        if remote_status == "blocked":
+            raise PropelioAuthError(last_error or "remote blocked")
+
+        await _update_heartbeat(seed_id)
+        if poll_idx < int(verify_polls) - 1:
+            await asyncio.sleep(float(verify_sleep_seconds))
+
+    if over_cap():
+        handle_transient_failure(
+            seed,
+            "verify_remote_state hard timeout after polls",
+            error_class="hard_timeout",
+            from_state="verifying",
+        )
+        return Outcome(status="timeout", error="hard_timeout")
+
+    _transition_best_effort(seed_id, "verifying", "running")
+    outcome = await wait_for_job_with_heartbeat(job_id, seed_id, timeout_min=15)
+
+    if outcome.status in {"completed", "saturated"}:
+        _transition_best_effort(
+            seed_id,
+            "running",
+            "completed",
+            comps_captured=int(outcome.total or 0),
+            net_new_comps=int(outcome.net_new or 0),
+        )
+        return outcome
+
+    if outcome.status == "timeout":
+        if over_cap():
+            handle_transient_failure(
+                seed,
+                "verify_remote_state hard timeout after second heartbeat window",
+                error_class="hard_timeout",
+                from_state="running",
+            )
+            return Outcome(status="timeout", error="hard_timeout")
+        return await verify_remote_state(
+            {
+                **seed,
+                "status": "running",
+                "job_id": job_id,
+            },
+            mock=mock,
+            wall_start_monotonic=wall_start_monotonic,
+            wall_cap_seconds=wall_cap_seconds,
+            verify_polls=verify_polls,
+            verify_sleep_seconds=verify_sleep_seconds,
+        )
+
+    if outcome.status == "stopped":
+        handle_transient_failure(
+            seed,
+            outcome.error or "stopped",
+            error_class="remote_stopped",
+            from_state="running",
+            retry_min=5,
+        )
+        return outcome
+
+    if outcome.status == "blocked":
+        raise PropelioAuthError(outcome.error or "remote blocked")
+
+    handle_transient_failure(
+        seed,
+        outcome.error or outcome.status,
+        error_class="remote_error",
+        from_state="running",
+    )
+    return outcome
 
 
 async def run_campaign(
@@ -274,6 +652,15 @@ async def run_campaign(
 
     campaign_id = int(campaign["campaign_id"])
     breaker = CircuitBreaker.load(campaign_id)
+
+    orphan_summary = reconcile_orphans(campaign_id)
+    print(
+        "[marathon-runner] "
+        f"orphans_reconciled count={orphan_summary['count']} "
+        f"completed={orphan_summary['completed']} "
+        f"adopted={orphan_summary['adopted']} "
+        f"requeued={orphan_summary['requeued']}"
+    )
 
     session_start = asyncio.get_running_loop().time()
     last_break_at = session_start
@@ -313,7 +700,7 @@ async def run_campaign(
 
             outcome = await wait_for_job_with_heartbeat(job_id, seed_id)
             if outcome.status in {"completed", "saturated"}:
-                transition(
+                _transition_best_effort(
                     seed_id,
                     "running",
                     "completed",
@@ -321,14 +708,68 @@ async def run_campaign(
                     net_new_comps=int(outcome.net_new or 0),
                 )
                 breaker.record_outcome("ok")
-            else:
-                _set_retryable(seed_id, "running", outcome.error or outcome.status, "runner_error")
+            elif outcome.status == "timeout":
+                verified = await verify_remote_state(
+                    {
+                        **seed,
+                        "seed_id": seed_id,
+                        "job_id": job_id,
+                        "status": "running",
+                    },
+                    mock=mock,
+                )
+                if verified.status in {"completed", "saturated"}:
+                    breaker.record_outcome("ok")
+                elif verified.status == "blocked":
+                    raise PropelioAuthError(verified.error or "remote blocked")
+                else:
+                    breaker.record_outcome("error")
+            elif outcome.status == "blocked":
+                raise PropelioAuthError(outcome.error or "remote blocked")
+            elif outcome.status == "stopped":
+                handle_transient_failure(
+                    seed,
+                    outcome.error or "stopped",
+                    error_class="remote_stopped",
+                    from_state="running",
+                    retry_min=5,
+                )
                 breaker.record_outcome("error")
+            else:
+                handle_transient_failure(
+                    seed,
+                    outcome.error or outcome.status,
+                    error_class="remote_error",
+                    from_state="running",
+                )
+                breaker.record_outcome("error")
+        except PropelioAuthError:
+            raise
+        except PropelioRateLimitError as exc:
+            breaker.trip("rate_limit", cooldown_min=30)
+            handle_transient_failure(
+                seed,
+                exc,
+                error_class="rate_limit",
+                from_state="running",
+                retry_min=30,
+            )
+            breaker.record_outcome("rate_limit")
+        except (asyncio.TimeoutError, TimeoutError, ConnectionError, socket.timeout, OSError) as exc:
+            handle_transient_failure(
+                seed,
+                exc,
+                error_class="network",
+                from_state="running",
+            )
+            breaker.record_outcome("error")
         except Exception as exc:
-            try:
-                _set_retryable(seed_id, "running", str(exc), "unexpected")
-            except Exception:
-                pass
+            handle_transient_failure(
+                seed,
+                exc,
+                error_class="unexpected",
+                from_state="running",
+            )
             breaker.record_outcome("error")
 
         seeds_processed += 1
