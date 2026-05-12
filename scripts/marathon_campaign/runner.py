@@ -9,6 +9,7 @@
 #   scripts/marathon_campaign/circuit_breaker.py - breaker state
 #   scripts/marathon_campaign/cooldown.py       - cooldown wait helper
 #   scripts/marathon_campaign/pacing.py         - inter-seed pause + break logic
+#   scripts/marathon_campaign/pass_configs.py    - density-based deep pull pass selection
 #   api.propelio.deep_pull.run_deep_pull        - real pull worker (non-mock path)
 
 from __future__ import annotations
@@ -31,6 +32,7 @@ from psycopg2.extras import RealDictCursor
 from api.config import get_session_conn, release_session_conn
 from .circuit_breaker import CircuitBreaker
 from .cooldown import wait_for_cooldown_or_exit
+from .pass_configs import passes_for_density_class
 from .pacing import inter_seed_pause_seconds, maybe_take_break
 from .state import IllegalStateTransition, transition
 
@@ -297,7 +299,8 @@ async def start_deep_pull_for_seed(seed: dict[str, object], mock: bool = False) 
     finally:
         release_session_conn(conn)
 
-    asyncio.create_task(run_deep_pull(job_id))
+    passes = passes_for_density_class(str(seed.get("density_class") or ""))
+    asyncio.create_task(run_deep_pull(job_id, passes=passes))
     return job_id
 
 
