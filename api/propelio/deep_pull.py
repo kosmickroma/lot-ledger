@@ -21,6 +21,7 @@ from psycopg2.extras import Json
 from api.config import get_session_conn, release_session_conn
 from api.propelio.archive import _comp_address_key, merge_comps_into_global  # intentional experimental reuse — see spec
 from api.propelio.config import PROPELIO_PASSWORD, PROPELIO_USERNAME
+from api.propelio.parcel_match import match_comps_to_parcels
 from api.propelio.scraper import PropelioClient, _parse_property
 from dataclasses import asdict
 
@@ -255,7 +256,16 @@ def _insert_pass_comps(job_id: str, pass_num: int, pass_config: dict[str, Any], 
             except Exception:
                 continue
         if parsed_for_global:
-            merge_comps_into_global(parsed_for_global, source="deep_pull")
+            try:
+                matched_for_global = match_comps_to_parcels(parsed_for_global)
+            except Exception as _me:
+                logger.warning(
+                    "[deep-pull job=%s] parcel match failed (non-fatal, writing unmatched): %s",
+                    job_id,
+                    _me,
+                )
+                matched_for_global = parsed_for_global
+            merge_comps_into_global(matched_for_global, source="deep_pull")
     except Exception as _exc:
         logger.warning("[deep-pull job=%s] global write failed (non-fatal): %s", job_id, _exc)
 
