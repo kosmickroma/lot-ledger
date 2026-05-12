@@ -739,7 +739,22 @@ async def get_by_saved_area(saved_area_id: str = Query(..., min_length=1)) -> di
     normalized = str(saved_area_id or "").strip()
     if not normalized:
         raise HTTPException(status_code=400, detail="saved_area_id is required")
-    return {"comps": load_archived_comps(normalized)}
+
+    # Phase 2: query the global propelio_comps cache via spatial lookup on the
+    # saved area's polygon. Falls back to legacy propelio_comp_archive when
+    # the area isn't a polygon type (location/parcel) or the spatial cache is
+    # empty (pre-Phase-2 areas that were never deep-pulled).
+    comps: list[dict[str, Any]] = []
+    try:
+        polygon = _load_saved_area_polygon(normalized)
+        comps = load_comps_by_polygon(polygon, normalized)
+    except HTTPException:
+        comps = []
+
+    if not comps:
+        comps = load_archived_comps(normalized)
+
+    return {"comps": comps}
 
 
 @router.post("/deep-pull/start")
