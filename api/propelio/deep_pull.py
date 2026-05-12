@@ -19,9 +19,10 @@ from typing import Any
 from psycopg2.extras import Json
 
 from api.config import get_session_conn, release_session_conn
-from api.propelio.archive import _comp_address_key  # intentional experimental reuse — see spec
+from api.propelio.archive import _comp_address_key, merge_comps_into_global  # intentional experimental reuse — see spec
 from api.propelio.config import PROPELIO_PASSWORD, PROPELIO_USERNAME
-from api.propelio.scraper import PropelioClient
+from api.propelio.scraper import PropelioClient, _parse_property
+from dataclasses import asdict
 
 
 logger = logging.getLogger(__name__)
@@ -242,6 +243,21 @@ def _insert_pass_comps(job_id: str, pass_num: int, pass_config: dict[str, Any], 
         raise
     finally:
         release_session_conn(conn)
+
+    # Phase 2 Chunk 2: parallel write to global propelio_comps table (non-fatal)
+    try:
+        parsed_for_global = []
+        for raw_comp in comps or []:
+            if not isinstance(raw_comp, dict):
+                continue
+            try:
+                parsed_for_global.append(asdict(_parse_property(raw_comp)))
+            except Exception:
+                continue
+        if parsed_for_global:
+            merge_comps_into_global(parsed_for_global, source="deep_pull")
+    except Exception as _exc:
+        logger.warning("[deep-pull job=%s] global write failed (non-fatal): %s", job_id, _exc)
 
 
 def _refresh_job_counts(job_id: str, pass_num: int) -> dict[str, int]:

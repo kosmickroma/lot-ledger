@@ -29,7 +29,7 @@ from api.config import get_conn, get_session_conn, release_conn, release_session
 from api.geo import haversine_miles, point_in_polygon, polygon_centroid
 from api.redfin import normalize_addr_key
 
-from .archive import load_archived_comps, merge_comps_into_archive, set_comp_rating
+from .archive import load_archived_comps, merge_comps_into_archive, merge_comps_into_global, set_comp_rating
 from .deep_pull import STALE_JOB_THRESHOLD_MINUTES, run_deep_pull
 from .parcel_match import match_comps_to_parcels
 from . import cache as cache_mod
@@ -356,6 +356,10 @@ async def _run_by_polygon(request: PolygonRequest, *, use_cache: bool) -> dict[s
                 # Reload the archive view so user_rating + comp_address_key
                 # round-trip on cache hits, matching the fresh-pull path.
                 cached_payload["comps"] = load_archived_comps(saved_area_id)
+            try:
+                merge_comps_into_global(cached_payload.get("comps") or [], "by_polygon")
+            except Exception as _exc:
+                logger.warning("[propelio] global write failed (cache-hit): %s", _exc)
             return {"cached": True, **cached_payload}
 
     subject_parcel = _nearest_subject_parcel(centroid_lat, centroid_lng)
@@ -429,6 +433,10 @@ async def _run_by_polygon(request: PolygonRequest, *, use_cache: bool) -> dict[s
             }
             if saved_area_id:
                 empty_payload["archive_meta"] = merge_comps_into_archive(saved_area_id, [])
+            try:
+                merge_comps_into_global([], "by_polygon")
+            except Exception as _exc:
+                logger.warning("[propelio] global write failed (empty-comps): %s", _exc)
             return {"cached": False, **empty_payload}
         # Surface the scraper error in logs so we can see WHY Propelio
         # rejected the pull (auth expired, lead-id lookup failed, captcha,
@@ -481,6 +489,10 @@ async def _run_by_polygon(request: PolygonRequest, *, use_cache: bool) -> dict[s
         # across refreshes via the merge function). New unrated comps
         # get user_rating=None.
         payload["comps"] = load_archived_comps(saved_area_id)
+    try:
+        merge_comps_into_global(payload.get("comps") or [], "by_polygon")
+    except Exception as _exc:
+        logger.warning("[propelio] global write failed (fresh-scrape): %s", _exc)
 
     if use_cache:
         cache_payload = dict(payload)
@@ -569,6 +581,11 @@ async def get_by_address(
 
     payload = _build_payload(subject, comps_list)
     payload["comps"] = match_comps_to_parcels(payload.get("comps") or [])
+
+    try:
+        merge_comps_into_global(payload.get("comps") or [], "by_address")
+    except Exception as _exc:
+        logger.warning("[propelio] global write failed (by-address): %s", _exc)
 
     cache_mod.log_quota(payload.get("balance"), address_key)
     cache_mod.put_cached(address_key, payload)
