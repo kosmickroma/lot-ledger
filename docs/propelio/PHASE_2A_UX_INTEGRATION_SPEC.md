@@ -4,6 +4,11 @@
 >
 > **Branch (continue on):** `feat/propelio-deep-pull-experiment`
 >
+> **Revision v2.1 (2026-05-12):** Addresses Copilot second-review findings on top of v2:
+> - Route handler snippet now PRESERVES the existing `saved_area_id` query/body precedence logic (routes.py:689-704). Only adds `cache_only` as a new query param.
+> - CSS selectors use class-based `.propelio-get-comps-btn` (the dynamic button is class-based, no id). Two-line label styling added explicitly.
+> - Get Comps `targetAddress` fallback no longer references a non-existent `workspace?.name`. Properly looks up the current workspace via `_currentLoadedAreaId` against `_savedAreasCache`.
+>
 > **Revision v2 (2026-05-12):** Addresses Copilot first-review findings. Key changes:
 > - Cache_only miss response shape FULLY enumerated (was missing polygon_meta/cma_settings/balance/subject parity)
 > - Get Comps button architecture corrected — it's a DYNAMIC sticky map control created at `map.js:4385-4392`, NOT static HTML. Modify the JS that creates it, not index.html.
@@ -66,14 +71,32 @@ Spec assumes Option A below. Toggle if KK decides differently.
 **Add to** `api/propelio/routes.py` — modify the route handler signature and the cache gate block inside `_run_by_polygon`.
 
 ```python
-# At the route handler (~routes.py:693)
+# At the route handler (api/propelio/routes.py:689-704).
+# CRITICAL: preserve the existing saved_area_id query/body precedence
+# logic. Only ADD cache_only as a new query param. Do NOT drop the
+# saved_area_id query/body merge handling — the existing code resolves
+# precedence (query wins over body) and we keep that semantic.
+
 @router.post("/by-polygon")
-async def by_polygon(
+async def get_by_polygon(
     request: PolygonRequest,
-    cache_only: bool = Query(False),
+    saved_area_id: str | None = Query(None),  # PRESERVED — existing query param
+    cache_only: bool = Query(False),          # NEW — added for Phase 2A
 ) -> dict[str, Any]:
-    return await _run_by_polygon(request, use_cache=True, cache_only=cache_only)
+    body_saved_area_id = str(request.saved_area_id or "").strip() or None
+    query_saved_area_id = str(saved_area_id or "").strip() or None
+    effective_saved_area_id = query_saved_area_id or body_saved_area_id
+
+    effective_request = PolygonRequest(
+        polygon=request.polygon,
+        months=request.months,
+        range_override_mi=request.range_override_mi,
+        saved_area_id=effective_saved_area_id,
+    )
+    return await _run_by_polygon(effective_request, use_cache=True, cache_only=cache_only)
 ```
+
+`_run_by_polygon` gains a new `cache_only: bool = False` kwarg.
 
 **Behavior in `_run_by_polygon`** — add at the TOP of the existing cache gate block (currently at `routes.py:325-401`), BEFORE the polygon cache lookup, scraper call, archive merge, or quota log:
 
@@ -208,10 +231,16 @@ btn.addEventListener("click", async () => {
     // Derive target address. Preference order:
     //   1. _lastSearchedAddress (typeahead-set)
     //   2. _suggestAreaNameFromContainedParcels (saved parcels in polygon)
-    //   3. fallback: workspace name (less ideal — has timestamp prefix)
+    //   3. Current saved workspace's name (looked up via _currentLoadedAreaId
+    //      against _savedAreasCache) — less ideal because it may have a
+    //      timestamp prefix or "Workspace at..." wrapper, but better than
+    //      nothing
+    const currentWorkspace = _currentLoadedAreaId
+        ? _savedAreasCache.find(a => a.id === _currentLoadedAreaId)
+        : null;
     const targetAddress = _lastSearchedAddress
         || _suggestAreaNameFromContainedParcels()
-        || (workspace?.name);  // last resort
+        || (currentWorkspace?.name);
     
     if (!targetAddress) {
         _showInlineWarning("Search for an address or save a parcel first");
@@ -240,14 +269,37 @@ btn.addEventListener("click", async () => {
 
 c. **Disabled state when deep-pull running** — add CSS class + visual:
 
+The button is class-based — `.propelio-get-comps-btn` — with NO id assigned during dynamic creation. CSS selectors must use the class:
+
 ```css
-#btn-get-comps[disabled],
-#btn-get-comps.is-running {
+.propelio-get-comps-btn[disabled],
+.propelio-get-comps-btn.is-running {
     opacity: 0.55;
     cursor: not-allowed;
     pointer-events: none;
 }
+
+/* Two-line label layout under the existing single-line styles at style.css:2496-2540 */
+.propelio-get-comps-btn .get-comps-main {
+    display: block;
+    font-weight: 600;
+}
+.propelio-get-comps-btn .get-comps-subtitle {
+    display: block;
+    font-size: 0.78em;
+    font-style: italic;
+    opacity: 0.85;
+    margin-top: 1px;
+}
 ```
+
+In JS, find the button via class:
+
+```javascript
+const btn = document.querySelector(".propelio-get-comps-btn");
+```
+
+OR (preferred) — add an `id` attribute during the existing dynamic creation at `map.js:4385-4392` so future references are cleaner. If we add an id, the spec should explicitly say so. **Copilot's call: pick whichever is less invasive to existing surrounding code.**
 
 d. **Progress banner — reuse existing `.deep-pull-banner` CSS at `style.css:3049`.** The polling logic from `_pollDeepPullStatus` at `map.js:8369` is reusable. Just swap the trigger source from the experimental Deep Pull button to the production Get Comps button.
 
