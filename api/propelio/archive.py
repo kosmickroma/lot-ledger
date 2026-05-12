@@ -507,4 +507,74 @@ def merge_comps_into_global(comps: list[dict[str, Any]], source: str) -> dict[st
     return {"inserted": inserted, "updated": updated}
 
 
+def load_comps_by_polygon(
+    polygon_latlngs: list[list[float]],
+    saved_area_id: str | None,
+) -> list[dict[str, Any]]:
+    """Query propelio_comps for all comps whose geom falls inside the given polygon.
+
+    polygon_latlngs: raw [[lng, lat], ...] ring from the frontend (NOT closed).
+    Returns a list of dicts ready for direct inclusion in the API response —
+    each dict is {**parsed_payload, comp_address_key, user_rating, parcel_geom,
+    parcel_account_num, parcel_county}.  Comps with NULL geom are excluded.
+    """
+    if not polygon_latlngs or len(polygon_latlngs) < 3:
+        return []
+
+    # Close the ring: PostGIS requires the first coord repeated at the end.
+    ring = list(polygon_latlngs)
+    if ring[0] != ring[-1]:
+        ring = ring + [ring[0]]
+
+    geojson_polygon = {
+        "type": "Polygon",
+        "coordinates": [ring],
+    }
+    import json as _json
+    geojson_str = _json.dumps(geojson_polygon)
+
+    workspace_id = str(saved_area_id or "").strip() or None
+
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    pc.parsed_payload,
+                    pc.comp_address_key,
+                    pc.parcel_geom,
+                    pc.parcel_account_num,
+                    pc.parcel_county,
+                    cr.rating AS user_rating
+                FROM propelio_comps pc
+                LEFT JOIN comp_ratings cr
+                    ON cr.comp_id = pc.comp_id
+                    AND cr.workspace_id = %(workspace_id)s
+                WHERE pc.geom IS NOT NULL
+                  AND ST_Within(pc.geom, ST_GeomFromGeoJSON(%(polygon)s)::geometry)
+                """,
+                {
+                    "workspace_id": workspace_id,
+                    "polygon": geojson_str,
+                },
+            )
+            rows = cur.fetchall() or []
+    finally:
+        release_session_conn(conn)
+
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        parsed_payload, comp_address_key, parcel_geom, parcel_account_num, parcel_county, user_rating = row
+        comp = dict(parsed_payload) if isinstance(parsed_payload, dict) else {}
+        comp["comp_address_key"] = comp_address_key
+        comp["parcel_geom"] = parcel_geom if isinstance(parcel_geom, (dict, list)) else None
+        comp["parcel_account_num"] = str(parcel_account_num or "").strip() or None
+        comp["parcel_county"] = str(parcel_county or "").strip() or None
+        comp["user_rating"] = str(user_rating).strip().lower() if user_rating is not None else None
+        result.append(comp)
+
+    return result
+
+
 ensure_tables()

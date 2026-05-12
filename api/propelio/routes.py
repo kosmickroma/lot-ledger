@@ -13,6 +13,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import secrets
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -29,7 +30,7 @@ from api.config import get_conn, get_session_conn, release_conn, release_session
 from api.geo import haversine_miles, point_in_polygon, polygon_centroid
 from api.redfin import normalize_addr_key
 
-from .archive import load_archived_comps, merge_comps_into_archive, merge_comps_into_global, set_comp_rating
+from .archive import load_archived_comps, load_comps_by_polygon, merge_comps_into_archive, merge_comps_into_global, set_comp_rating
 from .deep_pull import STALE_JOB_THRESHOLD_MINUTES, run_deep_pull
 from .parcel_match import match_comps_to_parcels
 from . import cache as cache_mod
@@ -325,6 +326,27 @@ async def _run_by_polygon(request: PolygonRequest, *, use_cache: bool) -> dict[s
     polygon = _validate_polygon(request.polygon)
     months = int(request.months)
     saved_area_id = str(request.saved_area_id or "").strip() or None
+
+    # --- Phase 2 Chunk 3: global cache read (gated by PHASE_2_CACHE_READ env var) ---
+    if os.environ.get("PHASE_2_CACHE_READ") == "true":
+        try:
+            cached_global = load_comps_by_polygon(polygon, saved_area_id)
+        except Exception as _exc:
+            logger.warning("[propelio] global cache read failed (non-fatal): %s", _exc)
+            cached_global = []
+        if cached_global:
+            logger.info(
+                "[propelio] PHASE_2_CACHE_READ hit: %d comps for saved_area=%s",
+                len(cached_global),
+                saved_area_id,
+            )
+            return {
+                "cached": True,
+                "comps": cached_global,
+                "phase2_cache": True,
+            }
+    # --- end Chunk 3 gate ---
+
     centroid_lat, centroid_lng = polygon_centroid(polygon)
     circumradius_mi = max(
         haversine_miles(centroid_lat, centroid_lng, point_lat, point_lng)
