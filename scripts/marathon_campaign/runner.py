@@ -1050,6 +1050,35 @@ def status_campaign(campaign_key: str) -> dict[str, int]:
                 (campaign_id,),
             )
             campaign_row = cur.fetchone()
+
+            cur.execute(
+                """
+                SELECT
+                    PERCENTILE_CONT(0.5) WITHIN GROUP (
+                        ORDER BY EXTRACT(EPOCH FROM (completed_at - running_at))
+                    ) AS p50_s,
+                    PERCENTILE_CONT(0.95) WITHIN GROUP (
+                        ORDER BY EXTRACT(EPOCH FROM (completed_at - running_at))
+                    ) AS p95_s
+                FROM propelio_marathon_seeds
+                WHERE campaign_id = %s
+                  AND status = 'completed'
+                  AND running_at IS NOT NULL
+                  AND completed_at IS NOT NULL
+                """,
+                (campaign_id,),
+            )
+            duration_row = cur.fetchone() or (None, None)
+
+            cur.execute(
+                """
+                SELECT COALESCE(SUM(attempts), 0)
+                FROM propelio_marathon_seeds
+                WHERE campaign_id = %s
+                """,
+                (campaign_id,),
+            )
+            attempts_row = cur.fetchone() or (0,)
         conn.commit()
     except Exception:
         conn.rollback()
@@ -1070,6 +1099,19 @@ def status_campaign(campaign_key: str) -> dict[str, int]:
     total_comps = int((totals_row[0] or 0))
     total_net_new = int((totals_row[1] or 0))
     avg_per_seed = (total_comps / completed) if completed else 0.0
+    p50_duration_s = duration_row[0]
+    p95_duration_s = duration_row[1]
+
+    total_attempts = int(attempts_row[0] or 0)
+    failure_count = int(counts["failed_retryable"] + counts["failed_final"])
+    error_rate_pct = (100.0 * failure_count / total_attempts) if total_attempts else None
+
+    net_new_ratio_pct = (100.0 * total_net_new / total_comps) if total_comps else None
+
+    # Deferred KPI notes for v3:
+    # - Cap-hit rate requires per-pass telemetry (not available in seed-level totals).
+    # - Parcel match rate needs matched/unmatched comp counters.
+    # - Duplicate rate is derivable as 1 - net_new_ratio.
 
     next_retry_at = retry_row[0] if retry_row else None
     next_retry_label = "-"
@@ -1098,6 +1140,33 @@ def status_campaign(campaign_key: str) -> dict[str, int]:
     print("")
     print(f"Comps captured:   {total_comps:,} total, {total_net_new:,} net-new")
     print(f"Avg per seed:     {avg_per_seed:.0f} comps (over {completed} completed)")
+    if p50_duration_s is not None and p95_duration_s is not None and completed > 0:
+        print(
+            "Pull duration:    "
+            f"p50={int(round(float(p50_duration_s)))}s  "
+            f"p95={int(round(float(p95_duration_s)))}s  "
+            f"(over {completed} completed)"
+        )
+    else:
+        print("Pull duration:    n/a")
+
+    if net_new_ratio_pct is not None:
+        print(
+            "Net-new ratio:    "
+            f"{net_new_ratio_pct:.0f}%       "
+            f"({total_net_new} net-new of {total_comps} captured)"
+        )
+    else:
+        print("Net-new ratio:    n/a")
+
+    if error_rate_pct is not None:
+        print(
+            "Error rate:       "
+            f"{error_rate_pct:.1f}%      "
+            f"({failure_count} failures over {total_attempts} attempts)"
+        )
+    else:
+        print("Error rate:       n/a")
     print("")
     print(f"Circuit breaker:   {breaker_text}")
     print(f"Last update:      {last_update}")
