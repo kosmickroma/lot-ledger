@@ -3959,7 +3959,7 @@ async def fork_saved_area(
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT name, polygon, filter_state, type
+                SELECT area_id, name, polygon, filter_state, type
                 FROM saved_areas
                 WHERE share_id = %s
                 LIMIT 1
@@ -3970,10 +3970,11 @@ async def fork_saved_area(
             if source is None:
                 raise HTTPException(status_code=404, detail="Saved area not found")
 
-            source_name = str(source[0] or "Untitled")
-            source_polygon = source[1] if isinstance(source[1], list) else []
-            source_filter_state = source[2] if isinstance(source[2], dict) else None
-            source_type = str(source[3] or "area")
+            source_area_id = source[0]
+            source_name = str(source[1] or "Untitled")
+            source_polygon = source[2] if isinstance(source[2], list) else []
+            source_filter_state = source[3] if isinstance(source[3], dict) else None
+            source_type = str(source[4] or "area")
 
             cur.execute("SELECT id FROM users WHERE id = %s FOR UPDATE", (int(user["id"]),))
             if cur.fetchone() is None:
@@ -4027,6 +4028,27 @@ async def fork_saved_area(
                     continue
             if row is None:
                 raise HTTPException(status_code=503, detail="Failed to allocate unique share_id")
+
+            # Copy the source area's archived comps (including user_rating + rating_at)
+            # to the new area so good/bad tags survive the fork. UNIQUE constraint on
+            # (saved_area_id, comp_address_key) holds because the new area_id makes
+            # every row unique. first_seen_at / last_seen_at intentionally default to
+            # NOW() to reflect when this user gained the rows.
+            cur.execute(
+                """
+                INSERT INTO propelio_comp_archive (
+                    saved_area_id, comp_address_key, comp_mls, comp_data,
+                    parcel_geom, parcel_account_num, status, last_status, last_price,
+                    user_rating, rating_at
+                )
+                SELECT %s, comp_address_key, comp_mls, comp_data,
+                       parcel_geom, parcel_account_num, status, last_status, last_price,
+                       user_rating, rating_at
+                FROM propelio_comp_archive
+                WHERE saved_area_id = %s
+                """,
+                (row[0], source_area_id),
+            )
         conn.commit()
     except HTTPException:
         conn.rollback()
