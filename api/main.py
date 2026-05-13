@@ -186,6 +186,7 @@ def _ensure_session_schema() -> None:
     try:
         with conn.cursor() as cur:
             cur.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto")
+            cur.execute("CREATE EXTENSION IF NOT EXISTS postgis")
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS users (
@@ -291,6 +292,171 @@ def _ensure_session_schema() -> None:
                 )
                 """
             )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS propelio_comps (
+                    comp_id BIGSERIAL PRIMARY KEY,
+                    comp_address_key TEXT UNIQUE NOT NULL,
+                    address TEXT NOT NULL,
+                    neighborhood TEXT,
+                    lat NUMERIC(10, 7),
+                    lng NUMERIC(10, 7),
+                    geom GEOMETRY(POINT, 4326),
+                    status TEXT,
+                    last_status TEXT,
+                    price NUMERIC,
+                    last_price NUMERIC,
+                    sold_date DATE,
+                    close_date DATE,
+                    dom INTEGER,
+                    beds NUMERIC,
+                    baths NUMERIC,
+                    baths_full INTEGER,
+                    baths_half INTEGER,
+                    garage INTEGER,
+                    sqft NUMERIC,
+                    lot_size NUMERIC,
+                    year_built INTEGER,
+                    mls TEXT,
+                    property_type TEXT,
+                    property_category TEXT,
+                    list_price NUMERIC,
+                    remarks TEXT,
+                    listing_agent_name TEXT,
+                    listing_agent_phone TEXT,
+                    listing_agent_email TEXT,
+                    listing_office_name TEXT,
+                    listing_office_phone TEXT,
+                    buyer_agent_name TEXT,
+                    buyer_agent_phone TEXT,
+                    buyer_agent_email TEXT,
+                    buyer_office_name TEXT,
+                    buyer_office_phone TEXT,
+                    photo_count INTEGER,
+                    photos JSONB,
+                    parcel_account_num TEXT,
+                    parcel_county TEXT,
+                    parcel_geom JSONB,
+                    parsed_payload JSONB NOT NULL,
+                    raw_payload JSONB,
+                    first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    first_seen_source TEXT
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_propelio_comps_geom
+                    ON propelio_comps USING GIST (geom)
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_propelio_comps_status
+                    ON propelio_comps (status)
+                    WHERE status IS NOT NULL
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_propelio_comps_sold_date
+                    ON propelio_comps (sold_date)
+                    WHERE sold_date IS NOT NULL
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_propelio_comps_close_date
+                    ON propelio_comps (close_date)
+                    WHERE close_date IS NOT NULL
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_propelio_comps_last_seen
+                    ON propelio_comps (last_seen_at)
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_propelio_comps_parcel
+                    ON propelio_comps (parcel_county, parcel_account_num)
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS comp_ratings (
+                    rating_id BIGSERIAL PRIMARY KEY,
+                    workspace_id TEXT NOT NULL REFERENCES saved_areas(area_id) ON DELETE CASCADE,
+                    comp_id BIGINT NOT NULL REFERENCES propelio_comps(comp_id) ON DELETE CASCADE,
+                    rating TEXT NOT NULL CHECK (rating IN ('good', 'bad')),
+                    rated_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    rated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    UNIQUE (workspace_id, comp_id)
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_comp_ratings_workspace
+                    ON comp_ratings (workspace_id)
+                """
+            )
+            if os.environ.get("DEEP_PULL_EXPERIMENT") == "true":
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS propelio_deep_pull_jobs (
+                        job_id TEXT PRIMARY KEY,
+                        saved_area_id TEXT,
+                        started_by_user_id INTEGER REFERENCES users(id),
+                        target_address TEXT NOT NULL,
+                        target_lat NUMERIC,
+                        target_lng NUMERIC,
+                        lead_id TEXT,
+                        cma_id TEXT,
+                        status TEXT NOT NULL DEFAULT 'queued'
+                            CHECK (status IN ('queued', 'running', 'completed', 'stopped',
+                                              'error', 'saturated', 'blocked')),
+                        started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        last_pass_at TIMESTAMPTZ,
+                        next_pass_at TIMESTAMPTZ,
+                        passes_completed INTEGER NOT NULL DEFAULT 0,
+                        total_unique_comps INTEGER NOT NULL DEFAULT 0,
+                        last_error TEXT,
+                        stop_requested BOOLEAN NOT NULL DEFAULT FALSE
+                    )
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_deep_pull_jobs_status
+                        ON propelio_deep_pull_jobs (status, next_pass_at)
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS propelio_deep_pull_experiment (
+                        id BIGSERIAL PRIMARY KEY,
+                        job_id TEXT NOT NULL REFERENCES propelio_deep_pull_jobs(job_id) ON DELETE CASCADE,
+                        pass_num INTEGER NOT NULL,
+                        months INTEGER NOT NULL,
+                        range_mi NUMERIC NOT NULL,
+                        pass_label TEXT,
+                        comp_address_key TEXT NOT NULL,
+                        comp_data JSONB NOT NULL,
+                        is_first_seen_in_job BOOLEAN NOT NULL,
+                        fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        UNIQUE (job_id, pass_num, comp_address_key)
+                    )
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_deep_pull_exp_job
+                        ON propelio_deep_pull_experiment (job_id, pass_num)
+                    """
+                )
             _run_schema_steps(
                 cur,
                 [
@@ -366,6 +532,18 @@ def _ensure_session_schema() -> None:
                         "ALTER TABLE cached_jobs ADD COLUMN IF NOT EXISTS saved_area_id TEXT REFERENCES saved_areas(area_id) ON DELETE SET NULL",
                     ),
                     ("idx_cached_jobs_saved_area", "CREATE INDEX IF NOT EXISTS idx_cached_jobs_saved_area ON cached_jobs (saved_area_id)"),
+                    (
+                        "deep_pull_jobs_net_new_comps",
+                        """
+                        DO $$
+                        BEGIN
+                            IF to_regclass('public.propelio_deep_pull_jobs') IS NOT NULL THEN
+                                ALTER TABLE propelio_deep_pull_jobs
+                                ADD COLUMN IF NOT EXISTS net_new_comps INTEGER NOT NULL DEFAULT 0;
+                            END IF;
+                        END$$;
+                        """,
+                    ),
                 ],
             )
             _backfill_saved_area_share_ids(cur)

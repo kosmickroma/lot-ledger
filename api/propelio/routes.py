@@ -13,21 +13,25 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
+import secrets
 from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any
 
 import requests
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
+from api.auth import get_current_user
 from api.config import get_conn, get_session_conn, release_conn, release_session_conn
-from api.geo import haversine_miles, point_in_polygon, polygon_centroid
+from api.geo import build_polygon_geojson_feature_collection, haversine_miles, point_in_polygon, polygon_centroid
 from api.redfin import normalize_addr_key
 
-from .archive import load_archived_comps, merge_comps_into_archive, set_comp_rating
+from .archive import load_archived_comps, load_comps_by_polygon, merge_comps_into_archive, merge_comps_into_global, set_comp_rating
+from .deep_pull import PASSES_RECENT, STALE_JOB_THRESHOLD_MINUTES, run_deep_pull
 from .parcel_match import match_comps_to_parcels
 from . import cache as cache_mod
 from . import scraper as scraper_mod
@@ -45,12 +49,25 @@ class PolygonRequest(BaseModel):
     months: int = 24
     range_override_mi: float | None = None
     saved_area_id: str | None = None
+    target_address: str | None = None
 
 
 class RefreshRequest(BaseModel):
     saved_area_id: str
     months: int = 24
     range_override_mi: float | None = None
+    target_address: str | None = None
+
+
+class DeepPullStartRequest(BaseModel):
+    target_address: str
+    saved_area_id: str | None = None
+
+
+def _ensure_deep_pull_role(user: dict[str, Any]) -> None:
+    role = str(user.get("role") or "").strip().lower()
+    if role not in {"developer", "owner"}:
+        raise HTTPException(status_code=403, detail="Deep pull is developer-only")
 
 
 def _fetch_propelio_photo_response(photo_url: str):
@@ -180,9 +197,82 @@ def _validate_polygon(points: list[list[float]]) -> list[list[float]]:
     return normalized
 
 
-def _polygon_cache_key(polygon: list[list[float]], months: int, range_mi: float) -> str:
-    canonical = json.dumps({"v": 2, "polygon": polygon, "months": months, "range_mi": round(float(range_mi), 6)}, separators=(",", ":"), sort_keys=True)
+def _polygon_cache_key(polygon: list[list[float]], months: int, range_mi: float, target_address: str = "") -> str:
+    canonical = json.dumps({"v": 2, "polygon": polygon, "months": months, "range_mi": round(float(range_mi), 6), "target_address": target_address}, separators=(",", ":"), sort_keys=True)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _normalize_target_address(raw: str | None) -> str | None:
+    """Normalize a user-supplied target_address for both cache keying and parcel
+    lookup. Splits on first comma to strip city/state/zip suffix that the
+    Nominatim doSearch path appends, then defers to normalize_addr_key for
+    case/abbreviation/suffix normalization.
+    Suggestion-picked addresses (no comma) pass through unchanged.
+    """
+    if not raw:
+        return None
+    street_only = raw.split(",", 1)[0].strip()
+    if not street_only:
+        return None
+    return normalize_addr_key(street_only)
+
+
+def _resolve_subject_parcel_for_target(address: str) -> dict[str, Any] | None:
+    """Look up a parcel in the DB matching the given target address string.
+    Returns the same shape as _nearest_subject_parcel:
+    {"address", "county", "account_num"} or None on no-match / DB error.
+    Uses street-number prefix filtering in SQL to narrow candidates, then
+    compares Python-normalized address keys for exact matching (same strategy
+    as parcel_match.py to avoid SQL/Python normalization mismatch).
+    """
+    target_key = _normalize_target_address(address)
+    if not target_key:
+        return None
+    tokens = target_key.split()
+    if not tokens:
+        return None
+    # Street number (first token) as a cheap SQL prefix filter.
+    prefix_pattern = f"{tokens[0]}%"
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 'dcad'::text AS county, account_num, property_address AS address
+                FROM parcels
+                WHERE property_address ILIKE %s AND property_address IS NOT NULL
+
+                UNION ALL
+
+                SELECT 'tad'::text, account_num, situs_addr
+                FROM tad_parcels
+                WHERE situs_addr ILIKE %s AND situs_addr IS NOT NULL
+
+                UNION ALL
+
+                SELECT 'collin'::text, account_num, property_address
+                FROM collin_parcels
+                WHERE property_address ILIKE %s AND property_address IS NOT NULL
+
+                UNION ALL
+
+                SELECT 'denton'::text, account_num, property_address
+                FROM denton_parcels
+                WHERE property_address ILIKE %s AND property_address IS NOT NULL
+                """,
+                (prefix_pattern, prefix_pattern, prefix_pattern, prefix_pattern),
+            )
+            rows = cur.fetchall()
+    finally:
+        release_conn(conn)
+
+    for row in rows:
+        county = str(row[0])
+        account_num = str(row[1])
+        raw_address = str(row[2] or "")
+        if normalize_addr_key(raw_address) == target_key:
+            return {"county": county, "account_num": account_num, "address": raw_address}
+    return None
 
 
 def _nearest_subject_parcel(lat: float, lng: float) -> dict[str, Any] | None:
@@ -307,10 +397,113 @@ def _load_saved_area_polygon(saved_area_id: str) -> list[list[float]]:
     return _validate_polygon(polygon)
 
 
-async def _run_by_polygon(request: PolygonRequest, *, use_cache: bool) -> dict[str, Any]:
+async def _run_by_polygon(request: PolygonRequest, *, use_cache: bool, cache_only: bool = False) -> dict[str, Any]:
     polygon = _validate_polygon(request.polygon)
     months = int(request.months)
     saved_area_id = str(request.saved_area_id or "").strip() or None
+    polygon_geojson = build_polygon_geojson_feature_collection(polygon)
+    if polygon_geojson is None:
+        logger.warning("[propelio] invalid polygon geojson build; falling back to circle search")
+
+    # --- Phase 2 Chunk 3: global cache read (gated by PHASE_2_CACHE_READ env var) ---
+    # Bug fix 2026-05-13: this block was ignoring the caller's `use_cache` flag,
+    # so the Refresh endpoint (which sets use_cache=False precisely to bypass
+    # cache and re-pull from Propelio) was being silently short-circuited
+    # whenever PHASE_2_CACHE_READ was on. Honor use_cache here too.
+    if use_cache and os.environ.get("PHASE_2_CACHE_READ") == "true":
+        try:
+            cached_global = load_comps_by_polygon(polygon, saved_area_id)
+        except Exception as _exc:
+            logger.warning("[propelio] global cache read failed (non-fatal): %s", _exc)
+            cached_global = []
+        _centroid_lat, _centroid_lng = polygon_centroid(polygon)
+
+        subject_parcel = _nearest_subject_parcel(_centroid_lat, _centroid_lng)
+        subject: dict[str, Any] | None = None
+        if subject_parcel:
+            subject = {
+                "address": subject_parcel["address"],
+                "county": subject_parcel["county"],
+                "account_num": subject_parcel["account_num"],
+            }
+
+        comps_in_polygon = sum(
+            1
+            for comp in cached_global
+            if not (
+                isinstance(comp.get("extra"), dict)
+                and comp["extra"].get("is_outside_polygon")
+            )
+        )
+        comps_outside_polygon = len(cached_global) - comps_in_polygon
+
+        polygon_meta: dict[str, Any] = {
+            "centroid": {"lat": _centroid_lat, "lng": _centroid_lng},
+            "comps_in_polygon": comps_in_polygon,
+            "comps_outside_polygon": comps_outside_polygon,
+            "comps_pulled": len(cached_global),
+            "subject_parcel": subject_parcel,
+        }
+
+        cma_settings: dict[str, Any] = {
+            "months": int(request.months),
+            "range": "(cached)" if cached_global else "(cache-only)",
+            "sales_count": len(cached_global),
+        }
+
+        try:
+            balance: int | None = cache_mod.latest_quota_balance() if cached_global else None
+        except Exception:
+            balance = None
+
+        if cache_only:
+            return {
+                "cached": bool(cached_global),
+                "cache_only": True,
+                "comps": cached_global if cached_global else [],
+                "polygon_meta": polygon_meta,
+                "cma_settings": cma_settings,
+                "balance": balance,
+                "ingestion_stats": {
+                    "returned": len(cached_global) if cached_global else 0,
+                    "new_to_cache": 0,
+                },
+                "subject": subject,
+            }
+
+        if cached_global:
+            logger.info(
+                "[propelio] PHASE_2_CACHE_READ hit: %d comps for saved_area=%s",
+                len(cached_global),
+                saved_area_id,
+            )
+            ph2_archive_meta: dict[str, Any] | None = None
+            if saved_area_id:
+                try:
+                    ph2_archive_meta = merge_comps_into_archive(saved_area_id, cached_global)
+                except Exception as _ae:
+                    logger.warning(
+                        "[propelio] archive sync failed on cache-hit (non-fatal): %s", _ae
+                    )
+
+            response: dict[str, Any] = {
+                "cached": True,
+                "phase2_cache": True,
+                "comps": cached_global,
+                "polygon_meta": polygon_meta,
+                "cma_settings": cma_settings,
+                "balance": balance,
+                "ingestion_stats": {
+                    "returned": len(cached_global),
+                    "new_to_cache": 0,
+                },
+                "subject": subject,
+            }
+            if ph2_archive_meta is not None:
+                response["archive_meta"] = ph2_archive_meta
+            return response
+    # --- end Chunk 3 gate ---
+
     centroid_lat, centroid_lng = polygon_centroid(polygon)
     circumradius_mi = max(
         haversine_miles(centroid_lat, centroid_lng, point_lat, point_lng)
@@ -322,7 +515,7 @@ async def _run_by_polygon(request: PolygonRequest, *, use_cache: bool) -> dict[s
     else:
         range_mi = min(max(float(request.range_override_mi), 0.01), 10.0)
 
-    cache_key = _polygon_cache_key(polygon, months, range_mi)
+    cache_key = _polygon_cache_key(polygon, months, range_mi, _normalize_target_address(request.target_address) or "")
     if use_cache:
         cached = cache_mod.get_cached(cache_key)
         if cached is not None:
@@ -342,11 +535,32 @@ async def _run_by_polygon(request: PolygonRequest, *, use_cache: bool) -> dict[s
                 # Reload the archive view so user_rating + comp_address_key
                 # round-trip on cache hits, matching the fresh-pull path.
                 cached_payload["comps"] = load_archived_comps(saved_area_id)
+            cached_payload["ingestion_stats"] = {
+                "returned": len(cached_payload.get("comps") or []),
+                "new_to_cache": 0,
+            }
+            try:
+                merge_comps_into_global(cached_payload.get("comps") or [], "by_polygon")
+            except Exception as _exc:
+                logger.warning("[propelio] global write failed (cache-hit): %s", _exc)
             return {"cached": True, **cached_payload}
 
-    subject_parcel = _nearest_subject_parcel(centroid_lat, centroid_lng)
+    user_target = (request.target_address or "").strip() or None
+    if user_target:
+        subject_parcel = _resolve_subject_parcel_for_target(user_target)
+        if subject_parcel is None:
+            logger.warning(
+                "[propelio] target address lookup failed for %r; falling back to centroid",
+                user_target,
+            )
+            subject_parcel = _nearest_subject_parcel(centroid_lat, centroid_lng)
+    else:
+        subject_parcel = _nearest_subject_parcel(centroid_lat, centroid_lng)
     if subject_parcel is None:
-        raise HTTPException(status_code=404, detail="No parcel found near polygon centroid")
+        detail = "No parcel found near polygon centroid"
+        if user_target:
+            detail += f" (also failed to resolve target address {user_target!r})"
+        raise HTTPException(status_code=404, detail=detail)
 
     try:
         subject, comps_list = await asyncio.to_thread(
@@ -354,6 +568,7 @@ async def _run_by_polygon(request: PolygonRequest, *, use_cache: bool) -> dict[s
             subject_parcel["address"],
             months=months,
             range_mi=range_mi,
+            geojson=polygon_geojson,
         )
     except scraper_mod.PropelioScraperError as exc:
         msg = str(exc)
@@ -399,6 +614,7 @@ async def _run_by_polygon(request: PolygonRequest, *, use_cache: bool) -> dict[s
                     "raw": None,
                 },
                 "comps": [],
+                "ingestion_stats": {"returned": 0, "new_to_cache": 0},
                 "polygon_meta": {
                     "centroid": {"lat": centroid_lat, "lng": centroid_lng},
                     "circumradius_mi": circumradius_mi,
@@ -415,6 +631,10 @@ async def _run_by_polygon(request: PolygonRequest, *, use_cache: bool) -> dict[s
             }
             if saved_area_id:
                 empty_payload["archive_meta"] = merge_comps_into_archive(saved_area_id, [])
+            try:
+                merge_comps_into_global([], "by_polygon")
+            except Exception as _exc:
+                logger.warning("[propelio] global write failed (empty-comps): %s", _exc)
             return {"cached": False, **empty_payload}
         # Surface the scraper error in logs so we can see WHY Propelio
         # rejected the pull (auth expired, lead-id lookup failed, captcha,
@@ -467,6 +687,18 @@ async def _run_by_polygon(request: PolygonRequest, *, use_cache: bool) -> dict[s
         # across refreshes via the merge function). New unrated comps
         # get user_rating=None.
         payload["comps"] = load_archived_comps(saved_area_id)
+    try:
+        merge_result = merge_comps_into_global(payload.get("comps") or [], "by_polygon")
+        payload["ingestion_stats"] = {
+            "returned": len(comps_list),
+            "new_to_cache": int(merge_result.get("inserted", 0)) if isinstance(merge_result, dict) else 0,
+        }
+    except Exception:
+        logger.exception("merge_comps_into_global failed; returning raw comps without cache write")
+        payload["ingestion_stats"] = {
+            "returned": len(comps_list),
+            "new_to_cache": 0,
+        }
 
     if use_cache:
         cache_payload = dict(payload)
@@ -556,6 +788,11 @@ async def get_by_address(
     payload = _build_payload(subject, comps_list)
     payload["comps"] = match_comps_to_parcels(payload.get("comps") or [])
 
+    try:
+        merge_comps_into_global(payload.get("comps") or [], "by_address")
+    except Exception as _exc:
+        logger.warning("[propelio] global write failed (by-address): %s", _exc)
+
     cache_mod.log_quota(payload.get("balance"), address_key)
     cache_mod.put_cached(address_key, payload)
     return {"cached": False, **payload}
@@ -581,6 +818,7 @@ def get_photo(url: str = Query(..., min_length=1)) -> StreamingResponse:
 async def get_by_polygon(
     request: PolygonRequest,
     saved_area_id: str | None = Query(None),
+    cache_only: bool = Query(False),
 ) -> dict[str, Any]:
     body_saved_area_id = str(request.saved_area_id or "").strip() or None
     query_saved_area_id = str(saved_area_id or "").strip() or None
@@ -591,8 +829,9 @@ async def get_by_polygon(
         months=request.months,
         range_override_mi=request.range_override_mi,
         saved_area_id=effective_saved_area_id,
+        target_address=request.target_address,
     )
-    return await _run_by_polygon(effective_request, use_cache=True)
+    return await _run_by_polygon(effective_request, use_cache=True, cache_only=cache_only)
 
 
 @router.post("/refresh")
@@ -607,6 +846,7 @@ async def refresh_by_saved_area(request: RefreshRequest) -> dict[str, Any]:
         months=int(request.months),
         range_override_mi=request.range_override_mi,
         saved_area_id=saved_area_id,
+        target_address=request.target_address,
     )
     response = await _run_by_polygon(by_poly_request, use_cache=False)
     response["comps"] = load_archived_comps(saved_area_id)
@@ -618,7 +858,217 @@ async def get_by_saved_area(saved_area_id: str = Query(..., min_length=1)) -> di
     normalized = str(saved_area_id or "").strip()
     if not normalized:
         raise HTTPException(status_code=400, detail="saved_area_id is required")
-    return {"comps": load_archived_comps(normalized)}
+
+    # Phase 2: query the global propelio_comps cache via spatial lookup on the
+    # saved area's polygon. Falls back to legacy propelio_comp_archive when
+    # the area isn't a polygon type (location/parcel) or the spatial cache is
+    # empty (pre-Phase-2 areas that were never deep-pulled).
+    comps: list[dict[str, Any]] = []
+    try:
+        polygon = _load_saved_area_polygon(normalized)
+        comps = load_comps_by_polygon(polygon, normalized)
+    except HTTPException:
+        comps = []
+
+    if not comps:
+        comps = load_archived_comps(normalized)
+
+    return {"comps": comps}
+
+
+@router.post("/deep-pull/start")
+async def start_deep_pull(
+    request: DeepPullStartRequest,
+    user: dict = Depends(get_current_user),
+) -> dict[str, Any]:
+    address = str(request.target_address or "").strip()
+    if not address:
+        raise HTTPException(status_code=400, detail="target_address is required")
+    saved_area_id = str(request.saved_area_id or "").strip() or None
+
+    job_id = "dp_" + secrets.token_urlsafe(8)
+
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO propelio_deep_pull_jobs
+                    (job_id, target_address, saved_area_id, started_by_user_id, status)
+                VALUES (%s, %s, %s, %s, 'queued')
+                """,
+                (job_id, address, saved_area_id, int(user["id"])),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        release_session_conn(conn)
+
+    asyncio.create_task(run_deep_pull(job_id))
+    return {"job_id": job_id}
+
+
+@router.post("/refresh-recent/start")
+async def start_refresh_recent(
+    request: DeepPullStartRequest,
+    user: dict = Depends(get_current_user),
+) -> dict[str, Any]:
+    """
+    Triggers a shorter, recency-focused deep-pull on the same job
+    infrastructure. Uses PASSES_RECENT (1mo / 2mo / 3mo at 1mi,
+    SFR preset). Total ~2-3 min. Catches stragglers — recent listings
+    (pendings, just-listed actives) the broad 24mo sweep missed due to
+    Propelio's 100-cap per call.
+    """
+    address = str(request.target_address or "").strip()
+    if not address:
+        raise HTTPException(status_code=400, detail="target_address is required")
+    saved_area_id = str(request.saved_area_id or "").strip() or None
+
+    job_id = "rr_" + secrets.token_urlsafe(8)
+
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO propelio_deep_pull_jobs
+                    (job_id, target_address, saved_area_id, started_by_user_id, status)
+                VALUES (%s, %s, %s, %s, 'queued')
+                """,
+                (job_id, address, saved_area_id, int(user["id"])),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        release_session_conn(conn)
+
+    asyncio.create_task(run_deep_pull(job_id, passes=PASSES_RECENT))
+    return {"job_id": job_id, "kind": "refresh_recent"}
+
+
+@router.get("/deep-pull/status/{job_id}")
+async def get_deep_pull_status(
+    job_id: str,
+    user: dict = Depends(get_current_user),
+) -> dict[str, Any]:
+    normalized_job_id = str(job_id or "").strip()
+    if not normalized_job_id:
+        raise HTTPException(status_code=400, detail="job_id is required")
+
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE propelio_deep_pull_jobs
+                SET status='error',
+                    last_error='Worker interrupted (stale)',
+                    stop_requested=TRUE
+                WHERE job_id = %s
+                  AND status='running'
+                  AND started_at < NOW() - (%s * INTERVAL '1 minute')
+                  AND (last_pass_at IS NULL OR last_pass_at < NOW() - (%s * INTERVAL '1 minute'))
+                  AND (next_pass_at IS NULL OR next_pass_at < NOW())
+                """,
+                (normalized_job_id, STALE_JOB_THRESHOLD_MINUTES, STALE_JOB_THRESHOLD_MINUTES),
+            )
+
+            cur.execute(
+                """
+                SELECT job_id, status, passes_completed, total_unique_comps,
+                       net_new_comps,
+                       last_pass_at, next_pass_at, last_error, started_at, stop_requested
+                FROM propelio_deep_pull_jobs
+                WHERE job_id = %s
+                """,
+                (normalized_job_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Job not found")
+
+            cur.execute(
+                """
+                SELECT pass_num,
+                       months,
+                       range_mi,
+                       pass_label,
+                       COUNT(*) AS returned,
+                       COUNT(*) FILTER (WHERE is_first_seen_in_job) AS new_comps,
+                       MAX(fetched_at) AS completed_at
+                FROM propelio_deep_pull_experiment
+                WHERE job_id = %s
+                GROUP BY pass_num, months, range_mi, pass_label
+                ORDER BY pass_num
+                """,
+                (normalized_job_id,),
+            )
+            per_pass = [
+                {
+                    "pass_num": r[0],
+                    "months": r[1],
+                    "range_mi": float(r[2]),
+                    "label": r[3],
+                    "returned": int(r[4] or 0),
+                    "new": int(r[5] or 0),
+                    "completed_at": r[6].isoformat() if r[6] else None,
+                }
+                for r in (cur.fetchall() or [])
+            ]
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        release_session_conn(conn)
+
+    return {
+        "job_id": row[0],
+        "status": row[1],
+        "passes_completed": int(row[2] or 0),
+        "total_unique_comps": int(row[3] or 0),
+        "net_new_comps": int(row[4] or 0),
+        "last_pass_at": row[5].isoformat() if row[5] else None,
+        "next_pass_at": row[6].isoformat() if row[6] else None,
+        "last_error": row[7],
+        "started_at": row[8].isoformat() if row[8] else None,
+        "stop_requested": bool(row[9]),
+        "per_pass": per_pass,
+    }
+
+
+@router.post("/deep-pull/stop/{job_id}")
+async def stop_deep_pull(
+    job_id: str,
+    user: dict = Depends(get_current_user),
+) -> dict[str, Any]:
+    normalized_job_id = str(job_id or "").strip()
+    if not normalized_job_id:
+        raise HTTPException(status_code=400, detail="job_id is required")
+
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE propelio_deep_pull_jobs
+                SET stop_requested = TRUE
+                WHERE job_id = %s
+                """,
+                (normalized_job_id,),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        release_session_conn(conn)
+    return {"ok": True}
 
 
 class AttachExistingRequest(BaseModel):

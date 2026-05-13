@@ -24,6 +24,7 @@ sold-comp pricing in this app.
 | [`SPEC.md`](./SPEC.md) | Phase 1 spec — original 6-chunk Copilot build (cyan dots, address-driven). Chunks 1–3 done. Cyan render gets retired in Phase 2. |
 | [`SPEC_V2_POLYGON.md`](./SPEC_V2_POLYGON.md) | Phase 2 spec — polygon-driven pulls + purple footprint render. Phase 2 done. |
 | [`SPEC_V3_WORKSPACE.md`](./SPEC_V3_WORKSPACE.md) | **Phase 3 spec — workspace-anchored comps, two-tier filters, good/bad curation, status colors, append-only refresh.** Active build. Six chunks for Copilot. |
+| [`INTEGRATION_TROUBLESHOOTING.md`](./INTEGRATION_TROUBLESHOOTING.md) | **Diagnosis playbook for silent failures** — Refresh-not-firing, marathon-runner-death, campaign-aggregate drift, Propelio cap mechanics. Start here when something's off. |
 
 ## Quick reference
 

@@ -15,6 +15,7 @@ from typing import Any
 from psycopg2.extras import Json
 
 from api.config import get_session_conn, release_session_conn
+from api.geo import haversine_miles, polygon_centroid
 from api.redfin import normalize_addr_key
 
 
@@ -278,6 +279,341 @@ def load_archived_comps(saved_area_id: str) -> list[dict[str, Any]]:
         return hydrated
     finally:
         release_session_conn(conn)
+
+
+def merge_comps_into_global(comps: list[dict[str, Any]], source: str) -> dict[str, int]:
+    """Upsert a list of asdict(Property) comps into the global propelio_comps table.
+
+    Uses the same idempotent ON CONFLICT DO UPDATE pattern as the backfill
+    script.  Returns {"inserted": N, "updated": M}.  Caller is responsible
+    for wrapping this in try/except so failures are non-fatal.
+    """
+    from datetime import datetime, timezone
+
+    from psycopg2.extras import Json as _Json
+
+    inserted = 0
+    updated = 0
+
+    if not comps:
+        return {"inserted": 0, "updated": 0}
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            for comp in comps:
+                if not isinstance(comp, dict):
+                    continue
+
+                comp_key = _comp_address_key(comp)
+                if not comp_key:
+                    continue
+
+                address = str(comp.get("address") or "").strip()
+                if not address:
+                    continue
+
+                extra = comp.get("extra") if isinstance(comp.get("extra"), dict) else {}
+                raw = extra.get("raw") if isinstance(extra.get("raw"), dict) else {}
+
+                def _flt(v: Any) -> float | None:
+                    if v in (None, ""):
+                        return None
+                    try:
+                        return float(v)
+                    except (TypeError, ValueError):
+                        return None
+
+                def _int(v: Any) -> int | None:
+                    if v in (None, ""):
+                        return None
+                    try:
+                        return int(float(v))
+                    except (TypeError, ValueError):
+                        return None
+
+                def _iso(v: Any) -> str | None:
+                    if v is None:
+                        return None
+                    text = str(v).strip()[:10]
+                    try:
+                        from datetime import datetime as _dt
+                        return _dt.strptime(text, "%Y-%m-%d").date().isoformat()
+                    except ValueError:
+                        return None
+
+                lat = _flt(extra.get("lat"))
+                lng = _flt(extra.get("lon") or extra.get("lng"))
+
+                fields = {
+                    "comp_address_key": comp_key,
+                    "address": address,
+                    "neighborhood": str(comp.get("neighborhood") or "").strip() or None,
+                    "lat": lat,
+                    "lng": lng,
+                    "status": str(comp.get("status") or "").strip().lower() or None,
+                    "price": _flt(comp.get("price")),
+                    "sold_date": _iso(extra.get("close_date")),
+                    "close_date": _iso(extra.get("close_date")),
+                    "dom": _int(extra.get("dom")),
+                    "beds": _flt(extra.get("beds")),
+                    "baths": _flt(extra.get("baths")),
+                    "baths_full": _int(extra.get("baths_full")),
+                    "baths_half": _int(extra.get("baths_half")),
+                    "garage": _int(extra.get("garage")),
+                    "sqft": _flt(comp.get("sqft")),
+                    "lot_size": _flt(comp.get("lot_size")),
+                    "year_built": _int(comp.get("year_built")),
+                    "mls": str(extra.get("mls") or "").strip() or None,
+                    "property_type": str(extra.get("property_type") or "").strip() or None,
+                    "property_category": str(extra.get("property_category") or "").strip() or None,
+                    "list_price": _flt(extra.get("list_price")),
+                    "remarks": str(extra.get("remarks") or raw.get("remarks") or "").strip() or None,
+                    "listing_agent_name": str(raw.get("listing_agent_name") or "").strip() or None,
+                    "listing_agent_phone": str(raw.get("listing_agent_phone") or "").strip() or None,
+                    "listing_agent_email": str(raw.get("listing_agent_email") or "").strip() or None,
+                    "listing_office_name": str(raw.get("listing_office_name") or "").strip() or None,
+                    "listing_office_phone": str(raw.get("listing_office_phone") or "").strip() or None,
+                    "buyer_agent_name": str(raw.get("buyer_agent_name") or "").strip() or None,
+                    "buyer_agent_phone": str(raw.get("buyer_agent_phone") or "").strip() or None,
+                    "buyer_agent_email": str(raw.get("buyer_agent_email") or "").strip() or None,
+                    "buyer_office_name": str(raw.get("buyer_office_name") or "").strip() or None,
+                    "buyer_office_phone": str(raw.get("buyer_office_phone") or "").strip() or None,
+                    "photo_count": _int(raw.get("photo_count")),
+                    "photos": raw.get("photos") if isinstance(raw.get("photos"), list) else None,
+                    "parcel_account_num": str(comp.get("parcel_account_num") or "").strip() or None,
+                    "parcel_county": str(comp.get("parcel_county") or "").strip() or None,
+                    "parcel_geom": comp.get("parcel_geom") if isinstance(comp.get("parcel_geom"), (dict, list)) else None,
+                    "parsed_payload": dict(comp),
+                    "raw_payload": raw if raw else None,
+                    "first_seen_source": source,
+                    "first_seen_at": now_iso,
+                    "last_seen_at": now_iso,
+                }
+
+                cur.execute(
+                    """
+                    INSERT INTO propelio_comps (
+                        comp_address_key, address, neighborhood, lat, lng, geom,
+                        status, last_status, price, last_price,
+                        sold_date, close_date, dom,
+                        beds, baths, baths_full, baths_half, garage,
+                        sqft, lot_size, year_built, mls,
+                        property_type, property_category, list_price, remarks,
+                        listing_agent_name, listing_agent_phone, listing_agent_email,
+                        listing_office_name, listing_office_phone,
+                        buyer_agent_name, buyer_agent_phone, buyer_agent_email,
+                        buyer_office_name, buyer_office_phone,
+                        photo_count, photos,
+                        parcel_account_num, parcel_county, parcel_geom,
+                        parsed_payload, raw_payload,
+                        first_seen_source, first_seen_at, last_seen_at
+                    )
+                    VALUES (
+                        %(comp_address_key)s, %(address)s, %(neighborhood)s,
+                        %(lat)s, %(lng)s,
+                        CASE
+                            WHEN %(lat)s IS NOT NULL AND %(lng)s IS NOT NULL
+                            THEN ST_SetSRID(ST_MakePoint(%(lng)s, %(lat)s), 4326)
+                            ELSE NULL
+                        END,
+                        %(status)s, %(status)s, %(price)s, %(price)s,
+                        %(sold_date)s, %(close_date)s, %(dom)s,
+                        %(beds)s, %(baths)s, %(baths_full)s, %(baths_half)s, %(garage)s,
+                        %(sqft)s, %(lot_size)s, %(year_built)s, %(mls)s,
+                        %(property_type)s, %(property_category)s,
+                        %(list_price)s, %(remarks)s,
+                        %(listing_agent_name)s, %(listing_agent_phone)s, %(listing_agent_email)s,
+                        %(listing_office_name)s, %(listing_office_phone)s,
+                        %(buyer_agent_name)s, %(buyer_agent_phone)s, %(buyer_agent_email)s,
+                        %(buyer_office_name)s, %(buyer_office_phone)s,
+                        %(photo_count)s, %(photos)s,
+                        %(parcel_account_num)s, %(parcel_county)s, %(parcel_geom)s,
+                        %(parsed_payload)s, %(raw_payload)s,
+                        %(first_seen_source)s, %(first_seen_at)s, %(last_seen_at)s
+                    )
+                    ON CONFLICT (comp_address_key) DO UPDATE SET
+                        address             = EXCLUDED.address,
+                        neighborhood        = EXCLUDED.neighborhood,
+                        lat                 = EXCLUDED.lat,
+                        lng                 = EXCLUDED.lng,
+                        geom                = CASE
+                            WHEN EXCLUDED.lat IS NOT NULL AND EXCLUDED.lng IS NOT NULL
+                            THEN ST_SetSRID(ST_MakePoint(EXCLUDED.lng, EXCLUDED.lat), 4326)
+                            ELSE propelio_comps.geom
+                        END,
+                        last_status         = propelio_comps.status,
+                        status              = EXCLUDED.status,
+                        last_price          = propelio_comps.price,
+                        price               = EXCLUDED.price,
+                        sold_date           = EXCLUDED.sold_date,
+                        close_date          = EXCLUDED.close_date,
+                        dom                 = EXCLUDED.dom,
+                        beds                = EXCLUDED.beds,
+                        baths               = EXCLUDED.baths,
+                        baths_full          = EXCLUDED.baths_full,
+                        baths_half          = EXCLUDED.baths_half,
+                        garage              = EXCLUDED.garage,
+                        sqft                = EXCLUDED.sqft,
+                        lot_size            = EXCLUDED.lot_size,
+                        year_built          = EXCLUDED.year_built,
+                        mls                 = EXCLUDED.mls,
+                        property_type       = EXCLUDED.property_type,
+                        property_category   = EXCLUDED.property_category,
+                        list_price          = EXCLUDED.list_price,
+                        remarks             = EXCLUDED.remarks,
+                        listing_agent_name  = EXCLUDED.listing_agent_name,
+                        listing_agent_phone = EXCLUDED.listing_agent_phone,
+                        listing_agent_email = EXCLUDED.listing_agent_email,
+                        listing_office_name = EXCLUDED.listing_office_name,
+                        listing_office_phone = EXCLUDED.listing_office_phone,
+                        buyer_agent_name    = EXCLUDED.buyer_agent_name,
+                        buyer_agent_phone   = EXCLUDED.buyer_agent_phone,
+                        buyer_agent_email   = EXCLUDED.buyer_agent_email,
+                        buyer_office_name   = EXCLUDED.buyer_office_name,
+                        buyer_office_phone  = EXCLUDED.buyer_office_phone,
+                        photo_count         = EXCLUDED.photo_count,
+                        photos              = EXCLUDED.photos,
+                        parcel_account_num  = EXCLUDED.parcel_account_num,
+                        parcel_county       = EXCLUDED.parcel_county,
+                        parcel_geom         = EXCLUDED.parcel_geom,
+                        parsed_payload      = EXCLUDED.parsed_payload,
+                        raw_payload         = COALESCE(EXCLUDED.raw_payload, propelio_comps.raw_payload),
+                        last_seen_at        = GREATEST(propelio_comps.last_seen_at, EXCLUDED.last_seen_at)
+                    RETURNING (xmax = 0) AS is_insert
+                    """,
+                    {
+                        **fields,
+                        "parsed_payload": _Json(fields["parsed_payload"]),
+                        "raw_payload": _Json(fields["raw_payload"]) if fields["raw_payload"] is not None else None,
+                        "parcel_geom": _Json(fields["parcel_geom"]) if fields["parcel_geom"] is not None else None,
+                        "photos": _Json(fields["photos"]) if fields["photos"] is not None else None,
+                    },
+                )
+                row = cur.fetchone()
+                if row and row[0]:
+                    inserted += 1
+                else:
+                    updated += 1
+
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        release_session_conn(conn)
+
+    return {"inserted": inserted, "updated": updated}
+
+
+def load_comps_by_polygon(
+    polygon_latlngs: list[list[float]],
+    saved_area_id: str | None,
+) -> list[dict[str, Any]]:
+    """Query propelio_comps for all comps whose geom falls inside the given polygon.
+
+    polygon_latlngs: raw [[lng, lat], ...] ring from the frontend (NOT closed).
+    Returns a list of dicts ready for direct inclusion in the API response —
+    each dict is {**parsed_payload, comp_address_key, user_rating, parcel_geom,
+    parcel_account_num, parcel_county}.  Comps with NULL geom are excluded.
+    """
+    if not polygon_latlngs or len(polygon_latlngs) < 3:
+        return []
+
+    # Close the ring: PostGIS requires the first coord repeated at the end.
+    ring = list(polygon_latlngs)
+    if ring[0] != ring[-1]:
+        ring = ring + [ring[0]]
+
+    centroid_lat, centroid_lng = polygon_centroid(polygon_latlngs)
+    circumradius_mi = max(
+        haversine_miles(centroid_lat, centroid_lng, point_lat, point_lng)
+        for point_lng, point_lat in polygon_latlngs
+    )
+    buffered_radius_mi = circumradius_mi * 1.05
+    # Floor at 2mi so tight polygons still catch nearby pendings/actives
+    # within reasonable distance (matches user mental model — when drawing
+    # a tight polygon, you still expect to see comps a couple miles away).
+    effective_radius_mi = min(max(buffered_radius_mi, 2.0), 10.0)
+    circumradius_meters = effective_radius_mi * 1609.344
+
+    geojson_polygon = {
+        "type": "Polygon",
+        "coordinates": [ring],
+    }
+    import json as _json
+    geojson_str = _json.dumps(geojson_polygon)
+
+    workspace_id = str(saved_area_id or "").strip() or None
+
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    pc.parsed_payload,
+                    pc.comp_address_key,
+                    pc.parcel_geom,
+                    pc.parcel_account_num,
+                    pc.parcel_county,
+                                        cr.rating AS user_rating,
+                                        NOT ST_Within(
+                                                pc.geom,
+                                                ST_GeomFromGeoJSON(%(polygon)s)::geometry
+                                        ) AS is_outside_polygon
+                FROM propelio_comps pc
+                LEFT JOIN comp_ratings cr
+                    ON cr.comp_id = pc.comp_id
+                    AND cr.workspace_id = %(workspace_id)s
+                WHERE pc.geom IS NOT NULL
+                                    AND (
+                                        ST_Within(pc.geom, ST_GeomFromGeoJSON(%(polygon)s)::geometry)
+                                        OR ST_DWithin(
+                                                pc.geom::geography,
+                                                ST_SetSRID(ST_MakePoint(%(centroid_lng)s, %(centroid_lat)s), 4326)::geography,
+                                                %(circumradius_meters)s
+                                        )
+                                    )
+                """,
+                {
+                    "workspace_id": workspace_id,
+                    "polygon": geojson_str,
+                                        "centroid_lat": centroid_lat,
+                                        "centroid_lng": centroid_lng,
+                                        "circumradius_meters": circumradius_meters,
+                },
+            )
+            rows = cur.fetchall() or []
+    finally:
+        release_session_conn(conn)
+
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        (
+            parsed_payload,
+            comp_address_key,
+            parcel_geom,
+            parcel_account_num,
+            parcel_county,
+            user_rating,
+            is_outside_polygon,
+        ) = row
+        comp = dict(parsed_payload) if isinstance(parsed_payload, dict) else {}
+        comp["comp_address_key"] = comp_address_key
+        comp["parcel_geom"] = parcel_geom if isinstance(parcel_geom, (dict, list)) else None
+        comp["parcel_account_num"] = str(parcel_account_num or "").strip() or None
+        comp["parcel_county"] = str(parcel_county or "").strip() or None
+        comp["user_rating"] = str(user_rating).strip().lower() if user_rating is not None else None
+        if is_outside_polygon:
+            extra = comp.setdefault("extra", {})
+            if isinstance(extra, dict):
+                extra["is_outside_polygon"] = True
+        result.append(comp)
+
+    return result
 
 
 ensure_tables()

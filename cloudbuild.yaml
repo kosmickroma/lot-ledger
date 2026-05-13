@@ -32,6 +32,7 @@ steps:
       - '--project=lot-ledger'
       - '--timeout=3600'
       - '--memory=1Gi'
+      - '--update-env-vars=DEEP_PULL_EXPERIMENT=true,PHASE_2_CACHE_READ=true'
       - '--quiet'
 
 options:

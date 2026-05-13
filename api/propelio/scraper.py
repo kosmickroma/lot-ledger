@@ -856,6 +856,9 @@ class PropelioClient:
         cma_id: str,
         months: int = 24,
         range_mi: float = 7.5,
+        *,
+        geojson: dict[str, Any] | None = None,
+        property_type_presets: list[str] | None = None,
     ) -> Dict[str, Any]:
         """Regenerate the CMA at ``lead_id``/``cma_id`` with new filter
         params via ``POST /legacy/cma/search/{lead_id}/{cma_id}``.
@@ -878,7 +881,11 @@ class PropelioClient:
         """
         self.login()
         url = f"{self.base_url}/legacy/cma/search/{lead_id}/{cma_id}"
-        body = {"months": int(months), "range": str(range_mi)}
+        body: Dict[str, Any] = {"months": int(months), "range": str(range_mi)}
+        if geojson is not None:
+            body["geojson"] = geojson
+        if property_type_presets is not None:
+            body["propertyTypePresets"] = list(property_type_presets)
         try:
             response = self.session.post(
                 url, json=body, timeout=max(self.timeout, 90),
@@ -983,6 +990,8 @@ def search_properties(
     password: Optional[str] = None,
     months: int = 24,
     range_mi: float = 1.0,
+    geojson: dict[str, Any] | None = None,
+    property_type_presets: list[str] | None = None,
 ) -> Tuple[Property, List[Property]]:
     """Return ``(subject, comps)`` for ``address``.
 
@@ -1038,7 +1047,12 @@ def search_properties(
         # call) or when we somehow couldn't extract a cma_id.
         if cma_id and (months != 6 or range_mi != 0.5):
             payload = client.search_cma(
-                lead_id, cma_id, months=months, range_mi=range_mi,
+                lead_id,
+                cma_id,
+                months=months,
+                range_mi=range_mi,
+                geojson=geojson,
+                property_type_presets=property_type_presets,
             )
         else:
             payload = add_payload

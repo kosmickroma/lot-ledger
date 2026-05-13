@@ -166,6 +166,11 @@ h1 {
   padding-right: 2px;
 }
 
+#saved-parcels-list {
+  max-height: 300px;
+  overflow-y: auto;
+}
+
 .section-toggle::after {
   content: "▾";
   color: var(--text-soft);
@@ -2486,6 +2491,12 @@ h1 {
   pointer-events: auto;
 }
 
+.propelio-action-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
 /* Legacy wrap class — older marker-based render path. Retained
    harmlessly in case any css selector still references it. */
 .propelio-get-comps-wrap {
@@ -2501,7 +2512,7 @@ h1 {
   font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.01em;
-  padding: 8px 18px;
+  padding: 8px 16px;
   min-width: 132px;
   box-shadow:
     0 10px 24px rgba(120, 90, 30, 0.35),
@@ -2512,6 +2523,21 @@ h1 {
   cursor: pointer;
   position: relative;
   overflow: hidden;
+  line-height: 1.1;
+  text-align: center;
+}
+
+.propelio-get-comps-btn .get-comps-main {
+  display: block;
+  font-weight: 700;
+}
+
+.propelio-get-comps-btn .get-comps-subtitle {
+  display: block;
+  font-size: 0.78em;
+  font-style: italic;
+  opacity: 0.88;
+  margin-top: 1px;
 }
 
 .propelio-get-comps-btn::after {
@@ -2538,6 +2564,65 @@ h1 {
 .propelio-get-comps-btn:disabled {
   opacity: 0.92;
   cursor: wait;
+}
+
+.propelio-get-comps-btn[disabled],
+.propelio-get-comps-btn.is-running {
+  opacity: 0.55;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.quick-refresh-placeholder {
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  border-radius: 999px;
+  background: linear-gradient(135deg, #5a8fb8 0%, #3d6d96 100%);
+  color: #f8f8f8;
+  font-size: 12px;
+  min-width: 126px;
+  padding: 8px 14px;
+  line-height: 1.1;
+  text-align: center;
+  cursor: pointer;
+  transition: background 0.18s ease, transform 0.1s ease;
+}
+
+.quick-refresh-placeholder:hover:not(:disabled) {
+  background: linear-gradient(135deg, #6ba0c9 0%, #4d7da6 100%);
+  transform: translateY(-1px);
+}
+
+.quick-refresh-placeholder:disabled,
+.quick-refresh-placeholder.is-running {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.quick-refresh-main {
+  display: block;
+  font-weight: 600;
+}
+
+.quick-refresh-subtitle {
+  display: block;
+  font-size: 0.78em;
+  font-style: italic;
+  margin-top: 1px;
+}
+
+.propelio-cache-empty-chip {
+  margin-top: 8px;
+  padding: 6px 10px;
+  font-size: 11px;
+  text-align: center;
+  color: #f7f7f7;
+  background: rgba(8, 12, 18, 0.82);
+  border: 1px solid rgba(226, 192, 117, 0.65);
+  border-radius: 999px;
+}
+
+.propelio-cache-empty-chip.hidden {
+  display: none;
 }
 
 @keyframes propelioPillPulse {
@@ -2795,6 +2880,12 @@ h1 {
   border: 0;
   border-radius: 999px;
   padding: 6px 14px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  line-height: 1.15;
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.02em;
@@ -2813,6 +2904,18 @@ h1 {
   opacity: 0.6;
   cursor: wait;
   transform: none;
+}
+
+.propelio-refresh-main {
+  display: block;
+  font-weight: 700;
+}
+
+.propelio-refresh-subtitle {
+  display: block;
+  font-size: 0.78em;
+  font-style: italic;
+  color: rgba(26, 20, 16, 0.78);
 }
 
 .propelio-filter-count {
@@ -3044,4 +3147,34 @@ h1 {
   font-style: italic;
   margin-top: 4px;
   text-align: center;
+}
+
+.deep-pull-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  margin: 6px 0;
+  background: rgba(247, 227, 161, 0.18);
+  border: 1px solid rgba(212, 175, 55, 0.6);
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.deep-pull-banner.hidden {
+  display: none;
+}
+
+.deep-pull-banner-icon {
+  display: inline-block;
+  animation: deep-pull-spin 1.5s linear infinite;
+}
+
+@keyframes deep-pull-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
 }
