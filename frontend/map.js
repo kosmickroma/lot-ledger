@@ -4324,9 +4324,26 @@ async function pullPropelioRefresh() {
       if (!resp.ok) throw new Error(`by-polygon failed: ${resp.status}`);
       data = await resp.json();
     }
-    window._propelioLast = data;
-    _updatePropelioStatusCounts();
-    applyPropelioClientFilters();
+    // Reload polygon cache so display filters operate on accumulated
+    // cache, not on this narrow scrape's response. Server-side merge
+    // already inserted any net-new comps. Fall back to the response if
+    // the reload didn't populate (missing polygon, empty cache, error).
+    let cacheLoaded = false;
+    try {
+      const cacheResp = await _fetchPolygonCacheOnly();
+      cacheLoaded = !!(
+        cacheResp
+        && Array.isArray(cacheResp.comps)
+        && cacheResp.comps.length > 0
+      );
+    } catch (cacheErr) {
+      console.warn("[propelio] cache reload after custom search failed:", cacheErr);
+    }
+    if (!cacheLoaded) {
+      window._propelioLast = data;
+      _updatePropelioStatusCounts();
+      applyPropelioClientFilters();
+    }
     const returned = Number(data?.ingestion_stats?.returned || 0);
     const newToCache = Number(data?.ingestion_stats?.new_to_cache || 0);
     if (returned > 0 && newToCache > 0) {
