@@ -2455,6 +2455,16 @@ async function restoreSavedArea(area, options = {}) {
     renderSidebar(data.counts, markers);
     applyResultTags(data);
     _currentLoadedAreaId = area.id;
+    // Show the sticky Get Comps button so a quick sweep is one click away
+    // after loading a saved area. Guard against mid-sweep: if a deep-pull
+    // is in flight, surface the anchor but skip _showPropelioPolygonButton's
+    // state reset so we don't trample the running label/disabled/is-running.
+    if (_activeDeepPullJobId) {
+      _ensureStickyPropelioButton();
+      propelioStickyAnchor?.classList.add("visible");
+    } else {
+      _showPropelioPolygonButton();
+    }
     // Workspace = parcels + archived comps. Hydrate propelio comps from the
     // session DB so the analyst lands back in the exact state they left
     // (good/bad ratings, dimmed bad-comps, footprints, list).
