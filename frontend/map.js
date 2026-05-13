@@ -2171,9 +2171,10 @@ async function _rightClickSaveParcel(p, knownGeometry) {
       const resp = await fetch(`/api/parcel/${encodeURIComponent(county)}/${encodeURIComponent(account)}`);
       if (resp.ok) {
         const detail = await resp.json();
-        addr = addr || String(detail.addr || "");
-        if (!Number.isFinite(lat) && Number.isFinite(Number(detail.lat))) lat = Number(detail.lat);
-        if (!Number.isFinite(lng) && Number.isFinite(Number(detail.lng))) lng = Number(detail.lng);
+        const props = detail.properties || detail;
+        addr = addr || String(props.addr || "");
+        if (!Number.isFinite(lat) && Number.isFinite(Number(props.lat))) lat = Number(props.lat);
+        if (!Number.isFinite(lng) && Number.isFinite(Number(props.lng))) lng = Number(props.lng);
         if (!geometry && (detail.geometry?.type === "Polygon" || detail.geometry?.type === "MultiPolygon")) {
           geometry = detail.geometry;
         }
