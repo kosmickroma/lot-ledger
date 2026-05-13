@@ -12,7 +12,7 @@ from .alerts import alert
 from .circuit_breaker import CircuitBreaker
 from .cooldown import wait_for_cooldown_or_exit
 from .events import emit_event
-from .pass_configs import PASSES_RURAL, PASSES_URBAN_SUBURBAN, passes_for_density_class
+from .pass_configs import PASSES, passes_for_density_class
 from .pacing import inter_seed_pause_seconds, maybe_take_break
 
 __all__ = [
@@ -23,8 +23,7 @@ __all__ = [
     "alert",
     "CircuitBreaker",
     "wait_for_cooldown_or_exit",
-    "PASSES_URBAN_SUBURBAN",
-    "PASSES_RURAL",
+    "PASSES",
     "passes_for_density_class",
     "inter_seed_pause_seconds",
     "maybe_take_break",

@@ -25,6 +25,12 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# Marathon caps all cooldowns at 5 minutes. For longer breaks the operator
+# uses Ctrl-C; the system itself never auto-pauses for hours. The constant
+# governs both explicit breaker.trip() calls and the is_open() self-trip.
+MAX_COOLDOWN_MINUTES: int = 5
+
+
 @dataclass
 class CircuitBreaker:
     campaign_id: int
@@ -79,6 +85,35 @@ class CircuitBreaker:
         )
 
     def is_open(self) -> bool:
+        # Re-read cb_cooldown_until from DB so operator clears propagate immediately.
+        # On DB failure fall through to cached self.cooldown_until (fail-open with
+        # stale state — preserves an active in-memory cooldown if DB is briefly gone).
+        try:
+            conn = get_session_conn()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT cb_cooldown_until
+                        FROM propelio_marathon_campaigns
+                        WHERE campaign_id = %s
+                        """,
+                        (int(self.campaign_id),),
+                    )
+                    row = cur.fetchone()
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                release_session_conn(conn)
+            if row is not None:
+                self.cooldown_until = row[0]
+        except Exception as exc:
+            logger.warning(
+                "is_open() DB read failed, using cached cooldown_until (fail-open on stale): %s", exc
+            )
+
         if self.cooldown_until and _utcnow() < self.cooldown_until:
             return True
 
@@ -86,7 +121,7 @@ class CircuitBreaker:
         if sample_size >= 10:
             errors = sum(1 for item in self.error_window if item != "ok")
             if errors / sample_size > 0.30:
-                self.cooldown_until = _utcnow() + timedelta(hours=1)
+                self.cooldown_until = _utcnow() + timedelta(minutes=MAX_COOLDOWN_MINUTES)
                 self.persist()
                 return True
         return False
@@ -110,7 +145,8 @@ class CircuitBreaker:
         self.persist()
 
     def trip(self, reason: str, cooldown_min: int) -> None:
-        self.cooldown_until = _utcnow() + timedelta(minutes=int(cooldown_min))
+        effective_min = min(int(cooldown_min), MAX_COOLDOWN_MINUTES)
+        self.cooldown_until = _utcnow() + timedelta(minutes=effective_min)
         self.last_failure_at = _utcnow()
         self.failure_count += 1
         if reason == "rate_limit":

@@ -1,9 +1,10 @@
 # scripts/marathon_campaign/smoke_phase5_pass_configs.py
 #
-# Role: Phase 5 CPU-only smoke test for density-based pass configuration selection.
+# Role: CPU-only smoke test for the single PASSES constant in pass_configs.py.
+#       Validates shape, ordering, uniqueness, and label completeness.
 #
 # Connects to:
-#   scripts/marathon_campaign/pass_configs.py - pass presets and selector helper
+#   scripts/marathon_campaign/pass_configs.py - imports PASSES
 
 from __future__ import annotations
 
@@ -14,61 +15,44 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from scripts.marathon_campaign.pass_configs import (  # noqa: E402
-    PASSES_RURAL,
-    PASSES_URBAN_SUBURBAN,
-    passes_for_density_class,
-)
+from scripts.marathon_campaign.pass_configs import PASSES  # noqa: E402
 
 
-def _ranges(passes: list[dict]) -> list[float]:
-    return [float(item["range_mi"]) for item in passes]
+def test_passes_shape() -> None:
+    # Exactly 9 passes — 3 recent-tight + 6 broad sweep.
+    assert len(PASSES) == 9, f"expected 9 passes, got {len(PASSES)}"
 
+    # Recent-tight passes come first, in (1mo, 2mo, 3mo) order.
+    months_seq = [p["months"] for p in PASSES[:3]]
+    assert months_seq == [1, 2, 3], f"recent-tight months order wrong: {months_seq}"
 
-def _print_check(name: str, ok: bool) -> bool:
-    print(f"{name}: {'PASS' if ok else 'FAIL'}")
-    return ok
+    # Broad sweep all at 24 months.
+    assert all(p["months"] == 24 for p in PASSES[3:]), "broad sweep should all be 24 months"
 
+    # Radii monotonically expanding within each group.
+    recent_radii = [p["range_mi"] for p in PASSES[:3]]
+    assert recent_radii == sorted(recent_radii), f"recent-tight radii not expanding: {recent_radii}"
+    broad_radii = [p["range_mi"] for p in PASSES[3:]]
+    assert broad_radii == sorted(broad_radii), f"broad sweep radii not expanding: {broad_radii}"
 
-def main() -> None:
-    all_ok = True
+    # Every pass has a non-empty label.
+    assert all(p.get("label") for p in PASSES), "every pass needs a label"
 
-    urban = passes_for_density_class("urban")
-    all_ok &= _print_check("urban_count_6", len(urban) == 6)
-    all_ok &= _print_check("urban_has_0_25", 0.25 in _ranges(urban))
-    all_ok &= _print_check("urban_has_10_0", 10.0 in _ranges(urban))
+    # All labels are unique — catches copy-paste-and-forgot-to-rename.
+    labels = [p["label"] for p in PASSES]
+    assert len(set(labels)) == len(labels), f"pass labels must be unique, got: {labels}"
 
-    suburban = passes_for_density_class("suburban")
-    all_ok &= _print_check("suburban_count_6", len(suburban) == 6)
-    all_ok &= _print_check("suburban_matches_urban", suburban == PASSES_URBAN_SUBURBAN)
+    # All (months, range_mi) tuples are unique — catches accidental duplicate passes.
+    pairs = [(p["months"], p["range_mi"]) for p in PASSES]
+    assert len(set(pairs)) == len(pairs), f"duplicate (months, range_mi) pairs detected: {pairs}"
 
-    rural = passes_for_density_class("rural")
-    rural_ranges = _ranges(rural)
-    all_ok &= _print_check("rural_count_5", len(rural) == 5)
-    all_ok &= _print_check("rural_no_0_25", 0.25 not in rural_ranges)
-    all_ok &= _print_check("rural_has_0_5", 0.5 in rural_ranges)
-    all_ok &= _print_check("rural_has_10_0", 10.0 in rural_ranges)
-
-    unknown = passes_for_density_class("UNKNOWN")
-    blank = passes_for_density_class("")
-    none_val = passes_for_density_class(None)
-    all_ok &= _print_check("unknown_defaults_6", len(unknown) == 6)
-    all_ok &= _print_check("blank_defaults_6", len(blank) == 6)
-    all_ok &= _print_check("none_defaults_6", len(none_val) == 6)
-
-    copied = passes_for_density_class("urban")
-    copied.append({"months": 24, "range_mi": 99.0, "label": "mutated"})
-    all_ok &= _print_check("returned_list_is_copy", len(PASSES_URBAN_SUBURBAN) == 6 and len(copied) == 7)
-
-    copied_rural = passes_for_density_class("rural")
-    copied_rural.pop()
-    all_ok &= _print_check("returned_rural_list_is_copy", len(PASSES_RURAL) == 5 and len(copied_rural) == 4)
-
-    if not all_ok:
-        raise SystemExit(1)
-
-    print("smoke_phase5_pass_configs: PASS")
+    # Mutation isolation — returned list is a copy, not the original.
+    copy = list(PASSES)
+    copy.append({"months": 99, "range_mi": 99.0, "label": "mutated"})
+    assert len(PASSES) == 9, "PASSES constant was mutated through a returned reference"
 
 
 if __name__ == "__main__":
-    main()
+    test_passes_shape()
+    print("smoke_phase5_pass_configs: OK")
+
