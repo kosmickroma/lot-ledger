@@ -4227,6 +4227,7 @@ function applyPropelioClientFilters() {
       ? `${all.length}`
       : `${visibleOnMap.length} / ${all.length}`;
   }
+  _updateUpdateAreaButtonVisibility();
 }
 
 function _sortPropelioComps(comps, mode) {
