@@ -4717,9 +4717,9 @@ function _ensureStickyPropelioButton() {
   const controlsWrap = document.createElement("div");
   controlsWrap.className = "propelio-action-row";
   propelioStickyBtn = document.createElement("button");
-  propelioStickyBtn.classList.add("power-user-only");
   propelioStickyBtn.type = "button";
   propelioStickyBtn.className = "propelio-get-comps-btn";
+  propelioStickyBtn.classList.add("power-user-only");
   _setPropelioGetCompsLabel("Get Comps");
   controlsWrap.appendChild(propelioStickyBtn);
 
