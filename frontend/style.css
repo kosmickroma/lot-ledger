@@ -2495,6 +2495,7 @@ h1 {
   display: flex;
   gap: 8px;
   align-items: center;
+  justify-content: center;
 }
 
 /* Legacy wrap class — older marker-based render path. Retained
@@ -2549,7 +2550,7 @@ h1 {
   height: 340%;
   background: linear-gradient(120deg, rgba(255, 255, 255, 0), rgba(255, 255, 255, 0.34), rgba(255, 255, 255, 0));
   transform: rotate(18deg);
-  animation: propelioPillShimmer 2.8s linear infinite;
+  animation: propelioPillShimmer 60s linear infinite;
   pointer-events: none;
 }
 
@@ -2644,6 +2645,9 @@ h1 {
 @keyframes propelioPillShimmer {
   0% {
     transform: translateX(-220%) rotate(18deg);
+  }
+  4.7% {
+    transform: translateX(420%) rotate(18deg);
   }
   100% {
     transform: translateX(420%) rotate(18deg);
@@ -3159,6 +3163,10 @@ h1 {
   border: 1px solid rgba(212, 175, 55, 0.6);
   border-radius: 4px;
   font-size: 12px;
+}
+
+.deep-pull-banner-text {
+  flex: 1;
 }
 
 .deep-pull-banner.hidden {
