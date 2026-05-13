@@ -2143,6 +2143,53 @@ async function saveParcel(account_num, county, addr, lat, lng, geometry) {
   setActiveItem("Workspace", row.name);
 }
 
+async function _rightClickSaveParcel(p, knownGeometry) {
+  if (!_currentUser) {
+    _showToast("Sign in to save", "error");
+    return;
+  }
+  const account = String(p?.account_num || "").trim();
+  const county = String(p?.source_county || "dcad").trim().toLowerCase();
+  if (!account || !county) return;
+
+  const already = _savedParcelsCache.find((a) =>
+    String(a.account_num || "").trim() === account
+    && String(a.county || "").trim().toLowerCase() === county,
+  );
+  if (already) {
+    _showToast("Already saved");
+    return;
+  }
+
+  let addr = String(p?.addr || "").trim();
+  let lat = Number(p?.lat);
+  let lng = Number(p?.lng);
+  let geometry = knownGeometry;
+
+  if (!addr || !Number.isFinite(lat) || !Number.isFinite(lng) || !geometry) {
+    try {
+      const resp = await fetch(`/api/parcel/${encodeURIComponent(county)}/${encodeURIComponent(account)}`);
+      if (resp.ok) {
+        const detail = await resp.json();
+        addr = addr || String(detail.addr || "");
+        if (!Number.isFinite(lat) && Number.isFinite(Number(detail.lat))) lat = Number(detail.lat);
+        if (!Number.isFinite(lng) && Number.isFinite(Number(detail.lng))) lng = Number(detail.lng);
+        if (!geometry && (detail.geometry?.type === "Polygon" || detail.geometry?.type === "MultiPolygon")) {
+          geometry = detail.geometry;
+        }
+      }
+    } catch (_) { /* proceed with what we have */ }
+  }
+
+  try {
+    await saveParcel(account, county, addr, lat, lng, geometry);
+    _showToast(addr ? `Saved: ${addr}` : "Saved");
+  } catch (err) {
+    console.error("right-click save failed", err);
+    _showToast("Save failed", "error");
+  }
+}
+
 function _restoreAllSavedParcelOutlines() {
   Object.values(savedParcelLayers).forEach((layer) => savedParcelLayer.removeLayer(layer));
   Object.keys(savedParcelLayers).forEach((key) => delete savedParcelLayers[key]);
@@ -6274,6 +6321,11 @@ function renderFeatures(geojson) {
         L.DomEvent.stopPropagation(ev);
         openParcelDetailPanel(p, { latlng: ev.latlng, geometry: feature.geometry });
       });
+      layer.on("contextmenu", (ev) => {
+        ev.originalEvent?.preventDefault();
+        L.DomEvent.stopPropagation(ev);
+        void _rightClickSaveParcel(p, feature.geometry || null);
+      });
       // L.geoJSON returns a FeatureGroup wrapper; click events fire on inner child layers,
       // so popup._source is the child, not the wrapper. Propagate metadata to children
       // so the popupopen handler can find it for suspend/restore protection.
@@ -6310,6 +6362,11 @@ function renderFeatures(geojson) {
       layer.on("click", (ev) => {
         L.DomEvent.stopPropagation(ev);
         openParcelDetailPanel(p, { latlng: ev.latlng, geometry: feature.geometry });
+      });
+      layer.on("contextmenu", (ev) => {
+        ev.originalEvent?.preventDefault();
+        L.DomEvent.stopPropagation(ev);
+        void _rightClickSaveParcel(p, feature.geometry || null);
       });
       layer._lotLedgerPopupMeta = { type: "parcel", accountNum: String(p.account_num || "") };
       layer.addTo(circleLayer);
@@ -7298,11 +7355,31 @@ map.on("draw:drawstop", () => {
   map.getContainer().classList.remove("drawing-active");
 });
 
-map.on("contextmenu", () => {
-  const handler = getPolygonDrawHandler();
-  if (handler && handler.enabled()) {
-    handler.completeShape();
+map.on("contextmenu", async (ev) => {
+  const drawHandler = getPolygonDrawHandler();
+  if (drawHandler && drawHandler.enabled()) {
+    drawHandler.completeShape();
+    return;
   }
+
+  if (!browseLayer || !browseLayer._map) return;
+  if (lastAnalysisGeojson) return;
+  ev.originalEvent?.preventDefault();
+
+  const result = browseLayer.queryTileFeaturesDebug(ev.latlng.lng, ev.latlng.lat);
+  const allFeatures = result instanceof Map
+    ? [...result.values()].flat()
+    : (Array.isArray(result) ? result : []);
+  if (allFeatures.length === 0) return;
+
+  const parcel = allFeatures.find((f) => {
+    const props = (f.feature && f.feature.props) || f.props || {};
+    return props.source_county === "dcad" || props.source_county === "tad" || props.source_county === "collin" || props.source_county === "denton";
+  });
+  if (!parcel) return;
+
+  const pProps = (parcel.feature && parcel.feature.props) || parcel.props || {};
+  void _rightClickSaveParcel(pProps, null);
 });
 
 // Sidebar-triggered sold popups should dismiss once the map is moved away.
@@ -8415,6 +8492,28 @@ async function _loadAreaFromShareId(shareId) {
         _renderSavedParcelOutline(normalized);
       }
     });
+
+    // Best-effort owner skip: if this share_id is already in cache, the
+    // current user is likely the owner. Not airtight if cache load failed.
+    const isOwner = _savedAreasCache.some((a) => String(a.share_id || "") === String(shareId));
+    if (_currentUser && !isOwner) {
+      try {
+        const cloned = await _apiJson(`/api/areas/from-share-id/${encodeURIComponent(shareId)}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...authHeaders() },
+          body: "{}",
+        });
+        const normalized = _normalizeSavedAreaRow(cloned);
+        _savedAreasCache.unshift(normalized);
+        _currentLoadedAreaId = cloned.area_id;
+        _selectedSavedItemId = cloned.area_id;
+        renderSavedAreasList();
+        _showToast(`Added to your saved areas: ${cloned.name}`);
+      } catch (forkErr) {
+        console.warn("auto-fork failed; keeping read-only view", forkErr);
+        _showToast("Could not save shared workspace", "error");
+      }
+    }
   } catch (err) {
     console.error("Deep-link load failed", err);
     _showToast("Could not open shared workspace", "error");

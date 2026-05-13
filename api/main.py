@@ -3975,9 +3975,30 @@ async def fork_saved_area(
             source_filter_state = source[2] if isinstance(source[2], dict) else None
             source_type = str(source[3] or "area")
 
+            cur.execute("SELECT id FROM users WHERE id = %s FOR UPDATE", (int(user["id"]),))
+            if cur.fetchone() is None:
+                raise HTTPException(status_code=403, detail="User not found")
+
+            cur.execute(
+                """
+                SELECT name
+                FROM saved_areas
+                WHERE user_id = %s
+                  AND (name = %s OR name LIKE %s)
+                """,
+                (int(user["id"]), source_name, f"{source_name} (%)"),
+            )
+            taken_names = {str(row[0] or "") for row in cur.fetchall()}
+            if source_name not in taken_names:
+                fork_name = source_name
+            else:
+                next_n = 2
+                while f"{source_name} ({next_n})" in taken_names:
+                    next_n += 1
+                fork_name = f"{source_name} ({next_n})"
+
             row = None
             new_share_id = ""
-            fork_name = f"{source_name} (copy)"
             for _ in range(10):
                 new_share_id = _generate_share_id()
                 try:
