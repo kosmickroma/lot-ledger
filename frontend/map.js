@@ -1758,6 +1758,18 @@ async function _reloadSavedResources() {
   renderSavedSessionsList();
 }
 
+// Sync the browser tab title to the active workspace name.
+// Called after every _currentLoadedAreaId assignment.
+function _syncTabTitle() {
+  if (_currentLoadedAreaId) {
+    const area = _savedAreasCache.find((a) => String(a.id) === String(_currentLoadedAreaId));
+    const name = String(area?.name || "").trim();
+    document.title = name || "LotLedger";
+  } else {
+    document.title = "LotLedger";
+  }
+}
+
 function _isLoadedAreaWithFilterDrift(area) {
   if (!area || area.type !== "area") return false;
   if (area.id !== _currentLoadedAreaId) return false;
@@ -1831,6 +1843,7 @@ async function saveCurrentArea(name) {
   // Mark the just-saved area as the currently-loaded one so the Update button
   // becomes available the moment the user tweaks any filter after saving.
   _currentLoadedAreaId = normalized.id;
+  _syncTabTitle();
   _selectedSavedItemId = normalized.id;
   setActiveItem("Workspace", normalized.name);
   renderSavedAreasList();
@@ -1936,7 +1949,7 @@ async function deleteSavedArea(item) {
       headers: { ...authHeaders() },
     });
     _savedAreasCache = _savedAreasCache.filter((a) => a.id !== item.id);
-    if (_currentLoadedAreaId === item.id) _currentLoadedAreaId = null;
+    if (_currentLoadedAreaId === item.id) { _currentLoadedAreaId = null; _syncTabTitle(); }
   }
   if (_selectedSavedItemId === item.id) _selectedSavedItemId = null;
   renderSavedAreasList();
@@ -2503,6 +2516,7 @@ async function restoreSavedArea(area, options = {}) {
     renderSidebar(data.counts, markers);
     applyResultTags(data);
     _currentLoadedAreaId = area.id;
+    _syncTabTitle();
     // Show the sticky Get Comps button so a quick sweep is one click away
     // after loading a saved area. Guard against mid-sweep: if a deep-pull
     // is in flight, surface the anchor but skip _showPropelioPolygonButton's
@@ -2546,6 +2560,7 @@ async function restoreNamedSession(session, options = {}) {
   }
   if (rowEl) rowEl.classList.add("row-shimmer");
   _currentLoadedAreaId = null;
+  _syncTabTitle();
   renderSavedAreasList();
   const savedFilterState = session.filter_state && typeof session.filter_state === "object"
     ? session.filter_state
@@ -2713,6 +2728,7 @@ async function _renameSavedItemInline(item, rowEl) {
       body: JSON.stringify({ name: nextName }),
     });
     await _reloadSavedResources();
+    _syncTabTitle();
   };
 
   input.addEventListener("keydown", async (e) => {
@@ -2803,6 +2819,7 @@ function _renderList(sectionId, listId, items) {
           });
           _savedAreasCache.unshift(_normalizeSavedAreaRow(cloned));
           _currentLoadedAreaId = cloned.area_id;
+          _syncTabTitle();
           _selectedSavedItemId = cloned.area_id;
           renderSavedAreasList();
           _showToast(`Forked → "${cloned.name}"`);
@@ -7133,6 +7150,7 @@ map.on("draw:created", async (e) => {
   map.getContainer().classList.remove("drawing-active");
   _currentSessionIsNamed = false;
   _currentLoadedAreaId = null;
+  _syncTabTitle();
   _selectedSavedItemId = null;
   _setSessionCacheNote("");
   renderSavedAreasList();
@@ -7297,6 +7315,7 @@ function clearDrawResults() {
   lastDrawnLatLngs = null;
   _currentSessionIsNamed = false;
   _currentLoadedAreaId = null;
+  _syncTabTitle();
   _updateSaveSessionButtonState();
   _setSessionCacheNote("");
   lastAnalysisGeojson = null;
@@ -7343,6 +7362,7 @@ map.on("draw:drawstart", () => {
   map.getContainer().classList.add("drawing-active");
   _currentSessionIsNamed = false;
   _currentLoadedAreaId = null;
+  _syncTabTitle();
   _selectedSavedItemId = null;
   _setSessionCacheNote("");
   renderSavedAreasList();
@@ -8507,6 +8527,7 @@ async function _loadAreaFromShareId(shareId) {
         const normalized = _normalizeSavedAreaRow(cloned);
         _savedAreasCache.unshift(normalized);
         _currentLoadedAreaId = cloned.area_id;
+        _syncTabTitle();
         _selectedSavedItemId = cloned.area_id;
         renderSavedAreasList();
         _showToast(`Added to your saved areas: ${cloned.name}`);
