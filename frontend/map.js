@@ -8193,7 +8193,6 @@ function _showLoginForm(errorMsg = "") {
       if (resp.ok) {
         _hideAuthModal();
         _currentUser = data.user || data;
-        _maybeShowDeepPullButton();
         _renderUserBar(_currentUser);
         _applyRoleVisibility();
         await _reloadSavedResources().catch((err) => console.error("load saved resources failed", err));
@@ -8686,7 +8685,6 @@ async function _loadAreaFromShareId(shareId) {
     if (resp.ok) {
       const data = await resp.json().catch(() => ({}));
       _currentUser = data.user || data;
-      _maybeShowDeepPullButton();
       _renderUserBar(_currentUser);
       _applyRoleVisibility();
       await _reloadSavedResources().catch((err) => console.error("load saved resources failed", err));
@@ -8727,17 +8725,6 @@ function _esc(str) {
 
 let _deepPullPollTimer = null;
 let _activeDeepPullJobId = null;
-
-function _maybeShowDeepPullButton() {
-  const btn = document.getElementById("btn-deep-pull");
-  if (!btn) return;
-  const role = (_currentUser && _currentUser.role) || "";
-  if (role === "developer" || role === "owner") {
-    btn.style.display = "inline-block";
-  } else {
-    btn.style.display = "none";
-  }
-}
 
 function _showDeepPullBanner(text) {
   const banner = document.getElementById("deep-pull-banner");
@@ -8859,5 +8846,4 @@ async function stopDeepPull() {
   }
 }
 
-document.getElementById("btn-deep-pull")?.addEventListener("click", startDeepPull);
 document.getElementById("btn-deep-pull-stop")?.addEventListener("click", stopDeepPull);
