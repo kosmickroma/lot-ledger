@@ -336,6 +336,12 @@ map.createPane("savedParcelPane");
 map.getPane("savedParcelPane").style.zIndex = "620";
 map.getPane("savedParcelPane").style.pointerEvents = "none";
 
+// Saved-target star pane sits above savedParcelPane so stars remain visible
+// when gold parcel outlines are also rendered.
+map.createPane("savedTargetStarPane");
+map.getPane("savedTargetStarPane").style.zIndex = "635";
+map.getPane("savedTargetStarPane").style.pointerEvents = "auto";
+
 // Selected-item outline pane — sits above the gold-halo savedParcelPane
 // so when a saved target is also the current selection, the crisp purple
 // line stays visible on top of the gold halo's diffuse glow. Decorative
@@ -451,6 +457,9 @@ let targetBadgeLayer = L.layerGroup().addTo(map);
 // Persistent saved-parcel outlines (cyan). Keyed by account_num for dedup + removal.
 const savedParcelLayer = L.layerGroup().addTo(map);
 const savedParcelLayers = {};
+const SAVED_TARGET_STAR_MAX_ZOOM = 14; // stars hide at this zoom and above
+const savedTargetStarLayer = L.layerGroup().addTo(map);
+const savedTargetStarMarkers = {};
 // Invisible click-catcher polygons that mirror saved-parcel outlines. The
 // decorative halo on `savedParcelPane` is pointer-events:none so its drop-shadow
 // bleed doesn't catch stray clicks; this parallel layer (default overlay pane)
@@ -1938,6 +1947,7 @@ async function deleteSavedArea(item) {
       savedParcelLayer.removeLayer(layer);
       delete savedParcelLayers[item.account_num];
     }
+    _removeSavedTargetStar(item.account_num);
     const clickLayer = savedParcelClickLayers[item.account_num];
     if (clickLayer) {
       savedParcelClickLayer.removeLayer(clickLayer);
@@ -2056,6 +2066,57 @@ async function _renameSavedSessionInline(session, rowEl) {
 }
 
 const SAVED_PARCEL_COLOR = "#FFD700";
+const savedTargetStarIcon = L.divIcon({
+  className: "saved-target-star",
+  html: '<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false"><path d="M12 1.8l3.16 6.4 7.06 1.03-5.11 4.98 1.2 7.04L12 17.93 5.69 21.25l1.2-7.04-5.11-4.98 7.06-1.03L12 1.8z" fill="#e2c075" stroke="#8b6b1f" stroke-width="1.2"/></svg>',
+  iconSize: [22, 22],
+  iconAnchor: [11, 11],
+});
+
+function _updateSavedTargetStarVisibility() {
+  if (map.getZoom() < SAVED_TARGET_STAR_MAX_ZOOM) {
+    if (!map.hasLayer(savedTargetStarLayer)) map.addLayer(savedTargetStarLayer);
+  } else if (map.hasLayer(savedTargetStarLayer)) {
+    map.removeLayer(savedTargetStarLayer);
+  }
+}
+
+function _removeSavedTargetStar(accountNum) {
+  const key = String(accountNum || "");
+  if (!key) return;
+  const marker = savedTargetStarMarkers[key];
+  if (!marker) return;
+  savedTargetStarLayer.removeLayer(marker);
+  delete savedTargetStarMarkers[key];
+}
+
+function _renderSavedTargetStar(area) {
+  const accountNum = String(area?.account_num || "").trim();
+  if (!accountNum) return;
+  if (savedTargetStarMarkers[accountNum]) return;
+
+  const lat = Number(area?.lat);
+  const lng = Number(area?.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+
+  const marker = L.marker([lat, lng], { icon: savedTargetStarIcon, pane: "savedTargetStarPane" });
+  marker.on("click", async (ev) => {
+    L.DomEvent.stopPropagation(ev);
+    const county = String(area.county || "dcad").trim().toLowerCase();
+    const account = String(area.account_num || "").trim();
+    if (!account) return;
+    try {
+      const resp = await fetch(`/api/parcel/${encodeURIComponent(county)}/${encodeURIComponent(account)}`);
+      if (!resp.ok) return;
+      const detail = await resp.json();
+      openParcelDetailPanel(detail.properties || detail, { latlng: ev.latlng, geometry: detail.geometry });
+    } catch (err) {
+      console.error("[saved-target-star] open failed", err);
+    }
+  });
+  marker.addTo(savedTargetStarLayer);
+  savedTargetStarMarkers[accountNum] = marker;
+}
 
 function _renderSavedParcelOutline(area) {
   if (savedParcelLayers[area.account_num]) return; // already on map
@@ -2153,6 +2214,7 @@ async function saveParcel(account_num, county, addr, lat, lng, geometry) {
   _selectedSavedItemId = row.id;
   renderSavedAreasList();
   _renderSavedParcelOutline(row);
+  _renderSavedTargetStar(row);
   setActiveItem("Workspace", row.name);
 }
 
@@ -2209,8 +2271,15 @@ function _restoreAllSavedParcelOutlines() {
   Object.keys(savedParcelLayers).forEach((key) => delete savedParcelLayers[key]);
   Object.values(savedParcelClickLayers).forEach((layer) => savedParcelClickLayer.removeLayer(layer));
   Object.keys(savedParcelClickLayers).forEach((key) => delete savedParcelClickLayers[key]);
+  Object.values(savedTargetStarMarkers).forEach((marker) => savedTargetStarLayer.removeLayer(marker));
+  Object.keys(savedTargetStarMarkers).forEach((key) => delete savedTargetStarMarkers[key]);
   _savedParcelsCache.forEach(_renderSavedParcelOutline);
+  _savedParcelsCache.forEach(_renderSavedTargetStar);
+  _updateSavedTargetStarVisibility();
 }
+
+map.on("zoomend", _updateSavedTargetStarVisibility);
+_updateSavedTargetStarVisibility();
 
 function _createUndoSnapshot() {
   return {
@@ -2387,6 +2456,7 @@ async function restoreSavedArea(area, options = {}) {
 
   if (area.type === "parcel") {
     _renderSavedParcelOutline(area);
+    _renderSavedTargetStar(area);
     const clickMode = getClickMode();
     if (clickMode === "jump") {
       map.flyTo([area.lat, area.lng], 16);
@@ -8512,6 +8582,7 @@ async function _loadAreaFromShareId(shareId) {
       if (normalized.geometry) {
         _renderSavedParcelOutline(normalized);
       }
+      _renderSavedTargetStar(normalized);
     });
 
     // Best-effort owner skip: if this share_id is already in cache, the
