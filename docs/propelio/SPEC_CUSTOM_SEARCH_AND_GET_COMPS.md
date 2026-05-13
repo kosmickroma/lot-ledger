@@ -1,14 +1,41 @@
-# Spec v2 — Custom Search rename + Get Comps quick-sweep + Targets scroller
+# Spec v3 — Custom Search rename + Get Comps quick-sweep + Targets scroller
 
 **Owner:** KK (product) + Claude (spec) + Copilot (implementation)
 **Target branch:** `feat/propelio-deep-pull-experiment`
-**Status:** v2 — incorporates Copilot's deep-dive critique from v1.
-Still pre-coding. Needs second go/no-go from Copilot before code lands.
+**Status:** v3 — incorporates Copilot's go/no-go #2 critique on v2.
+Still pre-coding. Needs third go/no-go from Copilot before code lands.
+
+## What changed since v2
+
+Copilot's v2 critique flagged 4 items (1 high, 2 medium, 1 low). v3
+addresses each:
+
+- **Complete `propelioQuickRefreshBtn` reference list** (HIGH). v2
+  missed two clusters: the error re-enable inside
+  `_refreshRecentByPolygon` at map.js:4664-4666 and the completion-path
+  re-enable inside `_pollDeepPullStatus` at map.js:8566-8569. v3
+  enumerates every reference and requires they all be removed
+  atomically.
+- **Pass-count contract made explicit** (MEDIUM). v2 retunes
+  `PASSES_RECENT` to 3 entries but the frontend hardcodes the divisor
+  `3` for `rr_*` jobs at map.js:8490 and 8555. If the list is ever
+  retuned to a different length, the UI silently lies. v3 adds a
+  module-level `PASSES_RECENT_COUNT` constant + runtime assertion in
+  `deep_pull.py`, with cross-reference comments at both ends. Adding
+  `passes_total` to the status response is still deferred (would need
+  a DB column or in-memory state to be accurate).
+- **Geojson helper centralized** (MEDIUM). Single source in
+  `api/geo.py` (or `api/propelio/_polygon_geojson.py`). Both
+  `routes.py` and `deep_pull.py` import from there. No duplication.
+- **Ingestion-stats merge-failure row** (LOW). If the fresh-path merge
+  raises, the existing try/except in routes.py:586 still emits a
+  response — v3 spec requires that response to include
+  `ingestion_stats: {returned: len(comps_list), new_to_cache: 0}` so
+  the schema is consistent.
 
 ## What changed since v1
 
-Copilot's critique surfaced one big architectural simplification and
-several smaller risk-reductions. v2:
+(Carried forward from v2 for posterity.)
 
 - **Reuses existing `/refresh-recent/start` infrastructure** instead
   of adding `pass_preset` to `/deep-pull/start`. Eliminates a DB
@@ -65,6 +92,11 @@ same scroller treatment saved areas already has.
 - Do NOT change the existing `/refresh-recent/start` body shape or
   `rr_` job-id prefix.
 - Do NOT change `propelio_comps` schema or merge logic.
+- Do NOT change the hardcoded `3`/`6` divisor logic at map.js:8490
+  and 8555 in this chunk. v3 makes the contract explicit via a Python
+  constant + cross-reference comments, but the JS still reads job-id
+  prefix. Replacing the prefix logic with a server-side
+  `passes_total` field is a separate change (out-of-scope follow-up).
 
 ## 3. End state
 
@@ -157,19 +189,35 @@ The `_pullPropelioByPolygon` function stays in code for the dev
 Deep Pull button + future use, but no longer wired to the gold sticky
 button.
 
-**(c) Hide the "Refresh Recent" button creation** — remove or
-comment-out the block at lines 4520-4528 (the `propelioQuickRefreshBtn`
-creation) AND the corresponding click handler at lines 4537-4540. Both
-go. The variable declaration at line 4421 (`let propelioQuickRefreshBtn
-= null;`) can stay (it's null and never used elsewhere now) or be
-removed — Copilot's call.
+**(c) Remove `propelioQuickRefreshBtn` completely — every reference**
 
-Grep confirms `propelioQuickRefreshBtn` is only referenced at lines
-4421, 4520-4528, 4537-4540, and inside `_refreshRecentByPolygon` at
-4640-4643 (which we update in step (d)). No other consumers.
+Grep on `propelioQuickRefreshBtn` (run on this branch's current
+`frontend/map.js`) returns the following complete list. **All must be
+removed in the same patch** — leaving any one means the symbol is
+either undefined (runtime error) or references a button that no longer
+exists in DOM (silent dead code).
+
+| Line(s) | What | Action |
+|---|---|---|
+| 4421 | `let propelioQuickRefreshBtn = null;` (variable declaration) | **Remove.** With no consumers it's pure dead code. |
+| 4520-4528 | DOM creation (`document.createElement`, classes, title, innerHTML, `controlsWrap.appendChild`) | **Remove the whole block.** |
+| 4537-4540 | `L.DomEvent.on(propelioQuickRefreshBtn, "click", ...)` handler binding | **Remove the whole `L.DomEvent.on` call.** |
+| 4640-4643 | Inside `_refreshRecentByPolygon`: disable-on-start block (`if (propelioQuickRefreshBtn) { ... disabled = true ... is-running }`) | **Replace** with `_setPropelioPolygonButtonState({ text: "Get Comps", disabled: true });` — see §4.2(d) below. |
+| 4664-4666 | Inside `_refreshRecentByPolygon`'s catch path: error re-enable block (`if (propelioQuickRefreshBtn) { ... disabled = false ... }`) | **Replace** with `_setPropelioPolygonButtonState({ text: "Get Comps", disabled: false });` so the sticky button re-enables on error. |
+| 8566-8569 | Inside `_pollDeepPullStatus` completion path: re-enable block (`if (propelioQuickRefreshBtn) { ... }`) | **Remove the whole `if` block.** The line immediately above at 8564 (`_setPropelioPolygonButtonState({ text: "Get Comps", disabled: false });`) already re-enables the only remaining button, so no replacement is needed here. |
+
+**Atomicity is critical.** A partial removal (e.g., leaving the click
+handler at 4537 with the DOM creation gone at 4520) crashes the page
+load with `ReferenceError`. Copilot should treat this as one
+indivisible change.
 
 After removal, only `propelioStickyBtn` (gold Get Comps) renders in
-the bottom-center sticky controls.
+the bottom-center sticky controls, and only it is referenced in
+state-management code paths.
+
+**Sanity grep before commit:** Copilot must run
+`grep -n "propelioQuickRefreshBtn" frontend/map.js` and confirm
+**zero results** before pushing.
 
 **(d) Update `_refreshRecentByPolygon` banner copy + button-state
 target** at line 4624 onwards:
@@ -178,14 +226,16 @@ target** at line 4624 onwards:
   `"Refresh Recent · queued - 3 passes (3mo, 6mo, 12mo), ~2-3 min"`
   to
   `"Quick sweep · queued - 3 passes (1mo, 2mo, 3mo), ~2-3 min"`.
-- Button-state management at lines 4640-4643 currently disables
-  `propelioQuickRefreshBtn`. Change to disable `propelioStickyBtn`
-  via the existing helper:
-  ```js
-  _setPropelioPolygonButtonState({ text: "Get Comps", disabled: true });
-  ```
-  And re-enable on completion via the existing path at
-  `_pollDeepPullStatus` (~line 8500).
+- Button-state management at lines 4640-4643 (disable-on-start) and
+  4664-4666 (re-enable-on-error): replace as specified in §4.2(c)
+  above. The disable-on-start block becomes
+  `_setPropelioPolygonButtonState({ text: "Get Comps", disabled: true });`
+  and the error re-enable becomes
+  `_setPropelioPolygonButtonState({ text: "Get Comps", disabled: false });`.
+- Re-enable on successful completion already happens at map.js:8564
+  inside `_pollDeepPullStatus`. After §4.2(c) removes lines 8566-8569,
+  the existing line 8564 covers the only remaining button. No new
+  completion-path code needed.
 
 **(e) Update the `_pollDeepPullStatus` final banner copy** at
 ~line 8550-8555. Currently shows "Pass {N}/3 · X captured · Y net-new"
@@ -235,7 +285,8 @@ good reference; copy and adapt the rules under `.propelio-refresh-*`).
 
 ### 4.4 api/propelio/deep_pull.py
 
-**(a) Retune `PASSES_RECENT`** at lines 44-48:
+**(a) Retune `PASSES_RECENT` and lock its length with a constant**
+at lines 44-48:
 
 ```python
 # WAS:
@@ -254,11 +305,38 @@ PASSES_RECENT = [
     {"months": 3, "range_mi": 1.0, "label": "quick_sweep_3mo",
      "property_type_presets": ["SINGLE_FAMILY"]},
 ]
+
+# FRONTEND CONTRACT: frontend/map.js hardcodes the divisor 3 for rr_*
+# job_ids at two sites (currently lines ~8490 and ~8555). If this list's
+# length ever changes, those two sites MUST be updated in the same
+# commit. The assertion below makes a length mismatch a startup error,
+# not a silent UI bug. Adding a passes_total field to the status
+# response (so the frontend can read length from the server) is a
+# deferred follow-up — see §8.
+PASSES_RECENT_COUNT = 3
+assert len(PASSES_RECENT) == PASSES_RECENT_COUNT, (
+    "PASSES_RECENT length changed — also update frontend hardcoded "
+    "divisor at map.js:~8490 and ~8555 (search 'rr_' branches)."
+)
 ```
 
 Update the docstring at line 41 to reflect the new configuration
 ("Three passes at 1mi SFR across last 1-3 months. Catches recent
 stragglers — pendings + just-listed actives.").
+
+**Companion comments in `frontend/map.js`** — add a one-line comment
+immediately above each of the two hardcoded `3` literals (currently at
+lines 8490 and 8555):
+
+```js
+// Contract: 3 must match api/propelio/deep_pull.py:PASSES_RECENT_COUNT.
+// A backend assertion guards length; this comment guards the JS edit.
+const totalPasses = jobId.startsWith("rr_") ? 3 : 6;
+```
+
+These comments give a future-editor a grep path between the two
+contract endpoints. Copilot should add the comment at both 8490 and
+8555 (the completion-path mirror).
 
 **(b) Pass `property_type_presets` + `geojson` through to scraper**
 at the `search_cma` call site in `run_deep_pull` (~lines 488-493):
@@ -287,12 +365,15 @@ For `add_cma` (~line 437-443): **no change** (per non-goal: geojson
 and presets stay off `/add` in this chunk).
 
 **(c) Add `_load_polygon_geojson_for_job` helper** — looks up the
-polygon by `saved_area_id` from the job row, validates, and converts
-to a GeoJSON FeatureCollection. Returns `None` on any failure (in
-which case the run proceeds without geojson — Propelio falls back to
-circle search based on months/range, no crash).
+polygon by `saved_area_id` from the job row, then delegates the
+validation + GeoJSON shape to the centralized helper in `api/geo.py`
+(see §4.7). Returns `None` on any failure (in which case the run
+proceeds without geojson — Propelio falls back to circle search based
+on months/range, no crash).
 
 ```python
+from api.geo import build_polygon_geojson_feature_collection
+
 def _load_polygon_geojson_for_job(job_id: str) -> dict[str, Any] | None:
     """Load the polygon associated with this job (via saved_area_id)
     and return a GeoJSON FeatureCollection. None if absent or invalid.
@@ -300,27 +381,13 @@ def _load_polygon_geojson_for_job(job_id: str) -> dict[str, Any] | None:
     # 1. Query: SELECT saved_area_id FROM propelio_deep_pull_jobs WHERE job_id = %s
     # 2. If saved_area_id is null/missing: return None
     # 3. Query: SELECT polygon FROM saved_areas WHERE area_id = %s
-    # 4. Validate: list of >=3 [lng,lat] pairs, numeric, ring closure.
-    # 5. Build FeatureCollection (see routes.py _build_polygon_geojson
-    #    for the shape — extract to a shared module if both call sites
-    #    end up identical).
+    # 4. Delegate to api.geo.build_polygon_geojson_feature_collection
+    #    (returns None on validation failure, logs warning).
 ```
 
-Polygon validation steps (same as `routes.py._build_polygon_geojson`):
-1. Require list-of-lists, each inner list ≥ 2 floats, length ≥ 3.
-2. Close the ring if first != last.
-3. Build:
-   ```python
-   {"type": "FeatureCollection",
-    "features": [{"type": "Feature",
-                  "geometry": {"type": "Polygon",
-                               "coordinates": [closed_ring]},
-                  "properties": {}}]}
-   ```
-   where `closed_ring` is `[[lng, lat], ..., [lng_first, lat_first]]`.
-
-On validation failure: log a warning and return `None`. Do NOT fail
-the job — geojson is optional.
+On validation failure (`build_polygon_geojson_feature_collection`
+returns `None`): log a warning and return `None`. Do NOT fail the
+job — geojson is optional.
 
 **(d) Call the helper once per job** — at the top of `run_deep_pull`,
 right after job claim:
@@ -370,17 +437,130 @@ through. See 4.6.
 
 ### 4.6 api/propelio/routes.py
 
-**(a) `_build_polygon_geojson` helper** — add at module level near
-other geometry helpers (~line 200 area). This is the SAME shape as
-the deep_pull.py helper in 4.4(c) — Copilot to evaluate whether to
-extract to a shared module (`api.geo`?) or duplicate.
+**(a) Import the centralized geojson helper** from `api.geo` (see
+§4.7 for the helper itself):
 
 ```python
-def _build_polygon_geojson(polygon: list[list[float]]) -> dict[str, Any] | None:
+from api.geo import build_polygon_geojson_feature_collection
+```
+
+There is no longer a `_build_polygon_geojson` defined locally in
+`routes.py`. Both this route flow and the `deep_pull.py` worker flow
+share one implementation.
+
+**(b) `_run_by_polygon` at line 325** — build polygon-derived
+`geojson` once and pass to `search_properties`. Insert before line
+459 (the `search_properties` call):
+
+```python
+polygon_geojson = build_polygon_geojson_feature_collection(polygon)
+```
+
+Pass to `search_properties`:
+
+```python
+subject, comps_list = await asyncio.to_thread(
+    scraper_mod.search_properties,
+    subject_parcel["address"],
+    months=months,
+    range_mi=range_mi,
+    geojson=polygon_geojson,
+)
+```
+
+**(c) Define `ingestion_stats` for every return path** — explicit
+shapes per branch. The key invariant: **every successful HTTP response
+from `_run_by_polygon` must include `ingestion_stats` with both
+`returned` and `new_to_cache` as integers**. The frontend banner
+copy at §6 reads these unconditionally.
+
+| Return path | `ingestion_stats` shape |
+|---|---|
+| Phase 2 cache-read hit (lines 388-414) | `{"returned": len(cached_global), "new_to_cache": 0}` |
+| Phase 2 cache-only mode (lines 377-386) | `{"returned": len(cached_global) if cached_global else 0, "new_to_cache": 0}` |
+| Legacy cache hit (lines 428-452) | `{"returned": <len cached comps>, "new_to_cache": 0}` |
+| Fresh scrape happy path (lines 550-590) | Capture `merge_result` from `merge_comps_into_global(...)` at line 582; report `inserted` count |
+| **Fresh scrape, merge raised** (caught by existing try/except at routes.py:586) | `{"returned": len(comps_list), "new_to_cache": 0}` — see explicit handling below |
+| Empty/no-coverage warning (lines 466-528) | `{"returned": 0, "new_to_cache": 0}` |
+| Scraper error (lines 530-548) | n/a — raises HTTPException, no payload |
+
+For the fresh scrape path at ~line 561, capture the merge result:
+
+```python
+merge_result = merge_comps_into_global(payload.get("comps") or [], "by_polygon")
+payload["ingestion_stats"] = {
+    "returned": len(comps_list),
+    "new_to_cache": int(merge_result.get("inserted", 0)) if isinstance(merge_result, dict) else 0,
+}
+```
+
+For the merge-failure path (try/except wrapping
+`merge_comps_into_global` at ~routes.py:586): on caught exception, log
+the error as today but **also set ingestion_stats before returning**:
+
+```python
+try:
+    merge_result = merge_comps_into_global(payload.get("comps") or [], "by_polygon")
+    payload["ingestion_stats"] = {
+        "returned": len(comps_list),
+        "new_to_cache": int(merge_result.get("inserted", 0)) if isinstance(merge_result, dict) else 0,
+    }
+except Exception as exc:
+    logger.exception("merge_comps_into_global failed; returning raw comps without cache write")
+    payload["ingestion_stats"] = {
+        "returned": len(comps_list),
+        "new_to_cache": 0,
+    }
+```
+
+This keeps the response schema consistent regardless of merge outcome,
+so the frontend banner code never has to branch on missing fields.
+
+For each other path, set `payload["ingestion_stats"]` explicitly
+before the return.
+
+**(d) `/refresh-recent/start` endpoint** at line 798 — **no body
+shape change**. The endpoint already takes `DeepPullStartRequest`
+and creates an `rr_*` job. The polygon-lookup-and-geojson logic lives
+in `run_deep_pull` (via `_load_polygon_geojson_for_job`), so the
+endpoint itself doesn't change.
+
+**(e) `/refresh` and `/by-polygon` endpoints** — no signature changes.
+Both go through `_run_by_polygon` which now threads geojson through
+to `search_properties`.
+
+### 4.7 api/geo.py — centralized polygon → GeoJSON helper
+
+This file already exists at `api/geo.py` with `polygon_bbox`,
+`polygon_centroid`, `haversine_miles`, `point_in_polygon`. Add one
+more public function. Single home for the polygon → GeoJSON
+FeatureCollection conversion, used by both `routes.py` (synchronous
+`/refresh` path) and `deep_pull.py` (async per-pass `search_cma` path):
+
+```python
+from typing import Any
+
+def build_polygon_geojson_feature_collection(
+    polygon: list[list[float]] | None,
+) -> dict[str, Any] | None:
     """Build a single-feature FeatureCollection from a [[lng,lat],...] ring.
 
-    Returns None if malformed; callers proceed without geojson and
-    Propelio falls back to circle search.
+    Used by Propelio scraper calls (search_cma) to constrain results to
+    the user-drawn polygon. Returns None if malformed — callers must
+    proceed without geojson; Propelio falls back to circle search based
+    on months/range, no crash.
+
+    Validation:
+    - Require list-of-lists, each inner list >= 2 floats, length >= 3.
+    - Coerce to float; reject on TypeError/ValueError.
+    - Close the ring if first != last.
+
+    Shape:
+        {"type": "FeatureCollection",
+         "features": [{"type": "Feature",
+                       "geometry": {"type": "Polygon",
+                                    "coordinates": [closed_ring]},
+                       "properties": {}}]}
     """
     if not isinstance(polygon, list) or len(polygon) < 3:
         return None
@@ -405,60 +585,18 @@ def _build_polygon_geojson(polygon: list[list[float]]) -> dict[str, Any] | None:
     }
 ```
 
-**(b) `_run_by_polygon` at line 325** — build polygon-derived
-`geojson` once and pass to `search_properties`. Insert before line
-459 (the `search_properties` call):
+**Rationale for the location.** `api/geo.py` already owns the other
+polygon math (`polygon_bbox`, `polygon_centroid`, `point_in_polygon`)
+shared between routes and workers. Adding the GeoJSON builder there
+keeps polygon-related primitives co-located. An alternative
+(`api/propelio/_polygon_geojson.py`) would tie the helper to one
+integration, but the function is generic enough to belong in
+`api.geo`.
 
-```python
-polygon_geojson = _build_polygon_geojson(polygon)
-```
-
-Pass to `search_properties`:
-
-```python
-subject, comps_list = await asyncio.to_thread(
-    scraper_mod.search_properties,
-    subject_parcel["address"],
-    months=months,
-    range_mi=range_mi,
-    geojson=polygon_geojson,
-)
-```
-
-**(c) Define `ingestion_stats` for every return path** — explicit
-shapes per branch:
-
-| Return path | `ingestion_stats` shape |
-|---|---|
-| Phase 2 cache-read hit (lines 388-414) | `{"returned": len(cached_global), "new_to_cache": 0}` |
-| Phase 2 cache-only mode (lines 377-386) | `{"returned": len(cached_global) if cached_global else 0, "new_to_cache": 0}` |
-| Legacy cache hit (lines 428-452) | `{"returned": <len cached comps>, "new_to_cache": 0}` |
-| Fresh scrape happy path (lines 550-590) | Capture `merge_result` from `merge_comps_into_global(...)` at line 582; report `inserted` count |
-| Empty/no-coverage warning (lines 466-528) | `{"returned": 0, "new_to_cache": 0}` |
-| Scraper error (lines 530-548) | n/a — raises HTTPException, no payload |
-
-For the fresh scrape path at ~line 561, capture the merge result:
-
-```python
-merge_result = merge_comps_into_global(payload.get("comps") or [], "by_polygon")
-payload["ingestion_stats"] = {
-    "returned": len(comps_list),
-    "new_to_cache": int(merge_result.get("inserted", 0)) if isinstance(merge_result, dict) else 0,
-}
-```
-
-For each other path, set `payload["ingestion_stats"]` explicitly
-before the return.
-
-**(d) `/refresh-recent/start` endpoint** at line 798 — **no body
-shape change**. The endpoint already takes `DeepPullStartRequest`
-and creates an `rr_*` job. The polygon-lookup-and-geojson logic lives
-in `run_deep_pull` (via `_load_polygon_geojson_for_job`), so the
-endpoint itself doesn't change.
-
-**(e) `/refresh` and `/by-polygon` endpoints** — no signature changes.
-Both go through `_run_by_polygon` which now threads geojson through
-to `search_properties`.
+**Tests:** at minimum, smoke 7 in §7 exercises the malformed-input
+path indirectly via the integration. If Copilot adds a tiny unit
+test next to existing `api/geo.py` tests, that's bonus — not required
+for this chunk.
 
 ## 5. Endpoint shapes (final)
 
@@ -551,38 +689,74 @@ All non-running states auto-hide after 6s via existing
 
 - Probe `add_cma` for `geojson` honor; expand if confirmed.
 - Property-type dropdown in sidebar (defer until Mike requests).
-- Show `passes_total` in status response (defer until UI needs more
-  flexibility than `rr_`/`dp_` prefix).
+- Show `passes_total` in status response so the frontend can stop
+  inferring divisors from job-id prefix. This is the durable fix for
+  the v2 medium-risk item Copilot flagged. v3's
+  `PASSES_RECENT_COUNT` assertion + cross-reference comments are a
+  cheap guard until the better fix lands. The reason `passes_total`
+  is deferred: it needs either a new column on
+  `propelio_deep_pull_jobs` (DB migration) or in-memory state that
+  doesn't survive runner restart — both are larger than the rest of
+  this chunk.
 - Marathon auto-restart + heartbeat alert.
 - Decide if jitter pacing should be tunable per-preset (currently
   global). Right now PASSES_RECENT uses the same jitter as full PASSES;
   total wall time for the new 3-pass config will be ~2-3 min.
+- Optional unit test in the `api/geo.py` test file covering
+  `build_polygon_geojson_feature_collection` malformed-input branches
+  (length<3, non-numeric vertex, missing close-of-ring). Spec
+  considers this a "nice to have" not required for shipping the chunk.
 
-## 9. Copilot critique gate #2 — go/no-go
+## 9. Copilot critique gate #3 — go/no-go
 
 Per `feedback_copilot_iteration_loop` upgraded loop, this is the
-second pass. Copilot reviews this v2 and answers these specific
-questions in addition to general critique:
+third pass. Each of Copilot's v2 critique items has a v3 response.
+Confirm each is adequately addressed (or push back with a
+counter-argument) and answer the general questions:
 
-1. Does reusing `/refresh-recent/start` cleanly cover the Get Comps
-   semantics, or is there a hidden assumption in the existing flow
-   we'd break by retuning `PASSES_RECENT`?
+**v2 critique responses to verify:**
 
-2. Is `_load_polygon_geojson_for_job` (helper in `run_deep_pull`)
-   the right place for the polygon-to-geojson conversion, or should
-   it live in `routes.py` and be passed in via the job row? Or should
-   both call sites import a shared helper from `api.geo`?
+1. **(HIGH) Button-removal completeness.** §4.2(c) now enumerates all
+   7 reference locations (4421, 4520-4528, 4537-4540, 4640-4643,
+   4664-4666, 8566-8569) with explicit per-cluster actions and a
+   sanity-grep step. Does this list now match your grep output? Is
+   the atomicity warning sufficient, or should the spec also reorder
+   the deletes (e.g., remove handler bind before DOM creation)?
 
-3. Does my `ingestion_stats` table in §4.6(c) cover every actual
-   return path in `_run_by_polygon`, or did I miss one?
+2. **(MEDIUM) Pass-count contract.** §4.4(a) adds
+   `PASSES_RECENT_COUNT = 3` + runtime assertion, plus
+   cross-reference comments in map.js at lines 8490 and 8555. Is the
+   assertion-based contract enough? Or should this chunk go further
+   and add a `passes_total` field to the status response (would need
+   to either persist on the jobs table or derive from job_id prefix
+   server-side — both have downsides documented in §8)?
 
-4. Is removing `propelioQuickRefreshBtn` from the DOM creation safe?
-   Grep result shows references only at lines 4421, 4520-4528,
-   4537-4540, and inside `_refreshRecentByPolygon`. Anywhere else?
+3. **(MEDIUM) Geojson helper centralization.** §4.7 introduces
+   `api.geo.build_polygon_geojson_feature_collection`. Both
+   `routes.py` (§4.6(a)/(b)) and `deep_pull.py` (§4.4(c)) import from
+   there. Is `api.geo` the right home, or do you prefer a
+   propelio-specific location (`api/propelio/_polygon_geojson.py`)?
+   Either works; v3 picks `api.geo` because the rest of the polygon
+   math already lives there.
 
-5. Does anything in this v2 risk regressing the use_cache gate
-   at routes.py:335?
+4. **(LOW) Ingestion-stats merge failure.** §4.6(c) now has an
+   explicit table row + code block for the merge-exception path,
+   emitting `{returned: len(comps_list), new_to_cache: 0}`. Does this
+   cover the failure mode you had in mind?
+
+**General go/no-go questions (carry-over):**
+
+5. Does reusing `/refresh-recent/start` cleanly cover the Get Comps
+   semantics? Any hidden assumption in the existing flow we'd break
+   by retuning `PASSES_RECENT`?
+
+6. Does anything in v3 risk regressing the use_cache gate at
+   routes.py:335?
 
 End with EXACTLY ONE of:
 - `SPEC IS READY — proceed to code`
 - `SPEC NEEDS ANOTHER ROUND — see critique above`
+
+If `SPEC IS READY`, the next prompt to you will be the coding
+prompt — at that point edit files only (no commits, no push;
+Claude handles those after verification).
