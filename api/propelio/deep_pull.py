@@ -14,16 +14,17 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+from dataclasses import asdict
 from typing import Any
 
 from psycopg2.extras import Json
 
 from api.config import get_session_conn, release_session_conn
+from api.geo import build_polygon_geojson_feature_collection
 from api.propelio.archive import _comp_address_key, merge_comps_into_global  # intentional experimental reuse — see spec
 from api.propelio.config import PROPELIO_PASSWORD, PROPELIO_USERNAME
 from api.propelio.parcel_match import match_comps_to_parcels
 from api.propelio.scraper import PropelioClient, _parse_property
-from dataclasses import asdict
 
 
 logger = logging.getLogger(__name__)
@@ -38,14 +39,22 @@ PASSES = [
 ]
 
 # Tighter, recency-focused pass set used by the "Refresh Recent" user
-# action. Catches stragglers — recent listings (pendings, just-listed
-# actives) that the broad 24mo sweep missed due to the 100-cap on each
-# CMA call. Three passes total, ~2-3 minutes including pacing.
+# action. Three passes at 1mi SFR across last 1-3 months. Catches
+# recent stragglers — pendings + just-listed actives.
 PASSES_RECENT = [
-    {"months": 3, "range_mi": 0.5, "label": "recent_tight"},
-    {"months": 6, "range_mi": 1.0, "label": "recent_neighborhood"},
-    {"months": 12, "range_mi": 2.0, "label": "year_broader"},
+    {"months": 1, "range_mi": 1.0, "label": "quick_sweep_1mo", "property_type_presets": ["SINGLE_FAMILY"]},
+    {"months": 2, "range_mi": 1.0, "label": "quick_sweep_2mo", "property_type_presets": ["SINGLE_FAMILY"]},
+    {"months": 3, "range_mi": 1.0, "label": "quick_sweep_3mo", "property_type_presets": ["SINGLE_FAMILY"]},
 ]
+
+# FRONTEND CONTRACT: frontend/map.js hardcodes the divisor 3 for rr_*
+# job_ids at two sites. If this list's length ever changes, those sites
+# must be updated in the same commit.
+PASSES_RECENT_COUNT = 3
+assert len(PASSES_RECENT) == PASSES_RECENT_COUNT, (
+    "PASSES_RECENT length changed — also update frontend hardcoded "
+    "divisor at map.js:~8490 and ~8555 (search 'rr_' branches)."
+)
 
 SATURATION_MIN_PASSES = 3
 SATURATION_THRESHOLD = 0.05
@@ -192,6 +201,44 @@ def _get_job_status(job_id: str) -> str | None:
         return str(row[0] or "").strip().lower() or None
     finally:
         release_session_conn(conn)
+
+
+def _load_polygon_geojson_for_job(job_id: str) -> dict[str, Any] | None:
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT saved_area_id
+                FROM propelio_deep_pull_jobs
+                WHERE job_id = %s
+                LIMIT 1
+                """,
+                (job_id,),
+            )
+            job_row = cur.fetchone()
+            saved_area_id = str(job_row[0] or "").strip() if job_row else ""
+            if not saved_area_id:
+                return None
+
+            cur.execute(
+                """
+                SELECT polygon
+                FROM saved_areas
+                WHERE area_id = %s
+                LIMIT 1
+                """,
+                (saved_area_id,),
+            )
+            polygon_row = cur.fetchone()
+    finally:
+        release_session_conn(conn)
+
+    polygon = polygon_row[0] if polygon_row else None
+    polygon_geojson = build_polygon_geojson_feature_collection(polygon)
+    if polygon is not None and polygon_geojson is None:
+        logger.warning("[deep-pull job=%s] invalid saved-area polygon; continuing without geojson", job_id)
+    return polygon_geojson
 
 
 def _insert_pass_comps(job_id: str, pass_num: int, pass_config: dict[str, Any], comps: list[dict[str, Any]]) -> None:
@@ -416,6 +463,7 @@ async def run_deep_pull(job_id: str, passes: list[dict[str, Any]] | None = None)
         target_address = _claim_job_for_running(job_id)
         if target_address is None:
             return
+        polygon_geojson = await asyncio.to_thread(_load_polygon_geojson_for_job, job_id)
 
         client = PropelioClient(username=PROPELIO_USERNAME, password=PROPELIO_PASSWORD)
         await asyncio.to_thread(client.login)
@@ -498,12 +546,15 @@ async def run_deep_pull(job_id: str, passes: list[dict[str, Any]] | None = None)
                 cfg["range_mi"],
                 cfg["label"],
             )
+            property_type_presets = cfg.get("property_type_presets") or None
             cma_response = await asyncio.to_thread(
                 client.search_cma,
                 lead_id,
                 cma_id,
                 months=cfg["months"],
                 range_mi=cfg["range_mi"],
+                geojson=polygon_geojson,
+                property_type_presets=property_type_presets,
             )
             comps = _parse_cma_envelope_comps(cma_response)
             _insert_pass_comps(job_id, pass_num=pass_num, pass_config=cfg, comps=comps)

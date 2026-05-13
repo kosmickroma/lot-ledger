@@ -27,7 +27,7 @@ from starlette.background import BackgroundTask
 
 from api.auth import get_current_user
 from api.config import get_conn, get_session_conn, release_conn, release_session_conn
-from api.geo import haversine_miles, point_in_polygon, polygon_centroid
+from api.geo import build_polygon_geojson_feature_collection, haversine_miles, point_in_polygon, polygon_centroid
 from api.redfin import normalize_addr_key
 
 from .archive import load_archived_comps, load_comps_by_polygon, merge_comps_into_archive, merge_comps_into_global, set_comp_rating
@@ -326,6 +326,9 @@ async def _run_by_polygon(request: PolygonRequest, *, use_cache: bool, cache_onl
     polygon = _validate_polygon(request.polygon)
     months = int(request.months)
     saved_area_id = str(request.saved_area_id or "").strip() or None
+    polygon_geojson = build_polygon_geojson_feature_collection(polygon)
+    if polygon_geojson is None:
+        logger.warning("[propelio] invalid polygon geojson build; falling back to circle search")
 
     # --- Phase 2 Chunk 3: global cache read (gated by PHASE_2_CACHE_READ env var) ---
     # Bug fix 2026-05-13: this block was ignoring the caller's `use_cache` flag,
@@ -386,6 +389,10 @@ async def _run_by_polygon(request: PolygonRequest, *, use_cache: bool, cache_onl
                 "polygon_meta": polygon_meta,
                 "cma_settings": cma_settings,
                 "balance": balance,
+                "ingestion_stats": {
+                    "returned": len(cached_global) if cached_global else 0,
+                    "new_to_cache": 0,
+                },
                 "subject": subject,
             }
 
@@ -411,6 +418,10 @@ async def _run_by_polygon(request: PolygonRequest, *, use_cache: bool, cache_onl
                 "polygon_meta": polygon_meta,
                 "cma_settings": cma_settings,
                 "balance": balance,
+                "ingestion_stats": {
+                    "returned": len(cached_global),
+                    "new_to_cache": 0,
+                },
                 "subject": subject,
             }
             if ph2_archive_meta is not None:
@@ -449,6 +460,10 @@ async def _run_by_polygon(request: PolygonRequest, *, use_cache: bool, cache_onl
                 # Reload the archive view so user_rating + comp_address_key
                 # round-trip on cache hits, matching the fresh-pull path.
                 cached_payload["comps"] = load_archived_comps(saved_area_id)
+            cached_payload["ingestion_stats"] = {
+                "returned": len(cached_payload.get("comps") or []),
+                "new_to_cache": 0,
+            }
             try:
                 merge_comps_into_global(cached_payload.get("comps") or [], "by_polygon")
             except Exception as _exc:
@@ -465,6 +480,7 @@ async def _run_by_polygon(request: PolygonRequest, *, use_cache: bool, cache_onl
             subject_parcel["address"],
             months=months,
             range_mi=range_mi,
+            geojson=polygon_geojson,
         )
     except scraper_mod.PropelioScraperError as exc:
         msg = str(exc)
@@ -510,6 +526,7 @@ async def _run_by_polygon(request: PolygonRequest, *, use_cache: bool, cache_onl
                     "raw": None,
                 },
                 "comps": [],
+                "ingestion_stats": {"returned": 0, "new_to_cache": 0},
                 "polygon_meta": {
                     "centroid": {"lat": centroid_lat, "lng": centroid_lng},
                     "circumradius_mi": circumradius_mi,
@@ -583,9 +600,17 @@ async def _run_by_polygon(request: PolygonRequest, *, use_cache: bool, cache_onl
         # get user_rating=None.
         payload["comps"] = load_archived_comps(saved_area_id)
     try:
-        merge_comps_into_global(payload.get("comps") or [], "by_polygon")
-    except Exception as _exc:
-        logger.warning("[propelio] global write failed (fresh-scrape): %s", _exc)
+        merge_result = merge_comps_into_global(payload.get("comps") or [], "by_polygon")
+        payload["ingestion_stats"] = {
+            "returned": len(comps_list),
+            "new_to_cache": int(merge_result.get("inserted", 0)) if isinstance(merge_result, dict) else 0,
+        }
+    except Exception:
+        logger.exception("merge_comps_into_global failed; returning raw comps without cache write")
+        payload["ingestion_stats"] = {
+            "returned": len(comps_list),
+            "new_to_cache": 0,
+        }
 
     if use_cache:
         cache_payload = dict(payload)
@@ -802,8 +827,8 @@ async def start_refresh_recent(
 ) -> dict[str, Any]:
     """
     Triggers a shorter, recency-focused deep-pull on the same job
-    infrastructure. Uses PASSES_RECENT (3mo × 0.5mi, 6mo × 1mi,
-    12mo × 2mi). Total ~2-3 min. Catches stragglers — recent listings
+    infrastructure. Uses PASSES_RECENT (1mo / 2mo / 3mo at 1mi,
+    SFR preset). Total ~2-3 min. Catches stragglers — recent listings
     (pendings, just-listed actives) the broad 24mo sweep missed due to
     Propelio's 100-cap per call.
     """

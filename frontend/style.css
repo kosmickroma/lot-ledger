@@ -166,6 +166,11 @@ h1 {
   padding-right: 2px;
 }
 
+#saved-parcels-list {
+  max-height: 300px;
+  overflow-y: auto;
+}
+
 .section-toggle::after {
   content: "▾";
   color: var(--text-soft);
@@ -2875,6 +2880,12 @@ h1 {
   border: 0;
   border-radius: 999px;
   padding: 6px 14px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  line-height: 1.15;
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.02em;
@@ -2893,6 +2904,18 @@ h1 {
   opacity: 0.6;
   cursor: wait;
   transform: none;
+}
+
+.propelio-refresh-main {
+  display: block;
+  font-weight: 700;
+}
+
+.propelio-refresh-subtitle {
+  display: block;
+  font-size: 0.78em;
+  font-style: italic;
+  color: rgba(26, 20, 16, 0.78);
 }
 
 .propelio-filter-count {

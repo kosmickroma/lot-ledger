@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 import math
-from typing import Iterable
+from typing import Any, Iterable
 
 
 def polygon_bbox(coords: Iterable[Iterable[float]]) -> tuple[float, float, float, float]:
@@ -98,3 +98,35 @@ def point_in_polygon(lat: float, lng: float, polygon_coords: Iterable[Iterable[f
             inside = not inside
 
     return inside
+
+
+def build_polygon_geojson_feature_collection(
+    polygon: list[list[float]] | None,
+) -> dict[str, Any] | None:
+    """Build a single-feature FeatureCollection from a [[lng, lat], ...] ring."""
+    if not isinstance(polygon, list) or len(polygon) < 3:
+        return None
+
+    cleaned: list[list[float]] = []
+    for point in polygon:
+        if not isinstance(point, (list, tuple)) or len(point) < 2:
+            return None
+        try:
+            lng, lat = float(point[0]), float(point[1])
+        except (TypeError, ValueError):
+            return None
+        cleaned.append([lng, lat])
+
+    if cleaned[0] != cleaned[-1]:
+        cleaned.append(cleaned[0])
+
+    return {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "geometry": {"type": "Polygon", "coordinates": [cleaned]},
+                "properties": {},
+            }
+        ],
+    }
