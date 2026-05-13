@@ -4643,7 +4643,7 @@ function _showCacheEmptyChip() {
   setTimeout(_hideCacheEmptyChip, 6000);
 }
 
-function _setPropelioGetCompsLabel(main, subtitle = "Deep Pull · ~5 min") {
+function _setPropelioGetCompsLabel(main, subtitle = "Deep Pull · ~3 min") {
   if (!propelioStickyBtn) return;
   propelioStickyBtn.innerHTML = `
     <span class="get-comps-main">${_esc(main || "Get Comps")}</span>
@@ -4743,7 +4743,7 @@ function _removePropelioPolygonButton() {
 
 function _setPropelioPolygonButtonState({ text, disabled }) {
   if (!propelioStickyBtn) return;
-  if (typeof text === "string") _setPropelioGetCompsLabel(text, "Deep Pull · ~5 min");
+  if (typeof text === "string") _setPropelioGetCompsLabel(text, "Deep Pull · ~3 min");
   if (typeof disabled === "boolean") propelioStickyBtn.disabled = disabled;
   propelioStickyBtn.classList.toggle("is-running", Boolean(disabled));
 }
