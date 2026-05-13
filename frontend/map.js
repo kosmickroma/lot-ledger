@@ -67,9 +67,9 @@ const DEFAULT_FILTERS = {
   sold: false,
   off_market: true,
   vacant: true,
-  multifamily: true,
-  commercial: true,
-  exempt: true,
+  multifamily: false,
+  commercial: false,
+  exempt: false,
 };
 
 const FILTER_INPUT_IDS = {
@@ -633,9 +633,9 @@ function applyPropelioFilterStateToUI(persisted) {
   const merged = { ...DEFAULT_PROPELIO_FILTERS, ...persisted };
   setVal("prop-months", merged.months);
   setVal("prop-range", merged.range);
-  setChk("prop-status-sold", merged.statusSold);
-  setChk("prop-status-active", merged.statusActive);
-  setChk("prop-status-pending", merged.statusPending);
+  _setPropStatusFilter("sold", Boolean(merged.statusSold), { apply: false });
+  _setPropStatusFilter("active", Boolean(merged.statusActive), { apply: false });
+  _setPropStatusFilter("pending", Boolean(merged.statusPending), { apply: false });
   setChk("prop-outside-area", merged.showOutsideArea);
   setVal("prop-sold-within", merged.soldWithinDays);
   setVal("prop-lot-min", merged.lotMin);
@@ -2219,6 +2219,7 @@ async function saveParcel(account_num, county, addr, lat, lng, geometry) {
 }
 
 async function _rightClickSaveParcel(p, knownGeometry) {
+  if (!_isPowerUserOrAbove()) return;
   if (!_currentUser) {
     _showToast("Sign in to save", "error");
     return;
@@ -3863,9 +3864,15 @@ function _updatePropelioStatusCounts(visibleComps) {
   const soldEl = document.getElementById("prop-count-sold");
   const activeEl = document.getElementById("prop-count-active");
   const pendingEl = document.getElementById("prop-count-pending");
+  const soldCfEl = document.getElementById("cf-count-sold");
+  const activeCfEl = document.getElementById("cf-count-active");
+  const pendingCfEl = document.getElementById("cf-count-pending");
   if (soldEl) soldEl.textContent = String(counts.sold);
   if (activeEl) activeEl.textContent = String(counts.for_sale);
   if (pendingEl) pendingEl.textContent = String(counts.pending);
+  if (soldCfEl) soldCfEl.textContent = String(counts.sold);
+  if (activeCfEl) activeCfEl.textContent = String(counts.for_sale);
+  if (pendingCfEl) pendingCfEl.textContent = String(counts.pending);
 }
 
 _updatePropelioStatusCounts();
@@ -4516,9 +4523,9 @@ function resetPropelioFilters() {
   const setChk = (id, v) => { const el = document.getElementById(id); if (el) el.checked = v; };
   set("prop-months", String(DEFAULT_PROPELIO_FILTERS.months));
   set("prop-range", String(DEFAULT_PROPELIO_FILTERS.range));
-  setChk("prop-status-sold", true);
-  setChk("prop-status-active", true);
-  setChk("prop-status-pending", true);
+  _setPropStatusFilter("sold", true, { apply: false });
+  _setPropStatusFilter("active", true, { apply: false });
+  _setPropStatusFilter("pending", true, { apply: false });
   setChk("prop-outside-area", false);
   set("prop-sold-within", "");
   set("prop-lot-min", ""); set("prop-lot-max", "");
@@ -4528,9 +4535,18 @@ function resetPropelioFilters() {
   applyPropelioClientFilters();
 }
 
+function _setPropStatusFilter(status, checked, options = {}) {
+  const apply = options.apply !== false;
+  const next = Boolean(checked);
+  const mapBox = document.getElementById(`prop-status-${status}`);
+  const cfBox = document.getElementById(`cf-status-${status}`);
+  if (mapBox) mapBox.checked = next;
+  if (cfBox) cfBox.checked = next;
+  if (apply) applyPropelioClientFilters();
+}
+
 (function _initPropelioFilterListeners() {
   const liveIds = [
-    "prop-status-sold", "prop-status-active", "prop-status-pending",
     "prop-outside-area",
     "prop-sold-within",
     "prop-lot-min", "prop-lot-max",
@@ -4543,6 +4559,16 @@ function resetPropelioFilters() {
     if (!el) return;
     el.addEventListener("input", applyPropelioClientFiltersDebounced);
     el.addEventListener("change", applyPropelioClientFiltersDebounced);
+  });
+  ["sold", "active", "pending"].forEach((status) => {
+    const mapBox = document.getElementById(`prop-status-${status}`);
+    const cfBox = document.getElementById(`cf-status-${status}`);
+    mapBox?.addEventListener("change", (ev) => {
+      _setPropStatusFilter(status, Boolean(ev.target?.checked));
+    });
+    cfBox?.addEventListener("change", (ev) => {
+      _setPropStatusFilter(status, Boolean(ev.target?.checked));
+    });
   });
   const refreshBtn = document.getElementById("btn-propelio-refresh");
   if (refreshBtn) refreshBtn.addEventListener("click", () => void pullPropelioRefresh());
@@ -4691,6 +4717,7 @@ function _ensureStickyPropelioButton() {
   const controlsWrap = document.createElement("div");
   controlsWrap.className = "propelio-action-row";
   propelioStickyBtn = document.createElement("button");
+  propelioStickyBtn.classList.add("power-user-only");
   propelioStickyBtn.type = "button";
   propelioStickyBtn.className = "propelio-get-comps-btn";
   _setPropelioGetCompsLabel("Get Comps");
@@ -6410,6 +6437,7 @@ function renderFeatures(geojson) {
         openParcelDetailPanel(p, { latlng: ev.latlng, geometry: feature.geometry });
       });
       layer.on("contextmenu", (ev) => {
+        if (!_isPowerUserOrAbove()) return;
         ev.originalEvent?.preventDefault();
         L.DomEvent.stopPropagation(ev);
         void _rightClickSaveParcel(p, feature.geometry || null);
@@ -6452,6 +6480,7 @@ function renderFeatures(geojson) {
         openParcelDetailPanel(p, { latlng: ev.latlng, geometry: feature.geometry });
       });
       layer.on("contextmenu", (ev) => {
+        if (!_isPowerUserOrAbove()) return;
         ev.originalEvent?.preventDefault();
         L.DomEvent.stopPropagation(ev);
         void _rightClickSaveParcel(p, feature.geometry || null);
@@ -7453,6 +7482,8 @@ map.on("contextmenu", async (ev) => {
     return;
   }
 
+  if (!_isPowerUserOrAbove()) return;
+
   if (!browseLayer || !browseLayer._map) return;
   if (lastAnalysisGeojson) return;
   ev.originalEvent?.preventDefault();
@@ -8070,9 +8101,20 @@ let _authDropdownOpen = false;  // tracks whether the username dropdown is expan
 
 // Role helpers — always read from _currentUser so they stay in sync with server state
 const _currentRole    = () => (_currentUser?.role || "").toLowerCase();
+const _isPowerUserOrAbove = () => ["power_user", "owner", "developer"].includes(_currentRole());
 const _isAdmin        = () => ["owner", "developer"].includes(_currentRole());
 const _canDownloadCsv = () => _currentRole() !== "user";
 const _canEditAnyArea = () => _currentRole() === "developer";
+
+function _applyRoleVisibility() {
+  if (_isPowerUserOrAbove()) {
+    document.body.classList.remove("is-not-power-user");
+  } else {
+    document.body.classList.add("is-not-power-user");
+  }
+}
+
+_applyRoleVisibility();
 
 // ---------------------------------------------------------------------------
 // Helpers to show/hide the modal
@@ -8153,6 +8195,7 @@ function _showLoginForm(errorMsg = "") {
         _currentUser = data.user || data;
         _maybeShowDeepPullButton();
         _renderUserBar(_currentUser);
+        _applyRoleVisibility();
         await _reloadSavedResources().catch((err) => console.error("load saved resources failed", err));
         _maybeShowImportBanner();
         const pendingShareId = _pendingAreaShareId;
@@ -8257,12 +8300,14 @@ function _showChangePasswordForm(forced = false) {
           _hideAuthModal();
           _currentUser = null;
           _renderUserBar(null);
+          _applyRoleVisibility();
           _showLoginForm("Password updated. Sign in with your new password.");
           return;
         }
         _currentUser = data.user || _currentUser;
         if (_currentUser) _currentUser.force_password_change = false;
         _renderUserBar(_currentUser);
+        _applyRoleVisibility();
         _hideAuthModal();
       } else {
         const detail = data?.detail;
@@ -8540,6 +8585,7 @@ async function _doSignOut() {
   } catch { /* ignore */ }
   _currentUser = null;
   _renderUserBar(null);
+  _applyRoleVisibility();
   _showLoginForm();
 }
 
@@ -8550,6 +8596,7 @@ async function _doSignOut() {
 function _handle401() {
   _currentUser = null;
   _renderUserBar(null);
+  _applyRoleVisibility();
   _showLoginForm("Your session expired. Please sign in again.");
 }
 
@@ -8619,6 +8666,7 @@ async function _loadAreaFromShareId(shareId) {
 (async function initAuth() {
   // Render the "Sign In" button immediately while we check.
   _renderUserBar(null);
+  _applyRoleVisibility();
 
   try {
     const resp = await fetch("/auth/me", { credentials: "same-origin" });
@@ -8640,6 +8688,7 @@ async function _loadAreaFromShareId(shareId) {
       _currentUser = data.user || data;
       _maybeShowDeepPullButton();
       _renderUserBar(_currentUser);
+      _applyRoleVisibility();
       await _reloadSavedResources().catch((err) => console.error("load saved resources failed", err));
       _maybeShowImportBanner();
       const pendingShareId = _pendingAreaShareId;
