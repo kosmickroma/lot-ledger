@@ -403,6 +403,23 @@ def _ensure_session_schema() -> None:
                     ON comp_ratings (workspace_id)
                 """
             )
+            # One-shot migration: copy legacy propelio_comp_archive.user_rating into
+            # comp_ratings so existing ratings remain visible after the canonical store
+            # cutover. Idempotent — re-runs are safe and a no-op for rows already
+            # migrated by the original Phase 2 backfill script.
+            cur.execute(
+                """
+                INSERT INTO comp_ratings (workspace_id, comp_id, rating, rated_at)
+                SELECT pa.saved_area_id,
+                       pc.comp_id,
+                       pa.user_rating,
+                       COALESCE(pa.rating_at, NOW())
+                FROM propelio_comp_archive pa
+                JOIN propelio_comps pc ON pc.comp_address_key = pa.comp_address_key
+                WHERE pa.user_rating IS NOT NULL
+                ON CONFLICT (workspace_id, comp_id) DO NOTHING
+                """
+            )
             if os.environ.get("DEEP_PULL_EXPERIMENT") == "true":
                 cur.execute(
                     """
@@ -4029,23 +4046,29 @@ async def fork_saved_area(
             if row is None:
                 raise HTTPException(status_code=503, detail="Failed to allocate unique share_id")
 
-            # Copy the source area's archived comps (including user_rating + rating_at)
-            # to the new area so good/bad tags survive the fork. UNIQUE constraint on
-            # (saved_area_id, comp_address_key) holds because the new area_id makes
-            # every row unique. first_seen_at / last_seen_at intentionally default to
-            # NOW() to reflect when this user gained the rows.
+            # Note: user_rating + rating_at intentionally NOT copied here. Ratings
+            # are now in comp_ratings (canonical Phase 2 store, copied separately
+            # below). The archive is comp-data only.
             cur.execute(
                 """
                 INSERT INTO propelio_comp_archive (
                     saved_area_id, comp_address_key, comp_mls, comp_data,
-                    parcel_geom, parcel_account_num, status, last_status, last_price,
-                    user_rating, rating_at
+                    parcel_geom, parcel_account_num, status, last_status, last_price
                 )
                 SELECT %s, comp_address_key, comp_mls, comp_data,
-                       parcel_geom, parcel_account_num, status, last_status, last_price,
-                       user_rating, rating_at
+                       parcel_geom, parcel_account_num, status, last_status, last_price
                 FROM propelio_comp_archive
                 WHERE saved_area_id = %s
+                """,
+                (row[0], source_area_id),
+            )
+
+            cur.execute(
+                """
+                INSERT INTO comp_ratings (workspace_id, comp_id, rating, rated_by_user_id, rated_at)
+                SELECT %s, comp_id, rating, rated_by_user_id, rated_at
+                FROM comp_ratings
+                WHERE workspace_id = %s
                 """,
                 (row[0], source_area_id),
             )

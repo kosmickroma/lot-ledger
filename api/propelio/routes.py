@@ -1099,21 +1099,28 @@ class CompRateRequest(BaseModel):
 
 
 @router.post("/comp/rate")
-async def rate_comp(request: CompRateRequest) -> dict[str, Any]:
-    """Set or clear a user_rating ('good' | 'bad' | None) on an archived
-    comp. Frontend uses this from the comp popup buttons.
+async def rate_comp(
+    request: CompRateRequest,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Set or clear a workspace-scoped rating for a comp.
+
+    Writes to comp_ratings (Phase 2 canonical store) keyed on
+    (workspace_id, comp_id). Comp must exist in the global propelio_comps
+    cache (comp_address_key UNIQUE index) — returns 404 otherwise.
     """
     try:
         updated = set_comp_rating(
             saved_area_id=request.saved_area_id,
             comp_address_key=request.comp_address_key,
             rating=request.rating,
+            rated_by_user_id=int(user.get("id")) if user.get("id") is not None else None,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if updated == 0:
         raise HTTPException(
             status_code=404,
-            detail="No archived comp found for that saved_area_id + comp_address_key",
+            detail="Comp not found in global cache for that comp_address_key",
         )
     return {"ok": True, "rating": request.rating, "updated": updated}
