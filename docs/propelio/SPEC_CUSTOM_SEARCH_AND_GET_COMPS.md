@@ -676,8 +676,8 @@ All non-running states auto-hide after 6s via existing
 
 **Smoke 7 — Polygon-validation fallback:**
 - Confirm that if `polygon` is malformed (e.g., manually inject 2 vertices),
-  `_build_polygon_geojson` returns None, the call proceeds with circle
-  search, no crash, log shows a warning.
+  `api.geo.build_polygon_geojson_feature_collection` returns None, the
+  call proceeds with circle search, no crash, log shows a warning.
 
 **Smoke 8 — use_cache gate did not regress:**
 - Confirm: with `PHASE_2_CACHE_READ=true`, hitting `/refresh` still
@@ -717,7 +717,7 @@ counter-argument) and answer the general questions:
 **v2 critique responses to verify:**
 
 1. **(HIGH) Button-removal completeness.** §4.2(c) now enumerates all
-   7 reference locations (4421, 4520-4528, 4537-4540, 4640-4643,
+   6 reference clusters (4421, 4520-4528, 4537-4540, 4640-4643,
    4664-4666, 8566-8569) with explicit per-cluster actions and a
    sanity-grep step. Does this list now match your grep output? Is
    the atomicity warning sufficient, or should the spec also reorder
