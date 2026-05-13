@@ -645,7 +645,18 @@ docs/
   COUNTY_EXPANSION_CHECKLIST.md   — Step-by-step for adding a new county (proven on Collin + Denton)
   DENTON_BUILD_BRIEF.md           — Denton-specific build notes
   lot-ledger/                     — Planning docs and client notes
+  propelio/                       — Propelio integration docs (specs, roadmap, troubleshooting)
+    INTEGRATION_TROUBLESHOOTING.md — Diagnosis playbook for Refresh / marathon / cache issues
+    README.md                       — Doc index for the Propelio integration
 ```
+
+### Troubleshooting
+
+When the Propelio comp integration misbehaves — Refresh not firing,
+marathon runner gone quiet, missing pendings, status counters drifting —
+start with [`docs/propelio/INTEGRATION_TROUBLESHOOTING.md`](./docs/propelio/INTEGRATION_TROUBLESHOOTING.md).
+It covers the three "quick triage" SQL queries that pin almost every
+issue, plus symptom-by-symptom diagnosis and known cap mechanics.
 
 ### Running in Development
 
