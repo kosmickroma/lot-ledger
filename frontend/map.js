@@ -4290,6 +4290,7 @@ async function pullPropelioRefresh() {
   }
   const filters = readPropelioFiltersFromUI();
   propelioFilterState = filters;
+  const targetAddress = _deriveDeepPullTargetAddress();
   const savedAreaId = (typeof _currentLoadedAreaId === "string" ? _currentLoadedAreaId : "") || "";
   btn.disabled = true;
   _showDeepPullBanner("Running custom search...");
@@ -4303,6 +4304,7 @@ async function pullPropelioRefresh() {
           saved_area_id: savedAreaId,
           months: filters.months,
           range_override_mi: filters.range,
+          target_address: targetAddress || null,
         }),
       });
       if (!resp.ok) throw new Error(`refresh failed: ${resp.status}`);
@@ -4319,6 +4321,7 @@ async function pullPropelioRefresh() {
           polygon: lastPolygon,
           months: filters.months,
           range_override_mi: filters.range,
+          target_address: targetAddress || null,
         }),
       });
       if (!resp.ok) throw new Error(`by-polygon failed: ${resp.status}`);

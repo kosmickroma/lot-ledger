@@ -49,12 +49,14 @@ class PolygonRequest(BaseModel):
     months: int = 24
     range_override_mi: float | None = None
     saved_area_id: str | None = None
+    target_address: str | None = None
 
 
 class RefreshRequest(BaseModel):
     saved_area_id: str
     months: int = 24
     range_override_mi: float | None = None
+    target_address: str | None = None
 
 
 class DeepPullStartRequest(BaseModel):
@@ -195,9 +197,82 @@ def _validate_polygon(points: list[list[float]]) -> list[list[float]]:
     return normalized
 
 
-def _polygon_cache_key(polygon: list[list[float]], months: int, range_mi: float) -> str:
-    canonical = json.dumps({"v": 2, "polygon": polygon, "months": months, "range_mi": round(float(range_mi), 6)}, separators=(",", ":"), sort_keys=True)
+def _polygon_cache_key(polygon: list[list[float]], months: int, range_mi: float, target_address: str = "") -> str:
+    canonical = json.dumps({"v": 2, "polygon": polygon, "months": months, "range_mi": round(float(range_mi), 6), "target_address": target_address}, separators=(",", ":"), sort_keys=True)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _normalize_target_address(raw: str | None) -> str | None:
+    """Normalize a user-supplied target_address for both cache keying and parcel
+    lookup. Splits on first comma to strip city/state/zip suffix that the
+    Nominatim doSearch path appends, then defers to normalize_addr_key for
+    case/abbreviation/suffix normalization.
+    Suggestion-picked addresses (no comma) pass through unchanged.
+    """
+    if not raw:
+        return None
+    street_only = raw.split(",", 1)[0].strip()
+    if not street_only:
+        return None
+    return normalize_addr_key(street_only)
+
+
+def _resolve_subject_parcel_for_target(address: str) -> dict[str, Any] | None:
+    """Look up a parcel in the DB matching the given target address string.
+    Returns the same shape as _nearest_subject_parcel:
+    {"address", "county", "account_num"} or None on no-match / DB error.
+    Uses street-number prefix filtering in SQL to narrow candidates, then
+    compares Python-normalized address keys for exact matching (same strategy
+    as parcel_match.py to avoid SQL/Python normalization mismatch).
+    """
+    target_key = _normalize_target_address(address)
+    if not target_key:
+        return None
+    tokens = target_key.split()
+    if not tokens:
+        return None
+    # Street number (first token) as a cheap SQL prefix filter.
+    prefix_pattern = f"{tokens[0]}%"
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 'dcad'::text AS county, account_num, property_address AS address
+                FROM parcels
+                WHERE property_address ILIKE %s AND property_address IS NOT NULL
+
+                UNION ALL
+
+                SELECT 'tad'::text, account_num, situs_addr
+                FROM tad_parcels
+                WHERE situs_addr ILIKE %s AND situs_addr IS NOT NULL
+
+                UNION ALL
+
+                SELECT 'collin'::text, account_num, property_address
+                FROM collin_parcels
+                WHERE property_address ILIKE %s AND property_address IS NOT NULL
+
+                UNION ALL
+
+                SELECT 'denton'::text, account_num, property_address
+                FROM denton_parcels
+                WHERE property_address ILIKE %s AND property_address IS NOT NULL
+                """,
+                (prefix_pattern, prefix_pattern, prefix_pattern, prefix_pattern),
+            )
+            rows = cur.fetchall()
+    finally:
+        release_conn(conn)
+
+    for row in rows:
+        county = str(row[0])
+        account_num = str(row[1])
+        raw_address = str(row[2] or "")
+        if normalize_addr_key(raw_address) == target_key:
+            return {"county": county, "account_num": account_num, "address": raw_address}
+    return None
 
 
 def _nearest_subject_parcel(lat: float, lng: float) -> dict[str, Any] | None:
@@ -440,7 +515,7 @@ async def _run_by_polygon(request: PolygonRequest, *, use_cache: bool, cache_onl
     else:
         range_mi = min(max(float(request.range_override_mi), 0.01), 10.0)
 
-    cache_key = _polygon_cache_key(polygon, months, range_mi)
+    cache_key = _polygon_cache_key(polygon, months, range_mi, _normalize_target_address(request.target_address) or "")
     if use_cache:
         cached = cache_mod.get_cached(cache_key)
         if cached is not None:
@@ -470,9 +545,22 @@ async def _run_by_polygon(request: PolygonRequest, *, use_cache: bool, cache_onl
                 logger.warning("[propelio] global write failed (cache-hit): %s", _exc)
             return {"cached": True, **cached_payload}
 
-    subject_parcel = _nearest_subject_parcel(centroid_lat, centroid_lng)
+    user_target = (request.target_address or "").strip() or None
+    if user_target:
+        subject_parcel = _resolve_subject_parcel_for_target(user_target)
+        if subject_parcel is None:
+            logger.warning(
+                "[propelio] target address lookup failed for %r; falling back to centroid",
+                user_target,
+            )
+            subject_parcel = _nearest_subject_parcel(centroid_lat, centroid_lng)
+    else:
+        subject_parcel = _nearest_subject_parcel(centroid_lat, centroid_lng)
     if subject_parcel is None:
-        raise HTTPException(status_code=404, detail="No parcel found near polygon centroid")
+        detail = "No parcel found near polygon centroid"
+        if user_target:
+            detail += f" (also failed to resolve target address {user_target!r})"
+        raise HTTPException(status_code=404, detail=detail)
 
     try:
         subject, comps_list = await asyncio.to_thread(
@@ -741,6 +829,7 @@ async def get_by_polygon(
         months=request.months,
         range_override_mi=request.range_override_mi,
         saved_area_id=effective_saved_area_id,
+        target_address=request.target_address,
     )
     return await _run_by_polygon(effective_request, use_cache=True, cache_only=cache_only)
 
@@ -757,6 +846,7 @@ async def refresh_by_saved_area(request: RefreshRequest) -> dict[str, Any]:
         months=int(request.months),
         range_override_mi=request.range_override_mi,
         saved_area_id=saved_area_id,
+        target_address=request.target_address,
     )
     response = await _run_by_polygon(by_poly_request, use_cache=False)
     response["comps"] = load_archived_comps(saved_area_id)
