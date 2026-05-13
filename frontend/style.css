@@ -119,6 +119,10 @@ h1 {
   padding-bottom: 6px;
 }
 
+body.is-not-power-user .power-user-only {
+  display: none !important;
+}
+
 .section-header {
   display: flex;
   align-items: center;

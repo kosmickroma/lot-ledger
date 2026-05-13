@@ -65,29 +65,27 @@
           <div class="filter-card-head">
             <button id="btn-propelio-reset" class="filter-reset-btn" type="button">Reset</button>
           </div>
-          <div class="propelio-api-section">
-            <p class="propelio-section-label">Search settings (refresh required)</p>
-            <div class="numeric-filter-row">
-              <span class="numeric-filter-label">Time window (months)</span>
-              <div class="numeric-filter-inputs">
-                <input type="number" id="prop-months" class="nf-input" min="1" max="60" value="24">
-              </div>
-            </div>
-            <div class="numeric-filter-row">
-              <span class="numeric-filter-label">Search radius (mi)</span>
-              <div class="numeric-filter-inputs">
-                <input type="number" id="prop-range" class="nf-input" min="0.1" max="10" step="0.1" value="1.0">
-              </div>
-            </div>
-            <button id="btn-propelio-refresh" class="propelio-refresh-btn" type="button">
-              <span class="propelio-refresh-main">Custom Search</span>
-              <span class="propelio-refresh-subtitle">Uses the filters above</span>
-            </button>
-            <button id="btn-deep-pull" class="btn-secondary deep-pull-dev-only" style="display:none;" type="button">Deep Pull (dev)</button>
-            <div id="deep-pull-banner" class="deep-pull-banner hidden">
-              <span class="deep-pull-banner-icon">⟳</span>
-              <span id="deep-pull-banner-text" class="deep-pull-banner-text">Deep pull in progress...</span>
-              <button id="btn-deep-pull-stop" class="btn-tertiary" type="button">Stop</button>
+          <div class="propelio-status-section">
+            <p class="propelio-section-label">Status</p>
+            <div class="filter-list">
+              <label class="filter-row">
+                <span class="filter-swatch is-dot" style="--sw:#dc2626"></span>
+                <span class="filter-name">Sold</span>
+                <span class="filter-count" id="cf-count-sold">0</span>
+                <input type="checkbox" id="cf-status-sold" checked>
+              </label>
+              <label class="filter-row">
+                <span class="filter-swatch is-dot" style="--sw:#22c55e"></span>
+                <span class="filter-name">Active</span>
+                <span class="filter-count" id="cf-count-active">0</span>
+                <input type="checkbox" id="cf-status-active" checked>
+              </label>
+              <label class="filter-row">
+                <span class="filter-swatch is-dot" style="background: radial-gradient(circle, #0284c7 0%, #0284c7 35%, #7dd3fc 100%);"></span>
+                <span class="filter-name">Pending</span>
+                <span class="filter-count" id="cf-count-pending">0</span>
+                <input type="checkbox" id="cf-status-pending" checked>
+              </label>
             </div>
           </div>
           <div class="propelio-client-section">
@@ -146,50 +144,6 @@
           </div>
         </div>
       </div>
-      <div id="numeric-filters" class="filter-card collapsible-section">
-        <button class="section-toggle" type="button" data-target="numeric-filters-body" aria-expanded="true">
-          <span class="sidebar-label">Property Filters</span>
-        </button>
-        <div id="numeric-filters-body" class="collapsible-body">
-          <div class="filter-card-head">
-            <button id="btn-numeric-reset" class="filter-reset-btn" type="button">Reset</button>
-          </div>
-          <div class="numeric-filter-list">
-            <div class="numeric-filter-row">
-              <span class="numeric-filter-label">Lot Size (acres)</span>
-              <div class="numeric-filter-inputs">
-                <input type="text" id="nf-lot-min" placeholder="Min" class="nf-input" inputmode="decimal">
-                <span class="nf-sep">–</span>
-                <input type="text" id="nf-lot-max" placeholder="Max" class="nf-input" inputmode="decimal">
-              </div>
-            </div>
-            <div class="numeric-filter-row">
-              <span class="numeric-filter-label">Appraised Value</span>
-              <div class="numeric-filter-inputs">
-                <input type="text" id="nf-val-min" placeholder="Min (500k)" class="nf-input" inputmode="decimal">
-                <span class="nf-sep">–</span>
-                <input type="text" id="nf-val-max" placeholder="Max (1m)" class="nf-input" inputmode="decimal">
-              </div>
-            </div>
-            <div class="numeric-filter-row">
-              <span class="numeric-filter-label">Year Built</span>
-              <div class="numeric-filter-inputs">
-                <input type="number" id="nf-yr-min" placeholder="Min" class="nf-input" min="1800" max="2030">
-                <span class="nf-sep">–</span>
-                <input type="number" id="nf-yr-max" placeholder="Max" class="nf-input" min="1800" max="2030">
-              </div>
-            </div>
-            <div class="numeric-filter-row">
-              <span class="numeric-filter-label">Building Sqft</span>
-              <div class="numeric-filter-inputs">
-                <input type="number" id="nf-sqft-min" placeholder="Min" class="nf-input" min="0">
-                <span class="nf-sep">–</span>
-                <input type="number" id="nf-sqft-max" placeholder="Max" class="nf-input" min="0">
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
       <div id="map-filters" class="filter-card collapsible-section">
         <button class="section-toggle" type="button" data-target="map-filters-body" aria-expanded="true">
           <span class="sidebar-label">Map Filters</span>
@@ -215,19 +169,19 @@
               <span class="filter-swatch swatch-multifamily"></span>
               <span class="filter-name">Multifamily</span>
               <span class="filter-count" id="filter-count-multifamily">0</span>
-              <input type="checkbox" id="filter-multifamily" checked>
+              <input type="checkbox" id="filter-multifamily">
             </label>
             <label class="filter-row">
               <span class="filter-swatch" style="--sw:#8B7355"></span>
               <span class="filter-name">Commercial</span>
               <span class="filter-count" id="filter-count-commercial">0</span>
-              <input type="checkbox" id="filter-commercial" checked>
+              <input type="checkbox" id="filter-commercial">
             </label>
             <label class="filter-row">
               <span class="filter-swatch" style="--sw:#95a5a6"></span>
               <span class="filter-name">Exempt</span>
               <span class="filter-count" id="filter-count-exempt">0</span>
-              <input type="checkbox" id="filter-exempt" checked>
+              <input type="checkbox" id="filter-exempt">
             </label>
             <!-- Propelio comp-status toggles — dots (.is-dot) to distinguish
                  from parcel-type squares above. Swatch colors match the
@@ -300,6 +254,82 @@
         </div>
         <div id="saved-sessions-body" class="collapsible-body hidden">
           <div id="saved-sessions-list"></div>
+        </div>
+      </div>
+      <div id="numeric-filters" class="filter-card collapsible-section power-user-only">
+        <button class="section-toggle" type="button" data-target="numeric-filters-body" aria-expanded="true">
+          <span class="sidebar-label">Property Filters</span>
+        </button>
+        <div id="numeric-filters-body" class="collapsible-body">
+          <div class="filter-card-head">
+            <button id="btn-numeric-reset" class="filter-reset-btn" type="button">Reset</button>
+          </div>
+          <div class="numeric-filter-list">
+            <div class="numeric-filter-row">
+              <span class="numeric-filter-label">Lot Size (acres)</span>
+              <div class="numeric-filter-inputs">
+                <input type="text" id="nf-lot-min" placeholder="Min" class="nf-input" inputmode="decimal">
+                <span class="nf-sep">–</span>
+                <input type="text" id="nf-lot-max" placeholder="Max" class="nf-input" inputmode="decimal">
+              </div>
+            </div>
+            <div class="numeric-filter-row">
+              <span class="numeric-filter-label">Appraised Value</span>
+              <div class="numeric-filter-inputs">
+                <input type="text" id="nf-val-min" placeholder="Min (500k)" class="nf-input" inputmode="decimal">
+                <span class="nf-sep">–</span>
+                <input type="text" id="nf-val-max" placeholder="Max (1m)" class="nf-input" inputmode="decimal">
+              </div>
+            </div>
+            <div class="numeric-filter-row">
+              <span class="numeric-filter-label">Year Built</span>
+              <div class="numeric-filter-inputs">
+                <input type="number" id="nf-yr-min" placeholder="Min" class="nf-input" min="1800" max="2030">
+                <span class="nf-sep">–</span>
+                <input type="number" id="nf-yr-max" placeholder="Max" class="nf-input" min="1800" max="2030">
+              </div>
+            </div>
+            <div class="numeric-filter-row">
+              <span class="numeric-filter-label">Building Sqft</span>
+              <div class="numeric-filter-inputs">
+                <input type="number" id="nf-sqft-min" placeholder="Min" class="nf-input" min="0">
+                <span class="nf-sep">–</span>
+                <input type="number" id="nf-sqft-max" placeholder="Max" class="nf-input" min="0">
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div id="custom-search-block" class="filter-card collapsible-section power-user-only">
+        <button class="section-toggle" type="button" data-target="custom-search-block-body" aria-expanded="true">
+          <span class="sidebar-label">Custom Search</span>
+        </button>
+        <div id="custom-search-block-body" class="collapsible-body">
+          <div class="propelio-api-section">
+            <p class="propelio-section-label">Search settings (refresh required)</p>
+            <div class="numeric-filter-row">
+              <span class="numeric-filter-label">Time window (months)</span>
+              <div class="numeric-filter-inputs">
+                <input type="number" id="prop-months" class="nf-input" min="1" max="60" value="24">
+              </div>
+            </div>
+            <div class="numeric-filter-row">
+              <span class="numeric-filter-label">Search radius (mi)</span>
+              <div class="numeric-filter-inputs">
+                <input type="number" id="prop-range" class="nf-input" min="0.1" max="10" step="0.1" value="1.0">
+              </div>
+            </div>
+            <button id="btn-propelio-refresh" class="propelio-refresh-btn" type="button">
+              <span class="propelio-refresh-main">Custom Search</span>
+              <span class="propelio-refresh-subtitle">Uses the filters above</span>
+            </button>
+            <button id="btn-deep-pull" class="btn-secondary deep-pull-dev-only" style="display:none;" type="button">Deep Pull (dev)</button>
+            <div id="deep-pull-banner" class="deep-pull-banner hidden">
+              <span class="deep-pull-banner-icon">⟳</span>
+              <span id="deep-pull-banner-text" class="deep-pull-banner-text">Deep pull in progress...</span>
+              <button id="btn-deep-pull-stop" class="btn-tertiary" type="button">Stop</button>
+            </div>
+          </div>
         </div>
       </div>
       <!-- Legacy Filters — Redfin Listings + Sold rows live here, hidden by default
