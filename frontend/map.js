@@ -983,7 +983,7 @@ function isFeatureVisible(feature) {
   return true;
 }
 
-function getVisibleFeatureCounts(features) {
+function getVisibleFeatureCounts(features, options = {}) {
   const counts = {
     active: 0,
     off_market: 0,
@@ -1001,6 +1001,7 @@ function getVisibleFeatureCounts(features) {
   let rawSeen = 0;
   let dupSkipped = 0;
   let unknownPropType = 0;
+  const ignoreBucketToggles = options.ignoreBucketToggles === true;
 
   list.forEach((feature, idx) => {
     rawSeen += 1;
@@ -1013,7 +1014,11 @@ function getVisibleFeatureCounts(features) {
     seen.add(key);
 
     const bucket = classifyFeatureForFilter(feature);
-    if (!(bucket in counts) || !isFeatureVisible(feature)) return;
+    if (!(bucket in counts)) return;
+    if (!passesNumericFilters(feature)) return;
+    const isListingOrSold = Boolean(p.on_redfin || p.sold_comp);
+    if (isListingOrSold && !passesCompFilters(feature)) return;
+    if (!ignoreBucketToggles && !filterState[bucket]) return;
 
     // Track features falling through to off_market that are NOT recognized
     // single_family — that signals a misclassification path we can investigate.
@@ -1298,18 +1303,20 @@ function updateSoldStatusText() {
   const soldStatus = document.getElementById("sold-toggle-status");
   if (!soldStatus) return;
   if (!filterState.sold) {
-    soldStatus.textContent = "Sold comps hidden";
+    soldStatus.textContent = "Some comps filtered out";
     return;
   }
 
   const filteredCount = lastSoldPanelPoints.length;
   const totalCount = allSoldPointsRef.length;
   if (soldCompsFiltersAreActive() && filteredCount < totalCount) {
-    soldStatus.textContent = `${filteredCount} of ${totalCount} sold comps found`;
+    soldStatus.textContent = "Some comps filtered out";
     return;
   }
 
-  soldStatus.textContent = `${filteredCount} sold comp${filteredCount !== 1 ? "s" : ""} found`;
+  // Default: all sold comps visible - clear so note doesn't read
+  // "filtered out" when nothing actually is.
+  soldStatus.textContent = "";
 }
 
 function applyAndRenderSoldFilters() {
@@ -5499,7 +5506,7 @@ function applyMapVisibilityFilters() {
 // number next to each checkbox.
 function _updateMergedSidebarCounts() {
   if (!Array.isArray(allAnalysisFeatures) || !allAnalysisFeatures.length) return;
-  const visibleCounts = getVisibleFeatureCounts(allAnalysisFeatures);
+  const visibleCounts = getVisibleFeatureCounts(allAnalysisFeatures, { ignoreBucketToggles: true });
   const soldCount = Array.isArray(lastSoldPanelPoints) && lastSoldPanelPoints.length
     ? lastSoldPanelPoints.length
     : (Array.isArray(allSoldPointsRef) ? allSoldPointsRef.length : 0);
@@ -5527,7 +5534,7 @@ function _applyNumericFilters() {
   const markers = viewportRenderMode
     ? renderViewportFeatures()
     : renderFeatures(lastAnalysisGeojson);
-  const counts = getVisibleFeatureCounts(lastAnalysisGeojson.features || []);
+  const counts = getVisibleFeatureCounts(lastAnalysisGeojson.features || [], { ignoreBucketToggles: true });
   if (lastAnalysisCounts) renderSidebar(counts, markers || {});
   _refreshLoadedAreaUi();
 }
@@ -6871,7 +6878,7 @@ function renderSidebar(counts, markers) {
   document.getElementById("sidebar-loading").classList.add("hidden");
   document.getElementById("sidebar-results").classList.remove("hidden");
   const visibleCounts = Array.isArray(allAnalysisFeatures) && allAnalysisFeatures.length
-    ? getVisibleFeatureCounts(allAnalysisFeatures)
+    ? getVisibleFeatureCounts(allAnalysisFeatures, { ignoreBucketToggles: true })
     : {
       active: counts.active,
       off_market: counts.off_market,
