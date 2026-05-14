@@ -1,6 +1,17 @@
-# Strip Runner Implementation Plan
+# Strip Runner Implementation Plan v1.1
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+## Changes v1 → v1.1 (Copilot plan-review findings folded in)
+
+1. **BLOCKER (Task 6/7 TDD runtime):** Pacing helpers in `run_address` will make Task 6/7 selftests run for ~10 min per call without monkeypatching. Added a `_zero_pacing()` context manager to the smoke harness in Task 6 and reused it in Tasks 7 and 8. Selftests now run sub-second.
+2. **IMPORTANT (auth-block summary, spec §10):** v1 plan's `main()` returned 2 on `AuthBlockExit` without printing the summary, violating spec §10. v1.1 wraps `run_all` in try/finally so the summary always prints, including on auth-block exit, before re-raising.
+3. **IMPORTANT (burst-guard reset test):** v1 had a reset-on-success path in `run_address` but no test for it. Redefined `POISON_BURST` mock trigger to fail-fail-succeed-fail-fail-then-succeed (instead of fail-3-then-succeed which never reached the reset path because the burst guard fired first). Added an explicit reset selftest.
+4. **NICE-TO-HAVE (§12 wording):** Task 6 note said `_classify_propelio_error` would be imported lazily in Task 7, but Task 7 re-implements it as `_is_auth_class`. Fixed the note and added a small equivalence selftest covering 401/403/429/throttle-text/benign inputs.
+5. **NICE-TO-HAVE (BOM-prefixed address files):** v1 `load_addresses` opened with `encoding="utf-8"`; a BOM-prefixed first line would parse as an invalid address. Switched to `utf-8-sig`. Added a BOM selftest.
+6. **Direct-answer add:** Inserted new Task 9 — "Pilot real-address run (2-3 addresses)" — between mock CLI rehearsal (Task 8) and final push (now Task 10). Validates the real Propelio path before KK kicks off the 25-address strip.
+
+Total selftests grow from 27 → 31.
 
 **Goal:** Build the Strip Runner — a single-file Python script that runs Propelio comp pulls against a hand-curated address list with a fixed 21-filter matrix per address, bypassing the marathon FSM/breaker/reconcile machinery.
 
@@ -258,6 +269,20 @@ def _test_load_addresses_missing():
     except (FileNotFoundError, ValueError):
         return
     raise AssertionError("expected FileNotFoundError or ValueError on missing file")
+
+
+@selftest("load_addresses strips UTF-8 BOM from first line")
+def _test_load_addresses_bom():
+    # UTF-8 BOM (0xEF 0xBB 0xBF) prefix on first line; `strip()` does not remove it,
+    # so encoding="utf-8-sig" must be used in load_addresses.
+    text = "﻿# header comment\n1234 Main St, Dallas TX 75201\n5678 Oak Ave, Dallas TX 75223\n"
+    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as fh:
+        fh.write(text)
+        path = fh.name
+    addresses = load_addresses(path)
+    _assert_eq(len(addresses), 2, "BOM file address count")
+    _assert_eq(addresses[0], "1234 Main St, Dallas TX 75201", "first address (no BOM bleed)")
+    _assert_true("﻿" not in addresses[0], "no BOM remnant in first address")
 ```
 
 - [ ] **Step 2: Run the smoke harness and verify failures**
@@ -299,7 +324,9 @@ def load_addresses(path: str) -> list[str]:
     if not file_path.exists():
         raise FileNotFoundError(f"address file not found: {path}")
 
-    with file_path.open("r", encoding="utf-8") as fh:
+    # utf-8-sig auto-strips the UTF-8 BOM if present, so a BOM-prefixed first
+    # line doesn't get parsed as a malformed address. Plain utf-8 leaves the BOM.
+    with file_path.open("r", encoding="utf-8-sig") as fh:
         lines = fh.readlines()
 
     addresses: list[str] = []
@@ -317,19 +344,19 @@ def load_addresses(path: str) -> list[str]:
     return addresses
 ```
 
-- [ ] **Step 4: Run smoke and verify all four selftests pass**
+- [ ] **Step 4: Run smoke and verify all five selftests pass**
 
 Run:
 ```bash
 python scripts/strip_runner_smoke.py
 ```
-Expected: `running 4 selftest(s)`, all `[ok]`, exits 0.
+Expected: `running 5 selftest(s)`, all `[ok]`, exits 0.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add scripts/strip_runner.py scripts/strip_runner_smoke.py
-git commit -m "feat(strip-runner): FILTERS constant + address list loader"
+git commit -m "feat(strip-runner): FILTERS constant + address list loader (BOM-safe)"
 ```
 
 ---
@@ -540,13 +567,13 @@ def log_addr_skipped(now: datetime, *, reason: str) -> str:
     return f"{fmt_ts(now)}   address skipped: {reason}"
 ```
 
-- [ ] **Step 4: Run smoke and verify all 12 selftests pass**
+- [ ] **Step 4: Run smoke and verify all 13 selftests pass**
 
 Run:
 ```bash
 python scripts/strip_runner_smoke.py
 ```
-Expected: `running 12 selftest(s)`, all `[ok]`, exits 0.
+Expected: `running 13 selftest(s)`, all `[ok]`, exits 0.
 
 If a log_pass test fails on column alignment, inspect the actual vs expected output character-by-character. The spec §9 sample is the source of truth for spacing.
 
@@ -664,12 +691,12 @@ def setup_to_first_pull_sleep_seconds() -> float:
     return random.uniform(SETUP_TO_FIRST_PULL_MIN, SETUP_TO_FIRST_PULL_MAX)
 ```
 
-- [ ] **Step 4: Run smoke and verify all 16 selftests pass**
+- [ ] **Step 4: Run smoke and verify all 17 selftests pass**
 
 ```bash
 python scripts/strip_runner_smoke.py
 ```
-Expected: `running 16 selftest(s)`, all `[ok]`, exits 0.
+Expected: `running 17 selftest(s)`, all `[ok]`, exits 0.
 
 - [ ] **Step 5: Commit**
 
@@ -843,12 +870,12 @@ MOCK_POISON_AUTH_ADDRESS = "POISON_AUTH 0000, Dallas TX 75000"
 
 **Note on poison-triggering reality:** the `lead_0000001` / `lead_0000002` triggers rely on specific addresses hashing to those IDs. In Task 7 we'll define dedicated trigger addresses with known hash collisions, OR refactor the mock to use an explicit injection list. We'll address that when the burst-guard test in Task 7 fails the trigger mechanism — fix it then.
 
-- [ ] **Step 4: Run smoke, verify 21 selftests pass**
+- [ ] **Step 4: Run smoke, verify 22 selftests pass**
 
 ```bash
 python scripts/strip_runner_smoke.py
 ```
-Expected: `running 21 selftest(s)`, all `[ok]`, exits 0.
+Expected: `running 22 selftest(s)`, all `[ok]`, exits 0.
 
 - [ ] **Step 5: Commit**
 
@@ -867,25 +894,55 @@ git commit -m "feat(strip-runner): MockPropelioClient for smoke harness"
 
 The function that drives one address through all 22 Propelio calls. This task only handles the happy path — errors are added in Task 7.
 
-- [ ] **Step 1: Write failing test**
+- [ ] **Step 1: Add the `_zero_pacing` context manager to the smoke harness, then write the failing test**
+
+`run_address` calls `time.sleep()` with pacing helpers internally. Without monkeypatching, a single happy-path selftest would take ~10 minutes. Add this context manager once; Tasks 7 and 8 also use it.
 
 Append to `scripts/strip_runner_smoke.py`:
 
 ```python
+import contextlib
+import scripts.strip_runner as _sr_module
 from scripts.strip_runner import run_address, AddressOutcome
+
+
+@contextlib.contextmanager
+def _zero_pacing():
+    """Monkeypatch pacing helpers to return 0 so selftests run fast.
+
+    Restores originals on exit so other tests (e.g., Task 4's range tests)
+    still see the real implementations.
+    """
+    saved = (
+        _sr_module.inter_pull_sleep_seconds,
+        _sr_module.inter_address_sleep_seconds,
+        _sr_module.setup_to_first_pull_sleep_seconds,
+    )
+    _sr_module.inter_pull_sleep_seconds = lambda: 0.0
+    _sr_module.inter_address_sleep_seconds = lambda: 0.0
+    _sr_module.setup_to_first_pull_sleep_seconds = lambda: 0.0
+    try:
+        yield
+    finally:
+        (
+            _sr_module.inter_pull_sleep_seconds,
+            _sr_module.inter_address_sleep_seconds,
+            _sr_module.setup_to_first_pull_sleep_seconds,
+        ) = saved
 
 
 @selftest("run_address happy path: 21 search_cma calls, all succeed, addr_total > 0")
 def _test_run_address_happy():
     client = MockPropelioClient()
     client.login()
-    outcome = run_address(
-        client=client,
-        address="1234 Main St, Dallas TX 75201",
-        idx=1,
-        total=1,
-        mock=True,
-    )
+    with _zero_pacing():
+        outcome = run_address(
+            client=client,
+            address="1234 Main St, Dallas TX 75201",
+            idx=1,
+            total=1,
+            mock=True,
+        )
     _assert_eq(outcome.status, "complete", "outcome status")
     _assert_eq(outcome.filters_ok, 21, "all 21 filters succeeded")
     _assert_eq(outcome.filters_errored, 0, "no errors")
@@ -1082,17 +1139,23 @@ def _parse_cma_envelope_sales(envelope: dict[str, Any]) -> list[dict[str, Any]]:
     return [item for item in sales if isinstance(item, dict)]
 ```
 
-**Note:** the spec §12 says to import `_classify_propelio_error`, `_parse_cma_envelope_comps`, and `_extract_cma_id` from `deep_pull.py`. We're using local re-implementations of the two parsing helpers because they're 5 lines each and importing them ties strip_runner to deep_pull's module-load (which pulls in the entire scraper). We'll import `_classify_propelio_error` lazily in Task 7 inside the error branch — it only matters there. If Copilot reviews the implementation and disagrees, switch back to import.
+**Note (spec §12 divergence — confirmed by Copilot plan-review R1):** the spec §12 recommends importing `_classify_propelio_error`, `_parse_cma_envelope_comps`, and `_extract_cma_id` from `deep_pull.py`. We're instead re-implementing all three locally:
 
-- [ ] **Step 4: Run smoke, verify all 22 selftests pass**
+- `_parse_cma_envelope_sales` (this task) — replaces `_parse_cma_envelope_comps`
+- `_extract_cma_id_from_envelope` (this task) — replaces `_extract_cma_id`
+- `_is_auth_class` (Task 7) — replaces `_classify_propelio_error`
+
+Justification: importing from `deep_pull.py` triggers a module-load of the entire scraper subsystem (DB connections via `api.config`, Propelio session imports, etc.) which is unnecessary for smoke-only flows and slows test runs. The functions are 3-5 lines each — drift risk is low. Task 7 adds an equivalence selftest for `_is_auth_class` against representative inputs (401/403/429/throttle-text/benign) so we can detect drift early. Copilot R1 plan-review explicitly agreed with this approach.
+
+- [ ] **Step 4: Run smoke, verify all 23 selftests pass**
 
 ```bash
 python scripts/strip_runner_smoke.py
 ```
 
-Note: the happy-path selftest will print all 21 pass-log lines (and the setup line) to stdout — that's expected, the smoke run is verbose. If you want to silence it during selftests, the cleaner fix is in Task 8 where we add `quiet` support; for now just scroll past.
+Note: the happy-path selftest prints all 21 pass-log lines + the setup line — verbose but expected. With `_zero_pacing()` wrapping the call, the test runs in under a second instead of ~10 minutes.
 
-Expected: `running 22 selftest(s)`, all `[ok]`, exits 0.
+Expected: `running 23 selftest(s)`, all `[ok]`, exits 0.
 
 - [ ] **Step 5: Commit**
 
@@ -1120,10 +1183,14 @@ class MockPropelioClient:
     """Triggers (address prefix or substring):
         "POISON_LEAD"     -> find_lead_id raises RuntimeError
         "POISON_CMA"      -> add_cma raises RuntimeError
-        "POISON_FILTER"   -> every search_cma raises RuntimeError
+        "POISON_FILTER"   -> every search_cma raises RuntimeError (burst guard trips)
         "POISON_AUTH"     -> find_lead_id raises with "401" in message (auth-class)
-        "POISON_BURST"    -> first 3 search_cma calls raise, then succeed
+        "POISON_BURST"    -> search_cma raises on zero-indexed call indices {0,1,3,4};
+                             succeeds elsewhere. Tests burst-guard RESET on success.
+                             Sequence: fail-fail-succeed-fail-fail-then-succeed.
     """
+
+    _POISON_BURST_FAIL_INDICES = frozenset({0, 1, 3, 4})
 
     def __init__(self) -> None:
         self._logged_in = False
@@ -1169,13 +1236,12 @@ class MockPropelioClient:
         if "_filter_" in lead_id:
             raise RuntimeError("MockPropelioClient: poisoned filter")
         if "_burst_" in lead_id:
+            # Use a per-lead_id counter to count zero-indexed search_cma calls
             n = self._burst_counter.get(lead_id, 0)
             self._burst_counter[lead_id] = n + 1
-            if n < 3:
-                raise RuntimeError(f"MockPropelioClient: poisoned burst call #{n + 1}")
-            # After the burst-guard would have tripped (at 3), behave normally — but
-            # the guard should have already escalated to address-skip so this path
-            # is unused in tests.
+            if n in self._POISON_BURST_FAIL_INDICES:
+                raise RuntimeError(f"MockPropelioClient: poisoned burst call #{n}")
+            # Fall through to success path for indices 2, 5, 6, 7, ...
         base = int(20 * range_mi) + months
         comps = [
             {
@@ -1199,19 +1265,20 @@ Also remove the now-unused module-level constants:
 # MOCK_POISON_AUTH_ADDRESS = ...
 ```
 
-- [ ] **Step 2: Write failing error-handling tests**
+- [ ] **Step 2: Write failing error-handling tests (all wrapped in `_zero_pacing()`)**
 
 Append to `scripts/strip_runner_smoke.py`:
 
 ```python
-from scripts.strip_runner import AuthBlockExit
+from scripts.strip_runner import AuthBlockExit, _is_auth_class
 
 
 @selftest("run_address: lead lookup failure → skipped (lead lookup failed)")
 def _test_run_address_lead_fail():
     client = MockPropelioClient()
     client.login()
-    outcome = run_address(client=client, address="POISON_LEAD 0000, Dallas TX", idx=1, total=1, mock=True)
+    with _zero_pacing():
+        outcome = run_address(client=client, address="POISON_LEAD 0000, Dallas TX", idx=1, total=1, mock=True)
     _assert_eq(outcome.status, "skipped", "status")
     _assert_eq(outcome.skip_reason, "lead lookup failed", "skip reason")
 
@@ -1220,7 +1287,8 @@ def _test_run_address_lead_fail():
 def _test_run_address_cma_fail():
     client = MockPropelioClient()
     client.login()
-    outcome = run_address(client=client, address="POISON_CMA 0000, Dallas TX", idx=1, total=1, mock=True)
+    with _zero_pacing():
+        outcome = run_address(client=client, address="POISON_CMA 0000, Dallas TX", idx=1, total=1, mock=True)
     _assert_eq(outcome.status, "skipped", "status")
     _assert_eq(outcome.skip_reason, "cma setup failed", "skip reason")
 
@@ -1229,11 +1297,28 @@ def _test_run_address_cma_fail():
 def _test_run_address_burst_guard():
     client = MockPropelioClient()
     client.login()
-    outcome = run_address(client=client, address="POISON_FILTER 0000, Dallas TX", idx=1, total=1, mock=True)
+    with _zero_pacing():
+        outcome = run_address(client=client, address="POISON_FILTER 0000, Dallas TX", idx=1, total=1, mock=True)
     _assert_eq(outcome.status, "skipped", "status")
     _assert_eq(outcome.skip_reason, "3 consecutive filter errors", "skip reason")
     _assert_eq(outcome.filters_ok, 0, "no filters succeeded")
     _assert_eq(outcome.filters_errored, 3, "exactly 3 filter errors before escalation")
+
+
+@selftest("run_address: burst guard RESETS on success (fail-fail-succeed-fail-fail-then-succeed)")
+def _test_run_address_burst_reset():
+    # POISON_BURST mock raises on call indices 0, 1, 3, 4 (zero-indexed); succeeds elsewhere.
+    # Sequence: pass1=fail(consec=1), pass2=fail(consec=2), pass3=success(consec=0 RESET),
+    #           pass4=fail(consec=1), pass5=fail(consec=2), pass6+=success.
+    # Guard threshold is 3; should NEVER trip. Address completes as "partial".
+    client = MockPropelioClient()
+    client.login()
+    with _zero_pacing():
+        outcome = run_address(client=client, address="POISON_BURST 0000, Dallas TX", idx=1, total=1, mock=True)
+    _assert_eq(outcome.status, "partial", "status (errors but no skip)")
+    _assert_eq(outcome.skip_reason, None, "skip_reason None — burst guard did NOT trip")
+    _assert_eq(outcome.filters_errored, 4, "exactly 4 errors (passes 1, 2, 4, 5)")
+    _assert_eq(outcome.filters_ok, 17, "17 successful pulls (21 - 4 errors)")
 
 
 @selftest("run_address: auth-class error raises AuthBlockExit")
@@ -1241,10 +1326,33 @@ def _test_run_address_auth_block():
     client = MockPropelioClient()
     client.login()
     try:
-        run_address(client=client, address="POISON_AUTH 0000, Dallas TX", idx=1, total=1, mock=True)
+        with _zero_pacing():
+            run_address(client=client, address="POISON_AUTH 0000, Dallas TX", idx=1, total=1, mock=True)
     except AuthBlockExit:
         return
     raise AssertionError("expected AuthBlockExit for POISON_AUTH address")
+
+
+@selftest("_is_auth_class returns True for 401/403/429 and throttle text, False otherwise")
+def _test_is_auth_class_equivalence():
+    # Local helper replaces deep_pull._classify_propelio_error per §12 divergence note.
+    # Inputs cover: status_code-on-exc, response.status_code-on-exc, message-substring matches, benign.
+    class _FakeExc(Exception):
+        def __init__(self, msg: str = "", status_code: int | None = None) -> None:
+            super().__init__(msg)
+            if status_code is not None:
+                self.status_code = status_code
+
+    _assert_true(_is_auth_class(_FakeExc(status_code=401)), "401")
+    _assert_true(_is_auth_class(_FakeExc(status_code=403)), "403")
+    _assert_true(_is_auth_class(_FakeExc(status_code=429)), "429")
+    _assert_true(_is_auth_class(_FakeExc("rate limit exceeded")), "rate limit text")
+    _assert_true(_is_auth_class(_FakeExc("Too Many Requests")), "too many requests text")
+    _assert_true(_is_auth_class(_FakeExc("403 forbidden")), "403 in text")
+    _assert_true(_is_auth_class(_FakeExc("401 unauthor")), "401 unauthor in text")
+    _assert_eq(_is_auth_class(_FakeExc(status_code=500)), False, "500 is not auth")
+    _assert_eq(_is_auth_class(_FakeExc("generic timeout")), False, "generic message")
+    _assert_eq(_is_auth_class(_FakeExc()), False, "no message no status")
 ```
 
 - [ ] **Step 3: Run smoke, verify fails**
@@ -1439,12 +1547,12 @@ def _short_err(exc: Exception) -> str:
     return f"{type(exc).__name__} {msg}".strip()
 ```
 
-- [ ] **Step 5: Run smoke, verify all 26 selftests pass**
+- [ ] **Step 5: Run smoke, verify all 29 selftests pass**
 
 ```bash
 python scripts/strip_runner_smoke.py
 ```
-Expected: `running 26 selftest(s)`, all `[ok]`, exits 0.
+Expected: `running 29 selftest(s)`, all `[ok]`, exits 0. With `_zero_pacing()` wrapping every `run_address` call, the four poison-trigger selftests run in under a second total.
 
 - [ ] **Step 6: Commit**
 
@@ -1484,17 +1592,9 @@ def _test_run_all_mixed():
     ]
 
     buf = io.StringIO()
-    # NOTE: monkeypatch the pacing helpers to return ~0 so the selftest doesn't wait
-    import scripts.strip_runner as sr
-    saved = (sr.inter_pull_sleep_seconds, sr.inter_address_sleep_seconds, sr.setup_to_first_pull_sleep_seconds)
-    sr.inter_pull_sleep_seconds = lambda: 0.0
-    sr.inter_address_sleep_seconds = lambda: 0.0
-    sr.setup_to_first_pull_sleep_seconds = lambda: 0.0
-    try:
+    with _zero_pacing():
         with contextlib.redirect_stdout(buf):
             summary = run_all(client=client, addresses=addresses, mock=True)
-    finally:
-        sr.inter_pull_sleep_seconds, sr.inter_address_sleep_seconds, sr.setup_to_first_pull_sleep_seconds = saved
 
     _assert_eq(summary.addresses_total, 3, "total")
     _assert_eq(summary.addresses_complete, 2, "complete")
@@ -1507,6 +1607,34 @@ def _test_run_all_mixed():
     output = buf.getvalue()
     _assert_in("=== strip_runner summary ===", output, "summary header in output")
     _assert_in("POISON_LEAD 0000", output, "skipped address listed in output")
+
+
+@selftest("run_all: auth-block exit prints summary BEFORE re-raising AuthBlockExit (spec §10)")
+def _test_run_all_auth_block_summary():
+    from scripts.strip_runner import run_all
+    client = MockPropelioClient()
+    client.login()
+    addresses = [
+        "1234 Main St, Dallas TX 75201",
+        "POISON_AUTH 0000, Dallas TX",   # 2nd address triggers AuthBlockExit
+        "9999 Never Reached, Dallas TX",
+    ]
+
+    buf = io.StringIO()
+    raised = False
+    try:
+        with _zero_pacing():
+            with contextlib.redirect_stdout(buf):
+                run_all(client=client, addresses=addresses, mock=True)
+    except AuthBlockExit:
+        raised = True
+
+    _assert_true(raised, "AuthBlockExit propagated out of run_all")
+    output = buf.getvalue()
+    # The summary must have been emitted (try/finally in run_all) BEFORE the exit propagated
+    _assert_in("=== strip_runner summary ===", output, "summary header printed despite auth-block exit")
+    _assert_in("addresses_complete:     1", output, "first address completed before block")
+    _assert_in("1234 Main St", output, "completed address visible in output")
 ```
 
 - [ ] **Step 2: Run smoke, verify fails**
@@ -1542,32 +1670,39 @@ class RunSummary:
 
 
 def run_all(*, client: Any, addresses: list[str], mock: bool = False) -> RunSummary:
-    """Drive the full address list through run_address, pacing between, accumulating totals."""
+    """Drive the full address list through run_address, pacing between, accumulating totals.
+
+    Per spec §10, the summary is printed in BOTH normal exit AND auth-block exit
+    paths. We use try/finally so the summary always emits — including when an
+    AuthBlockExit propagates from run_address mid-loop.
+    """
     summary = RunSummary(addresses_total=len(addresses))
     start_monotonic = time.monotonic()
 
-    for idx, address in enumerate(addresses, start=1):
-        if idx > 1:
-            time.sleep(inter_address_sleep_seconds())
-            print()  # blank line between addresses per spec §9
+    try:
+        for idx, address in enumerate(addresses, start=1):
+            if idx > 1:
+                time.sleep(inter_address_sleep_seconds())
+                print()  # blank line between addresses per spec §9
 
-        outcome = run_address(client=client, address=address, idx=idx, total=len(addresses), mock=mock)
+            outcome = run_address(client=client, address=address, idx=idx, total=len(addresses), mock=mock)
 
-        summary.filter_pulls_total += outcome.filters_ok + outcome.filters_errored
-        summary.propelio_returned_sum += outcome.propelio_returned
-        summary.comps_net_new_total += outcome.addr_net_new
+            summary.filter_pulls_total += outcome.filters_ok + outcome.filters_errored
+            summary.propelio_returned_sum += outcome.propelio_returned
+            summary.comps_net_new_total += outcome.addr_net_new
 
-        if outcome.status == "complete":
-            summary.addresses_complete += 1
-        elif outcome.status == "partial":
-            summary.addresses_partial += 1
-            summary.partial_list.append((address, outcome.filters_errored))
-        else:  # "skipped"
-            summary.addresses_skipped += 1
-            summary.skipped_list.append((address, outcome.skip_reason or "unknown"))
+            if outcome.status == "complete":
+                summary.addresses_complete += 1
+            elif outcome.status == "partial":
+                summary.addresses_partial += 1
+                summary.partial_list.append((address, outcome.filters_errored))
+            else:  # "skipped"
+                summary.addresses_skipped += 1
+                summary.skipped_list.append((address, outcome.skip_reason or "unknown"))
+    finally:
+        summary.elapsed_min = (time.monotonic() - start_monotonic) / 60.0
+        _print_summary(summary)
 
-    summary.elapsed_min = (time.monotonic() - start_monotonic) / 60.0
-    _print_summary(summary)
     return summary
 
 
@@ -1630,17 +1765,19 @@ def main() -> int:
     try:
         run_all(client=client, addresses=addresses, mock=args.mock)
     except AuthBlockExit as exc:
+        # run_all's try/finally already printed the summary before re-raising,
+        # so we just need to surface the CRITICAL banner and exit with code 2.
         print(f"\nCRITICAL: {exc.message}", file=sys.stderr)
         return 2
     return 0
 ```
 
-- [ ] **Step 4: Run smoke, verify all 27 selftests pass**
+- [ ] **Step 4: Run smoke, verify all 31 selftests pass**
 
 ```bash
 python scripts/strip_runner_smoke.py
 ```
-Expected: `running 27 selftest(s)`, all `[ok]`, exits 0. The new run_all test prints a full mock run (3 addresses × 21 passes = ~64 lines) which is normal.
+Expected: `running 31 selftest(s)`, all `[ok]`, exits 0. The two run_all tests redirect stdout so their output doesn't pollute the test log (auth-block test captures the summary into a buffer and asserts on it).
 
 - [ ] **Step 5: End-to-end CLI dry run with --mock and a tiny address file**
 
@@ -1668,7 +1805,81 @@ git commit -m "feat(strip-runner): main loop + run summary + CLI wiring"
 
 ---
 
-## Task 9: Push and queue for Copilot code review
+## Task 9: Pilot real-address run (2-3 addresses, real Propelio)
+
+**Files:** No code changes. This task validates the real Propelio path end-to-end with a deliberately tiny address file before the implementing engineer hands the work back to KK for the full 25-address strip.
+
+**Why this task exists** (Copilot plan-review R1): the mock CLI rehearsal in Task 8 exercises code wiring but not the real Propelio session, real `find_lead_id` resolution, real `add_cma` cache behavior, real `search_cma` per-filter response shape, or real `merge_comps_into_global` persistence. A 2-3 address pilot catches integration mismatches in ~30 minutes instead of finding them 2 hours into a 25-address strip.
+
+**Prerequisites:**
+
+- `PROPELIO_USERNAME` and `PROPELIO_PASSWORD` env vars set (check with `env | grep PROPELIO`)
+- DB connectivity working (the persistence path writes to `propelio_comps` via `merge_comps_into_global`)
+- KK is around or pre-cleared the pilot, since this hits Propelio for real and creates a real CMA
+
+- [ ] **Step 1: Pick 2-3 KK-confirmed test addresses**
+
+Ask KK for 2-3 addresses he has already pulled manually (so we know they have valid leads in Propelio and won't fail on `find_lead_id`). Write them to a pilot file:
+
+```bash
+cat > scripts/strip_runner_addresses/pilot_2026_05_14.txt <<'EOF'
+# Pilot run — confirm real Propelio path works end-to-end before the full strip.
+# Addresses provided by KK.
+
+<address 1>
+<address 2>
+<address 3>
+EOF
+```
+
+Replace `<address 1>` etc. with the addresses KK provides. Commit this file — pilot files become part of the run history per spec §1 success criterion.
+
+- [ ] **Step 2: Run the pilot**
+
+```bash
+cd /home/kk/projects/clients/lot-ledger
+python scripts/strip_runner.py --addresses scripts/strip_runner_addresses/pilot_2026_05_14.txt
+```
+
+Expected runtime: ~25-35 minutes (3 addresses × ~10-12 min each, including the 4-hour-scaled inter-pull pacing).
+
+- [ ] **Step 3: Verify the pilot output**
+
+While the run is in progress:
+
+- Per-pull log lines should appear with real `returned` counts (typically 10-300 depending on filter) and `new` counts (high on early passes, dropping toward 0 on tight final passes)
+- `setup: add_cma ok cma_id=cma_XXXXXXX (Ns)` lines should show real CMA IDs and elapsed times (typically 2-5s)
+- No Python tracebacks should hit stderr
+
+After the run completes:
+
+- End-of-run summary block should show `addresses_complete: 3` (or `2` + `1 partial` if one address had a filter error)
+- `comps_net_new_total` should be > 0 (the real cache was warmed)
+- Spot-check the global cache:
+
+```sql
+-- From psql against the dev DB
+SELECT COUNT(*) FROM propelio_comps WHERE source = 'strip_runner';
+SELECT source, MIN(created_at), MAX(created_at), COUNT(*)
+FROM propelio_comps
+WHERE source = 'strip_runner'
+GROUP BY source;
+```
+
+Both queries should return non-zero counts dated within the run window.
+
+- [ ] **Step 4: Commit the pilot address file**
+
+```bash
+git add scripts/strip_runner_addresses/pilot_2026_05_14.txt
+git commit -m "chore(strip-runner): pilot 2026-05-14 address list — 3 real addresses"
+```
+
+If the pilot revealed any code defect, STOP here and fix it before proceeding. The pilot's whole point is to surface real-world breakage before the full strip.
+
+---
+
+## Task 10: Push and queue for Copilot code review
 
 **Files:** No code changes.
 
@@ -1682,9 +1893,9 @@ git diff develop..feat/strip-runner --stat
 ```
 
 Expected:
-- All 27 selftests pass
-- 9-10 commits (3 spec commits from earlier + 6-7 implementation commits from this plan)
-- Diff stat shows `scripts/strip_runner.py`, `scripts/strip_runner_smoke.py`, `scripts/strip_runner_addresses/.gitkeep`, `docs/propelio/STRIP_RUNNER_SPEC.md`, `docs/propelio/STRIP_RUNNER_PLAN.md`
+- All 31 selftests pass
+- 11-12 commits (3 spec commits + 1 plan commit + 1 plan-v1.1 commit + 7 implementation commits + 1 pilot file commit)
+- Diff stat shows `scripts/strip_runner.py`, `scripts/strip_runner_smoke.py`, `scripts/strip_runner_addresses/.gitkeep`, `scripts/strip_runner_addresses/pilot_2026_05_14.txt`, `docs/propelio/STRIP_RUNNER_SPEC.md`, `docs/propelio/STRIP_RUNNER_PLAN.md`
 
 - [ ] **Step 2: Push the branch**
 
@@ -1695,12 +1906,13 @@ git push
 - [ ] **Step 3: Draft the Copilot code-review prompt for KK**
 
 The prompt should ask Copilot to:
-1. Verify the implementation matches spec §1-§14 line by line
-2. Confirm the `MockPropelioClient` accurately mimics the real `PropelioClient` surface for the four methods strip_runner uses
-3. Audit the error-handling paths against §8 (especially: auth-class detection, burst-guard reset on success, partial vs complete vs skipped status assignment)
-4. Confirm `_persist_pull_real` matches `deep_pull.py`'s comp-persistence path
-5. Surface any divergence from the locked-in v1.3 spec
-6. Flag any non-obvious risk before the first real run
+1. Verify the implementation matches spec v1.3 §1-§14 line by line
+2. Confirm the `MockPropelioClient` accurately mimics the real `PropelioClient` surface for the four methods strip_runner uses (`login`, `find_lead_id`, `add_cma`, `search_cma`); spot-check signatures against `api/propelio/scraper.py`
+3. Audit the error-handling paths against spec §8: auth-class detection (`_is_auth_class`), burst-guard reset-on-success (verified by `_test_run_address_burst_reset`), partial vs complete vs skipped status assignment, summary emission on auth-block (try/finally in `run_all`)
+4. Confirm `_persist_pull_real` matches `deep_pull.py`'s comp-persistence path (parcel-match exception fallback in particular)
+5. Surface any divergence from spec v1.3 — including the three intentional re-implementations of `deep_pull.py` helpers per Task 6's §12 note
+6. Note the Task 9 pilot run results when reporting: if the pilot caught a real-world issue, that's important context for the code review
+7. Flag any non-obvious risk before KK runs the full 25-address strip
 
 Hand the prompt and the branch+commit ref to KK.
 
@@ -1715,6 +1927,27 @@ If you're implementing this plan and you hit any of the following, STOP and surf
 3. **The mock client's hash-based triggers (Task 5) collide with a real address** in the smoke test — replace with the explicit-prefix triggers from Task 7 immediately; that's the whole reason Task 7 refactors them.
 4. **`merge_comps_into_global` import path breaks** — the spec assumes `api.propelio.archive.merge_comps_into_global` exists. If it's moved/renamed, fix the import in `_persist_pull_real` (Task 6) and note it for the Copilot review.
 5. **Real-run rehearsal (Task 8 step 5) hits Propelio for real instead of mock** — make sure `--mock` flag is set. If you accidentally hit real Propelio, expect a CMA to be created on KK's account; let him know immediately.
+6. **Task 9 pilot reveals a defect** — STOP before pushing for code review. Fix the defect, re-run the pilot, only proceed to Task 10 when the pilot is clean.
+
+---
+
+## Copilot plan-review — outcomes (2026-05-14)
+
+### Round 1 (v1 → v1.1)
+
+One BLOCKER, two IMPORTANTs, two nice-to-haves. All addressed in v1.1:
+
+| # | Task | Severity | Resolution |
+|---|---|---|---|
+| 1 | Task 6/7 | BLOCKER | Pacing helpers in `run_address` would make selftests take ~10 min each without monkeypatching. Added `_zero_pacing()` context manager in Task 6 and wrapped every `run_address` call in Tasks 6/7/8 selftests. |
+| 2 | Task 8 | IMPORTANT | `run_all` returned on `AuthBlockExit` without printing summary, violating spec §10. Wrapped main loop in try/finally so summary always prints before re-raising. Added explicit `_test_run_all_auth_block_summary` selftest. |
+| 3 | Task 7 | IMPORTANT | Burst-guard reset-on-success was implemented but untested. Redefined `POISON_BURST` mock trigger to fail on call indices {0,1,3,4} (instead of fail-first-3) so the reset path is actually exercised. Added `_test_run_address_burst_reset` selftest. |
+| 4 | Task 6 §12 note | NICE-TO-HAVE | Note said `_classify_propelio_error` would be imported lazily in Task 7, but Task 7 re-implements it. Fixed the wording. Added `_test_is_auth_class_equivalence` selftest covering 401/403/429/throttle-text/benign inputs to catch drift. |
+| 5 | Task 2 | NICE-TO-HAVE | BOM-prefixed first line would parse as malformed address. Switched `load_addresses` to `encoding="utf-8-sig"`. Added `_test_load_addresses_bom` selftest. |
+
+Plus one direct-answer add: **Task 9 (new) — pilot real-address run** between mock CLI rehearsal (Task 8) and final push (now Task 10). Validates real Propelio path on 2-3 addresses before the full 25-address strip.
+
+Copilot R1 verdict on v1: not implementation-ready (1 BLOCKER + 2 IMPORTANT). With v1.1 fixes folded in, the plan should be implementation-ready pending R2 verification.
 
 ---
 
@@ -1725,19 +1958,20 @@ If you're implementing this plan and you hit any of the following, STOP and surf
 | §1 Purpose | Task 1, 6 | Architecture comment at top of strip_runner.py |
 | §2 Non-goals | All tasks | No FSM, no breaker, no reconcile — verified by absence |
 | §3 Architecture / invocation | Task 1, 8 | Repo-root requirement documented in module docstring |
-| §4 Address list format | Task 2 | `load_addresses` parser |
+| §4 Address list format | Task 2 | `load_addresses` parser with `utf-8-sig` for BOM safety (v1.1) |
 | §5 Filter matrix | Task 2 | `FILTERS` constant with `assert len == 21` |
-| §6 Per-address execution | Task 6, 7 | `run_address` function with Option A (add_cma setup → 21 search_cma) |
+| §6 Per-address execution | Task 6, 7 | `run_address` function with Option A (add_cma setup → 21 search_cma); reset-on-success now explicitly tested (v1.1) |
 | §7 Pacing | Task 4 | Three pacing helpers + run-1 floor at 15s + future-tuning principle in comments |
-| §8 Error handling | Task 7 | AuthBlockExit + address-level skip + filter-level continue + burst guard |
+| §8 Error handling | Task 7 | AuthBlockExit + address-level skip + filter-level continue + burst guard with reset (now tested via `_test_run_address_burst_reset`, v1.1) |
 | §9 Per-pull terminal logging | Task 3, 6, 7 | Seven log_* formatters + the setup line + pass line + footer |
-| §10 End-of-run summary | Task 8 | `_print_summary` with three-skip-path annotation |
+| §10 End-of-run summary | Task 8 | `_print_summary` with three-skip-path annotation; emitted via `run_all` try/finally on BOTH normal exit AND auth-block exit (v1.1 fix) |
 | §11 What this does NOT use | All tasks | No marathon imports anywhere |
-| §12 Dependencies | Task 6 | Import `PropelioClient`, `merge_comps_into_global`, `match_comps_to_parcels`, `_parse_property`; local re-impl of `_extract_cma_id` and `_parse_cma_envelope_comps` (small enough that import indirection isn't worth pulling in the whole scraper module on smoke runs); `_classify_propelio_error` re-implemented locally as `_is_auth_class` in Task 7 |
-| §13 Branch and commit | Task 9 | Final push step |
+| §12 Dependencies | Task 6 + Task 7 | Import `PropelioClient`, `merge_comps_into_global`, `match_comps_to_parcels`, `_parse_property`; local re-impl of `_extract_cma_id_from_envelope`, `_parse_cma_envelope_sales`, and `_is_auth_class` (avoids loading the scraper subsystem on smoke runs; equivalence test in Task 7 covers drift risk) |
+| §13 Branch and commit | Task 10 | Final push step |
 | §14 Deferred | N/A | Items intentionally not implemented |
+| **Pilot validation** | Task 9 (new in v1.1) | Real-Propelio 2-3 address pilot before the full 25-address strip; catches integration mismatches the mock can't surface |
 
-**Divergence from spec §12 noted:** I'm locally re-implementing `_classify_propelio_error`, `_parse_cma_envelope_comps`, and `_extract_cma_id` as `_is_auth_class`, `_parse_cma_envelope_sales`, and `_extract_cma_id_from_envelope` respectively. Reason: importing them from `api.propelio.deep_pull` triggers a module-load of the entire scraper subsystem (DB connections, etc.) which we want to avoid for smoke runs. The functions are 3-5 lines each so drift risk is minimal. Spec v1.3 §12 recommended import; this plan diverges with a comment in the code flagging the coupling. **Flag this to Copilot in the code review** — if Copilot disagrees, switch to import in a follow-up commit.
+**Divergence from spec §12 — confirmed by Copilot plan-review R1:** locally re-implementing `_classify_propelio_error` → `_is_auth_class`, `_parse_cma_envelope_comps` → `_parse_cma_envelope_sales`, and `_extract_cma_id` → `_extract_cma_id_from_envelope`. Reason: importing from `api.propelio.deep_pull` triggers a module-load of the entire scraper subsystem (DB connections, etc.) which we want to avoid for smoke runs. The functions are 3-5 lines each, and Task 7's `_test_is_auth_class_equivalence` selftest covers the drift risk explicitly. Copilot R1 plan-review agreed with this approach.
 
 ---
 
