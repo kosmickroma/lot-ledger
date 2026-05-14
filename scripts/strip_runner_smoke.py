@@ -218,6 +218,44 @@ def _test_log_addr_skipped():
     _assert_eq(line, "[12:05:14]   address skipped: lead lookup failed", "addr skipped")
 
 
+from scripts.strip_runner import (
+    inter_pull_sleep_seconds,
+    inter_address_sleep_seconds,
+    setup_to_first_pull_sleep_seconds,
+)
+
+
+@selftest("inter_pull_sleep_seconds returns values in [15, 60]")
+def _test_inter_pull_range():
+    # Run 500 samples; all must fall in band A [15, 30] or band B [30, 60]
+    for _ in range(500):
+        v = inter_pull_sleep_seconds()
+        _assert_true(15.0 <= v <= 60.0, f"inter_pull sample {v} out of [15, 60]")
+
+
+@selftest("inter_pull_sleep_seconds favors band A (~80%)")
+def _test_inter_pull_band_ratio():
+    samples = [inter_pull_sleep_seconds() for _ in range(2000)]
+    band_a = sum(1 for v in samples if v <= 30.0)
+    ratio = band_a / len(samples)
+    # Expect ~80% in band A; allow generous slack for randomness (0.70..0.90)
+    _assert_true(0.70 <= ratio <= 0.90, f"band A ratio {ratio:.2f} outside [0.70, 0.90]")
+
+
+@selftest("inter_address_sleep_seconds returns values in [15, 45]")
+def _test_inter_address_range():
+    for _ in range(500):
+        v = inter_address_sleep_seconds()
+        _assert_true(15.0 <= v <= 45.0, f"inter_address sample {v} out of [15, 45]")
+
+
+@selftest("setup_to_first_pull_sleep_seconds returns values in [3, 5]")
+def _test_setup_pause_range():
+    for _ in range(500):
+        v = setup_to_first_pull_sleep_seconds()
+        _assert_true(3.0 <= v <= 5.0, f"setup pause sample {v} out of [3, 5]")
+
+
 def main() -> int:
     print(f"strip_runner_smoke: running {len(SELFTESTS)} selftest(s)")
     failures: list[tuple[str, str]] = []

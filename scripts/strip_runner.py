@@ -148,6 +148,48 @@ def log_addr_skipped(now: datetime, *, reason: str) -> str:
     return f"{fmt_ts(now)}   address skipped: {reason}"
 
 
+# --- Pacing (spec §7) -------------------------------------------------------
+#
+# Band A: 80% of inter-pull pauses, uniform(15, 30) — floor raised from 10s
+#         per Copilot v1 review #3 for conservative-first-run.
+# Band B: 20% of inter-pull pauses, uniform(30, 60).
+# Setup→first-pull: uniform(3, 5) — closes immediate-burst gap on same CMA.
+# Inter-address: uniform(15, 45).
+#
+# Future-tuning principle (KK): speed up gradually but always preserve the
+# non-uniform two-band shape — don't fully look like a bot.
+
+
+INTER_PULL_BAND_A_PROB = 0.80
+INTER_PULL_BAND_A_MIN = 15.0
+INTER_PULL_BAND_A_MAX = 30.0
+INTER_PULL_BAND_B_MIN = 30.0
+INTER_PULL_BAND_B_MAX = 60.0
+
+INTER_ADDRESS_MIN = 15.0
+INTER_ADDRESS_MAX = 45.0
+
+SETUP_TO_FIRST_PULL_MIN = 3.0
+SETUP_TO_FIRST_PULL_MAX = 5.0
+
+
+def inter_pull_sleep_seconds() -> float:
+    """Two-band jitter pause between filter pulls within an address."""
+    if random.random() < INTER_PULL_BAND_A_PROB:
+        return random.uniform(INTER_PULL_BAND_A_MIN, INTER_PULL_BAND_A_MAX)
+    return random.uniform(INTER_PULL_BAND_B_MIN, INTER_PULL_BAND_B_MAX)
+
+
+def inter_address_sleep_seconds() -> float:
+    """Pause between addresses."""
+    return random.uniform(INTER_ADDRESS_MIN, INTER_ADDRESS_MAX)
+
+
+def setup_to_first_pull_sleep_seconds() -> float:
+    """Fixed-range pause between add_cma (CMA setup) and the first search_cma."""
+    return random.uniform(SETUP_TO_FIRST_PULL_MIN, SETUP_TO_FIRST_PULL_MAX)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Strip Runner — hand-curated Propelio comp sweep")
     parser.add_argument(
