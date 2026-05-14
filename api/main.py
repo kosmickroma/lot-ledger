@@ -487,6 +487,14 @@ def _ensure_session_schema() -> None:
                     ("users_role_member_alias", "UPDATE users SET role = 'user' WHERE role = 'member'"),
                     ("saved_areas_filter_state", "ALTER TABLE saved_areas ADD COLUMN IF NOT EXISTS filter_state JSONB"),
                     ("saved_areas_type", "ALTER TABLE saved_areas ADD COLUMN IF NOT EXISTS type TEXT"),
+                    (
+                        "saved_areas_originator_county",
+                        "ALTER TABLE saved_areas ADD COLUMN IF NOT EXISTS originator_parcel_county TEXT",
+                    ),
+                    (
+                        "saved_areas_originator_account",
+                        "ALTER TABLE saved_areas ADD COLUMN IF NOT EXISTS originator_parcel_account_num TEXT",
+                    ),
                     ("saved_areas_share_id", "ALTER TABLE saved_areas ADD COLUMN IF NOT EXISTS share_id VARCHAR(20)"),
                     (
                         "saved_areas_public_toggle",
@@ -1057,6 +1065,8 @@ class SavedAreaCreateRequest(BaseModel):
     # Backfills cached_jobs.saved_area_id and analysis_sessions.saved_area_id so
     # the next CSV download from this job carries the new area's share_id.
     job_id: str | None = None
+    originator_parcel_county: str | None = None
+    originator_parcel_account_num: str | None = None
 
 
 class SavedAreaUpdateRequest(BaseModel):
@@ -1065,6 +1075,8 @@ class SavedAreaUpdateRequest(BaseModel):
     type: Literal["area", "location"] | None = None
     lat: float | None = None
     lng: float | None = None
+    originator_parcel_county: str | None = None
+    originator_parcel_account_num: str | None = None
 
 
 class SavedParcelCreateRequest(BaseModel):
@@ -3659,7 +3671,9 @@ async def list_saved_areas(user: dict[str, Any] = Depends(get_current_user)) -> 
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT area_id, name, polygon, filter_state, type, share_id, created_at, updated_at
+                SELECT area_id, name, polygon, filter_state, type, share_id,
+                       originator_parcel_county, originator_parcel_account_num,
+                       created_at, updated_at
                 FROM saved_areas
                 WHERE user_id = %s
                 ORDER BY created_at DESC
@@ -3674,10 +3688,12 @@ async def list_saved_areas(user: dict[str, Any] = Depends(get_current_user)) -> 
                     "filter_state": row[3] if isinstance(row[3], dict) else None,
                     "type": str(row[4] or "area"),
                     "share_id": str(row[5] or ""),
+                    "originator_parcel_county": str(row[6] or "").strip().lower() or None,
+                    "originator_parcel_account_num": str(row[7] or "").strip() or None,
                     "lat": (float(row[2][0][1]) if isinstance(row[2], list) and row[2] and len(row[2][0]) >= 2 else None) if str(row[4] or "area") == "location" else None,
                     "lng": (float(row[2][0][0]) if isinstance(row[2], list) and row[2] and len(row[2][0]) >= 2 else None) if str(row[4] or "area") == "location" else None,
-                    "created_at": row[6].isoformat() if row[6] else None,
-                    "updated_at": row[7].isoformat() if row[7] else None,
+                    "created_at": row[8].isoformat() if row[8] else None,
+                    "updated_at": row[9].isoformat() if row[9] else None,
                 }
                 for row in cur.fetchall()
             ]
@@ -3760,6 +3776,13 @@ async def create_saved_area(request: SavedAreaCreateRequest, req: Request, user:
     if not name:
         raise HTTPException(status_code=400, detail="Area name is required")
     area_type, polygon_geojson, lat, lng = _normalize_saved_area_payload(request)
+    originator_county = str(request.originator_parcel_county or "").strip().lower() or None
+    originator_account = str(request.originator_parcel_account_num or "").strip() or None
+    if bool(originator_county) != bool(originator_account):
+        raise HTTPException(
+            status_code=400,
+            detail="originator_parcel_county and originator_parcel_account_num must be provided together",
+        )
 
     conn = get_session_conn()
     try:
@@ -3772,9 +3795,12 @@ async def create_saved_area(request: SavedAreaCreateRequest, req: Request, user:
                     cur.execute("SAVEPOINT sp_create_saved_area")
                     cur.execute(
                         """
-                        INSERT INTO saved_areas (name, polygon, filter_state, type, share_id, user_id)
-                        VALUES (%s, %s, %s, %s, %s, %s)
-                        RETURNING area_id, created_at, updated_at
+                        INSERT INTO saved_areas (
+                            name, polygon, filter_state, type, share_id, user_id,
+                            originator_parcel_county, originator_parcel_account_num
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        RETURNING area_id, originator_parcel_county, originator_parcel_account_num, created_at, updated_at
                         """,
                         (
                             name,
@@ -3783,6 +3809,8 @@ async def create_saved_area(request: SavedAreaCreateRequest, req: Request, user:
                             area_type,
                             share_id,
                             int(user["id"]),
+                            originator_county,
+                            originator_account,
                         ),
                     )
                     row = cur.fetchone()
@@ -3835,10 +3863,12 @@ async def create_saved_area(request: SavedAreaCreateRequest, req: Request, user:
         "filter_state": request.filter_state if isinstance(request.filter_state, dict) else None,
         "type": area_type,
         "share_id": share_id,
+        "originator_parcel_county": str(row[1] or "").strip().lower() or None,
+        "originator_parcel_account_num": str(row[2] or "").strip() or None,
         "lat": lat,
         "lng": lng,
-        "created_at": row[1].isoformat() if row[1] else None,
-        "updated_at": row[2].isoformat() if row[2] else None,
+        "created_at": row[3].isoformat() if row[3] else None,
+        "updated_at": row[4].isoformat() if row[4] else None,
     }
 
 
@@ -3849,7 +3879,9 @@ async def get_saved_area(area_id: str, user: dict[str, Any] = Depends(get_curren
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT area_id, name, polygon, filter_state, type, share_id, user_id, created_at, updated_at
+                SELECT area_id, name, polygon, filter_state, type, share_id,
+                       originator_parcel_county, originator_parcel_account_num,
+                       user_id, created_at, updated_at
                 FROM saved_areas
                 WHERE area_id = %s
                 LIMIT 1
@@ -3882,7 +3914,7 @@ async def get_saved_area(area_id: str, user: dict[str, Any] = Depends(get_curren
 
     if row is None:
         raise HTTPException(status_code=404, detail="Saved area not found")
-    if int(row[6] or 0) != int(user["id"]):
+    if int(row[8] or 0) != int(user["id"]):
         raise HTTPException(status_code=403, detail="Forbidden")
 
     return {
@@ -3892,10 +3924,12 @@ async def get_saved_area(area_id: str, user: dict[str, Any] = Depends(get_curren
         "filter_state": row[3] if isinstance(row[3], dict) else None,
         "type": str(row[4] or "area"),
         "share_id": str(row[5] or ""),
+        "originator_parcel_county": str(row[6] or "").strip().lower() or None,
+        "originator_parcel_account_num": str(row[7] or "").strip() or None,
         "lat": (float(row[2][0][1]) if isinstance(row[2], list) and row[2] and len(row[2][0]) >= 2 else None) if str(row[4] or "area") == "location" else None,
         "lng": (float(row[2][0][0]) if isinstance(row[2], list) and row[2] and len(row[2][0]) >= 2 else None) if str(row[4] or "area") == "location" else None,
-        "created_at": row[7].isoformat() if row[7] else None,
-        "updated_at": row[8].isoformat() if row[8] else None,
+        "created_at": row[9].isoformat() if row[9] else None,
+        "updated_at": row[10].isoformat() if row[10] else None,
         "seed_parcels": seed_parcels,
     }
 
@@ -3910,7 +3944,9 @@ async def get_saved_area_by_share_id(
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT area_id, name, polygon, filter_state, type, share_id, created_at, updated_at,
+                  SELECT area_id, name, polygon, filter_state, type, share_id,
+                      originator_parcel_county, originator_parcel_account_num,
+                      created_at, updated_at,
                        COUNT(*) OVER() AS match_count
                 FROM saved_areas
                 WHERE share_id = %s
@@ -3945,7 +3981,7 @@ async def get_saved_area_by_share_id(
     if row is None:
         raise HTTPException(status_code=404, detail="Saved area not found")
 
-    if int(row[8] or 0) > 1:
+    if int(row[10] or 0) > 1:
         logger.warning("Multiple saved_areas rows found for share_id=%s", share_id)
 
     return {
@@ -3955,10 +3991,12 @@ async def get_saved_area_by_share_id(
         "filter_state": row[3] if isinstance(row[3], dict) else None,
         "type": str(row[4] or "area"),
         "share_id": str(row[5] or ""),
+        "originator_parcel_county": str(row[6] or "").strip().lower() or None,
+        "originator_parcel_account_num": str(row[7] or "").strip() or None,
         "lat": (float(row[2][0][1]) if isinstance(row[2], list) and row[2] and len(row[2][0]) >= 2 else None) if str(row[4] or "area") == "location" else None,
         "lng": (float(row[2][0][0]) if isinstance(row[2], list) and row[2] and len(row[2][0]) >= 2 else None) if str(row[4] or "area") == "location" else None,
-        "created_at": row[6].isoformat() if row[6] else None,
-        "updated_at": row[7].isoformat() if row[7] else None,
+        "created_at": row[8].isoformat() if row[8] else None,
+        "updated_at": row[9].isoformat() if row[9] else None,
         "seed_parcels": seed_parcels,
     }
 
@@ -3976,7 +4014,8 @@ async def fork_saved_area(
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT area_id, name, polygon, filter_state, type
+                SELECT area_id, name, polygon, filter_state, type,
+                       originator_parcel_county, originator_parcel_account_num
                 FROM saved_areas
                 WHERE share_id = %s
                 LIMIT 1
@@ -3992,6 +4031,8 @@ async def fork_saved_area(
             source_polygon = source[2] if isinstance(source[2], list) else []
             source_filter_state = source[3] if isinstance(source[3], dict) else None
             source_type = str(source[4] or "area")
+            source_originator_county = str(source[5] or "").strip().lower() or None
+            source_originator_account = str(source[6] or "").strip() or None
 
             cur.execute("SELECT id FROM users WHERE id = %s FOR UPDATE", (int(user["id"]),))
             if cur.fetchone() is None:
@@ -4023,9 +4064,12 @@ async def fork_saved_area(
                     cur.execute("SAVEPOINT sp_fork_saved_area")
                     cur.execute(
                         """
-                        INSERT INTO saved_areas (name, polygon, filter_state, type, share_id, user_id)
-                        VALUES (%s, %s, %s, %s, %s, %s)
-                        RETURNING area_id, created_at, updated_at
+                        INSERT INTO saved_areas (
+                            name, polygon, filter_state, type, share_id, user_id,
+                            originator_parcel_county, originator_parcel_account_num
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        RETURNING area_id, originator_parcel_county, originator_parcel_account_num, created_at, updated_at
                         """,
                         (
                             fork_name,
@@ -4034,6 +4078,8 @@ async def fork_saved_area(
                             source_type,
                             new_share_id,
                             int(user["id"]),
+                            source_originator_county,
+                            source_originator_account,
                         ),
                     )
                     row = cur.fetchone()
@@ -4089,17 +4135,19 @@ async def fork_saved_area(
         "filter_state": source_filter_state if isinstance(source_filter_state, dict) else None,
         "type": source_type,
         "share_id": new_share_id,
+        "originator_parcel_county": str(row[1] or "").strip().lower() or None,
+        "originator_parcel_account_num": str(row[2] or "").strip() or None,
         "lat": (float(source_polygon[0][1]) if isinstance(source_polygon, list) and source_polygon and len(source_polygon[0]) >= 2 else None) if source_type == "location" else None,
         "lng": (float(source_polygon[0][0]) if isinstance(source_polygon, list) and source_polygon and len(source_polygon[0]) >= 2 else None) if source_type == "location" else None,
-        "created_at": row[1].isoformat() if row[1] else None,
-        "updated_at": row[2].isoformat() if row[2] else None,
+        "created_at": row[3].isoformat() if row[3] else None,
+        "updated_at": row[4].isoformat() if row[4] else None,
     }
 
 
 @app.put("/api/areas/{area_id}")
 async def update_saved_area(area_id: str, request: SavedAreaUpdateRequest, req: Request, user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
     require_csrf(req)
-    if request.name is None and request.filter_state is None and request.type is None and request.lat is None and request.lng is None:
+    if request.name is None and request.filter_state is None and request.type is None and request.lat is None and request.lng is None and request.originator_parcel_county is None and request.originator_parcel_account_num is None:
         raise HTTPException(status_code=400, detail="Nothing to update")
 
     update_cols: list[str] = ["updated_at = now()"]
@@ -4125,6 +4173,19 @@ async def update_saved_area(area_id: str, request: SavedAreaUpdateRequest, req: 
             update_cols.append("polygon = %s")
             params.append(Json(polygon_geojson))
 
+    if request.originator_parcel_county is not None or request.originator_parcel_account_num is not None:
+        if request.originator_parcel_county is None or request.originator_parcel_account_num is None:
+            raise HTTPException(
+                status_code=400,
+                detail="originator_parcel_county and originator_parcel_account_num must be provided together",
+            )
+        county = str(request.originator_parcel_county or "").strip().lower() or None
+        account = str(request.originator_parcel_account_num or "").strip() or None
+        update_cols.append("originator_parcel_county = %s")
+        params.append(county)
+        update_cols.append("originator_parcel_account_num = %s")
+        params.append(account)
+
     is_developer = str(user.get("role") or "").strip().lower() == "developer"
     where_clause = "WHERE area_id = %s" if is_developer else "WHERE area_id = %s AND user_id = %s"
     query_params: list[Any] = [*params, area_id]
@@ -4139,7 +4200,9 @@ async def update_saved_area(area_id: str, request: SavedAreaUpdateRequest, req: 
                 UPDATE saved_areas
                 SET {', '.join(update_cols)}
                 {where_clause}
-                RETURNING area_id, name, polygon, filter_state, type, updated_at
+                RETURNING area_id, name, polygon, filter_state, type,
+                          originator_parcel_county, originator_parcel_account_num,
+                          updated_at
                 """,
                 tuple(query_params),
             )
@@ -4159,9 +4222,11 @@ async def update_saved_area(area_id: str, request: SavedAreaUpdateRequest, req: 
         "polygon": _to_leaflet_polygon(row[2]),
         "filter_state": row[3] if isinstance(row[3], dict) else None,
         "type": str(row[4] or "area"),
+        "originator_parcel_county": str(row[5] or "").strip().lower() or None,
+        "originator_parcel_account_num": str(row[6] or "").strip() or None,
         "lat": (float(row[2][0][1]) if isinstance(row[2], list) and row[2] and len(row[2][0]) >= 2 else None) if str(row[4] or "area") == "location" else None,
         "lng": (float(row[2][0][0]) if isinstance(row[2], list) and row[2] and len(row[2][0]) >= 2 else None) if str(row[4] or "area") == "location" else None,
-        "updated_at": row[5].isoformat() if row[5] else None,
+        "updated_at": row[7].isoformat() if row[7] else None,
     }
 
 

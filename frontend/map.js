@@ -460,6 +460,8 @@ const savedParcelLayers = {};
 const SAVED_TARGET_STAR_MAX_ZOOM = 14; // stars hide at this zoom and above
 const savedTargetStarLayer = L.layerGroup().addTo(map);
 const savedTargetStarMarkers = {};
+const _ORIGINATOR_STAR_LAYER = L.layerGroup().addTo(map);
+let _originatorStarMarker = null;
 // Invisible click-catcher polygons that mirror saved-parcel outlines. The
 // decorative halo on `savedParcelPane` is pointer-events:none so its drop-shadow
 // bleed doesn't catch stray clicks; this parallel layer (default overlay pane)
@@ -536,6 +538,7 @@ let _savedParcelsCache = [];
 let _currentSessionIsNamed = false;
 let _savedSessionsCache = [];
 let _currentLoadedAreaId = null;
+let _outlinedParcelIdentity = null; // { county, account } | null
 // Tracks the most recent address the user searched or selected via typeahead.
 // Deep Pull uses this as the target address for the experimental run.
 let _lastSearchedAddress = null;
@@ -1710,6 +1713,8 @@ function _normalizeSavedAreaRow(area) {
     filter_state: area.filter_state && typeof area.filter_state === "object" ? area.filter_state : null,
     lat: Number.isFinite(Number(area.lat)) ? Number(area.lat) : null,
     lng: Number.isFinite(Number(area.lng)) ? Number(area.lng) : null,
+    originator_parcel_county: String(area.originator_parcel_county || "").trim().toLowerCase() || null,
+    originator_parcel_account_num: String(area.originator_parcel_account_num || "").trim() || null,
     shared_by_username: area.shared_by_username || null,
   };
 }
@@ -1831,11 +1836,25 @@ function _savedAreaBoundsFromLatLngs(latlngs) {
   return [[minLat, minLng], [maxLat, maxLng]];
 }
 
+function _captureOriginatorParcel() {
+  if (_outlinedParcelIdentity?.county && _outlinedParcelIdentity?.account) {
+    return { ..._outlinedParcelIdentity };
+  }
+  if (_activeParcelPopupState?.props) {
+    const p = _activeParcelPopupState.props;
+    const account = String(p.account_num || "").trim();
+    const county = String(p.source_county || p.county || "").trim().toLowerCase();
+    if (account && county) return { county, account };
+  }
+  return null;
+}
+
 async function saveCurrentArea(name) {
   if (!lastDrawnLatLngs) return;
   const trimmed = String(name || "").trim();
   if (!trimmed) return;
   bumpUndoPillVersion();
+  const origin = _captureOriginatorParcel();
   const created = await _apiJson("/api/areas", {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders() },
@@ -1845,12 +1864,17 @@ async function saveCurrentArea(name) {
       polygon: lastDrawnLatLngs,
       filter_state: captureFilterState(),
       job_id: currentJobId || null,
+      ...(origin ? {
+        originator_parcel_county: origin.county,
+        originator_parcel_account_num: origin.account,
+      } : {}),
     }),
   });
   const normalized = _normalizeSavedAreaRow(created);
   _savedAreasCache.unshift(normalized);
   // Mark the just-saved area as the currently-loaded one so the Update button
   // becomes available the moment the user tweaks any filter after saving.
+  _clearOriginatorStar();
   _currentLoadedAreaId = normalized.id;
   _syncTabTitle();
   _selectedSavedItemId = normalized.id;
@@ -1959,7 +1983,11 @@ async function deleteSavedArea(item) {
       headers: { ...authHeaders() },
     });
     _savedAreasCache = _savedAreasCache.filter((a) => a.id !== item.id);
-    if (_currentLoadedAreaId === item.id) { _currentLoadedAreaId = null; _syncTabTitle(); }
+    if (_currentLoadedAreaId === item.id) {
+      _clearOriginatorStar();
+      _currentLoadedAreaId = null;
+      _syncTabTitle();
+    }
   }
   if (_selectedSavedItemId === item.id) _selectedSavedItemId = null;
   renderSavedAreasList();
@@ -2073,11 +2101,60 @@ const savedTargetStarIcon = L.divIcon({
   iconAnchor: [11, 11],
 });
 
+function _clearOriginatorStar() {
+  if (_originatorStarMarker) {
+    _ORIGINATOR_STAR_LAYER.removeLayer(_originatorStarMarker);
+    _originatorStarMarker = null;
+  }
+}
+
+async function _renderOriginatorTargetStar(county, account) {
+  if (_originatorStarMarker) {
+    _ORIGINATOR_STAR_LAYER.removeLayer(_originatorStarMarker);
+    _originatorStarMarker = null;
+  }
+  const c = String(county || "").trim().toLowerCase();
+  const a = String(account || "").trim();
+  if (!c || !a) return;
+  try {
+    const resp = await fetch(`/api/parcel/${encodeURIComponent(c)}/${encodeURIComponent(a)}`);
+    if (!resp.ok) return;
+    const detail = await resp.json();
+    const props = detail.properties || detail;
+    const lat = Number(props.lat);
+    const lng = Number(props.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+
+    const icon = L.divIcon({
+      className: "saved-target-star is-originator",
+      html: `
+        <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false">
+          <path d="M12 1.8l3.16 6.4 7.06 1.03-5.11 4.98 1.2 7.04L12 17.93 5.69 21.25l1.2-7.04-5.11-4.98 7.06-1.03L12 1.8z"
+                fill="#e2c075" stroke="#8b6b1f" stroke-width="1.2"/>
+        </svg>
+        <div class="originator-badge">&#9733; TARGET</div>
+      `,
+      iconSize: [44, 32],
+      iconAnchor: [22, 11],
+    });
+    _originatorStarMarker = L.marker([lat, lng], {
+      icon,
+      pane: "savedTargetStarPane",
+    }).addTo(_ORIGINATOR_STAR_LAYER);
+  } catch (err) {
+    console.warn("[originator-star] render failed:", err);
+  }
+}
+
 function _updateSavedTargetStarVisibility() {
   if (map.getZoom() < SAVED_TARGET_STAR_MAX_ZOOM) {
     if (!map.hasLayer(savedTargetStarLayer)) map.addLayer(savedTargetStarLayer);
+    if (!map.hasLayer(_ORIGINATOR_STAR_LAYER)) map.addLayer(_ORIGINATOR_STAR_LAYER);
   } else if (map.hasLayer(savedTargetStarLayer)) {
     map.removeLayer(savedTargetStarLayer);
+    if (map.hasLayer(_ORIGINATOR_STAR_LAYER)) map.removeLayer(_ORIGINATOR_STAR_LAYER);
+  } else if (map.hasLayer(_ORIGINATOR_STAR_LAYER)) {
+    map.removeLayer(_ORIGINATOR_STAR_LAYER);
   }
 }
 
@@ -2163,7 +2240,14 @@ function _renderSavedParcelOutline(area) {
 }
 
 function _clearSelectedOutline() {
+  _setOutlinedParcelIdentity(null, null);
   selectedOutlineLayer.clearLayers();
+}
+
+function _setOutlinedParcelIdentity(county, account) {
+  const c = String(county || "").trim().toLowerCase();
+  const a = String(account || "").trim();
+  _outlinedParcelIdentity = (c && a) ? { county: c, account: a } : null;
 }
 
 // Render a crisp purple outline of `geometry` (Polygon or MultiPolygon)
@@ -2586,8 +2670,15 @@ async function restoreSavedArea(area, options = {}) {
     }
     renderSidebar(data.counts, markers);
     applyResultTags(data);
+    _clearOriginatorStar();
     _currentLoadedAreaId = area.id;
     _syncTabTitle();
+    if (area.originator_parcel_county && area.originator_parcel_account_num) {
+      void _renderOriginatorTargetStar(
+        area.originator_parcel_county,
+        area.originator_parcel_account_num,
+      );
+    }
     // Show the sticky Get Comps button so a quick sweep is one click away
     // after loading a saved area. Guard against mid-sweep: if a deep-pull
     // is in flight, surface the anchor but skip _showPropelioPolygonButton's
@@ -2630,6 +2721,7 @@ async function restoreNamedSession(session, options = {}) {
     return;
   }
   if (rowEl) rowEl.classList.add("row-shimmer");
+  _clearOriginatorStar();
   _currentLoadedAreaId = null;
   _syncTabTitle();
   renderSavedAreasList();
@@ -2889,6 +2981,7 @@ function _renderList(sectionId, listId, items) {
             body: "{}",
           });
           _savedAreasCache.unshift(_normalizeSavedAreaRow(cloned));
+          _clearOriginatorStar();
           _currentLoadedAreaId = cloned.area_id;
           _syncTabTitle();
           _selectedSavedItemId = cloned.area_id;
@@ -2920,6 +3013,7 @@ function _renderList(sectionId, listId, items) {
       // and comp-list clicks are the only paths that get the highlight.
       if (area.type === "parcel") {
         _renderSelectedOutline(area.geometry || null);
+        _setOutlinedParcelIdentity(area.county, area.account_num);
       } else {
         _clearSelectedOutline();
       }
@@ -4400,6 +4494,8 @@ function _findPropelioCompByKey(key) {
 async function flyToAndOpenPropelioComp(compKey) {
   const layer = propelioCompLayerByKey.get(String(compKey || "").trim());
   if (!layer) return;
+  const comp = layer._lotLedgerComp
+    || (typeof layer.getLayers === "function" ? layer.getLayers()[0]?._lotLedgerComp : null);
 
   // Show a crisp purple outline on the map for the clicked comp. If the
   // comp rendered as a footprint, outline its polygon; if it's a fallback
@@ -4413,6 +4509,13 @@ async function flyToAndOpenPropelioComp(compKey) {
         ? (gj.features && gj.features[0])
         : gj;
       _renderSelectedOutline(feat?.geometry || null);
+      const compCounty = String(comp?.parcel_county || "").trim().toLowerCase();
+      const compAccount = String(comp?.parcel_account_num || "").trim();
+      if (compCounty && compAccount) {
+        _setOutlinedParcelIdentity(compCounty, compAccount);
+      } else {
+        _setOutlinedParcelIdentity(null, null);
+      }
     } else {
       _clearSelectedOutline();
     }
@@ -4456,8 +4559,6 @@ async function flyToAndOpenPropelioComp(compKey) {
   // drawn polygon) get the unified CAD+MLS popup, not just the standalone
   // Propelio-only popup. layer._lotLedgerComp is stashed at render time
   // in _renderPropelioComps.
-  const comp = layer._lotLedgerComp
-    || (typeof layer.getLayers === "function" ? layer.getLayers()[0]?._lotLedgerComp : null);
   if (comp && center) {
     await _openUnifiedPropelioPopup(comp, center);
   }
@@ -5987,6 +6088,7 @@ function openParcelDetailPanel(parcelProps, opts = {}) {
   // listener). Falls back gracefully when no geometry is available — the
   // outline just doesn't render for that case.
   if (opts.geometry) {
+    _setOutlinedParcelIdentity(parcelProps?.source_county || parcelProps?.county, parcelProps?.account_num);
     _renderSelectedOutline(opts.geometry);
   }
 
@@ -7327,6 +7429,7 @@ map.on("draw:created", async (e) => {
   closeTransientSoldSidebarPopup();
   map.getContainer().classList.remove("drawing-active");
   _currentSessionIsNamed = false;
+  _clearOriginatorStar();
   _currentLoadedAreaId = null;
   _syncTabTitle();
   _selectedSavedItemId = null;
@@ -7492,6 +7595,7 @@ function clearDrawResults() {
   lastPolygon = null;
   lastDrawnLatLngs = null;
   _currentSessionIsNamed = false;
+  _clearOriginatorStar();
   _currentLoadedAreaId = null;
   _syncTabTitle();
   _updateSaveSessionButtonState();
@@ -7539,6 +7643,7 @@ map.on("draw:drawstart", () => {
   // so vertices never get swallowed by underlying markers.
   map.getContainer().classList.add("drawing-active");
   _currentSessionIsNamed = false;
+  _clearOriginatorStar();
   _currentLoadedAreaId = null;
   _syncTabTitle();
   _selectedSavedItemId = null;
@@ -8722,6 +8827,7 @@ async function _loadAreaFromShareId(shareId) {
         });
         const normalized = _normalizeSavedAreaRow(cloned);
         _savedAreasCache.unshift(normalized);
+        _clearOriginatorStar();
         _currentLoadedAreaId = cloned.area_id;
         _syncTabTitle();
         _selectedSavedItemId = cloned.area_id;
