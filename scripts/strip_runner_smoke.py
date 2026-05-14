@@ -308,6 +308,55 @@ def _test_mock_search_cma_deterministic():
     _assert_true(len(sales_a) > 0, "search_cma returns at least one comp")
 
 
+import contextlib
+import scripts.strip_runner as _sr_module
+from scripts.strip_runner import run_address, AddressOutcome
+
+
+@contextlib.contextmanager
+def _zero_pacing():
+    """Monkeypatch pacing helpers to return 0 so selftests run fast.
+
+    Restores originals on exit so other tests (e.g., Task 4's range tests)
+    still see the real implementations.
+    """
+    saved = (
+        _sr_module.inter_pull_sleep_seconds,
+        _sr_module.inter_address_sleep_seconds,
+        _sr_module.setup_to_first_pull_sleep_seconds,
+    )
+    _sr_module.inter_pull_sleep_seconds = lambda: 0.0
+    _sr_module.inter_address_sleep_seconds = lambda: 0.0
+    _sr_module.setup_to_first_pull_sleep_seconds = lambda: 0.0
+    try:
+        yield
+    finally:
+        (
+            _sr_module.inter_pull_sleep_seconds,
+            _sr_module.inter_address_sleep_seconds,
+            _sr_module.setup_to_first_pull_sleep_seconds,
+        ) = saved
+
+
+@selftest("run_address happy path: 21 search_cma calls, all succeed, addr_total > 0")
+def _test_run_address_happy():
+    client = MockPropelioClient()
+    client.login()
+    with _zero_pacing():
+        outcome = run_address(
+            client=client,
+            address="1234 Main St, Dallas TX 75201",
+            idx=1,
+            total=1,
+            mock=True,
+        )
+    _assert_eq(outcome.status, "complete", "outcome status")
+    _assert_eq(outcome.filters_ok, 21, "all 21 filters succeeded")
+    _assert_eq(outcome.filters_errored, 0, "no errors")
+    _assert_true(outcome.addr_net_new > 0, f"net-new > 0 (got {outcome.addr_net_new})")
+    _assert_true(outcome.cma_id is not None, "cma_id captured")
+
+
 def main() -> int:
     print(f"strip_runner_smoke: running {len(SELFTESTS)} selftest(s)")
     failures: list[tuple[str, str]] = []

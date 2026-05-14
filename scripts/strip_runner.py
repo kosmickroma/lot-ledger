@@ -263,6 +263,185 @@ class MockPropelioClient:
         return {"data": {"sales": comps}}
 
 
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class AddressOutcome:
+    """Per-address result returned by run_address.
+
+    status:
+        "complete"  - all 21 filters fired without error
+        "partial"   - some filters errored but address ran to completion
+        "skipped"   - address-level failure (lead lookup, cma setup, or burst guard)
+    skip_reason:
+        Present when status == "skipped". One of:
+            "lead lookup failed"
+            "cma setup failed"
+            "3 consecutive filter errors"
+    """
+    status: str  # "complete" | "partial" | "skipped"
+    filters_ok: int
+    filters_errored: int
+    addr_net_new: int
+    propelio_returned: int  # raw comps returned across all successful pulls
+    cma_id: str | None
+    skip_reason: str | None = None
+
+
+def _persist_pull_mock(addr_seen_keys: set[str], comps: list[dict[str, Any]]) -> tuple[int, int]:
+    """Mock persistence: count returned + net-new based on a per-address dedup set."""
+    returned = len(comps)
+    new = 0
+    for c in comps:
+        key = c.get("comp_address_key") or c.get("address_full")
+        if not key:
+            continue
+        if key not in addr_seen_keys:
+            new += 1
+            addr_seen_keys.add(key)
+    return returned, new
+
+
+def _persist_pull_real(comps: list[dict[str, Any]]) -> tuple[int, int]:
+    """Real persistence path via api.propelio.archive.merge_comps_into_global.
+
+    Mirrors the flow in api/propelio/deep_pull.py: _parse_property -> dict via
+    asdict() -> match_comps_to_parcels (with WARNING fallback) -> merge.
+    """
+    from dataclasses import asdict
+    from api.propelio.scraper import _parse_property
+    from api.propelio.parcel_match import match_comps_to_parcels
+    from api.propelio.archive import merge_comps_into_global
+
+    parsed = []
+    for raw in comps:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            parsed.append(asdict(_parse_property(raw)))
+        except Exception:
+            continue
+    if not parsed:
+        return 0, 0
+
+    try:
+        matched = match_comps_to_parcels(parsed)
+    except Exception as exc:
+        # Spec §6 / §8: log WARNING, fall back to unmatched merge
+        print(f"  [warn] parcel_match failed (non-fatal): {exc}", file=sys.stderr)
+        matched = parsed
+
+    merge_result = merge_comps_into_global(matched, source="strip_runner")
+    returned = len(comps)
+    new = int(merge_result.get("inserted", 0) or 0)
+    return returned, new
+
+
+def run_address(
+    *,
+    client: Any,
+    address: str,
+    idx: int,
+    total: int,
+    mock: bool = False,
+) -> AddressOutcome:
+    """Run the full 21-filter sweep against one address.
+
+    Happy path only in this task. Error handling is added in Task 7.
+    """
+    now = datetime.now()
+    print(log_addr_header(now, idx=idx, total=total, address=address))
+
+    # Step 1: lead lookup
+    lead_id, _subject_sqft, parcel_bundle = client.find_lead_id(address)
+    confirmation_key = parcel_bundle.get("confirmation_key") if isinstance(parcel_bundle, dict) else None
+
+    # Step 2: CMA setup (comps discarded)
+    setup_start = time.monotonic()
+    envelope = client.add_cma(lead_id, confirmation_key, months=FILTERS[0][0], range_mi=FILTERS[0][1])
+    cma_id = _extract_cma_id_from_envelope(envelope)
+    setup_elapsed = time.monotonic() - setup_start
+    print(log_setup_ok(datetime.now(), cma_id=cma_id, elapsed_s=setup_elapsed))
+
+    # Setup -> first-pull pause (closes immediate-burst gap on same CMA)
+    time.sleep(setup_to_first_pull_sleep_seconds())
+
+    # Step 3: 21 filter pulls via search_cma
+    addr_seen_keys: set[str] = set()
+    addr_total_new = 0
+    propelio_returned_total = 0
+    filters_ok = 0
+
+    for pass_num, (months, range_mi) in enumerate(FILTERS, start=1):
+        if pass_num > 1:
+            time.sleep(inter_pull_sleep_seconds())
+        envelope = client.search_cma(lead_id, cma_id, months=months, range_mi=range_mi)
+        comps = _parse_cma_envelope_sales(envelope)
+        if mock:
+            returned, new = _persist_pull_mock(addr_seen_keys, comps)
+        else:
+            returned, new = _persist_pull_real(comps)
+        propelio_returned_total += returned
+        addr_total_new += new
+        filters_ok += 1
+        print(
+            log_pass(
+                datetime.now(),
+                pass_num=pass_num,
+                pass_total=len(FILTERS),
+                months=months,
+                range_mi=range_mi,
+                returned=returned,
+                new=new,
+                addr_total=addr_total_new,
+            )
+        )
+
+    print(
+        log_addr_done(
+            datetime.now(),
+            filters_ok=filters_ok,
+            filters_total=len(FILTERS),
+            filters_errored=0,
+            addr_net_new=addr_total_new,
+        )
+    )
+    return AddressOutcome(
+        status="complete",
+        filters_ok=filters_ok,
+        filters_errored=0,
+        addr_net_new=addr_total_new,
+        propelio_returned=propelio_returned_total,
+        cma_id=cma_id,
+    )
+
+
+# Local re-implementations of the small helpers from api/propelio/deep_pull.py
+# (the underscore-prefixed ones). Importing them directly would trigger a full
+# scraper module load on smoke runs, so we reimplement here. Drift risk covered
+# by the _is_auth_class equivalence selftest in Task 7.
+def _extract_cma_id_from_envelope(envelope: dict[str, Any]) -> str:
+    if not isinstance(envelope, dict):
+        raise ValueError(f"add_cma envelope is not a dict: type={type(envelope)}")
+    cma_id = str(envelope.get("id") or "").strip()
+    if not cma_id:
+        raise ValueError(f"could not extract cma_id from envelope keys={list(envelope.keys())}")
+    return cma_id
+
+
+def _parse_cma_envelope_sales(envelope: dict[str, Any]) -> list[dict[str, Any]]:
+    if not isinstance(envelope, dict):
+        return []
+    data = envelope.get("data")
+    if not isinstance(data, dict):
+        return []
+    sales = data.get("sales")
+    if not isinstance(sales, list):
+        return []
+    return [item for item in sales if isinstance(item, dict)]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Strip Runner — hand-curated Propelio comp sweep")
     parser.add_argument(
