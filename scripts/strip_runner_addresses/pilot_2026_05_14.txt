@@ -1,0 +1,7 @@
+# Pilot run — confirm real Propelio path works end-to-end before the full strip.
+# Addresses provided by KK (Dallas County, sourced from DCAD info popups).
+# 2026-05-14
+
+143 BILINDSAY COVE
+2101 INDIA RD
+700 WOLF SPRINGS RD
