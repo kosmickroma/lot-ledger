@@ -3852,16 +3852,18 @@ const propelioCmaChip = new PropelioCmaChip().addTo(map);
 const PROPELIO_STATUS_PRIORITY = { sold: 3, pending: 2, active: 1 };
 
 function _dedupCompsForRender(comps) {
+  // Dedup by comp_address_key ("LL:lat,lng" at 6 decimals) — geographic
+  // identity of the comp, always present. Earlier version keyed on
+  // parcel_county|parcel_account_num which left unmatched comps stacking
+  // because most Propelio MLS records don't auto-match county parcels.
   const winners = new Map();
-  const unmatched = [];
+  const noKey = [];
   for (const c of comps) {
-    const county = String(c?.parcel_county || "").trim();
-    const account = String(c?.parcel_account_num || "").trim();
-    if (!account) {
-      unmatched.push(c);
+    const key = String(c?.comp_address_key || "").trim();
+    if (!key) {
+      noKey.push(c);
       continue;
     }
-    const key = county ? `${county}|${account}` : account;
     const current = winners.get(key);
     if (!current) {
       winners.set(key, c);
@@ -3880,7 +3882,7 @@ function _dedupCompsForRender(comps) {
     const newPri = PROPELIO_STATUS_PRIORITY[_propelioStatusBucket(c)] || 0;
     if (newPri > curPri) winners.set(key, c);
   }
-  return [...winners.values(), ...unmatched];
+  return [...winners.values(), ...noKey];
 }
 
 const PROPELIO_POLYGON_MONTHS = 24;
