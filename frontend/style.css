@@ -2355,7 +2355,6 @@ body.is-not-power-user .power-user-only {
 }
 
 .saved-target-star {
-  position: relative;
   width: 22px;
   height: 22px;
   display: flex;
