@@ -1,0 +1,15 @@
+# strip_dallas_south_row1b_2026_05_14.txt
+# Row 1, batch B — next 10 addresses across south Dallas County.
+# Continues from pilot_2026_05_14.txt (143 BILINDSAY COVE, 2101 INDIA RD, 700 WOLF SPRINGS RD).
+# Estimated runtime at run-1 pacing: ~110-120 min (10 × ~11 min/addr + inter-address pauses).
+
+3210 MILLER FERRY RD
+1800 HASH RD
+2830 GREEN ACRES LN
+2913 S HOUSTON SCHOOL RD
+807 BARTON AVE
+901 S WESTMORELAND RD
+1627 S DUNCANVILLE RD
+324 SIMMONS WAY
+2151 TEXAS PLUME RD
+3080 ROSEBUD CT
