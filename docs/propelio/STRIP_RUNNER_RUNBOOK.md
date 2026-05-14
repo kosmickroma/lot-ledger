@@ -17,7 +17,10 @@ cd /path/to/lot-ledger
 # 2. Drop them into a text file under scripts/strip_runner_addresses/
 nano scripts/strip_runner_addresses/strip_my_run.txt
 
-# 3. Run the strip
+# 3. Make sure the log directory exists (first-run only)
+mkdir -p /tmp/strip_runner_logs
+
+# 4. Run the strip
 .venv/bin/python3 -u scripts/strip_runner.py \
     --addresses scripts/strip_runner_addresses/strip_my_run.txt 2>&1 \
     | tee /tmp/strip_runner_logs/strip_my_run.log

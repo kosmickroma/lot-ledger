@@ -23,8 +23,8 @@ from typing import Any
 
 # Ensure the repo root is on sys.path so `from api.propelio.*` imports resolve
 # when this script is invoked directly (Python adds the script's directory to
-# sys.path[0], not the repo root). Matches the pattern used in
-# scripts/marathon_campaign/generate_seeds.py.
+# sys.path[0], not the repo root). Same pattern used by other scripts in this
+# repo that import from `api.*` and live under `scripts/`.
 _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
@@ -261,8 +261,19 @@ class MockPropelioClient:
         }
 
     def search_cma(
-        self, lead_id: str, cma_id: str, months: int, range_mi: float
+        self,
+        lead_id: str,
+        cma_id: str,
+        months: int,
+        range_mi: float,
+        *,
+        geojson: dict[str, Any] | None = None,
+        property_type_presets: list[str] | None = None,
     ) -> dict[str, Any]:
+        # Real PropelioClient.search_cma in api/propelio/scraper.py accepts the
+        # additional keyword args geojson and property_type_presets. strip_runner
+        # doesn't pass them today, but mirroring the signature keeps the mock
+        # forward-compatible with future strip_runner extensions.
         if not self._logged_in:
             raise RuntimeError("MockPropelioClient: must call login() first")
         if "_filter_" in lead_id:
@@ -347,7 +358,16 @@ def _persist_pull_real(comps: list[dict[str, Any]]) -> tuple[int, int]:
         except Exception:
             continue
     if not parsed:
-        return 0, 0
+        # Spec §9: `returned` is raw Propelio output, independent of parse success.
+        # If Propelio returned comps but all failed _parse_property, emit a warning
+        # so payload-shape regressions surface in the log.
+        if comps:
+            print(
+                f"  [warn] all {len(comps)} comps failed _parse_property; "
+                f"possible Propelio payload shape change",
+                file=sys.stderr,
+            )
+        return len(comps), 0
 
     try:
         matched = match_comps_to_parcels(parsed)
