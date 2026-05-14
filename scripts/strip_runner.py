@@ -21,6 +21,15 @@ from pathlib import Path
 from typing import Any
 
 
+# Ensure the repo root is on sys.path so `from api.propelio.*` imports resolve
+# when this script is invoked directly (Python adds the script's directory to
+# sys.path[0], not the repo root). Matches the pattern used in
+# scripts/marathon_campaign/generate_seeds.py.
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+
 FILTERS: list[tuple[int, float]] = [
     # 24-month band
     (24, 5.0), (24, 2.0), (24, 1.0), (24, 0.5), (24, 0.25),
