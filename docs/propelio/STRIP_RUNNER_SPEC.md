@@ -1,8 +1,13 @@
-# Strip Runner — Design v1.2
+# Strip Runner — Design v1.3
 
-**Status:** Copilot rounds 1 and 2 review folded in (2026-05-14). Build-eligible pending KK approval.
+**Status:** Copilot rounds 1, 2, and 3 review folded in (2026-05-14). Build-eligible pending KK approval.
 **Author:** KK + Claude (brainstorm 2026-05-14).
 **Successor to:** the marathon scraper at `scripts/marathon_campaign/` (which remains untouched on `feat/marathon-campaign`).
+
+## Changes v1.2 → v1.3
+
+1. **§10 summary + skip-list (Copilot R3 finding R3-1, IMPORTANT):** the `addresses_skipped` annotation and skip-list example were stale — only covered `find_lead_id` failures. Now generic, with three explicit skip-path labels: `lead lookup failed`, `cma setup failed`, `3 consecutive filter errors`. Implementer is told to track which step caused each skip.
+2. **§6 step 1 (Copilot R3 finding R3-2, nice-to-have):** added explicit `non-auth` qualifier to the address-level-skip rule for `find_lead_id` exceptions, matching the wording in step 2. Removes any ambiguity about whether auth-blocked lead-lookup errors should exit or skip.
 
 ## Changes v1.1 → v1.2
 
@@ -129,7 +134,7 @@ All 21 filters run via `search_cma`. The preceding `add_cma` call exists only to
 
 This is the heart of the script. Per address:
 
-1. `lead_id, subject_lot_sqft, parcel_bundle = client.find_lead_id(address)` — extract `confirmation_key` from `parcel_bundle`. On exception, skip this address (see §8).
+1. `lead_id, subject_lot_sqft, parcel_bundle = client.find_lead_id(address)` — extract `confirmation_key` from `parcel_bundle`. On non-auth exception, skip this address (see §8). Auth-class exceptions (per `_classify_propelio_error`) take the `Auth/rate` path and exit the entire run with code 2 — same as in §8.
 2. **CMA setup (no data pull):**
    - `envelope = client.add_cma(lead_id, confirmation_key, months=FILTERS[0][0], range_mi=FILTERS[0][1])` — purpose: obtain `cma_id` only
    - `cma_id = _extract_cma_id(envelope)`
@@ -263,12 +268,14 @@ Plain stdout, after the main loop exits (or after auth-block exit):
 addresses_total:        25
 addresses_complete:     22  (all 21 filters fired)
 addresses_partial:       2  (some filters errored)
-addresses_skipped:       1  (lead lookup failed)
+addresses_skipped:       1  (setup failed — lead lookup, cma setup, or burst-error guard)
 filter_pulls_total:    504
 propelio_returned_sum: 18420  (raw comps returned across all pulls, duplicates included)
 comps_net_new_total:  1247  (rows inserted into propelio_comps cache)
 elapsed_min:           178
 ```
+
+The `addresses_skipped` annotation is generic because there are three skip paths (Copilot R3 finding R3-1): `find_lead_id` failure, `add_cma` / `_extract_cma_id` failure, or the 3-consecutive-filter-errors burst guard. The implementer should track which step caused each skip and surface that in the skip list below.
 
 The two-number split lets KK eyeball efficiency: 18420 returned vs 1247 net-new means ~6.8% net-new rate. Low rates indicate the area is already well-cached or pulls overlap heavily.
 
@@ -280,7 +287,15 @@ addresses_partial:
   - 8888 Elm St, Dallas TX 75215   (3 filters errored)
 addresses_skipped:
   - 9999 Bad St, Dallas TX 00000   (lead lookup failed)
+  - 4321 Other Ln, Dallas TX 75210 (cma setup failed)
+  - 7777 Burst Rd, Dallas TX 75220 (3 consecutive filter errors)
 ```
+
+Each skipped address is annotated with the specific failure path so KK knows where to look:
+
+- `lead lookup failed` — `find_lead_id` raised; the Propelio side never created or located a CMA
+- `cma setup failed` — `add_cma` or `_extract_cma_id` raised; the lead was found but CMA creation/identification failed
+- `3 consecutive filter errors` — burst-error guard tripped mid-address; some pulls succeeded before the run was aborted for this address (see §8 burst guard)
 
 That's KK's manual re-run list.
 
@@ -366,3 +381,14 @@ R1 findings 1-4 all held under fresh scrutiny. One new IMPORTANT and two nice-to
 | R2-3 | §6, §7 | NICE-TO-HAVE | Added `random.uniform(3, 5)` fixed-range pause after `add_cma` before the first `search_cma`. Closes the immediate-burst gap (the only point where two calls hit the same CMA object back-to-back). |
 
 Copilot's round-2 verdict: with R2-1 resolved, the spec is build-eligible.
+
+### Round 3 (v1.2 → v1.3) — regression check
+
+R1 and R2 implementations all held under fresh scrutiny. One new IMPORTANT (a stale annotation in §10 that I missed when adding the CMA-setup-failure path in R2-1) and one nice-to-have consistency fix. Both addressed in v1.3:
+
+| # | Section | Severity | Resolution |
+|---|---|---|---|
+| R3-1 | §10 | IMPORTANT | The `addresses_skipped` annotation and skip-list example still read "(lead lookup failed)" — only one of three skip paths now (`find_lead_id`, `add_cma`, burst-error guard). Implementer would have hardcoded a misleading annotation. Now generic, with three explicit labels and an implementer note. |
+| R3-2 | §6 step 1 | NICE-TO-HAVE | Step 1 said "On exception, skip this address" without the `non-auth` qualifier that step 2 had. §8 table ordering would have saved the implementation in practice, but explicit consistency removes the risk. |
+
+Copilot's round-3 verdict: with R3-1 resolved, the spec is build-eligible. No prior mitigations weakened.
