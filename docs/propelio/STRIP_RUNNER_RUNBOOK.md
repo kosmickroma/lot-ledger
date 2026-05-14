@@ -8,30 +8,93 @@ How to run the strip runner against a hand-curated list of Dallas County address
 
 ---
 
-## 1. Quick Start
+## 1. Quick Start — From a Fresh Terminal
+
+Six steps. Copy-paste each block. Assumes you've already cloned the repo and the `.venv` exists (one-time setup steps in §1.1 below if not).
+
+**Step 1 — Open a terminal and go to the repo.**
 
 ```bash
-cd /path/to/lot-ledger
-
-# 1. Pick addresses from the map (save targets, copy from the saved-parcels panel)
-# 2. Drop them into a text file under scripts/strip_runner_addresses/
-nano scripts/strip_runner_addresses/strip_my_run.txt
-
-# 3. Make sure the log directory exists (first-run only)
-mkdir -p /tmp/strip_runner_logs
-
-# 4. Run the strip
-.venv/bin/python3 -u scripts/strip_runner.py \
-    --addresses scripts/strip_runner_addresses/strip_my_run.txt 2>&1 \
-    | tee /tmp/strip_runner_logs/strip_my_run.log
+cd /home/kk/projects/clients/lot-ledger
 ```
 
-**Two non-obvious flags:**
+**Step 2 — Switch to the strip runner branch and pull any updates.**
+
+```bash
+git checkout feat/strip-runner
+git pull
+```
+
+**Step 3 — Make sure the log directory exists (only matters on first run after reboot).**
+
+```bash
+mkdir -p /tmp/strip_runner_logs
+```
+
+**Step 4 — Drop your addresses into a new file under `scripts/strip_runner_addresses/`.**
+
+Pick a descriptive filename (the file becomes part of run history). Two ways to create it:
+
+```bash
+# Option A — open it in nano and type/paste the addresses
+nano scripts/strip_runner_addresses/<your-run-name>.txt
+```
+
+```bash
+# Option B — paste the addresses inline (one per line, # for comments)
+cat > scripts/strip_runner_addresses/<your-run-name>.txt <<'EOF'
+# <your-run-name> — brief description, date
+1234 Main St
+5678 Oak Ave
+9012 Pine Rd
+EOF
+```
+
+(Optional — commit the address file as run history. `*.txt` is gitignored, so use `-f`.)
+
+```bash
+git add -f scripts/strip_runner_addresses/<your-run-name>.txt
+git commit -m "chore(strip-runner): <your-run-name> address list"
+git push
+```
+
+**Step 5 — Kick off the run.**
+
+```bash
+.venv/bin/python3 -u scripts/strip_runner.py \
+    --addresses scripts/strip_runner_addresses/<your-run-name>.txt 2>&1 \
+    | tee /tmp/strip_runner_logs/<your-run-name>.log
+```
+
+**Step 6 (optional) — Watch live from a second terminal.**
+
+```bash
+tail -f /tmp/strip_runner_logs/<your-run-name>.log
+```
+
+`Ctrl-C` on the `tail -f` detaches your viewer; it does **not** stop the runner.
+
+**Three non-obvious flags / details:**
 
 - `.venv/bin/python3` — the system Python doesn't have `dotenv` etc.; the strip runner needs the project venv.
 - `-u` — unbuffered stdout. Without this, output is block-buffered when piped through `tee` and you won't see anything for ~10 minutes.
+- `tee` is optional but makes after-the-fact log inspection trivial.
 
-`tee` is optional but makes after-the-fact log inspection easy.
+### 1.1 One-time setup (only if `.venv` doesn't exist)
+
+```bash
+cd /home/kk/projects/clients/lot-ledger
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+```
+
+Then verify `.env` has `PROPELIO_USERNAME` and `PROPELIO_PASSWORD`:
+
+```bash
+grep -E "^PROPELIO_(USERNAME|PASSWORD)" .env
+```
+
+Both should print (values redacted by your shell history but the lines exist).
 
 ---
 
