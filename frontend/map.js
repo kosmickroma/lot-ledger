@@ -1878,6 +1878,14 @@ async function saveCurrentArea(name) {
   _currentLoadedAreaId = normalized.id;
   _syncTabTitle();
   _selectedSavedItemId = normalized.id;
+  // Render the originator star immediately if captured at save time —
+  // otherwise the star wouldn't appear until next workspace reload.
+  if (normalized.originator_parcel_county && normalized.originator_parcel_account_num) {
+    void _renderOriginatorTargetStar(
+      normalized.originator_parcel_county,
+      normalized.originator_parcel_account_num,
+    );
+  }
   setActiveItem("Workspace", normalized.name);
   renderSavedAreasList();
   // If there's already a Propelio pull on screen for this polygon, attach
@@ -2344,6 +2352,12 @@ async function _rightClickSaveParcel(p, knownGeometry) {
 
   try {
     await saveParcel(account, county, addr, lat, lng, geometry);
+    // Stamp the outlined-parcel-identity so a subsequent Save Area (or
+    // auto-save-on-draw) captures THIS parcel as the originator target.
+    // Right-click save skips the detail-panel/outline paths, so without
+    // this _outlinedParcelIdentity stays null and the originator capture
+    // fallback misses entirely.
+    _setOutlinedParcelIdentity(county, account);
     _showToast(addr ? `Saved: ${addr}` : "Saved");
   } catch (err) {
     console.error("right-click save failed", err);
@@ -2980,11 +2994,19 @@ function _renderList(sectionId, listId, items) {
             headers: { "Content-Type": "application/json", ...authHeaders() },
             body: "{}",
           });
-          _savedAreasCache.unshift(_normalizeSavedAreaRow(cloned));
+          const normalizedFork = _normalizeSavedAreaRow(cloned);
+          _savedAreasCache.unshift(normalizedFork);
           _clearOriginatorStar();
           _currentLoadedAreaId = cloned.area_id;
           _syncTabTitle();
           _selectedSavedItemId = cloned.area_id;
+          // Render the originator star carried through the fork.
+          if (normalizedFork.originator_parcel_county && normalizedFork.originator_parcel_account_num) {
+            void _renderOriginatorTargetStar(
+              normalizedFork.originator_parcel_county,
+              normalizedFork.originator_parcel_account_num,
+            );
+          }
           renderSavedAreasList();
           _showToast(`Forked → "${cloned.name}"`);
         } catch {
@@ -8831,6 +8853,13 @@ async function _loadAreaFromShareId(shareId) {
         _currentLoadedAreaId = cloned.area_id;
         _syncTabTitle();
         _selectedSavedItemId = cloned.area_id;
+        // Render the originator star carried through the auto-fork.
+        if (normalized.originator_parcel_county && normalized.originator_parcel_account_num) {
+          void _renderOriginatorTargetStar(
+            normalized.originator_parcel_county,
+            normalized.originator_parcel_account_num,
+          );
+        }
         renderSavedAreasList();
         _showToast(`Added to your saved areas: ${cloned.name}`);
       } catch (forkErr) {
