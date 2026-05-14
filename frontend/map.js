@@ -4034,10 +4034,18 @@ const PROPELIO_POLYGON_MONTHS = 24;
 
 
 function _updatePropelioStatusCounts(_unusedFullList) {
-  // Compute counts independent of status/OAC toggles — answer "how many
-  // would render per category if this toggle were on, with all other
-  // filters as currently set." Other filters (price, sqft, year,
-  // sold-within, lot, year-built) still apply.
+  // Two-pass count calc per docs/propelio/STATUS_BADGE_OAC_AWARENESS_SPEC.md:
+  //
+  // Pass 1 (status badges): answer "if I turn this status ON with my
+  //   current settings, how many comps will I see?" — honors the user's
+  //   actual OAC (showOutsideArea) toggle state, so out-of-polygon comps
+  //   are excluded when OAC is off.
+  // Pass 2 (OAC badge): informational "how many comps are currently
+  //   out-of-view because OAC is off?" — forces showOutsideArea=true so
+  //   the OAC count reflects the full out-of-polygon population.
+  //
+  // Other filters (price, sqft, year, sold-within, lot, year-built) apply
+  // in both passes via propelioFilterState inheritance.
   if (!window._propelioLast || !Array.isArray(window._propelioLast.comps)) {
     const ids = [
       "prop-count-sold", "prop-count-active", "prop-count-pending",
@@ -4050,25 +4058,48 @@ function _updatePropelioStatusCounts(_unusedFullList) {
     });
     return;
   }
-  // Synthetic filter state: all status toggles + OAC simulated ON.
-  const baselineFilters = {
+  // Pass 1: status counts — honor the user's actual showOutsideArea state.
+  // Each status badge answers: "if I turn this status ON with my current
+  // settings, how many comps will I see right now?" When OAC is off, the
+  // out-of-polygon comps don't render, so they shouldn't be counted here.
+  // See docs/propelio/STATUS_BADGE_OAC_AWARENESS_SPEC.md.
+  const statusBaselineFilters = {
+    ...propelioFilterState,
+    statusSold: true,
+    statusActive: true,
+    statusPending: true,
+    // showOutsideArea NOT forced — inherits from propelioFilterState
+  };
+  const statusVisible = window._propelioLast.comps.filter(
+    (c) => compPassesPropelioFilters(c, statusBaselineFilters)
+  );
+  const statusWinners = _dedupCompsForRender(statusVisible);
+
+  let sold = 0, active = 0, pending = 0;
+  for (const c of statusWinners) {
+    const bucket = _propelioStatusBucket(c);
+    if (bucket === "sold") sold++;
+    else if (bucket === "pending") pending++;
+    else active++;
+  }
+
+  // Pass 2: OAC count — informational, always counts out-of-polygon comps
+  // regardless of toggle state. The OAC badge answers "how many comps are
+  // currently filtered out by OAC being off?"
+  const oacBaselineFilters = {
     ...propelioFilterState,
     statusSold: true,
     statusActive: true,
     statusPending: true,
     showOutsideArea: true,
   };
-  const baselineVisible = window._propelioLast.comps.filter(
-    (c) => compPassesPropelioFilters(c, baselineFilters)
+  const oacVisible = window._propelioLast.comps.filter(
+    (c) => compPassesPropelioFilters(c, oacBaselineFilters)
   );
-  const baselineWinners = _dedupCompsForRender(baselineVisible);
+  const oacWinners = _dedupCompsForRender(oacVisible);
 
-  let sold = 0, active = 0, pending = 0, oac = 0;
-  for (const c of baselineWinners) {
-    const bucket = _propelioStatusBucket(c);
-    if (bucket === "sold") sold++;
-    else if (bucket === "pending") pending++;
-    else active++;
+  let oac = 0;
+  for (const c of oacWinners) {
     if (c?.extra?.is_outside_polygon) oac++;
   }
 
@@ -4426,8 +4457,11 @@ function applyPropelioClientFilters() {
   _updatePropelioStatusCounts();
   // Render-only dedup: collapse multi-status records on the same parcel
   // to only the highest-priority status (good-rated wins tie-break).
-  // Status counts above use a baseline-on filter state so badges still
-  // show "what WOULD render if toggled on" — independent of toggle state.
+  // Status counts above use two-pass logic — status badges respect the
+  // user's actual OAC toggle state ("what would this status deliver right
+  // now?"), while the OAC badge stays informational ("how many comps are
+  // currently filtered out by OAC?"). See
+  // docs/propelio/STATUS_BADGE_OAC_AWARENESS_SPEC.md.
   const visibleOnMapForRender = _dedupCompsForRender(visibleOnMap);
   _renderPropelioComps({ ...window._propelioLast, comps: visibleOnMapForRender });
   if (window._propelioLast) propelioCmaChip.setData(window._propelioLast);
