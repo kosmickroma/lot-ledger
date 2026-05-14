@@ -66,6 +66,88 @@ def load_addresses(path: str) -> list[str]:
     return addresses
 
 
+def fmt_ts(now: datetime | None = None) -> str:
+    """Return a bracketed [HH:MM:SS] timestamp prefix. `now` is injectable for tests."""
+    if now is None:
+        now = datetime.now()
+    return now.strftime("[%H:%M:%S]")
+
+
+def log_addr_header(now: datetime, *, idx: int, total: int, address: str) -> str:
+    return f"{fmt_ts(now)} address {idx}/{total}: {address}"
+
+
+def log_setup_ok(now: datetime, *, cma_id: str, elapsed_s: float) -> str:
+    return f"{fmt_ts(now)}   setup: add_cma ok   cma_id={cma_id}   ({elapsed_s:.1f}s)"
+
+
+def log_setup_fail(now: datetime, *, error_summary: str) -> str:
+    return f"{fmt_ts(now)}   setup: add_cma failed — {error_summary}; skipping address"
+
+
+def log_pass(
+    now: datetime,
+    *,
+    pass_num: int,
+    pass_total: int,
+    months: int,
+    range_mi: float,
+    returned: int,
+    new: int,
+    addr_total: int,
+) -> str:
+    # Column widths chosen to match spec §9 sample: pass 2-digit, months 2-digit,
+    # range_mi 4-char (e.g. "2.0" or "0.25"), returned/new/addr_total 3-digit padded.
+    # Use a custom formatter: preserve at least one decimal digit (2.0 not 2, 0.25 stays 0.25).
+    raw = f"{range_mi:g}"
+    range_str = (raw if "." in raw else raw + ".0") + "mi"
+    months_str = f"{months}mo"
+    return (
+        f"{fmt_ts(now)}   pass {pass_num:>2}/{pass_total}   "
+        f"{months_str:>4} / {range_str:<6}  "
+        f"returned {returned:>3}   new {new:>3}   addr_total {addr_total}"
+    )
+
+
+def log_pass_error(
+    now: datetime,
+    *,
+    pass_num: int,
+    pass_total: int,
+    months: int,
+    range_mi: float,
+    error_summary: str,
+) -> str:
+    raw = f"{range_mi:g}"
+    range_str = (raw if "." in raw else raw + ".0") + "mi"
+    months_str = f"{months}mo"
+    return (
+        f"{fmt_ts(now)}   pass {pass_num:>2}/{pass_total}   "
+        f"{months_str:>4} / {range_str:<6}  "
+        f"ERROR {error_summary} — continuing"
+    )
+
+
+def log_addr_done(
+    now: datetime,
+    *,
+    filters_ok: int,
+    filters_total: int,
+    filters_errored: int,
+    addr_net_new: int,
+) -> str:
+    if filters_errored == 0:
+        return f"{fmt_ts(now)}   address done: {filters_ok}/{filters_total} filters ok, {addr_net_new} net-new comps to cache"
+    return (
+        f"{fmt_ts(now)}   address done: {filters_ok}/{filters_total} filters ok, "
+        f"{filters_errored} errored, {addr_net_new} net-new comps to cache"
+    )
+
+
+def log_addr_skipped(now: datetime, *, reason: str) -> str:
+    return f"{fmt_ts(now)}   address skipped: {reason}"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Strip Runner — hand-curated Propelio comp sweep")
     parser.add_argument(

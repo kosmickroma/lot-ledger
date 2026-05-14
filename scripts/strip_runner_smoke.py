@@ -117,6 +117,107 @@ def _test_load_addresses_bom():
     _assert_true("﻿" not in addresses[0], "no BOM remnant in first address")
 
 
+from scripts.strip_runner import (
+    fmt_ts,
+    log_addr_header,
+    log_setup_ok,
+    log_setup_fail,
+    log_pass,
+    log_pass_error,
+    log_addr_done,
+    log_addr_skipped,
+)
+from datetime import datetime
+
+
+_FIXED_TS = datetime(2026, 5, 14, 12, 5, 14)
+
+
+@selftest("fmt_ts produces HH:MM:SS bracketed prefix")
+def _test_fmt_ts():
+    _assert_eq(fmt_ts(_FIXED_TS), "[12:05:14]", "fmt_ts at fixed time")
+
+
+@selftest("log_addr_header format matches spec §9")
+def _test_log_addr_header():
+    line = log_addr_header(_FIXED_TS, idx=4, total=25, address="1234 Main St, Dallas TX 75201")
+    _assert_eq(line, "[12:05:14] address 4/25: 1234 Main St, Dallas TX 75201", "addr header")
+
+
+@selftest("log_setup_ok format matches spec §9")
+def _test_log_setup_ok():
+    line = log_setup_ok(_FIXED_TS, cma_id="cma_a1b2c3d4", elapsed_s=3.8)
+    _assert_eq(line, "[12:05:14]   setup: add_cma ok   cma_id=cma_a1b2c3d4   (3.8s)", "setup ok")
+
+
+@selftest("log_setup_fail format matches spec §9")
+def _test_log_setup_fail():
+    line = log_setup_fail(_FIXED_TS, error_summary="HTTPError 503")
+    _assert_eq(line, "[12:05:14]   setup: add_cma failed — HTTPError 503; skipping address", "setup fail")
+
+
+@selftest("log_pass format matches spec §9 (aligned columns)")
+def _test_log_pass():
+    line = log_pass(
+        _FIXED_TS,
+        pass_num=2,
+        pass_total=21,
+        months=24,
+        range_mi=2.0,
+        returned=142,
+        new=18,
+        addr_total=305,
+    )
+    _assert_eq(
+        line,
+        "[12:05:14]   pass  2/21   24mo / 2.0mi   returned 142   new  18   addr_total 305",
+        "pass line",
+    )
+
+
+@selftest("log_pass_error format matches spec §9")
+def _test_log_pass_error():
+    line = log_pass_error(
+        _FIXED_TS,
+        pass_num=12,
+        pass_total=21,
+        months=6,
+        range_mi=2.0,
+        error_summary="HTTPError 502",
+    )
+    _assert_eq(
+        line,
+        "[12:05:14]   pass 12/21    6mo / 2.0mi   ERROR HTTPError 502 — continuing",
+        "pass error line",
+    )
+
+
+@selftest("log_addr_done format matches spec §9 (all filters ok)")
+def _test_log_addr_done_clean():
+    line = log_addr_done(_FIXED_TS, filters_ok=21, filters_total=21, filters_errored=0, addr_net_new=487)
+    _assert_eq(
+        line,
+        "[12:05:14]   address done: 21/21 filters ok, 487 net-new comps to cache",
+        "addr done clean",
+    )
+
+
+@selftest("log_addr_done format matches spec §9 (some errors)")
+def _test_log_addr_done_partial():
+    line = log_addr_done(_FIXED_TS, filters_ok=20, filters_total=21, filters_errored=1, addr_net_new=423)
+    _assert_eq(
+        line,
+        "[12:05:14]   address done: 20/21 filters ok, 1 errored, 423 net-new comps to cache",
+        "addr done partial",
+    )
+
+
+@selftest("log_addr_skipped format matches spec §9")
+def _test_log_addr_skipped():
+    line = log_addr_skipped(_FIXED_TS, reason="lead lookup failed")
+    _assert_eq(line, "[12:05:14]   address skipped: lead lookup failed", "addr skipped")
+
+
 def main() -> int:
     print(f"strip_runner_smoke: running {len(SELFTESTS)} selftest(s)")
     failures: list[tuple[str, str]] = []
