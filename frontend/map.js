@@ -538,7 +538,7 @@ let _savedParcelsCache = [];
 let _currentSessionIsNamed = false;
 let _savedSessionsCache = [];
 let _currentLoadedAreaId = null;
-let _outlinedParcelIdentity = null; // { county, account } | null
+let _currentTargetParcel = null; // { county, account, lat?, lng? } | null
 // Tracks the most recent address the user searched or selected via typeahead.
 // Deep Pull uses this as the target address for the experimental run.
 let _lastSearchedAddress = null;
@@ -1836,25 +1836,12 @@ function _savedAreaBoundsFromLatLngs(latlngs) {
   return [[minLat, minLng], [maxLat, maxLng]];
 }
 
-function _captureOriginatorParcel() {
-  if (_outlinedParcelIdentity?.county && _outlinedParcelIdentity?.account) {
-    return { ..._outlinedParcelIdentity };
-  }
-  if (_activeParcelPopupState?.props) {
-    const p = _activeParcelPopupState.props;
-    const account = String(p.account_num || "").trim();
-    const county = String(p.source_county || p.county || "").trim().toLowerCase();
-    if (account && county) return { county, account };
-  }
-  return null;
-}
-
 async function saveCurrentArea(name) {
   if (!lastDrawnLatLngs) return;
   const trimmed = String(name || "").trim();
   if (!trimmed) return;
   bumpUndoPillVersion();
-  const origin = _captureOriginatorParcel();
+  const origin = _currentTargetParcel;
   const created = await _apiJson("/api/areas", {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders() },
@@ -1875,15 +1862,25 @@ async function saveCurrentArea(name) {
   // Mark the just-saved area as the currently-loaded one so the Update button
   // becomes available the moment the user tweaks any filter after saving.
   _clearOriginatorStar();
+  _currentTargetParcel = null;
   _currentLoadedAreaId = normalized.id;
   _syncTabTitle();
   _selectedSavedItemId = normalized.id;
-  // Render the originator star immediately if captured at save time —
-  // otherwise the star wouldn't appear until next workspace reload.
+  // Render the originator star immediately if captured at save time.
+  // Use lat/lng from origin (the pre-save _currentTargetParcel) to skip
+  // the /api/parcel fetch round-trip since we already have coordinates.
   if (normalized.originator_parcel_county && normalized.originator_parcel_account_num) {
+    _currentTargetParcel = {
+      county: normalized.originator_parcel_county,
+      account: normalized.originator_parcel_account_num,
+      lat: origin?.lat,
+      lng: origin?.lng,
+    };
     void _renderOriginatorTargetStar(
       normalized.originator_parcel_county,
       normalized.originator_parcel_account_num,
+      origin?.lat,
+      origin?.lng,
     );
   }
   setActiveItem("Workspace", normalized.name);
@@ -1993,6 +1990,7 @@ async function deleteSavedArea(item) {
     _savedAreasCache = _savedAreasCache.filter((a) => a.id !== item.id);
     if (_currentLoadedAreaId === item.id) {
       _clearOriginatorStar();
+      _currentTargetParcel = null;
       _currentLoadedAreaId = null;
       _syncTabTitle();
     }
@@ -2116,7 +2114,7 @@ function _clearOriginatorStar() {
   }
 }
 
-async function _renderOriginatorTargetStar(county, account) {
+async function _renderOriginatorTargetStar(county, account, lat, lng) {
   if (_originatorStarMarker) {
     _ORIGINATOR_STAR_LAYER.removeLayer(_originatorStarMarker);
     _originatorStarMarker = null;
@@ -2124,34 +2122,42 @@ async function _renderOriginatorTargetStar(county, account) {
   const c = String(county || "").trim().toLowerCase();
   const a = String(account || "").trim();
   if (!c || !a) return;
-  try {
-    const resp = await fetch(`/api/parcel/${encodeURIComponent(c)}/${encodeURIComponent(a)}`);
-    if (!resp.ok) return;
-    const detail = await resp.json();
-    const props = detail.properties || detail;
-    const lat = Number(props.lat);
-    const lng = Number(props.lng);
-    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
 
-    const icon = L.divIcon({
-      className: "saved-target-star is-originator",
-      html: `
+  let resolvedLat = Number(lat);
+  let resolvedLng = Number(lng);
+  if (!Number.isFinite(resolvedLat) || !Number.isFinite(resolvedLng)) {
+    try {
+      const resp = await fetch(`/api/parcel/${encodeURIComponent(c)}/${encodeURIComponent(a)}`);
+      if (!resp.ok) return;
+      const detail = await resp.json();
+      const props = detail.properties || detail;
+      resolvedLat = Number(props.lat);
+      resolvedLng = Number(props.lng);
+      if (!Number.isFinite(resolvedLat) || !Number.isFinite(resolvedLng)) return;
+    } catch (err) {
+      console.warn("[target-star] fetch failed:", err);
+      return;
+    }
+  }
+
+  const icon = L.divIcon({
+    className: "saved-target-star is-originator",
+    html: `
+      <div style="position: relative; display: inline-block; width: 22px; height: 22px;">
         <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false">
           <path d="M12 1.8l3.16 6.4 7.06 1.03-5.11 4.98 1.2 7.04L12 17.93 5.69 21.25l1.2-7.04-5.11-4.98 7.06-1.03L12 1.8z"
                 fill="#e2c075" stroke="#8b6b1f" stroke-width="1.2"/>
         </svg>
         <div class="originator-badge">&#9733; TARGET</div>
-      `,
-      iconSize: [44, 32],
-      iconAnchor: [22, 11],
-    });
-    _originatorStarMarker = L.marker([lat, lng], {
-      icon,
-      pane: "savedTargetStarPane",
-    }).addTo(_ORIGINATOR_STAR_LAYER);
-  } catch (err) {
-    console.warn("[originator-star] render failed:", err);
-  }
+      </div>
+    `,
+    iconSize: [44, 32],
+    iconAnchor: [22, 11],
+  });
+  _originatorStarMarker = L.marker([resolvedLat, resolvedLng], {
+    icon,
+    pane: "savedTargetStarPane",
+  }).addTo(_ORIGINATOR_STAR_LAYER);
 }
 
 function _updateSavedTargetStarVisibility() {
@@ -2253,14 +2259,7 @@ function _renderSavedParcelOutline(area) {
 }
 
 function _clearSelectedOutline() {
-  _setOutlinedParcelIdentity(null, null);
   selectedOutlineLayer.clearLayers();
-}
-
-function _setOutlinedParcelIdentity(county, account) {
-  const c = String(county || "").trim().toLowerCase();
-  const a = String(account || "").trim();
-  _outlinedParcelIdentity = (c && a) ? { county: c, account: a } : null;
 }
 
 // Render a crisp purple outline of `geometry` (Polygon or MultiPolygon)
@@ -2312,6 +2311,16 @@ async function saveParcel(account_num, county, addr, lat, lng, geometry) {
   renderSavedAreasList();
   _renderSavedParcelOutline(row);
   _renderSavedTargetStar(row);
+  // Single choke point for both right-click and popup-save paths.
+  // Setting the current target + rendering the TARGET-badged star
+  // happens here, so any saveParcel caller (right-click handler,
+  // popup .parcel-save-link, future paths) gets it for free.
+  const targetCounty = String(county || "dcad").trim().toLowerCase();
+  const targetAccount = String(account_num || "").trim();
+  if (targetAccount) {
+    _currentTargetParcel = { county: targetCounty, account: targetAccount, lat, lng };
+    void _renderOriginatorTargetStar(targetCounty, targetAccount, lat, lng);
+  }
   setActiveItem("Workspace", row.name);
 }
 
@@ -2357,12 +2366,6 @@ async function _rightClickSaveParcel(p, knownGeometry) {
 
   try {
     await saveParcel(account, county, addr, lat, lng, geometry);
-    // Stamp the outlined-parcel-identity so a subsequent Save Area (or
-    // auto-save-on-draw) captures THIS parcel as the originator target.
-    // Right-click save skips the detail-panel/outline paths, so without
-    // this _outlinedParcelIdentity stays null and the originator capture
-    // fallback misses entirely.
-    _setOutlinedParcelIdentity(county, account);
     _showToast(addr ? `Saved: ${addr}` : "Saved");
   } catch (err) {
     console.error("right-click save failed", err);
@@ -2690,9 +2693,14 @@ async function restoreSavedArea(area, options = {}) {
     renderSidebar(data.counts, markers);
     applyResultTags(data);
     _clearOriginatorStar();
+    _currentTargetParcel = null;
     _currentLoadedAreaId = area.id;
     _syncTabTitle();
     if (area.originator_parcel_county && area.originator_parcel_account_num) {
+      _currentTargetParcel = {
+        county: area.originator_parcel_county,
+        account: area.originator_parcel_account_num,
+      };
       void _renderOriginatorTargetStar(
         area.originator_parcel_county,
         area.originator_parcel_account_num,
@@ -2741,6 +2749,7 @@ async function restoreNamedSession(session, options = {}) {
   }
   if (rowEl) rowEl.classList.add("row-shimmer");
   _clearOriginatorStar();
+  _currentTargetParcel = null;
   _currentLoadedAreaId = null;
   _syncTabTitle();
   renderSavedAreasList();
@@ -3002,11 +3011,16 @@ function _renderList(sectionId, listId, items) {
           const normalizedFork = _normalizeSavedAreaRow(cloned);
           _savedAreasCache.unshift(normalizedFork);
           _clearOriginatorStar();
+          _currentTargetParcel = null;
           _currentLoadedAreaId = cloned.area_id;
           _syncTabTitle();
           _selectedSavedItemId = cloned.area_id;
-          // Render the originator star carried through the fork.
+          // Carry the originator TARGET star through the fork.
           if (normalizedFork.originator_parcel_county && normalizedFork.originator_parcel_account_num) {
+            _currentTargetParcel = {
+              county: normalizedFork.originator_parcel_county,
+              account: normalizedFork.originator_parcel_account_num,
+            };
             void _renderOriginatorTargetStar(
               normalizedFork.originator_parcel_county,
               normalizedFork.originator_parcel_account_num,
@@ -3040,7 +3054,6 @@ function _renderList(sectionId, listId, items) {
       // and comp-list clicks are the only paths that get the highlight.
       if (area.type === "parcel") {
         _renderSelectedOutline(area.geometry || null);
-        _setOutlinedParcelIdentity(area.county, area.account_num);
       } else {
         _clearSelectedOutline();
       }
@@ -4536,13 +4549,6 @@ async function flyToAndOpenPropelioComp(compKey) {
         ? (gj.features && gj.features[0])
         : gj;
       _renderSelectedOutline(feat?.geometry || null);
-      const compCounty = String(comp?.parcel_county || "").trim().toLowerCase();
-      const compAccount = String(comp?.parcel_account_num || "").trim();
-      if (compCounty && compAccount) {
-        _setOutlinedParcelIdentity(compCounty, compAccount);
-      } else {
-        _setOutlinedParcelIdentity(null, null);
-      }
     } else {
       _clearSelectedOutline();
     }
@@ -6115,7 +6121,6 @@ function openParcelDetailPanel(parcelProps, opts = {}) {
   // listener). Falls back gracefully when no geometry is available — the
   // outline just doesn't render for that case.
   if (opts.geometry) {
-    _setOutlinedParcelIdentity(parcelProps?.source_county || parcelProps?.county, parcelProps?.account_num);
     _renderSelectedOutline(opts.geometry);
   }
 
@@ -7457,6 +7462,7 @@ map.on("draw:created", async (e) => {
   map.getContainer().classList.remove("drawing-active");
   _currentSessionIsNamed = false;
   _clearOriginatorStar();
+  _currentTargetParcel = null;
   _currentLoadedAreaId = null;
   _syncTabTitle();
   _selectedSavedItemId = null;
@@ -7623,6 +7629,7 @@ function clearDrawResults() {
   lastDrawnLatLngs = null;
   _currentSessionIsNamed = false;
   _clearOriginatorStar();
+  _currentTargetParcel = null;
   _currentLoadedAreaId = null;
   _syncTabTitle();
   _updateSaveSessionButtonState();
@@ -7670,7 +7677,6 @@ map.on("draw:drawstart", () => {
   // so vertices never get swallowed by underlying markers.
   map.getContainer().classList.add("drawing-active");
   _currentSessionIsNamed = false;
-  _clearOriginatorStar();
   _currentLoadedAreaId = null;
   _syncTabTitle();
   _selectedSavedItemId = null;
@@ -8855,11 +8861,16 @@ async function _loadAreaFromShareId(shareId) {
         const normalized = _normalizeSavedAreaRow(cloned);
         _savedAreasCache.unshift(normalized);
         _clearOriginatorStar();
+        _currentTargetParcel = null;
         _currentLoadedAreaId = cloned.area_id;
         _syncTabTitle();
         _selectedSavedItemId = cloned.area_id;
-        // Render the originator star carried through the auto-fork.
+        // Carry the originator TARGET star through the auto-fork.
         if (normalized.originator_parcel_county && normalized.originator_parcel_account_num) {
+          _currentTargetParcel = {
+            county: normalized.originator_parcel_county,
+            account: normalized.originator_parcel_account_num,
+          };
           void _renderOriginatorTargetStar(
             normalized.originator_parcel_county,
             normalized.originator_parcel_account_num,
