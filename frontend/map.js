@@ -7456,8 +7456,11 @@ map.on("draw:created", async (e) => {
   closeTransientSoldSidebarPopup();
   map.getContainer().classList.remove("drawing-active");
   _currentSessionIsNamed = false;
-  _clearOriginatorStar();
-  _currentTargetParcel = null;
+  // Intentionally NOT clearing _currentTargetParcel or _originatorStarMarker
+  // here — saveCurrentArea (called downstream via _autoCacheOnDraw) needs
+  // to read _currentTargetParcel as the originator for the new workspace.
+  // saveCurrentArea handles the clear-and-re-render with the bonded value
+  // after the area is persisted.
   _currentLoadedAreaId = null;
   _syncTabTitle();
   _selectedSavedItemId = null;
