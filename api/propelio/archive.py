@@ -190,17 +190,17 @@ def set_comp_rating(
     saved_area_id: str,
     comp_address_key: str,
     rating: str | None,
+    rated_by_user_id: int | None = None,
 ) -> int:
-    """Update user_rating + rating_at for a single comp in the archive.
+    """Set or clear a workspace-scoped rating for a comp.
 
-    rating values: 'good' | 'bad' | None (None clears the rating).
-    Returns the number of rows updated (0 if no match, 1 on success).
-
-    Validation:
-        - saved_area_id must be non-empty
-        - comp_address_key must be non-empty
-        - rating must be in {'good', 'bad', None}
+    Writes to comp_ratings (Phase 2 canonical store) keyed on
+    (workspace_id, comp_id). Looks up comp_id via comp_address_key on
+    propelio_comps. Returns rows-affected count for endpoint 404 logic
+    (0 = comp not found in global cache).
     """
+    # Intentionally no longer writes propelio_comp_archive.user_rating;
+    # readers should query comp_ratings for canonical rating state.
     area_id = str(saved_area_id or "").strip()
     if not area_id:
         raise ValueError("saved_area_id is required")
@@ -209,13 +209,16 @@ def set_comp_rating(
         raise ValueError("comp_address_key is required")
 
     norm_rating: str | None
-    if rating in (None, "", "null"):
+    if rating is None:
         norm_rating = None
     elif isinstance(rating, str):
         candidate = rating.strip().lower()
-        if candidate not in {"good", "bad"}:
+        if candidate == "":
+            norm_rating = None
+        elif candidate not in {"good", "bad"}:
             raise ValueError(f"rating must be 'good', 'bad', or null; got {rating!r}")
-        norm_rating = candidate
+        else:
+            norm_rating = candidate
     else:
         raise ValueError(f"rating must be a string or null; got type {type(rating).__name__}")
 
@@ -223,18 +226,40 @@ def set_comp_rating(
     try:
         with conn.cursor() as cur:
             cur.execute(
-                """
-                UPDATE propelio_comp_archive
-                SET user_rating = %s,
-                    rating_at  = CASE WHEN %s IS NULL THEN NULL ELSE NOW() END
-                WHERE saved_area_id = %s
-                  AND comp_address_key = %s
-                """,
-                (norm_rating, norm_rating, area_id, addr_key),
+                "SELECT comp_id FROM propelio_comps WHERE comp_address_key = %s LIMIT 1",
+                (addr_key,),
             )
-            updated = cur.rowcount
+            row = cur.fetchone()
+            if row is None:
+                return 0
+            comp_id = int(row[0])
+
+            if norm_rating is None:
+                cur.execute(
+                    """
+                    DELETE FROM comp_ratings
+                    WHERE workspace_id = %s AND comp_id = %s
+                    """,
+                    (area_id, comp_id),
+                )
+                affected = cur.rowcount
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO comp_ratings (workspace_id, comp_id, rating, rated_by_user_id, rated_at)
+                    VALUES (%s, %s, %s, %s, NOW())
+                    ON CONFLICT (workspace_id, comp_id) DO UPDATE
+                        SET rating = EXCLUDED.rating,
+                            rated_by_user_id = EXCLUDED.rated_by_user_id,
+                            rated_at = NOW()
+                    """,
+                    (area_id, comp_id, norm_rating, rated_by_user_id),
+                )
+                affected = cur.rowcount
         conn.commit()
-        return int(updated or 0)
+        if norm_rating is None and affected == 0:
+            return 1
+        return int(affected or 0)
     except Exception:
         conn.rollback()
         raise
