@@ -460,6 +460,8 @@ const savedParcelLayers = {};
 const SAVED_TARGET_STAR_MAX_ZOOM = 14; // stars hide at this zoom and above
 const savedTargetStarLayer = L.layerGroup().addTo(map);
 const savedTargetStarMarkers = {};
+const _ORIGINATOR_STAR_LAYER = L.layerGroup().addTo(map);
+let _originatorStarMarker = null;
 // Invisible click-catcher polygons that mirror saved-parcel outlines. The
 // decorative halo on `savedParcelPane` is pointer-events:none so its drop-shadow
 // bleed doesn't catch stray clicks; this parallel layer (default overlay pane)
@@ -536,6 +538,7 @@ let _savedParcelsCache = [];
 let _currentSessionIsNamed = false;
 let _savedSessionsCache = [];
 let _currentLoadedAreaId = null;
+let _currentTargetParcel = null; // { county, account, lat?, lng? } | null
 // Tracks the most recent address the user searched or selected via typeahead.
 // Deep Pull uses this as the target address for the experimental run.
 let _lastSearchedAddress = null;
@@ -980,7 +983,7 @@ function isFeatureVisible(feature) {
   return true;
 }
 
-function getVisibleFeatureCounts(features) {
+function getVisibleFeatureCounts(features, options = {}) {
   const counts = {
     active: 0,
     off_market: 0,
@@ -998,6 +1001,7 @@ function getVisibleFeatureCounts(features) {
   let rawSeen = 0;
   let dupSkipped = 0;
   let unknownPropType = 0;
+  const ignoreBucketToggles = options.ignoreBucketToggles === true;
 
   list.forEach((feature, idx) => {
     rawSeen += 1;
@@ -1010,7 +1014,11 @@ function getVisibleFeatureCounts(features) {
     seen.add(key);
 
     const bucket = classifyFeatureForFilter(feature);
-    if (!(bucket in counts) || !isFeatureVisible(feature)) return;
+    if (!(bucket in counts)) return;
+    if (!passesNumericFilters(feature)) return;
+    const isListingOrSold = Boolean(p.on_redfin || p.sold_comp);
+    if (isListingOrSold && !passesCompFilters(feature)) return;
+    if (!ignoreBucketToggles && !filterState[bucket]) return;
 
     // Track features falling through to off_market that are NOT recognized
     // single_family — that signals a misclassification path we can investigate.
@@ -1295,18 +1303,20 @@ function updateSoldStatusText() {
   const soldStatus = document.getElementById("sold-toggle-status");
   if (!soldStatus) return;
   if (!filterState.sold) {
-    soldStatus.textContent = "Sold comps hidden";
+    soldStatus.textContent = "Some comps filtered out";
     return;
   }
 
   const filteredCount = lastSoldPanelPoints.length;
   const totalCount = allSoldPointsRef.length;
   if (soldCompsFiltersAreActive() && filteredCount < totalCount) {
-    soldStatus.textContent = `${filteredCount} of ${totalCount} sold comps found`;
+    soldStatus.textContent = "Some comps filtered out";
     return;
   }
 
-  soldStatus.textContent = `${filteredCount} sold comp${filteredCount !== 1 ? "s" : ""} found`;
+  // Default: all sold comps visible - clear so note doesn't read
+  // "filtered out" when nothing actually is.
+  soldStatus.textContent = "";
 }
 
 function applyAndRenderSoldFilters() {
@@ -1710,6 +1720,8 @@ function _normalizeSavedAreaRow(area) {
     filter_state: area.filter_state && typeof area.filter_state === "object" ? area.filter_state : null,
     lat: Number.isFinite(Number(area.lat)) ? Number(area.lat) : null,
     lng: Number.isFinite(Number(area.lng)) ? Number(area.lng) : null,
+    originator_parcel_county: String(area.originator_parcel_county || "").trim().toLowerCase() || null,
+    originator_parcel_account_num: String(area.originator_parcel_account_num || "").trim() || null,
     shared_by_username: area.shared_by_username || null,
   };
 }
@@ -1836,6 +1848,7 @@ async function saveCurrentArea(name) {
   const trimmed = String(name || "").trim();
   if (!trimmed) return;
   bumpUndoPillVersion();
+  const origin = _currentTargetParcel;
   const created = await _apiJson("/api/areas", {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders() },
@@ -1845,15 +1858,38 @@ async function saveCurrentArea(name) {
       polygon: lastDrawnLatLngs,
       filter_state: captureFilterState(),
       job_id: currentJobId || null,
+      ...(origin ? {
+        originator_parcel_county: origin.county,
+        originator_parcel_account_num: origin.account,
+      } : {}),
     }),
   });
   const normalized = _normalizeSavedAreaRow(created);
   _savedAreasCache.unshift(normalized);
   // Mark the just-saved area as the currently-loaded one so the Update button
   // becomes available the moment the user tweaks any filter after saving.
+  _clearOriginatorStar();
+  _currentTargetParcel = null;
   _currentLoadedAreaId = normalized.id;
   _syncTabTitle();
   _selectedSavedItemId = normalized.id;
+  // Render the originator star immediately if captured at save time.
+  // Use lat/lng from origin (the pre-save _currentTargetParcel) to skip
+  // the /api/parcel fetch round-trip since we already have coordinates.
+  if (normalized.originator_parcel_county && normalized.originator_parcel_account_num) {
+    _currentTargetParcel = {
+      county: normalized.originator_parcel_county,
+      account: normalized.originator_parcel_account_num,
+      lat: origin?.lat,
+      lng: origin?.lng,
+    };
+    void _renderOriginatorTargetStar(
+      normalized.originator_parcel_county,
+      normalized.originator_parcel_account_num,
+      origin?.lat,
+      origin?.lng,
+    );
+  }
   setActiveItem("Workspace", normalized.name);
   renderSavedAreasList();
   // If there's already a Propelio pull on screen for this polygon, attach
@@ -1959,7 +1995,12 @@ async function deleteSavedArea(item) {
       headers: { ...authHeaders() },
     });
     _savedAreasCache = _savedAreasCache.filter((a) => a.id !== item.id);
-    if (_currentLoadedAreaId === item.id) { _currentLoadedAreaId = null; _syncTabTitle(); }
+    if (_currentLoadedAreaId === item.id) {
+      _clearOriginatorStar();
+      _currentTargetParcel = null;
+      _currentLoadedAreaId = null;
+      _syncTabTitle();
+    }
   }
   if (_selectedSavedItemId === item.id) _selectedSavedItemId = null;
   renderSavedAreasList();
@@ -2073,12 +2114,69 @@ const savedTargetStarIcon = L.divIcon({
   iconAnchor: [11, 11],
 });
 
+function _clearOriginatorStar() {
+  if (_originatorStarMarker) {
+    _ORIGINATOR_STAR_LAYER.removeLayer(_originatorStarMarker);
+    _originatorStarMarker = null;
+  }
+}
+
+async function _renderOriginatorTargetStar(county, account, lat, lng) {
+  if (_originatorStarMarker) {
+    _ORIGINATOR_STAR_LAYER.removeLayer(_originatorStarMarker);
+    _originatorStarMarker = null;
+  }
+  const c = String(county || "").trim().toLowerCase();
+  const a = String(account || "").trim();
+  if (!c || !a) return;
+
+  let resolvedLat = Number(lat);
+  let resolvedLng = Number(lng);
+  if (!Number.isFinite(resolvedLat) || !Number.isFinite(resolvedLng)) {
+    try {
+      const resp = await fetch(`/api/parcel/${encodeURIComponent(c)}/${encodeURIComponent(a)}`);
+      if (!resp.ok) return;
+      const detail = await resp.json();
+      const props = detail.properties || detail;
+      resolvedLat = Number(props.lat);
+      resolvedLng = Number(props.lng);
+      if (!Number.isFinite(resolvedLat) || !Number.isFinite(resolvedLng)) return;
+    } catch (err) {
+      console.warn("[target-star] fetch failed:", err);
+      return;
+    }
+  }
+
+  const icon = L.divIcon({
+    className: "saved-target-star is-originator",
+    html: `<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false">
+        <path d="M12 1.8l3.16 6.4 7.06 1.03-5.11 4.98 1.2 7.04L12 17.93 5.69 21.25l1.2-7.04-5.11-4.98 7.06-1.03L12 1.8z"
+              fill="#e2c075" stroke="#8b6b1f" stroke-width="1.2"/>
+      </svg>`,
+    iconSize: [22, 22],
+    iconAnchor: [11, 11],
+  });
+  _originatorStarMarker = L.marker([resolvedLat, resolvedLng], {
+    icon,
+    pane: "savedTargetStarPane",
+  }).addTo(_ORIGINATOR_STAR_LAYER);
+}
+
 function _updateSavedTargetStarVisibility() {
+  // Regular gold target stars: zoom-gated. Purpose is wide-view nav so
+  // they only show when zoomed out far enough that parcel outlines
+  // aren't readable. Above the threshold the parcel outlines themselves
+  // are the visible markers.
   if (map.getZoom() < SAVED_TARGET_STAR_MAX_ZOOM) {
     if (!map.hasLayer(savedTargetStarLayer)) map.addLayer(savedTargetStarLayer);
   } else if (map.hasLayer(savedTargetStarLayer)) {
     map.removeLayer(savedTargetStarLayer);
   }
+  // Originator star is NOT zoom-gated. Its purpose is to distinguish
+  // THE intended target from other gold-saved targets in the same
+  // workspace at every zoom level — the user always needs to know
+  // which parcel was the originator regardless of view scale.
+  if (!map.hasLayer(_ORIGINATOR_STAR_LAYER)) map.addLayer(_ORIGINATOR_STAR_LAYER);
 }
 
 function _removeSavedTargetStar(accountNum) {
@@ -2215,6 +2313,16 @@ async function saveParcel(account_num, county, addr, lat, lng, geometry) {
   renderSavedAreasList();
   _renderSavedParcelOutline(row);
   _renderSavedTargetStar(row);
+  // Single choke point for both right-click and popup-save paths.
+  // Setting the current target + rendering the TARGET-badged star
+  // happens here, so any saveParcel caller (right-click handler,
+  // popup .parcel-save-link, future paths) gets it for free.
+  const targetCounty = String(county || "dcad").trim().toLowerCase();
+  const targetAccount = String(account_num || "").trim();
+  if (targetAccount) {
+    _currentTargetParcel = { county: targetCounty, account: targetAccount, lat, lng };
+    void _renderOriginatorTargetStar(targetCounty, targetAccount, lat, lng);
+  }
   setActiveItem("Workspace", row.name);
 }
 
@@ -2586,8 +2694,20 @@ async function restoreSavedArea(area, options = {}) {
     }
     renderSidebar(data.counts, markers);
     applyResultTags(data);
+    _clearOriginatorStar();
+    _currentTargetParcel = null;
     _currentLoadedAreaId = area.id;
     _syncTabTitle();
+    if (area.originator_parcel_county && area.originator_parcel_account_num) {
+      _currentTargetParcel = {
+        county: area.originator_parcel_county,
+        account: area.originator_parcel_account_num,
+      };
+      void _renderOriginatorTargetStar(
+        area.originator_parcel_county,
+        area.originator_parcel_account_num,
+      );
+    }
     // Show the sticky Get Comps button so a quick sweep is one click away
     // after loading a saved area. Guard against mid-sweep: if a deep-pull
     // is in flight, surface the anchor but skip _showPropelioPolygonButton's
@@ -2630,6 +2750,8 @@ async function restoreNamedSession(session, options = {}) {
     return;
   }
   if (rowEl) rowEl.classList.add("row-shimmer");
+  _clearOriginatorStar();
+  _currentTargetParcel = null;
   _currentLoadedAreaId = null;
   _syncTabTitle();
   renderSavedAreasList();
@@ -2888,10 +3010,24 @@ function _renderList(sectionId, listId, items) {
             headers: { "Content-Type": "application/json", ...authHeaders() },
             body: "{}",
           });
-          _savedAreasCache.unshift(_normalizeSavedAreaRow(cloned));
+          const normalizedFork = _normalizeSavedAreaRow(cloned);
+          _savedAreasCache.unshift(normalizedFork);
+          _clearOriginatorStar();
+          _currentTargetParcel = null;
           _currentLoadedAreaId = cloned.area_id;
           _syncTabTitle();
           _selectedSavedItemId = cloned.area_id;
+          // Carry the originator TARGET star through the fork.
+          if (normalizedFork.originator_parcel_county && normalizedFork.originator_parcel_account_num) {
+            _currentTargetParcel = {
+              county: normalizedFork.originator_parcel_county,
+              account: normalizedFork.originator_parcel_account_num,
+            };
+            void _renderOriginatorTargetStar(
+              normalizedFork.originator_parcel_county,
+              normalizedFork.originator_parcel_account_num,
+            );
+          }
           renderSavedAreasList();
           _showToast(`Forked → "${cloned.name}"`);
         } catch {
@@ -4400,6 +4536,8 @@ function _findPropelioCompByKey(key) {
 async function flyToAndOpenPropelioComp(compKey) {
   const layer = propelioCompLayerByKey.get(String(compKey || "").trim());
   if (!layer) return;
+  const comp = layer._lotLedgerComp
+    || (typeof layer.getLayers === "function" ? layer.getLayers()[0]?._lotLedgerComp : null);
 
   // Show a crisp purple outline on the map for the clicked comp. If the
   // comp rendered as a footprint, outline its polygon; if it's a fallback
@@ -4456,8 +4594,6 @@ async function flyToAndOpenPropelioComp(compKey) {
   // drawn polygon) get the unified CAD+MLS popup, not just the standalone
   // Propelio-only popup. layer._lotLedgerComp is stashed at render time
   // in _renderPropelioComps.
-  const comp = layer._lotLedgerComp
-    || (typeof layer.getLayers === "function" ? layer.getLayers()[0]?._lotLedgerComp : null);
   if (comp && center) {
     await _openUnifiedPropelioPopup(comp, center);
   }
@@ -5370,7 +5506,7 @@ function applyMapVisibilityFilters() {
 // number next to each checkbox.
 function _updateMergedSidebarCounts() {
   if (!Array.isArray(allAnalysisFeatures) || !allAnalysisFeatures.length) return;
-  const visibleCounts = getVisibleFeatureCounts(allAnalysisFeatures);
+  const visibleCounts = getVisibleFeatureCounts(allAnalysisFeatures, { ignoreBucketToggles: true });
   const soldCount = Array.isArray(lastSoldPanelPoints) && lastSoldPanelPoints.length
     ? lastSoldPanelPoints.length
     : (Array.isArray(allSoldPointsRef) ? allSoldPointsRef.length : 0);
@@ -5398,7 +5534,7 @@ function _applyNumericFilters() {
   const markers = viewportRenderMode
     ? renderViewportFeatures()
     : renderFeatures(lastAnalysisGeojson);
-  const counts = getVisibleFeatureCounts(lastAnalysisGeojson.features || []);
+  const counts = getVisibleFeatureCounts(lastAnalysisGeojson.features || [], { ignoreBucketToggles: true });
   if (lastAnalysisCounts) renderSidebar(counts, markers || {});
   _refreshLoadedAreaUi();
 }
@@ -6742,7 +6878,7 @@ function renderSidebar(counts, markers) {
   document.getElementById("sidebar-loading").classList.add("hidden");
   document.getElementById("sidebar-results").classList.remove("hidden");
   const visibleCounts = Array.isArray(allAnalysisFeatures) && allAnalysisFeatures.length
-    ? getVisibleFeatureCounts(allAnalysisFeatures)
+    ? getVisibleFeatureCounts(allAnalysisFeatures, { ignoreBucketToggles: true })
     : {
       active: counts.active,
       off_market: counts.off_market,
@@ -7327,6 +7463,11 @@ map.on("draw:created", async (e) => {
   closeTransientSoldSidebarPopup();
   map.getContainer().classList.remove("drawing-active");
   _currentSessionIsNamed = false;
+  // Intentionally NOT clearing _currentTargetParcel or _originatorStarMarker
+  // here — saveCurrentArea (called downstream via _autoCacheOnDraw) needs
+  // to read _currentTargetParcel as the originator for the new workspace.
+  // saveCurrentArea handles the clear-and-re-render with the bonded value
+  // after the area is persisted.
   _currentLoadedAreaId = null;
   _syncTabTitle();
   _selectedSavedItemId = null;
@@ -7492,6 +7633,8 @@ function clearDrawResults() {
   lastPolygon = null;
   lastDrawnLatLngs = null;
   _currentSessionIsNamed = false;
+  _clearOriginatorStar();
+  _currentTargetParcel = null;
   _currentLoadedAreaId = null;
   _syncTabTitle();
   _updateSaveSessionButtonState();
@@ -8722,9 +8865,22 @@ async function _loadAreaFromShareId(shareId) {
         });
         const normalized = _normalizeSavedAreaRow(cloned);
         _savedAreasCache.unshift(normalized);
+        _clearOriginatorStar();
+        _currentTargetParcel = null;
         _currentLoadedAreaId = cloned.area_id;
         _syncTabTitle();
         _selectedSavedItemId = cloned.area_id;
+        // Carry the originator TARGET star through the auto-fork.
+        if (normalized.originator_parcel_county && normalized.originator_parcel_account_num) {
+          _currentTargetParcel = {
+            county: normalized.originator_parcel_county,
+            account: normalized.originator_parcel_account_num,
+          };
+          void _renderOriginatorTargetStar(
+            normalized.originator_parcel_county,
+            normalized.originator_parcel_account_num,
+          );
+        }
         renderSavedAreasList();
         _showToast(`Added to your saved areas: ${cloned.name}`);
       } catch (forkErr) {
