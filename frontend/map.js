@@ -3848,31 +3848,94 @@ const PropelioCmaChip = L.Control.extend({
 });
 const propelioCmaChip = new PropelioCmaChip().addTo(map);
 
+
+const PROPELIO_STATUS_PRIORITY = { sold: 3, pending: 2, active: 1 };
+
+function _dedupCompsForRender(comps) {
+  const winners = new Map();
+  const unmatched = [];
+  for (const c of comps) {
+    const county = String(c?.parcel_county || "").trim();
+    const account = String(c?.parcel_account_num || "").trim();
+    if (!account) {
+      unmatched.push(c);
+      continue;
+    }
+    const key = county ? `${county}|${account}` : account;
+    const current = winners.get(key);
+    if (!current) {
+      winners.set(key, c);
+      continue;
+    }
+    // Good-rating tie-break BEFORE status priority.
+    const currentGood = current?.user_rating === "good";
+    const newGood = c?.user_rating === "good";
+    if (newGood && !currentGood) {
+      winners.set(key, c);
+      continue;
+    }
+    if (currentGood && !newGood) continue;
+    // Both good or both non-good → status priority.
+    const curPri = PROPELIO_STATUS_PRIORITY[_propelioStatusBucket(current)] || 0;
+    const newPri = PROPELIO_STATUS_PRIORITY[_propelioStatusBucket(c)] || 0;
+    if (newPri > curPri) winners.set(key, c);
+  }
+  return [...winners.values(), ...unmatched];
+}
+
 const PROPELIO_POLYGON_MONTHS = 24;
 
-function _updatePropelioStatusCounts(visibleComps) {
-  const comps = Array.isArray(visibleComps)
-    ? visibleComps
-    : (Array.isArray(window._propelioLast?.comps) ? window._propelioLast.comps : []);
-  const counts = { sold: 0, for_sale: 0, pending: 0 };
-  for (const c of comps) {
-    const s = String(c?.status || "").toLowerCase();
-    if (s === "sold") counts.sold += 1;
-    else if (s === "for_sale" || s === "active") counts.for_sale += 1;
-    else if (s === "pending") counts.pending += 1;
+
+function _updatePropelioStatusCounts(_unusedFullList) {
+  // Compute counts independent of status/OAC toggles — answer "how many
+  // would render per category if this toggle were on, with all other
+  // filters as currently set." Other filters (price, sqft, year,
+  // sold-within, lot, year-built) still apply.
+  if (!window._propelioLast || !Array.isArray(window._propelioLast.comps)) {
+    const ids = [
+      "prop-count-sold", "prop-count-active", "prop-count-pending",
+      "cf-count-sold", "cf-count-active", "cf-count-pending",
+      "prop-count-oac",
+    ];
+    ids.forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) el.textContent = "0";
+    });
+    return;
   }
-  const soldEl = document.getElementById("prop-count-sold");
-  const activeEl = document.getElementById("prop-count-active");
-  const pendingEl = document.getElementById("prop-count-pending");
-  const soldCfEl = document.getElementById("cf-count-sold");
-  const activeCfEl = document.getElementById("cf-count-active");
-  const pendingCfEl = document.getElementById("cf-count-pending");
-  if (soldEl) soldEl.textContent = String(counts.sold);
-  if (activeEl) activeEl.textContent = String(counts.for_sale);
-  if (pendingEl) pendingEl.textContent = String(counts.pending);
-  if (soldCfEl) soldCfEl.textContent = String(counts.sold);
-  if (activeCfEl) activeCfEl.textContent = String(counts.for_sale);
-  if (pendingCfEl) pendingCfEl.textContent = String(counts.pending);
+  // Synthetic filter state: all status toggles + OAC simulated ON.
+  const baselineFilters = {
+    ...propelioFilterState,
+    statusSold: true,
+    statusActive: true,
+    statusPending: true,
+    showOutsideArea: true,
+  };
+  const baselineVisible = window._propelioLast.comps.filter(
+    (c) => compPassesPropelioFilters(c, baselineFilters)
+  );
+  const baselineWinners = _dedupCompsForRender(baselineVisible);
+
+  let sold = 0, active = 0, pending = 0, oac = 0;
+  for (const c of baselineWinners) {
+    const bucket = _propelioStatusBucket(c);
+    if (bucket === "sold") sold++;
+    else if (bucket === "pending") pending++;
+    else active++;
+    if (c?.extra?.is_outside_polygon) oac++;
+  }
+
+  const setText = (id, val) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = String(val);
+  };
+  setText("prop-count-sold", sold);
+  setText("prop-count-active", active);
+  setText("prop-count-pending", pending);
+  setText("cf-count-sold", sold);
+  setText("cf-count-active", active);
+  setText("cf-count-pending", pending);
+  setText("prop-count-oac", oac);
 }
 
 _updatePropelioStatusCounts();
@@ -4200,6 +4263,7 @@ function compPassesPropelioFilters(comp, filters) {
 let _propelioFilterDebounceId = null;
 let propelioCompSortMode = "price_desc";
 
+
 function applyPropelioClientFilters() {
   if (!window._propelioLast || !Array.isArray(window._propelioLast.comps)) {
     const countEl = document.getElementById("propelio-filter-count");
@@ -4212,10 +4276,13 @@ function applyPropelioClientFilters() {
   // Map view: render every passing comp (good/unrated AND bad — bad gets
   // the `.bad-comp` class for visual de-emphasis but stays on the map).
   const visibleOnMap = all.filter((c) => compPassesPropelioFilters(c, propelioFilterState));
-  _updatePropelioStatusCounts(visibleOnMap);
-  _renderPropelioComps({ ...window._propelioLast, comps: visibleOnMap });
-  // Re-set the chip from the ORIGINAL data so chip totals reflect raw pull
-  // (filtering is for the map; chip stays accurate to what Propelio sent).
+  _updatePropelioStatusCounts();
+  // Render-only dedup: collapse multi-status records on the same parcel
+  // to only the highest-priority status (good-rated wins tie-break).
+  // Status counts above use a baseline-on filter state so badges still
+  // show "what WOULD render if toggled on" — independent of toggle state.
+  const visibleOnMapForRender = _dedupCompsForRender(visibleOnMap);
+  _renderPropelioComps({ ...window._propelioLast, comps: visibleOnMapForRender });
   if (window._propelioLast) propelioCmaChip.setData(window._propelioLast);
   // List view: hide bad-rated comps entirely from the sidebar list.
   const visibleInList = visibleOnMap.filter((c) => c?.user_rating !== "bad");
@@ -4223,9 +4290,9 @@ function applyPropelioClientFilters() {
   // Update the card-head count chip
   const countEl = document.getElementById("propelio-filter-count");
   if (countEl) {
-    countEl.textContent = visibleOnMap.length === all.length
+    countEl.textContent = visibleOnMapForRender.length === all.length
       ? `${all.length}`
-      : `${visibleOnMap.length} / ${all.length}`;
+      : `${visibleOnMapForRender.length} / ${all.length}`;
   }
   _updateUpdateAreaButtonVisibility();
 }
