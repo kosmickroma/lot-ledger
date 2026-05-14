@@ -50,6 +50,72 @@ def selftest(label: str):
 
 # Selftest registrations get added by subsequent tasks. Empty for now.
 
+from scripts.strip_runner import FILTERS, load_addresses
+import tempfile
+
+
+@selftest("FILTERS has 21 entries in spec-defined order")
+def _test_filters_shape():
+    _assert_eq(len(FILTERS), 21, "FILTERS length")
+    _assert_eq(FILTERS[0], (24, 5.0), "FILTERS[0]")
+    _assert_eq(FILTERS[20], (1, 0.25), "FILTERS[20]")
+    # 24-month band: 5 entries
+    band_24 = [f for f in FILTERS if f[0] == 24]
+    _assert_eq(len(band_24), 5, "24-month band length")
+    # 1-month band: 3 entries
+    band_1 = [f for f in FILTERS if f[0] == 1]
+    _assert_eq(len(band_1), 3, "1-month band length")
+
+
+@selftest("load_addresses strips comments, blanks, whitespace")
+def _test_load_addresses_happy():
+    text = "# header comment\n1234 Main St, Dallas TX 75201\n\n  5678 Oak Ave, Dallas TX 75223  \n# trailing comment\n9012 Pine Rd, Dallas TX 75228\n"
+    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as fh:
+        fh.write(text)
+        path = fh.name
+    addresses = load_addresses(path)
+    _assert_eq(len(addresses), 3, "address count")
+    _assert_eq(addresses[0], "1234 Main St, Dallas TX 75201", "first address")
+    _assert_eq(addresses[1], "5678 Oak Ave, Dallas TX 75223", "second address whitespace-stripped")
+    _assert_eq(addresses[2], "9012 Pine Rd, Dallas TX 75228", "third address")
+
+
+@selftest("load_addresses raises on empty after strip")
+def _test_load_addresses_empty():
+    text = "# only comments\n\n# nothing else\n"
+    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as fh:
+        fh.write(text)
+        path = fh.name
+    try:
+        load_addresses(path)
+    except ValueError as exc:
+        _assert_in("empty", str(exc).lower(), "empty error message")
+        return
+    raise AssertionError("expected ValueError on empty address file")
+
+
+@selftest("load_addresses raises on missing file")
+def _test_load_addresses_missing():
+    try:
+        load_addresses("/tmp/__nonexistent_strip_runner_test_file__.txt")
+    except (FileNotFoundError, ValueError):
+        return
+    raise AssertionError("expected FileNotFoundError or ValueError on missing file")
+
+
+@selftest("load_addresses strips UTF-8 BOM from first line")
+def _test_load_addresses_bom():
+    # UTF-8 BOM (0xEF 0xBB 0xBF) prefix on first line; `strip()` does not remove it,
+    # so encoding="utf-8-sig" must be used in load_addresses.
+    text = "﻿# header comment\n1234 Main St, Dallas TX 75201\n5678 Oak Ave, Dallas TX 75223\n"
+    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as fh:
+        fh.write(text)
+        path = fh.name
+    addresses = load_addresses(path)
+    _assert_eq(len(addresses), 2, "BOM file address count")
+    _assert_eq(addresses[0], "1234 Main St, Dallas TX 75201", "first address (no BOM bleed)")
+    _assert_true("﻿" not in addresses[0], "no BOM remnant in first address")
+
 
 def main() -> int:
     print(f"strip_runner_smoke: running {len(SELFTESTS)} selftest(s)")

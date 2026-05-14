@@ -21,6 +21,51 @@ from pathlib import Path
 from typing import Any
 
 
+FILTERS: list[tuple[int, float]] = [
+    # 24-month band
+    (24, 5.0), (24, 2.0), (24, 1.0), (24, 0.5), (24, 0.25),
+    # 12-month band
+    (12, 5.0), (12, 2.0), (12, 1.0), (12, 0.5), (12, 0.25),
+    # 6-month band
+    (6, 5.0), (6, 2.0), (6, 1.0), (6, 0.5), (6, 0.25),
+    # 3-month band
+    (3, 1.0), (3, 0.5), (3, 0.25),
+    # 1-month band
+    (1, 1.0), (1, 0.5), (1, 0.25),
+]
+assert len(FILTERS) == 21, "FILTERS must have exactly 21 entries per spec §5"
+
+
+def load_addresses(path: str) -> list[str]:
+    """Read an address list file and return the stripped non-blank, non-comment lines.
+
+    Raises FileNotFoundError if the file does not exist, ValueError if the
+    file exists but contains no addresses after stripping comments and blanks.
+    """
+    file_path = Path(path)
+    if not file_path.exists():
+        raise FileNotFoundError(f"address file not found: {path}")
+
+    # utf-8-sig auto-strips the UTF-8 BOM if present, so a BOM-prefixed first
+    # line doesn't get parsed as a malformed address. Plain utf-8 leaves the BOM.
+    with file_path.open("r", encoding="utf-8-sig") as fh:
+        lines = fh.readlines()
+
+    addresses: list[str] = []
+    for raw in lines:
+        stripped = raw.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("#"):
+            continue
+        addresses.append(stripped)
+
+    if not addresses:
+        raise ValueError(f"address file is empty (no non-comment, non-blank lines): {path}")
+
+    return addresses
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Strip Runner — hand-curated Propelio comp sweep")
     parser.add_argument(
