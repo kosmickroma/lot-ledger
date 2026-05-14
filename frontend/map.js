@@ -2155,15 +2155,20 @@ async function _renderOriginatorTargetStar(county, account) {
 }
 
 function _updateSavedTargetStarVisibility() {
+  // Regular gold target stars: zoom-gated. Purpose is wide-view nav so
+  // they only show when zoomed out far enough that parcel outlines
+  // aren't readable. Above the threshold the parcel outlines themselves
+  // are the visible markers.
   if (map.getZoom() < SAVED_TARGET_STAR_MAX_ZOOM) {
     if (!map.hasLayer(savedTargetStarLayer)) map.addLayer(savedTargetStarLayer);
-    if (!map.hasLayer(_ORIGINATOR_STAR_LAYER)) map.addLayer(_ORIGINATOR_STAR_LAYER);
   } else if (map.hasLayer(savedTargetStarLayer)) {
     map.removeLayer(savedTargetStarLayer);
-    if (map.hasLayer(_ORIGINATOR_STAR_LAYER)) map.removeLayer(_ORIGINATOR_STAR_LAYER);
-  } else if (map.hasLayer(_ORIGINATOR_STAR_LAYER)) {
-    map.removeLayer(_ORIGINATOR_STAR_LAYER);
   }
+  // Originator star is NOT zoom-gated. Its purpose is to distinguish
+  // THE intended target from other gold-saved targets in the same
+  // workspace at every zoom level — the user always needs to know
+  // which parcel was the originator regardless of view scale.
+  if (!map.hasLayer(_ORIGINATOR_STAR_LAYER)) map.addLayer(_ORIGINATOR_STAR_LAYER);
 }
 
 function _removeSavedTargetStar(accountNum) {
