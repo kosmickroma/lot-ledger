@@ -646,6 +646,9 @@ scripts/
   build_denton.py      — Ingest Denton GeoJSON into DB (streams via ijson)
   export_pmtiles.py    — Export all counties to GeoJSON, print tippecanoe command
   check_denton_codes.py — Utility: print state_cd distribution for Denton
+  strip_runner.py      — Hand-curated Propelio comp pull (warm propelio_comps cache)
+  strip_runner_smoke.py — Inline selftests for strip_runner (32 assertions)
+  strip_runner_addresses/  — Address lists for strip runs (one file per run)
 
 frontend/
   index.html           — App shell, sidebar HTML
@@ -659,6 +662,9 @@ docs/
   propelio/                       — Propelio integration docs (specs, roadmap, troubleshooting)
     INTEGRATION_TROUBLESHOOTING.md — Diagnosis playbook for Refresh / marathon / cache issues
     README.md                       — Doc index for the Propelio integration
+    STRIP_RUNNER_SPEC.md            — Strip runner design (v1.3, on feat/strip-runner)
+    STRIP_RUNNER_PLAN.md            — Strip runner implementation plan (v1.1, executed)
+    STRIP_RUNNER_RUNBOOK.md         — Operator runbook: how to run a strip, what to expect
 ```
 
 ### Troubleshooting
@@ -668,6 +674,24 @@ marathon runner gone quiet, missing pendings, status counters drifting —
 start with [`docs/propelio/INTEGRATION_TROUBLESHOOTING.md`](./docs/propelio/INTEGRATION_TROUBLESHOOTING.md).
 It covers the three "quick triage" SQL queries that pin almost every
 issue, plus symptom-by-symptom diagnosis and known cap mechanics.
+
+### Warming the Propelio Comp Cache (Strip Runner)
+
+When you want to bulk-pull Propelio comps against a hand-curated list of
+addresses (rather than per-click on the map), use the strip runner. It runs
+a 21-filter sweep per address (24mo down to 1mo × 5mi down to 0.25mi) and
+writes results to the global `propelio_comps` cache.
+
+See [`docs/propelio/STRIP_RUNNER_RUNBOOK.md`](./docs/propelio/STRIP_RUNNER_RUNBOOK.md)
+for invocation, address list format, monitoring, and tuning. Quick form:
+
+```bash
+.venv/bin/python3 -u scripts/strip_runner.py \
+    --addresses scripts/strip_runner_addresses/<your-list>.txt \
+    2>&1 | tee /tmp/strip_runner_logs/<your-list>.log
+```
+
+Strip runner lives on `feat/strip-runner`; not yet merged to `develop`.
 
 ### Running in Development
 

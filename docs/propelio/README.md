@@ -25,6 +25,9 @@ sold-comp pricing in this app.
 | [`SPEC_V2_POLYGON.md`](./SPEC_V2_POLYGON.md) | Phase 2 spec — polygon-driven pulls + purple footprint render. Phase 2 done. |
 | [`SPEC_V3_WORKSPACE.md`](./SPEC_V3_WORKSPACE.md) | **Phase 3 spec — workspace-anchored comps, two-tier filters, good/bad curation, status colors, append-only refresh.** Active build. Six chunks for Copilot. |
 | [`INTEGRATION_TROUBLESHOOTING.md`](./INTEGRATION_TROUBLESHOOTING.md) | **Diagnosis playbook for silent failures** — Refresh-not-firing, marathon-runner-death, campaign-aggregate drift, Propelio cap mechanics. Start here when something's off. |
+| [`STRIP_RUNNER_SPEC.md`](./STRIP_RUNNER_SPEC.md) | Strip Runner v1.3 spec — hand-curated address list + 21-filter sweep per address. Replaces the marathon's auto-grid approach. Lives on `feat/strip-runner`. |
+| [`STRIP_RUNNER_PLAN.md`](./STRIP_RUNNER_PLAN.md) | Implementation plan (v1.1) — 10 tasks, TDD rhythm. Executed via subagent-driven dev. |
+| [`STRIP_RUNNER_RUNBOOK.md`](./STRIP_RUNNER_RUNBOOK.md) | **Operator runbook** — how to invoke, what to expect, how to monitor and verify. Start here when running a strip. |
 
 ## Quick reference
 
