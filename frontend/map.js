@@ -3852,14 +3852,23 @@ const propelioCmaChip = new PropelioCmaChip().addTo(map);
 const PROPELIO_STATUS_PRIORITY = { sold: 3, pending: 2, active: 1 };
 
 function _dedupCompsForRender(comps) {
-  // Dedup by comp_address_key ("LL:lat,lng" at 6 decimals) — geographic
-  // identity of the comp, always present. Earlier version keyed on
-  // parcel_county|parcel_account_num which left unmatched comps stacking
-  // because most Propelio MLS records don't auto-match county parcels.
+  // Dedup by lat/lng rounded to 4 decimals (~10m precision). Propelio
+  // sometimes returns the same physical property with slightly different
+  // geocodes across MLS records (e.g., listing geocoded to parcel
+  // centroid, sold record geocoded to building centroid). 6-decimal
+  // comp_address_key was too strict and let these stack on the map;
+  // 4-decimal rounding collapses near-duplicates while keeping adjacent
+  // properties distinct (typical urban lot is 20-30m).
   const winners = new Map();
   const noKey = [];
+  const round4 = (n) => {
+    const x = Number(n);
+    return Number.isFinite(x) ? x.toFixed(4) : null;
+  };
   for (const c of comps) {
-    const key = String(c?.comp_address_key || "").trim();
+    const lat = round4(c?.lat);
+    const lng = round4(c?.lng);
+    const key = lat && lng ? `${lat},${lng}` : String(c?.comp_address_key || "").trim();
     if (!key) {
       noKey.push(c);
       continue;
