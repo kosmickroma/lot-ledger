@@ -2371,21 +2371,6 @@ body.is-not-power-user .power-user-only {
   transform: scale(1.06);
 }
 
-.saved-target-star.is-originator .originator-badge {
-  position: absolute;
-  top: 22px;
-  left: 50%;
-  transform: translateX(-50%);
-  background: rgba(120, 90, 30, 0.92);
-  color: #f7e3a1;
-  font-size: 9px;
-  font-weight: 700;
-  padding: 1px 4px;
-  border-radius: 3px;
-  white-space: nowrap;
-  pointer-events: none;
-}
-
 .saved-target-star.is-originator svg {
   filter:
     drop-shadow(0 0 6px rgba(226, 192, 117, 0.95))

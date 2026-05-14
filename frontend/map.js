@@ -2142,17 +2142,12 @@ async function _renderOriginatorTargetStar(county, account, lat, lng) {
 
   const icon = L.divIcon({
     className: "saved-target-star is-originator",
-    html: `
-      <div style="position: relative; display: inline-block; width: 22px; height: 22px;">
-        <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false">
-          <path d="M12 1.8l3.16 6.4 7.06 1.03-5.11 4.98 1.2 7.04L12 17.93 5.69 21.25l1.2-7.04-5.11-4.98 7.06-1.03L12 1.8z"
-                fill="#e2c075" stroke="#8b6b1f" stroke-width="1.2"/>
-        </svg>
-        <div class="originator-badge">&#9733; TARGET</div>
-      </div>
-    `,
-    iconSize: [44, 32],
-    iconAnchor: [22, 11],
+    html: `<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false">
+        <path d="M12 1.8l3.16 6.4 7.06 1.03-5.11 4.98 1.2 7.04L12 17.93 5.69 21.25l1.2-7.04-5.11-4.98 7.06-1.03L12 1.8z"
+              fill="#e2c075" stroke="#8b6b1f" stroke-width="1.2"/>
+      </svg>`,
+    iconSize: [22, 22],
+    iconAnchor: [11, 11],
   });
   _originatorStarMarker = L.marker([resolvedLat, resolvedLng], {
     icon,
