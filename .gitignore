@@ -23,9 +23,11 @@ ingest/
 *.db
 *.sqlite
 
-# Docs — internal notes, not for repo (CODE_GUIDE.md is the exception)
+# Docs — internal notes, not for repo (CODE_GUIDE.md and propelio/ are exceptions)
 docs/*
 !docs/CODE_GUIDE.md
+!docs/propelio/
+!docs/propelio/**
 
 # Render / deployment artifacts
 .render/
@@ -33,6 +35,7 @@ docs/*
 # IDE
 .vscode/
 .idea/
+.claude/
 
 # OS
 .DS_Store

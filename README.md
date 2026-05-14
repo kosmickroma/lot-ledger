@@ -197,7 +197,18 @@ Never share your `.env` file or `credentials.json`. Do not commit them to GitHub
 
 **Address search** — type any address in the search bar to jump to a parcel. Searches all four counties.
 
-**Saved areas** — click Save Area to name and save your polygon. Click it again later to fly back and restore the draw.
+**Saved areas** — click Save Area to name and save your polygon. Click it again later to fly back and restore the draw. The parcel you had selected when you clicked Save Area becomes the workspace's "intended target" — marked on the map with a gold star at every zoom level so you can always tell which parcel the workspace was built around.
+
+**Propelio comps (power-user+ only)** — when a workspace is loaded, two pulls are available:
+
+- **Get Comps** (gold sticky button on the map) — fires a 3-pass Quick Sweep across the last 1–3 months at 0.25–1.0 mile radius, constrained to the drawn polygon. Catches recent listings, pendings, and sold comps. ~3 minutes per polygon.
+- **Custom Search** (sidebar) — manual scrape using the months + range you set. Results merge into the global comp cache automatically.
+
+Comps render as colored footprints on the map: red = sold, green = active listing, blue dot = pending. Click any comp to see the full MLS data + price, agent info, photos, and a Good/Bad rating you can attach (ratings ship with the workspace through share links).
+
+**Sharing a workspace** — every saved area has a Share link button. Send the URL to a teammate; when they open it, it auto-clones into their saved areas (with their own copy if their account has a same-named workspace already). The clone carries the polygon, filter state, comp ratings, and intended-target marker.
+
+**Display vs scrape filters** — the sidebar separates "Search settings" (months/range used when running Custom Search or Get Comps) from "Display filters" (sold-within window, lot size, sqft, year, price). Changing display filters is instant; changing search settings requires a new scrape. Map Filters control which parcel types render (Off Market, Vacant, Multifamily, etc.) and which comp statuses (Sold, Active, Pending) are visible. Toggle counts always show what WOULD render if the toggle were on — never zero just because you've hidden a category.
 
 ---
 
@@ -645,7 +656,18 @@ docs/
   COUNTY_EXPANSION_CHECKLIST.md   — Step-by-step for adding a new county (proven on Collin + Denton)
   DENTON_BUILD_BRIEF.md           — Denton-specific build notes
   lot-ledger/                     — Planning docs and client notes
+  propelio/                       — Propelio integration docs (specs, roadmap, troubleshooting)
+    INTEGRATION_TROUBLESHOOTING.md — Diagnosis playbook for Refresh / marathon / cache issues
+    README.md                       — Doc index for the Propelio integration
 ```
+
+### Troubleshooting
+
+When the Propelio comp integration misbehaves — Refresh not firing,
+marathon runner gone quiet, missing pendings, status counters drifting —
+start with [`docs/propelio/INTEGRATION_TROUBLESHOOTING.md`](./docs/propelio/INTEGRATION_TROUBLESHOOTING.md).
+It covers the three "quick triage" SQL queries that pin almost every
+issue, plus symptom-by-symptom diagnosis and known cap mechanics.
 
 ### Running in Development
 

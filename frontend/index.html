@@ -32,71 +32,245 @@
           <button id="btn-dismiss-import" type="button">Dismiss</button>
         </div>
       </div>
+      <div id="active-item-slot" class="active-item-slot">
+        <div class="active-item-slot-inner">
+          <span class="active-item-type" id="active-item-type">Workspace</span>
+          <strong class="active-item-name" id="active-item-name">—</strong>
+          <button id="active-item-rename" class="active-item-rename-btn hidden" type="button" title="Rename workspace" aria-label="Rename workspace">✎</button>
+        </div>
+      </div>
+      <div id="sidebar-results" class="sidebar-section hidden">
+        <p id="session-cache-note" class="sidebar-note hidden"></p>
+        <div class="sidebar-actions">
+          <button id="btn-save-area" class="btn-primary">Save Area</button>
+          <button id="btn-download" class="btn-secondary">Download CSV</button>
+          <button id="btn-update-saved-area" class="btn-secondary hidden">Update</button>
+        </div>
+        <div class="sidebar-actions actions-secondary">
+          <button id="btn-save-session" class="btn-tertiary" disabled>Save Snapshot</button>
+          <button id="btn-clear" class="btn-tertiary">Deselect</button>
+        </div>
+      </div>
+      <div id="sidebar-loading" class="sidebar-section hidden">
+        <div class="spinner"></div>
+        <p class="sidebar-copy">Loading parcels...</p>
+        <p id="redfin-status" class="sidebar-note">Pulling Redfin listings...</p>
+      </div>
+      <div id="propelio-filters" class="filter-card collapsible-section">
+        <button class="section-toggle" type="button" data-target="propelio-filters-body" aria-expanded="true">
+          <span class="sidebar-label">Sold Comps + Listings</span>
+          <span id="propelio-filter-count" class="propelio-filter-count"></span>
+        </button>
+        <div id="propelio-filters-body" class="collapsible-body">
+          <div class="filter-card-head">
+            <button id="btn-propelio-reset" class="filter-reset-btn" type="button">Reset</button>
+          </div>
+          <div class="propelio-status-section">
+            <p class="propelio-section-label">Status</p>
+            <div class="filter-list">
+              <label class="filter-row">
+                <span class="filter-swatch is-dot" style="--sw:#dc2626"></span>
+                <span class="filter-name">Sold</span>
+                <span class="filter-count" id="cf-count-sold">0</span>
+                <input type="checkbox" id="cf-status-sold" checked>
+              </label>
+              <label class="filter-row">
+                <span class="filter-swatch is-dot" style="--sw:#22c55e"></span>
+                <span class="filter-name">Active</span>
+                <span class="filter-count" id="cf-count-active">0</span>
+                <input type="checkbox" id="cf-status-active" checked>
+              </label>
+              <label class="filter-row">
+                <span class="filter-swatch is-dot" style="background: radial-gradient(circle, #0284c7 0%, #0284c7 35%, #7dd3fc 100%);"></span>
+                <span class="filter-name">Pending</span>
+                <span class="filter-count" id="cf-count-pending">0</span>
+                <input type="checkbox" id="cf-status-pending" checked>
+              </label>
+            </div>
+          </div>
+          <div class="propelio-client-section">
+            <p class="propelio-section-label">Display filters (instant)</p>
+            <div class="numeric-filter-row">
+              <span class="numeric-filter-label">Sold within (days)</span>
+              <div class="numeric-filter-inputs">
+                <input type="number" id="prop-sold-within" class="nf-input" placeholder="any" min="1" max="3650">
+              </div>
+            </div>
+            <div class="numeric-filter-row">
+              <span class="numeric-filter-label">Lot Size (acres)</span>
+              <div class="numeric-filter-inputs">
+                <input type="text" id="prop-lot-min" class="nf-input" placeholder="Min" inputmode="decimal">
+                <span class="nf-sep">–</span>
+                <input type="text" id="prop-lot-max" class="nf-input" placeholder="Max" inputmode="decimal">
+              </div>
+            </div>
+            <div class="numeric-filter-row">
+              <span class="numeric-filter-label">Living Sqft</span>
+              <div class="numeric-filter-inputs">
+                <input type="number" id="prop-sqft-min" class="nf-input" placeholder="Min" min="0">
+                <span class="nf-sep">–</span>
+                <input type="number" id="prop-sqft-max" class="nf-input" placeholder="Max" min="0">
+              </div>
+            </div>
+            <div class="numeric-filter-row">
+              <span class="numeric-filter-label">Year Built</span>
+              <div class="numeric-filter-inputs">
+                <input type="number" id="prop-year-min" class="nf-input" placeholder="Min" min="1800" max="2030">
+                <span class="nf-sep">–</span>
+                <input type="number" id="prop-year-max" class="nf-input" placeholder="Max" min="1800" max="2030">
+              </div>
+            </div>
+            <div class="numeric-filter-row">
+              <span class="numeric-filter-label">Price</span>
+              <div class="numeric-filter-inputs">
+                <input type="text" id="prop-price-min" class="nf-input" placeholder="Min (500k)" inputmode="decimal">
+                <span class="nf-sep">–</span>
+                <input type="text" id="prop-price-max" class="nf-input" placeholder="Max (1m)" inputmode="decimal">
+              </div>
+            </div>
+          </div>
+          <div class="propelio-comp-list-section">
+            <div class="propelio-comp-list-head">
+              <span class="propelio-section-label">Comps list</span>
+              <select id="propelio-comp-sort" class="propelio-sort-select">
+                <option value="price_desc">Price ↓</option>
+                <option value="price_asc">Price ↑</option>
+                <option value="sqft_desc">Sqft ↓</option>
+                <option value="year_desc">Year ↓</option>
+                <option value="distance_asc">Distance ↑</option>
+              </select>
+            </div>
+            <div id="propelio-comp-list" class="propelio-comp-list"></div>
+          </div>
+        </div>
+      </div>
       <div id="map-filters" class="filter-card collapsible-section">
         <button class="section-toggle" type="button" data-target="map-filters-body" aria-expanded="true">
           <span class="sidebar-label">Map Filters</span>
         </button>
         <div id="map-filters-body" class="collapsible-body">
           <div class="filter-card-head">
-            <p class="sidebar-label">Map Filters</p>
             <button id="btn-filters-reset" class="filter-reset-btn" type="button">Reset</button>
           </div>
           <div class="filter-list" id="filter-list">
             <label class="filter-row">
-              <span class="filter-swatch" style="--sw:#D92228"></span>
-              <span class="filter-name">Listings</span>
-              <input type="checkbox" id="filter-active" checked>
-            </label>
-            <label class="filter-row">
-              <span class="filter-swatch" style="--sw:#5C2D91"></span>
-              <span class="filter-name">Sold</span>
-              <input type="checkbox" id="filter-sold" checked>
-            </label>
-            <label class="filter-row">
               <span class="filter-swatch" style="--sw:#2980b9"></span>
               <span class="filter-name">Off Market</span>
+              <span class="filter-count" id="filter-count-off_market">0</span>
               <input type="checkbox" id="filter-off-market" checked>
             </label>
             <label class="filter-row">
               <span class="filter-swatch" style="--sw:#27ae60"></span>
               <span class="filter-name">Vacant</span>
+              <span class="filter-count" id="filter-count-vacant">0</span>
               <input type="checkbox" id="filter-vacant" checked>
             </label>
             <label class="filter-row">
-              <span class="filter-swatch" style="--sw:#7B68A0"></span>
+              <span class="filter-swatch swatch-multifamily"></span>
               <span class="filter-name">Multifamily</span>
-              <input type="checkbox" id="filter-multifamily" checked>
+              <span class="filter-count" id="filter-count-multifamily">0</span>
+              <input type="checkbox" id="filter-multifamily">
             </label>
             <label class="filter-row">
               <span class="filter-swatch" style="--sw:#8B7355"></span>
               <span class="filter-name">Commercial</span>
-              <input type="checkbox" id="filter-commercial" checked>
+              <span class="filter-count" id="filter-count-commercial">0</span>
+              <input type="checkbox" id="filter-commercial">
             </label>
             <label class="filter-row">
               <span class="filter-swatch" style="--sw:#95a5a6"></span>
               <span class="filter-name">Exempt</span>
-              <input type="checkbox" id="filter-exempt" checked>
+              <span class="filter-count" id="filter-count-exempt">0</span>
+              <input type="checkbox" id="filter-exempt">
+            </label>
+            <!-- Propelio comp-status toggles — dots (.is-dot) to distinguish
+                 from parcel-type squares above. Swatch colors match the
+                 footprint-glow / fallback-dot palette (sold=red, active=green,
+                 pending=blue two-tone). -->
+            <label class="filter-row">
+              <span class="filter-swatch is-dot" style="--sw:#dc2626"></span>
+              <span class="filter-name">Sold</span>
+              <span class="filter-count" id="prop-count-sold">0</span>
+              <input type="checkbox" id="prop-status-sold" checked>
+            </label>
+            <label class="filter-row">
+              <span class="filter-swatch is-dot" style="--sw:#22c55e"></span>
+              <span class="filter-name">Active</span>
+              <span class="filter-count" id="prop-count-active">0</span>
+              <input type="checkbox" id="prop-status-active" checked>
+            </label>
+            <label class="filter-row">
+              <span class="filter-swatch is-dot" style="background: radial-gradient(circle, #0284c7 0%, #0284c7 35%, #7dd3fc 100%);"></span>
+              <span class="filter-name">Pending</span>
+              <span class="filter-count" id="prop-count-pending">0</span>
+              <input type="checkbox" id="prop-status-pending" checked>
+            </label>
+            <!-- Outside Area Comps — meta-toggle; no swatch, hidden placeholder
+                 keeps the grid columns aligned with the rows above. -->
+            <label class="filter-row" title="Show comps Propelio returned that fall outside your drawn polygon">
+              <span class="filter-swatch" style="visibility:hidden"></span>
+              <span class="filter-name">Outside Area Comps</span>
+              <span class="filter-count" id="prop-count-oac">0</span>
+              <input type="checkbox" id="prop-outside-area">
             </label>
           </div>
           <p id="sold-toggle-status" class="sidebar-note"></p>
         </div>
       </div>
-      <div id="numeric-filters" class="filter-card collapsible-section">
+      <div class="hidden" aria-hidden="true">
+        <input type="checkbox" id="toggle-redfin">
+        <p id="redfin-toggle-status"></p>
+        <input type="checkbox" id="toggle-sold" checked>
+      </div>
+      <div id="saved-areas" class="sidebar-section hidden collapsible-section">
+        <div class="section-header">
+          <button class="section-toggle" type="button" data-target="saved-areas-body" aria-expanded="false">
+            <span class="sidebar-label">Saved Areas</span>
+          </button>
+          <!-- click-mode-toggle (Zoom/Keep View) moved to the map control
+               toolbar as the ZOOM button — easier to discover, no scrolling
+               required (2026-05-11 relocation per KK). -->
+        </div>
+        <div id="saved-areas-body" class="collapsible-body hidden">
+          <div id="saved-areas-list"></div>
+          <button id="btn-saved-area-clear" class="hidden" onclick="clearDrawResults()" style="margin-top:8px;width:100%;padding:5px 0;background:transparent;border:1px solid #555;border-radius:4px;color:#aaa;font-size:11px;cursor:pointer;">← Back to Browse</button>
+        </div>
+      </div>
+      <div id="saved-parcels" class="sidebar-section hidden collapsible-section">
+        <div class="section-header">
+          <button class="section-toggle" type="button" data-target="saved-parcels-body" aria-expanded="false">
+            <span class="sidebar-label">Targets</span>
+          </button>
+        </div>
+        <div id="saved-parcels-body" class="collapsible-body hidden">
+          <div id="saved-parcels-list"></div>
+        </div>
+      </div>
+      <div id="saved-sessions" class="sidebar-section hidden collapsible-section">
+        <div class="section-header">
+          <button class="section-toggle" type="button" data-target="saved-sessions-body" aria-expanded="false">
+            <span class="sidebar-label">Saved Snapshots</span>
+          </button>
+        </div>
+        <div id="saved-sessions-body" class="collapsible-body hidden">
+          <div id="saved-sessions-list"></div>
+        </div>
+      </div>
+      <div id="numeric-filters" class="filter-card collapsible-section power-user-only">
         <button class="section-toggle" type="button" data-target="numeric-filters-body" aria-expanded="true">
           <span class="sidebar-label">Property Filters</span>
         </button>
         <div id="numeric-filters-body" class="collapsible-body">
           <div class="filter-card-head">
-            <p class="sidebar-label">Property Filters</p>
             <button id="btn-numeric-reset" class="filter-reset-btn" type="button">Reset</button>
           </div>
           <div class="numeric-filter-list">
             <div class="numeric-filter-row">
               <span class="numeric-filter-label">Lot Size (acres)</span>
               <div class="numeric-filter-inputs">
-                <input type="number" id="nf-lot-min" placeholder="Min acres" class="nf-input" min="0" step="0.01">
+                <input type="text" id="nf-lot-min" placeholder="Min" class="nf-input" inputmode="decimal">
                 <span class="nf-sep">–</span>
-                <input type="number" id="nf-lot-max" placeholder="Max acres" class="nf-input" min="0" step="0.01">
+                <input type="text" id="nf-lot-max" placeholder="Max" class="nf-input" inputmode="decimal">
               </div>
             </div>
             <div class="numeric-filter-row">
@@ -126,73 +300,66 @@
           </div>
         </div>
       </div>
-      <div class="hidden" aria-hidden="true">
-        <input type="checkbox" id="toggle-redfin">
-        <p id="redfin-toggle-status"></p>
-        <input type="checkbox" id="toggle-sold" checked>
-      </div>
-      <div id="sidebar-instructions" class="sidebar-section">
-        <p class="sidebar-copy">Draw a polygon around a target pocket to analyze parcels instantly.</p>
-        <p class="sidebar-note">Shortcuts: Enter or right-click to finish. Esc to cancel.</p>
-      </div>
-      <div id="sidebar-loading" class="sidebar-section hidden">
-        <div class="spinner"></div>
-        <p class="sidebar-copy">Loading parcels...</p>
-        <p id="redfin-status" class="sidebar-note">Pulling Redfin listings...</p>
-      </div>
-      <div id="sidebar-results" class="sidebar-section hidden">
-        <p id="session-cache-note" class="sidebar-note hidden"></p>
-        <div id="counts-panel" class="counts-panel"></div>
-        <div id="sold-comps-panel"></div>
-        <div class="sidebar-actions">
-          <button id="btn-download" class="btn-primary">Download CSV</button>
-          <button id="btn-update-saved-area" class="btn-secondary hidden">Update</button>
-          <button id="btn-save-session" class="btn-secondary" disabled>Save Snapshot</button>
-          <button id="btn-clear" class="btn-secondary">Clear</button>
-          <button id="btn-save-area" class="btn-secondary">Save Area</button>
-        </div>
-      </div>
-      <div id="saved-areas" class="sidebar-section hidden collapsible-section">
-        <div class="section-header">
-          <button class="section-toggle" type="button" data-target="saved-areas-body" aria-expanded="true">
-            <span class="sidebar-label">Saved Areas</span>
-          </button>
-          <div class="click-mode-toggle" id="click-mode-toggle">
-            <button class="click-mode-btn jump-mode" data-mode="jump" type="button" title="Jump and zoom">Jump</button>
-            <button class="click-mode-btn stay-mode" data-mode="stay" type="button" title="Stay zoomed out">Stay</button>
-          </div>
-        </div>
-        <div id="saved-areas-body" class="collapsible-body">
-          <div id="saved-area-current" class="saved-area-current hidden">
-            <span class="sidebar-note">Currently viewing: <strong id="saved-area-current-name"></strong></span>
-            <button id="btn-saved-area-current-clear" type="button" class="saved-area-action-btn" title="Clear current saved area">×</button>
-          </div>
-          <div id="saved-areas-list"></div>
-          <button id="btn-saved-area-clear" class="hidden" onclick="clearDrawResults()" style="margin-top:8px;width:100%;padding:5px 0;background:transparent;border:1px solid #555;border-radius:4px;color:#aaa;font-size:11px;cursor:pointer;">× Back to Browse</button>
-        </div>
-      </div>
-      <div id="saved-parcels" class="sidebar-section hidden collapsible-section">
-        <div class="section-header">
-          <button class="section-toggle" type="button" data-target="saved-parcels-body" aria-expanded="true">
-            <span class="sidebar-label">Saved Parcels</span>
-          </button>
-        </div>
-        <div id="saved-parcels-body" class="collapsible-body">
-          <div id="saved-parcels-list"></div>
-        </div>
-      </div>
-        <div id="saved-sessions" class="sidebar-section hidden collapsible-section">
-          <div class="section-header">
-            <button class="section-toggle" type="button" data-target="saved-sessions-body" aria-expanded="true">
-              <span class="sidebar-label">Saved Snapshots</span>
+      <div id="custom-search-block" class="filter-card collapsible-section power-user-only">
+        <button class="section-toggle" type="button" data-target="custom-search-block-body" aria-expanded="true">
+          <span class="sidebar-label">Custom Search</span>
+        </button>
+        <div id="custom-search-block-body" class="collapsible-body">
+          <div class="propelio-api-section">
+            <p class="propelio-section-label">Search settings (refresh required)</p>
+            <div class="numeric-filter-row">
+              <span class="numeric-filter-label">Time window (months)</span>
+              <div class="numeric-filter-inputs">
+                <input type="number" id="prop-months" class="nf-input" min="1" max="60" value="24">
+              </div>
+            </div>
+            <div class="numeric-filter-row">
+              <span class="numeric-filter-label">Search radius (mi)</span>
+              <div class="numeric-filter-inputs">
+                <input type="number" id="prop-range" class="nf-input" min="0.1" max="10" step="0.1" value="1.0">
+              </div>
+            </div>
+            <button id="btn-propelio-refresh" class="propelio-refresh-btn" type="button">
+              <span class="propelio-refresh-main">Custom Search</span>
+              <span class="propelio-refresh-subtitle">Uses the filters above</span>
             </button>
-          </div>
-          <div id="saved-sessions-body" class="collapsible-body">
-            <div id="saved-sessions-list"></div>
+            <div id="deep-pull-banner" class="deep-pull-banner hidden">
+              <span class="deep-pull-banner-icon">⟳</span>
+              <span id="deep-pull-banner-text" class="deep-pull-banner-text">Deep pull in progress...</span>
+              <button id="btn-deep-pull-stop" class="btn-tertiary" type="button">Stop</button>
+            </div>
           </div>
         </div>
+      </div>
+      <!-- Legacy Filters — Redfin Listings + Sold rows live here, hidden by default
+           during the current Propelio-driven flow but accessible if needed. -->
+      <div id="legacy-filters" class="filter-card collapsible-section">
+        <button class="section-toggle" type="button" data-target="legacy-filters-body" aria-expanded="false">
+          <span class="sidebar-label">Legacy Filters</span>
+        </button>
+        <div id="legacy-filters-body" class="collapsible-body hidden">
+          <div class="filter-list">
+            <label class="filter-row">
+              <span class="filter-swatch" style="--sw:#D92228"></span>
+              <span class="filter-name">R.F. Listings</span>
+              <span class="filter-count" id="filter-count-active">0</span>
+              <input type="checkbox" id="filter-active">
+            </label>
+            <label class="filter-row">
+              <span class="filter-swatch" style="--sw:#5C2D91"></span>
+              <span class="filter-name">R.F. Sold</span>
+              <span class="filter-count" id="filter-count-sold">0</span>
+              <input type="checkbox" id="filter-sold">
+            </label>
+          </div>
+        </div>
+      </div>
+      <div id="sold-comps-panel"></div>
     </aside>
     <main class="map-panel">
+      <aside id="parcel-detail-panel" class="parcel-detail-panel hidden" aria-hidden="true">
+        <!-- Populated by JS — see openParcelDetailPanel() -->
+      </aside>
       <button id="sidebar-toggle" class="sidebar-toggle" aria-expanded="true" aria-controls="sidebar">
         <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
           <path d="M12.5 4 L6.5 10 L12.5 16" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>

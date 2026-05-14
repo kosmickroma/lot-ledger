@@ -175,6 +175,41 @@ def get_user_by_email(email: str) -> dict[str, Any] | None:
         release_session_conn(conn)
 
 
+def get_user_by_username_or_email(identifier: str) -> dict[str, Any] | None:
+    # Username takes precedence over email when both could match. Deterministic
+    # ordering (username match wins; ties broken by lowest id) so login can't
+    # flip between two users across requests.
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, username, email, password_hash, role, is_active,
+                       force_password_change, session_version
+                FROM users
+                WHERE LOWER(username) = LOWER(%s) OR LOWER(email) = LOWER(%s)
+                ORDER BY (LOWER(username) = LOWER(%s)) DESC, id ASC
+                LIMIT 1
+                """,
+                (identifier, identifier, identifier),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            return {
+                "id": row[0],
+                "username": row[1],
+                "email": row[2],
+                "password_hash": row[3],
+                "role": row[4],
+                "is_active": bool(row[5]),
+                "force_password_change": bool(row[6]),
+                "session_version": int(row[7] or 1),
+            }
+    finally:
+        release_session_conn(conn)
+
+
 def get_user_by_id(user_id: int) -> dict[str, Any] | None:
     conn = get_session_conn()
     try:

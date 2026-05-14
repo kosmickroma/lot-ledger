@@ -19,7 +19,7 @@ const COLORS = {
   single_family: "#2980b9",
   off_market: "#2980b9",
   vacant: "#27ae60",
-  multifamily: "#7B68A0",
+  multifamily: "#2c2c2c",
   commercial: "#8B7355",
   exempt: "#95a5a6",
   active: "#D92228",
@@ -30,7 +30,7 @@ const BORDER_COLORS = {
   single_family: "#1a6a9a",
   off_market: "#1a6a9a",
   vacant: "#1e8449",
-  multifamily: "#5C4D7A",
+  multifamily: "#1f1f1f",
   commercial: "#6e5c42",
   exempt: "#7f8c8d",
   active: "#a3161a",
@@ -57,15 +57,19 @@ const SOLD_FALLBACK_DOT_COLOR = "#004225";
 const SOLD_FALLBACK_DOT_BORDER = "#5C2D91";
 const FILTER_STORAGE_KEY = "lotledger.map.filters.v1";
 const CLICK_MODE_STORAGE_KEY = "lot_ledger_click_mode";
+const SIDEBAR_SECTION_STATE_STORAGE_KEY = "lot_ledger_sidebar_sections.v1";
 
 const DEFAULT_FILTERS = {
-  active: true,
-  sold: true,
+  // R.F. Listings + R.F. Sold default OFF — those are the legacy Redfin
+  // overlays. Propelio is the primary comps surface now; legacy stays
+  // around as opt-in for sanity-check or deprecation review.
+  active: false,
+  sold: false,
   off_market: true,
   vacant: true,
-  multifamily: true,
-  commercial: true,
-  exempt: true,
+  multifamily: false,
+  commercial: false,
+  exempt: false,
 };
 
 const FILTER_INPUT_IDS = {
@@ -90,6 +94,14 @@ const NUMERIC_FILTER_INPUTS = [
 ];
 
 const numericFilters = {
+  lot_sqft_min: null, lot_sqft_max: null,
+  appr_val_min: null, appr_val_max: null,
+  yr_built_min: null, yr_built_max: null,
+  sqft_min: null,     sqft_max: null,
+};
+
+// Comp Filters: same numeric schema as Property Filters, but applied only to listings + sold-matched
+const compNumericFilters = {
   lot_sqft_min: null, lot_sqft_max: null,
   appr_val_min: null, appr_val_max: null,
   yr_built_min: null, yr_built_max: null,
@@ -189,7 +201,32 @@ function passesNumericFilters(feature) {
   return true;
 }
 
-const PARCEL_LAYER_KEYS = ["active", "off_market", "vacant", "multifamily", "commercial", "exempt"];
+// Comp Filters (applied only to listings + sold-matched): same parsing logic as Property Filters
+function passesCompFilters(feature) {
+  const p = feature?.properties || {};
+  const lotRaw = String(p.lot_sqft || "").replace(/,/g, "").match(/^[\d.]+/);
+  const lot = lotRaw ? Number(lotRaw[0]) : null;
+
+  const valRaw = String(p.tot_val || "").replace(/[$,]/g, "").match(/^[\d.]+/);
+  const val = valRaw ? Number(valRaw[0]) : null;
+
+  const yr = asNumber(p.yr_built);
+
+  const sqftRaw = String(p.sqft || "").replace(/,/g, "").match(/^[\d.]+/);
+  const sqft = sqftRaw ? Number(sqftRaw[0]) : null;
+
+  if (compNumericFilters.lot_sqft_min != null && (lot == null || lot < compNumericFilters.lot_sqft_min)) return false;
+  if (compNumericFilters.lot_sqft_max != null && (lot == null || lot > compNumericFilters.lot_sqft_max)) return false;
+  if (compNumericFilters.appr_val_min != null && (val == null || val < compNumericFilters.appr_val_min)) return false;
+  if (compNumericFilters.appr_val_max != null && (val == null || val > compNumericFilters.appr_val_max)) return false;
+  if (compNumericFilters.yr_built_min != null && (yr == null || yr < compNumericFilters.yr_built_min)) return false;
+  if (compNumericFilters.yr_built_max != null && (yr == null || yr > compNumericFilters.yr_built_max)) return false;
+  if (compNumericFilters.sqft_min != null && (sqft == null || sqft < compNumericFilters.sqft_min)) return false;
+  if (compNumericFilters.sqft_max != null && (sqft == null || sqft > compNumericFilters.sqft_max)) return false;
+  return true;
+}
+
+const PARCEL_LAYER_KEYS = ["active", "sold", "off_market", "vacant", "multifamily", "commercial", "exempt"];
 
 // -- Click mode helpers (Jump vs Stay) --
 let currentClickMode = "jump";
@@ -210,6 +247,24 @@ function updateClickModeButtonState() {
   const stayBtn = document.querySelector(".click-mode-btn.stay-mode");
   if (jumpBtn) jumpBtn.classList.toggle("active", currentClickMode === "jump");
   if (stayBtn) stayBtn.classList.toggle("active", currentClickMode === "stay");
+  // Mirror state onto the toolbar ZOOM button. Active (green) = jump mode.
+  const zoomToolbarBtn = document.getElementById("btn-zoom-toggle");
+  if (zoomToolbarBtn) {
+    zoomToolbarBtn.classList.toggle("active", currentClickMode === "jump");
+  }
+}
+
+// Keep the toolbar OAC button visually in sync with the Map Filters
+// #prop-outside-area checkbox. Listener attached at startup (see init
+// block at the bottom of this file). Updates active class whenever the
+// checkbox changes — whether the change came from clicking the checkbox
+// directly, clicking the toolbar OAC button (which dispatches a change),
+// or programmatic state restoration on saved-area load.
+function _updateOACButtonState() {
+  const checkbox = document.getElementById("prop-outside-area");
+  const btn = document.getElementById("btn-outside-area-toggle");
+  if (!checkbox || !btn) return;
+  btn.classList.toggle("active", Boolean(checkbox.checked));
 }
 
 function isPointInViewport(latlng) {
@@ -228,7 +283,7 @@ function areaBoundsInViewport(bounds) {
 // during startup before the rest of the module wiring runs.
 let lastAnalysisGeojson = null;
 
-const map = L.map("map", { zoomControl: true, closePopupOnClick: false }).setView(DALLAS_CENTER, DEFAULT_ZOOM);
+const map = L.map("map", { zoomControl: true }).setView(DALLAS_CENTER, DEFAULT_ZOOM);
 const MAP_CANVAS_RENDERER = L.canvas();
 const MAP_SVG_RENDERER = L.svg();
 
@@ -273,6 +328,27 @@ map.getPane("soldPane").style.zIndex = "640";
 map.createPane("countyLabelPane");
 map.getPane("countyLabelPane").style.zIndex = "645";
 map.getPane("countyLabelPane").style.pointerEvents = "none";
+
+// Saved-parcel (Target) pane sits above parcel fills + markers but below
+// soldPane (640) and tooltipPane (650) so sold-price labels remain readable
+// over orange targets.
+map.createPane("savedParcelPane");
+map.getPane("savedParcelPane").style.zIndex = "620";
+map.getPane("savedParcelPane").style.pointerEvents = "none";
+
+// Saved-target star pane sits above savedParcelPane so stars remain visible
+// when gold parcel outlines are also rendered.
+map.createPane("savedTargetStarPane");
+map.getPane("savedTargetStarPane").style.zIndex = "635";
+map.getPane("savedTargetStarPane").style.pointerEvents = "auto";
+
+// Selected-item outline pane — sits above the gold-halo savedParcelPane
+// so when a saved target is also the current selection, the crisp purple
+// line stays visible on top of the gold halo's diffuse glow. Decorative
+// only; pointer-events: none lets clicks pass through to layers below.
+map.createPane("selectedOutlinePane");
+map.getPane("selectedOutlinePane").style.zIndex = "625";
+map.getPane("selectedOutlinePane").style.pointerEvents = "none";
 
 // Apply saved basemap BEFORE browseLayer is added. If we switch after protomaps
 // is on the map, the tile layer removal fires viewprereset → _invalidateAll on
@@ -353,6 +429,8 @@ map.on("moveend", () => {
 map.on("zoomend", () => {
   if (viewportRenderMode) _scheduleViewportRender();
   refreshSoldPriceLabels();
+  refreshRedfinPriceLabels();
+  refreshPropelioPriceLabels();
   _updateCountyLabelVisibility();
 });
 _updateZoomNudge();
@@ -379,6 +457,29 @@ let targetBadgeLayer = L.layerGroup().addTo(map);
 // Persistent saved-parcel outlines (cyan). Keyed by account_num for dedup + removal.
 const savedParcelLayer = L.layerGroup().addTo(map);
 const savedParcelLayers = {};
+const SAVED_TARGET_STAR_MAX_ZOOM = 14; // stars hide at this zoom and above
+const savedTargetStarLayer = L.layerGroup().addTo(map);
+const savedTargetStarMarkers = {};
+const _ORIGINATOR_STAR_LAYER = L.layerGroup().addTo(map);
+let _originatorStarMarker = null;
+// Invisible click-catcher polygons that mirror saved-parcel outlines. The
+// decorative halo on `savedParcelPane` is pointer-events:none so its drop-shadow
+// bleed doesn't catch stray clicks; this parallel layer (default overlay pane)
+// is what actually opens the popup. Keyed by account_num.
+const savedParcelClickLayer = L.layerGroup().addTo(map);
+const savedParcelClickLayers = {};
+// Selected-item outline. Holds at most one L.geoJSON at a time — a new
+// selection clears the previous. Cleared by any map click. Sources:
+// saved-areas-list click + propelio-comp-list click.
+const selectedOutlineLayer = L.layerGroup().addTo(map);
+// Propelio comps rendered from address/polygon pulls.
+// Parcel geometry is preferred (purple glowing footprints); missing geometry
+// falls back to compact purple dots.
+const propelioCompLayer = L.layerGroup().addTo(map);
+// (Old marker-based "Get Comps" button retired. The sticky DOM-based
+// version lives in propelioStickyAnchor / propelioStickyBtn declared
+// near _ensureStickyPropelioButton.)
+let propelioPolygonPullInFlight = false;
 let countyLayer = null;
 let countyLabelLayer = null;
 let countyVisible = false;
@@ -393,7 +494,13 @@ let lastIncludedSold = false;
 let lastSoldPoints = [];
 let lastSoldPanelPoints = [];
 let matchedSoldLabelPoints = [];
+// Tracks account_nums of sold-matched parcels that actually rendered in the
+// current renderFeatures pass (after passesNumericFilters). renderSoldPoints
+// uses this to suppress price labels for parcels filtered out by numeric
+// filters (e.g., lot-size min/max), so labels follow parcel visibility.
+let _currentlyRenderedSoldAccounts = new Set();
 let soldMarkers = [];
+let redfinMarkers = [];
 let transientSoldSidebarPopup = null;
 let soldCompsSortMode = "price";
 let soldCompsCollapsed = true;
@@ -416,6 +523,10 @@ let viewportRenderMode = false;   // true when feature count exceeds render thre
 let _vpRenderTimeout = null;      // debounce handle for viewport re-render
 const LARGE_DRAW_THRESHOLD = 500;  // viewport-only rendering above this count
 const BROWSE_ONLY_THRESHOLD = 30000; // skip all polygon rendering above this; use browse layer
+let _activeParcelPopupState = null;
+let _isRefreshingParcelLayers = false;
+let _suspendViewportRenderUntil = 0;
+const _renderedParcelPopupLayers = new Map();
 let _analysisRequestSeq = 0;
 let _activeAnalysisRequestId = 0;
 let _activeAnalysisAbortController = null;
@@ -427,6 +538,19 @@ let _savedParcelsCache = [];
 let _currentSessionIsNamed = false;
 let _savedSessionsCache = [];
 let _currentLoadedAreaId = null;
+let _currentTargetParcel = null; // { county, account, lat?, lng? } | null
+// Tracks the most recent address the user searched or selected via typeahead.
+// Deep Pull uses this as the target address for the experimental run.
+let _lastSearchedAddress = null;
+let _selectedSavedItemId = null;
+const _initialAreaShareId = (() => {
+  try {
+    const v = new URLSearchParams(window.location.search).get("area");
+    if (v && /^area_[A-Za-z0-9]{10}$/.test(v)) return v;
+  } catch {}
+  return null;
+})();
+let _pendingAreaShareId = _initialAreaShareId;
 
 const HOA_COLOR = "#b8860b";
 
@@ -469,12 +593,14 @@ function captureFilterState() {
       minYearBuilt: soldCompsFilter.minYearBuilt,
       maxYearBuilt: soldCompsFilter.maxYearBuilt,
     },
+    comp: { ...compNumericFilters },
+    propelio: { ...propelioFilterState, sortMode: propelioCompSortMode },
   };
 }
 
 function _normalizeFilterStateForCompare(state) {
   if (!state || typeof state !== "object") {
-    return { v: 1, checkboxes: {}, numeric: {}, sold: {} };
+    return { v: 1, checkboxes: {}, numeric: {}, sold: {}, comp: {} };
   }
   const sold = state.sold && typeof state.sold === "object" ? state.sold : {};
   return {
@@ -488,7 +614,49 @@ function _normalizeFilterStateForCompare(state) {
       minYearBuilt: sold.minYearBuilt ?? null,
       maxYearBuilt: sold.maxYearBuilt ?? null,
     },
+    comp: { ...(state.comp || {}) },
+    propelio: { ...(state.propelio || {}) },
   };
+}
+
+// Restore Propelio filter state into UI inputs from a persisted state blob.
+// Called during saved-area load. Pure DOM writes — no API calls.
+function applyPropelioFilterStateToUI(persisted) {
+  if (!persisted || typeof persisted !== "object") return;
+  const setVal = (id, v) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.value = v == null ? "" : String(v);
+  };
+  const setChk = (id, v) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.checked = Boolean(v);
+  };
+  const merged = { ...DEFAULT_PROPELIO_FILTERS, ...persisted };
+  setVal("prop-months", merged.months);
+  setVal("prop-range", merged.range);
+  _setPropStatusFilter("sold", Boolean(merged.statusSold), { apply: false });
+  _setPropStatusFilter("active", Boolean(merged.statusActive), { apply: false });
+  _setPropStatusFilter("pending", Boolean(merged.statusPending), { apply: false });
+  setChk("prop-outside-area", merged.showOutsideArea);
+  setVal("prop-sold-within", merged.soldWithinDays);
+  setVal("prop-lot-min", merged.lotMin);
+  setVal("prop-lot-max", merged.lotMax);
+  setVal("prop-sqft-min", merged.sqftMin);
+  setVal("prop-sqft-max", merged.sqftMax);
+  setVal("prop-year-min", merged.yearMin);
+  setVal("prop-year-max", merged.yearMax);
+  setVal("prop-price-min", merged.priceMin);
+  setVal("prop-price-max", merged.priceMax);
+  // Comp-list sort mode lives outside propelioFilterState but is part of
+  // the workspace's visible state, so it persists alongside.
+  if (typeof persisted.sortMode === "string" && persisted.sortMode) {
+    propelioCompSortMode = persisted.sortMode;
+    const sortEl = document.getElementById("propelio-comp-sort");
+    if (sortEl) sortEl.value = propelioCompSortMode;
+  }
+  propelioFilterState = readPropelioFiltersFromUI();
 }
 
 function _filterStatesEqual(a, b) {
@@ -497,24 +665,108 @@ function _filterStatesEqual(a, b) {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
-function _renderCurrentViewingArea() {
-  const host = document.getElementById("saved-area-current");
-  const nameEl = document.getElementById("saved-area-current-name");
-  if (!host || !nameEl) return;
-  if (!_currentLoadedAreaId) {
-    host.classList.add("hidden");
-    nameEl.textContent = "";
-    return;
-  }
-  const area = _savedAreasCache.find((a) => a.id === _currentLoadedAreaId && a.type === "area");
-  if (!area) {
-    host.classList.add("hidden");
-    nameEl.textContent = "";
-    _currentLoadedAreaId = null;
-    return;
-  }
-  nameEl.textContent = area.name || "Saved area";
-  host.classList.remove("hidden");
+function setActiveItem(type, name) {
+  const typeEl = document.getElementById("active-item-type");
+  const nameEl = document.getElementById("active-item-name");
+  if (!typeEl || !nameEl) return;
+  typeEl.textContent = type || "Workspace";
+  nameEl.textContent = name || "—";
+  _updateActiveItemRenameVisibility();
+}
+
+function clearActiveItem() {
+  _selectedSavedItemId = null;
+  renderSavedAreasList();
+  const typeEl = document.getElementById("active-item-type");
+  const nameEl = document.getElementById("active-item-name");
+  if (typeEl) typeEl.textContent = "Workspace";
+  if (nameEl) nameEl.textContent = "—";
+  _updateActiveItemRenameVisibility();
+}
+
+// Pencil only shows when there's actually a saved area to rename. For
+// transient states (no workspace loaded, snapshots, location pins) it
+// stays hidden so users don't try to rename something the API doesn't
+// own. Called from setActiveItem / clearActiveItem and after renames.
+function _updateActiveItemRenameVisibility() {
+  const btn = document.getElementById("active-item-rename");
+  if (!btn) return;
+  btn.classList.toggle("hidden", !_currentLoadedAreaId);
+}
+
+(function _initActiveItemRenamePencil() {
+  const btn = document.getElementById("active-item-rename");
+  if (!btn) return;
+  btn.addEventListener("click", (e) => {
+    e.preventDefault();
+    void _handleActiveItemRenameClick();
+  });
+})();
+
+async function _handleActiveItemRenameClick() {
+  if (!_currentLoadedAreaId) return;
+  const nameEl = document.getElementById("active-item-name");
+  const btn = document.getElementById("active-item-rename");
+  if (!nameEl || !btn) return;
+  if (nameEl.classList.contains("is-editing")) return;
+
+  const currentName = (nameEl.textContent || "").trim();
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "active-item-name-input";
+  input.value = currentName === "—" ? "" : currentName;
+  input.maxLength = 120;
+
+  nameEl.classList.add("is-editing");
+  nameEl.style.display = "none";
+  nameEl.parentElement.insertBefore(input, btn);
+  btn.classList.add("hidden");
+  input.focus();
+  input.select();
+
+  let resolved = false;
+  const cleanup = () => {
+    nameEl.classList.remove("is-editing");
+    nameEl.style.display = "";
+    if (input.parentElement) input.parentElement.removeChild(input);
+    btn.classList.toggle("hidden", !_currentLoadedAreaId);
+  };
+
+  const finish = async (mode) => {
+    if (resolved) return;
+    resolved = true;
+    if (mode === "cancel") {
+      cleanup();
+      return;
+    }
+    const nextName = String(input.value || "").trim();
+    if (!nextName || nextName === currentName) {
+      cleanup();
+      return;
+    }
+    try {
+      bumpUndoPillVersion();
+      await _apiJson(`/api/areas/${encodeURIComponent(_currentLoadedAreaId)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ name: nextName }),
+      });
+      const cached = _savedAreasCache.find((a) => a.id === _currentLoadedAreaId);
+      if (cached) cached.name = nextName;
+      nameEl.textContent = nextName;
+      cleanup();
+      renderSavedAreasList();
+    } catch (err) {
+      console.error("[rename] active-item rename failed:", err);
+      cleanup();
+    }
+  };
+
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { e.preventDefault(); void finish("cancel"); return; }
+    if (e.key === "Enter") { e.preventDefault(); void finish("save"); }
+  });
+  input.addEventListener("blur", () => { void finish("save"); });
 }
 
 function _refreshLoadedAreaUi() {
@@ -580,6 +832,38 @@ function _hydrateSoldCompInputsFromState() {
   }
 }
 
+// Hydrate Comp Filter numeric inputs (similar to Property but with nf-comp- prefix)
+function _hydrateCompNumericInputsFromState() {
+  const compInputs = [
+    { id: "nf-comp-lot-min", key: "lot_sqft_min" },
+    { id: "nf-comp-lot-max", key: "lot_sqft_max" },
+    { id: "nf-comp-val-min", key: "appr_val_min" },
+    { id: "nf-comp-val-max", key: "appr_val_max" },
+    { id: "nf-comp-yr-min", key: "yr_built_min" },
+    { id: "nf-comp-yr-max", key: "yr_built_max" },
+    { id: "nf-comp-sqft-min", key: "sqft_min" },
+    { id: "nf-comp-sqft-max", key: "sqft_max" },
+  ];
+  compInputs.forEach(({ id, key }) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const val = compNumericFilters[key];
+    if (val == null) {
+      el.value = "";
+      return;
+    }
+    if (key === "lot_sqft_min" || key === "lot_sqft_max") {
+      el.value = String((Number(val) / 43560).toFixed(2)).replace(/\.00$/, "");
+      return;
+    }
+    if (key === "appr_val_min" || key === "appr_val_max") {
+      el.value = formatNumberWithCommas(val);
+      return;
+    }
+    el.value = String(val);
+  });
+}
+
 function restoreFilterState(state) {
   if (!state || typeof state !== "object") return;
   if (Number(state.v || 0) > 1) {
@@ -588,7 +872,13 @@ function restoreFilterState(state) {
   }
   if (Number(state.v || 0) !== 1) return;
   if (state.checkboxes && typeof state.checkboxes === "object") Object.assign(filterState, state.checkboxes);
+  // Legacy R.F. filters never auto-enable from saved state — mirrors the
+  // localStorage-restore guard above. Old saved areas baked R.F. on when
+  // those filters lived in Map Filters; chunk 2 made them opt-in only.
+  filterState.active = false;
+  filterState.sold = false;
   if (state.numeric && typeof state.numeric === "object") Object.assign(numericFilters, state.numeric);
+  if (state.comp && typeof state.comp === "object") Object.assign(compNumericFilters, state.comp);
   if (state.sold && typeof state.sold === "object") {
     Object.assign(soldCompsFilter, {
       maxDaysAgo: state.sold.maxDaysAgo ?? DEFAULT_SOLD_COMPS_FILTER.maxDaysAgo,
@@ -598,17 +888,28 @@ function restoreFilterState(state) {
       maxYearBuilt: state.sold.maxYearBuilt ?? null,
     });
   }
+  if (state.propelio && typeof state.propelio === "object") {
+    applyPropelioFilterStateToUI(state.propelio);
+  }
   console.debug("[restoreFilterState] restored", {
     checkboxes: { ...filterState },
     numeric: { ...numericFilters },
+    comp: { ...compNumericFilters },
     sold: { ...soldCompsFilter },
+    propelio: { ...propelioFilterState },
   });
   syncFilterInputs();
   _hydrateNumericInputsFromState();
+  _hydrateCompNumericInputsFromState();
   _hydrateSoldCompInputsFromState();
   if (lastAnalysisGeojson) {
     applyAndRenderSoldFilters();
     const markers = viewportRenderMode ? renderViewportFeatures() : renderFeatures(lastAnalysisGeojson);
+    // After re-render, parcel-type layers are all attached to the map. Re-apply
+    // the visibility filter so the restored checkbox state actually hides the
+    // correct categories on the map. Without this, the checkboxes show "off"
+    // but the highlights remain visible.
+    applyMapVisibilityFilters();
     const counts = getVisibleFeatureCounts(lastAnalysisGeojson.features || []);
     if (lastAnalysisCounts) renderSidebar(counts, markers || {});
   }
@@ -638,6 +939,14 @@ function loadFilters() {
   } catch (_) {
     filterState = { ...DEFAULT_FILTERS };
   }
+  // Legacy R.F. filters (active = R.F. Listings, sold = R.F. Sold) are
+  // tucked away in the collapsed "Legacy Filters" card and should ONLY
+  // turn on when the user opts in by clicking them. localStorage might
+  // hold stale `true` values from before the 2026-05-10 restructure when
+  // these lived in Map Filters and defaulted on — force them off on
+  // every load so they never fire on a search without explicit opt-in.
+  filterState.active = false;
+  filterState.sold = false;
 }
 
 function saveFilters() {
@@ -667,10 +976,14 @@ function classifyFeatureForFilter(feature) {
 function isFeatureVisible(feature) {
   const bucket = classifyFeatureForFilter(feature);
   if (!filterState[bucket]) return false;
-  return passesNumericFilters(feature);
+  if (!passesNumericFilters(feature)) return false;
+  const p = feature?.properties || {};
+  const isListingOrSold = Boolean(p.on_redfin || p.sold_comp);
+  if (isListingOrSold && !passesCompFilters(feature)) return false;
+  return true;
 }
 
-function getVisibleFeatureCounts(features) {
+function getVisibleFeatureCounts(features, options = {}) {
   const counts = {
     active: 0,
     off_market: 0,
@@ -681,11 +994,55 @@ function getVisibleFeatureCounts(features) {
   };
 
   const list = Array.isArray(features) ? features : [];
-  list.forEach((feature) => {
+  // Dedupe by (account_num + source_county) so the same parcel counted across
+  // tile boundaries or cross-county merges only contributes once. Falls back
+  // to feature index if account_num is missing so we never silently drop a row.
+  const seen = new Set();
+  let rawSeen = 0;
+  let dupSkipped = 0;
+  let unknownPropType = 0;
+  const ignoreBucketToggles = options.ignoreBucketToggles === true;
+
+  list.forEach((feature, idx) => {
+    rawSeen += 1;
+    const p = feature?.properties || {};
+    const key = `${p.account_num || `__noacct_${idx}`}|${p.source_county || "dcad"}`;
+    if (seen.has(key)) {
+      dupSkipped += 1;
+      return;
+    }
+    seen.add(key);
+
     const bucket = classifyFeatureForFilter(feature);
-    if (!(bucket in counts) || !isFeatureVisible(feature)) return;
+    if (!(bucket in counts)) return;
+    if (!passesNumericFilters(feature)) return;
+    const isListingOrSold = Boolean(p.on_redfin || p.sold_comp);
+    if (isListingOrSold && !passesCompFilters(feature)) return;
+    if (!ignoreBucketToggles && !filterState[bucket]) return;
+
+    // Track features falling through to off_market that are NOT recognized
+    // single_family — that signals a misclassification path we can investigate.
+    if (bucket === "off_market" && p.prop_type && p.prop_type !== "single_family") {
+      unknownPropType += 1;
+    }
+
     counts[bucket] += 1;
   });
+
+  if (rawSeen > 0) {
+    console.debug("[counts]", {
+      raw: rawSeen,
+      deduped: seen.size,
+      dupSkipped,
+      unknownPropType,
+      off_market: counts.off_market,
+      active: counts.active,
+      vacant: counts.vacant,
+      multifamily: counts.multifamily,
+      commercial: counts.commercial,
+      exempt: counts.exempt,
+    });
+  }
 
   return counts;
 }
@@ -732,6 +1089,69 @@ function refreshSoldPriceLabels() {
       direction: "top",
       offset: [10, -8],
       className: "sold-price-label",
+      interactive: false,
+    });
+    shown += 1;
+  }
+}
+
+function refreshRedfinPriceLabels() {
+  redfinMarkers.forEach(({ marker }) => marker.unbindTooltip());
+  if (!filterState.active || map.getZoom() < 16) return;
+
+  const maxLabels = map.getZoom() >= 18 ? 220 : map.getZoom() >= 17 ? 140 : 80;
+  const cellPx = map.getZoom() >= 18 ? 20 : map.getZoom() >= 17 ? 26 : 34;
+  const occupied = new Set();
+  let shown = 0;
+
+  for (const { marker, priceLabel } of redfinMarkers) {
+    if (shown >= maxLabels) break;
+    if (!priceLabel) continue;
+    const p = map.latLngToContainerPoint(marker.getLatLng());
+    const key = `${Math.floor(p.x / cellPx)}:${Math.floor(p.y / cellPx)}`;
+    if (occupied.has(key)) continue;
+    occupied.add(key);
+    marker.bindTooltip(priceLabel, {
+      permanent: true,
+      direction: "top",
+      offset: [10, -8],
+      className: "redfin-price-label",
+      interactive: false,
+    });
+    shown += 1;
+  }
+}
+
+// Zoom-gated permanent price tooltips for Propelio comps. Mirrors the
+// sold + redfin patterns. Status drives the chip color: sold→purple,
+// active→red, pending→amber-with-dashed-border (visually distinct
+// from active red so they don't blur together at a glance). Bad-rated
+// comps are excluded at marker-build time so they never get a balloon.
+function refreshPropelioPriceLabels() {
+  propelioPriceMarkers.forEach(({ marker }) => marker.unbindTooltip());
+  if (map.getZoom() < 16) return;
+  if (!propelioPriceMarkers.length) return;
+
+  const maxLabels = map.getZoom() >= 18 ? 220 : map.getZoom() >= 17 ? 140 : 80;
+  const cellPx = map.getZoom() >= 18 ? 20 : map.getZoom() >= 17 ? 26 : 34;
+  const occupied = new Set();
+  let shown = 0;
+
+  for (const { marker, priceLabel, bucket, soldDateLabel } of propelioPriceMarkers) {
+    if (shown >= maxLabels) break;
+    if (!priceLabel) continue;
+    const p = map.latLngToContainerPoint(marker.getLatLng());
+    const key = `${Math.floor(p.x / cellPx)}:${Math.floor(p.y / cellPx)}`;
+    if (occupied.has(key)) continue;
+    occupied.add(key);
+    const tooltipHtml = (bucket === "sold" && soldDateLabel)
+      ? `<div class="propelio-price-label-price">${priceLabel}</div><div class="propelio-price-label-date">${soldDateLabel}</div>`
+      : priceLabel;
+    marker.bindTooltip(tooltipHtml, {
+      permanent: true,
+      direction: "top",
+      offset: [10, -8],
+      className: `propelio-price-label ${bucket || "sold"}`,
       interactive: false,
     });
     shown += 1;
@@ -822,6 +1242,22 @@ function _soldPointPassesFilter(p, filter) {
   if (filter.minYearBuilt != null && (yr == null || yr < filter.minYearBuilt)) return false;
   if (filter.maxYearBuilt != null && (yr == null || yr > filter.maxYearBuilt)) return false;
 
+  // The Sold Comps + Listings panel filter bar in renderSoldCompsPanel writes
+  // Lot Size, Building Sqft, and Year Built inputs into compNumericFilters
+  // (not soldCompsFilter). Without honoring those here, the sidebar list
+  // silently ignored 3 of the 5 visible filters even while the same values
+  // correctly filtered the on-map polygons.
+  if (compNumericFilters.yr_built_min != null && (yr == null || yr < compNumericFilters.yr_built_min)) return false;
+  if (compNumericFilters.yr_built_max != null && (yr == null || yr > compNumericFilters.yr_built_max)) return false;
+
+  const lot = asNumber(p.lot_sqft);
+  if (compNumericFilters.lot_sqft_min != null && (lot == null || lot < compNumericFilters.lot_sqft_min)) return false;
+  if (compNumericFilters.lot_sqft_max != null && (lot == null || lot > compNumericFilters.lot_sqft_max)) return false;
+
+  const sqft = asNumber(p.sqft);
+  if (compNumericFilters.sqft_min != null && (sqft == null || sqft < compNumericFilters.sqft_min)) return false;
+  if (compNumericFilters.sqft_max != null && (sqft == null || sqft > compNumericFilters.sqft_max)) return false;
+
   return true;
 }
 
@@ -852,6 +1288,7 @@ function updateMatchedSoldCompVisibility(filter) {
     const lng = Number(props.lng);
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
     nextMatchedLabelPoints.push({
+      account_num: String(props.account_num || ""),
       lat,
       lng,
       sold_price: source.sold_price,
@@ -866,18 +1303,20 @@ function updateSoldStatusText() {
   const soldStatus = document.getElementById("sold-toggle-status");
   if (!soldStatus) return;
   if (!filterState.sold) {
-    soldStatus.textContent = "Sold comps hidden";
+    soldStatus.textContent = "Some comps filtered out";
     return;
   }
 
   const filteredCount = lastSoldPanelPoints.length;
   const totalCount = allSoldPointsRef.length;
   if (soldCompsFiltersAreActive() && filteredCount < totalCount) {
-    soldStatus.textContent = `${filteredCount} of ${totalCount} sold comps found`;
+    soldStatus.textContent = "Some comps filtered out";
     return;
   }
 
-  soldStatus.textContent = `${filteredCount} sold comp${filteredCount !== 1 ? "s" : ""} found`;
+  // Default: all sold comps visible - clear so note doesn't read
+  // "filtered out" when nothing actually is.
+  soldStatus.textContent = "";
 }
 
 function applyAndRenderSoldFilters() {
@@ -885,17 +1324,17 @@ function applyAndRenderSoldFilters() {
     _soldPointPassesFilter(p, soldCompsFilter)
   );
   updateMatchedSoldCompVisibility(soldCompsFilter);
-  // Re-render map dots respecting filters (renderSoldPoints clears layer if sold is off)
-  const filteredMap = lastSoldPoints.filter((p) =>
-    _soldPointPassesFilter(p, soldCompsFilter)
-  );
-  renderSoldPoints(filteredMap);
+  // renderFeatures auto-runs renderSoldPoints at its end, so anchors stay in sync.
+  // For paths that don't re-render features (e.g., sold-only filter input changes
+  // when no analysis is loaded), call renderSoldPoints directly as a fallback.
   if (lastAnalysisGeojson && Array.isArray(lastAnalysisGeojson.features) && lastAnalysisGeojson.features.length <= BROWSE_ONLY_THRESHOLD) {
     if (viewportRenderMode) {
       renderViewportFeatures();
     } else {
       renderFeatures(lastAnalysisGeojson);
     }
+  } else {
+    renderSoldPoints();
   }
   renderSoldCompsPanel();
   updateSoldStatusText();
@@ -908,11 +1347,6 @@ function renderSoldCompsPanel() {
   if (!panel) return;
   const totalSoldCount = Array.isArray(allSoldPointsRef) ? allSoldPointsRef.length : 0;
   const soldCountNote = `<p class="sidebar-note sold-comps-count-note">${totalSoldCount} sold comp${totalSoldCount === 1 ? "" : "s"} in this area</p>`;
-
-  if (!Array.isArray(allSoldPointsRef) || allSoldPointsRef.length === 0) {
-    panel.innerHTML = soldCountNote;
-    return;
-  }
 
   const priceValues = lastSoldPanelPoints.map((p) => asNumber(p.sold_price)).filter((n) => n != null);
   const ppsfValues = lastSoldPanelPoints.map((p) => asNumber(p.price_per_sqft)).filter((n) => n != null);
@@ -936,6 +1370,8 @@ function renderSoldCompsPanel() {
       const soldDate = formatSoldDateLabel(point.sold_date) || "N/A";
       const ppsfText = ppsf != null ? `$${Math.round(ppsf)}/sqft` : "N/A";
       const sizeText = sqft != null ? `${Math.round(sqft).toLocaleString()} sf` : "N/A sf";
+      const lot = asNumber(point.lot_sqft);
+      const lotText = lot != null ? `${(lot / 43560).toFixed(2)} ac` : "N/A ac";
       const bedBathText = `${beds != null ? beds : "?"}bd/${baths != null ? baths : "?"}ba`;
       const yearText = yrBuilt != null ? `${Math.round(yrBuilt)}` : "N/A";
       return `
@@ -944,7 +1380,7 @@ function renderSoldCompsPanel() {
             <span class="sold-row-price">${price}</span>
             <span>${ppsfText}</span>
           </div>
-          <div class="sold-row-meta">${sizeText} · ${bedBathText} · Built ${yearText}</div>
+          <div class="sold-row-meta">${sizeText} · ${lotText} · ${bedBathText} · Built ${yearText}</div>
           <div class="sold-row-sub">${soldDate} · ${soldAddressStreetOnly(point.address)}</div>
         </div>
       `;
@@ -965,7 +1401,7 @@ function renderSoldCompsPanel() {
         </div>
       </div>
       <div class="numeric-filter-row">
-        <span class="numeric-filter-label">Price ($)</span>
+        <span class="numeric-filter-label">Sold Price ($)</span>
         <div class="numeric-filter-inputs">
           <input type="text" id="sold-price-min" placeholder="Min (500k)" class="nf-input" value="${soldCompsFilter.minPrice ?? ""}">
           <span class="nf-sep">–</span>
@@ -973,11 +1409,27 @@ function renderSoldCompsPanel() {
         </div>
       </div>
       <div class="numeric-filter-row">
+        <span class="numeric-filter-label">Lot Size (acres)</span>
+        <div class="numeric-filter-inputs">
+          <input type="text" inputmode="decimal" id="nf-comp-lot-min" placeholder="Min acres" class="nf-input" value="${compNumericFilters.lot_sqft_min == null ? "" : (compNumericFilters.lot_sqft_min / 43560).toFixed(2).replace(/\.00$/, "")}">
+          <span class="nf-sep">–</span>
+          <input type="text" inputmode="decimal" id="nf-comp-lot-max" placeholder="Max acres" class="nf-input" value="${compNumericFilters.lot_sqft_max == null ? "" : (compNumericFilters.lot_sqft_max / 43560).toFixed(2).replace(/\.00$/, "")}">
+        </div>
+      </div>
+      <div class="numeric-filter-row">
+        <span class="numeric-filter-label">Building Sqft</span>
+        <div class="numeric-filter-inputs">
+          <input type="number" id="nf-comp-sqft-min" placeholder="Min" class="nf-input" min="0" value="${compNumericFilters.sqft_min ?? ""}">
+          <span class="nf-sep">–</span>
+          <input type="number" id="nf-comp-sqft-max" placeholder="Max" class="nf-input" min="0" value="${compNumericFilters.sqft_max ?? ""}">
+        </div>
+      </div>
+      <div class="numeric-filter-row">
         <span class="numeric-filter-label">Year Built</span>
         <div class="numeric-filter-inputs">
-          <input type="number" id="sold-yr-min" placeholder="Min" class="nf-input" min="1800" max="2030" value="${soldCompsFilter.minYearBuilt ?? ""}">
+          <input type="number" id="nf-comp-yr-min" placeholder="Min" class="nf-input" min="1800" max="2030" value="${compNumericFilters.yr_built_min ?? ""}">
           <span class="nf-sep">–</span>
-          <input type="number" id="sold-yr-max" placeholder="Max" class="nf-input" min="1800" max="2030" value="${soldCompsFilter.maxYearBuilt ?? ""}">
+          <input type="number" id="nf-comp-yr-max" placeholder="Max" class="nf-input" min="1800" max="2030" value="${compNumericFilters.yr_built_max ?? ""}">
         </div>
       </div>
     </div>`;
@@ -991,7 +1443,7 @@ function renderSoldCompsPanel() {
     ${soldCountNote}
     <div class="sold-comps-panel">
       <button class="section-toggle" type="button" id="sold-comps-toggle" aria-expanded="${!soldCompsCollapsed}">
-        <span class="sidebar-label">Sold Comps</span>
+        <span class="sidebar-label">Legacy Filters</span>
       </button>
       <div id="sold-comps-body" class="collapsible-body${soldCompsCollapsed ? " hidden" : ""}">
         <div class="sold-comps-summary">
@@ -1030,8 +1482,12 @@ function renderSoldCompsPanel() {
   const soldDaysMaxInput = panel.querySelector("#sold-days-max");
   const soldPriceMinInput = panel.querySelector("#sold-price-min");
   const soldPriceMaxInput = panel.querySelector("#sold-price-max");
-  const soldYrMinInput = panel.querySelector("#sold-yr-min");
-  const soldYrMaxInput = panel.querySelector("#sold-yr-max");
+  const compLotMinInput = panel.querySelector("#nf-comp-lot-min");
+  const compLotMaxInput = panel.querySelector("#nf-comp-lot-max");
+  const compYrMinInput = panel.querySelector("#nf-comp-yr-min");
+  const compYrMaxInput = panel.querySelector("#nf-comp-yr-max");
+  const compSqftMinInput = panel.querySelector("#nf-comp-sqft-min");
+  const compSqftMaxInput = panel.querySelector("#nf-comp-sqft-max");
 
   const normalizeShorthandInput = (inputEl) => {
     if (!inputEl) return null;
@@ -1066,18 +1522,18 @@ function renderSoldCompsPanel() {
 
     soldCompsFilter.minPrice = parseShorthand(soldPriceMinInput?.value);
     soldCompsFilter.maxPrice = parseShorthand(soldPriceMaxInput?.value);
-    soldCompsFilter.minYearBuilt = parseIntegerInput(soldYrMinInput);
-    soldCompsFilter.maxYearBuilt = parseIntegerInput(soldYrMaxInput);
     applyAndRenderSoldFilters();
     _refreshLoadedAreaUi();
   };
 
+  const applyCompNumericInputFilters = () => {
+    bumpUndoPillVersion();
+    // Read comp numeric filter inputs  and apply
+    _applyCompNumericFilters();
+  };
+
   soldDaysMaxInput?.addEventListener("blur", applySoldCompInputFilters);
   soldDaysMaxInput?.addEventListener("change", applySoldCompInputFilters);
-  soldYrMinInput?.addEventListener("blur", applySoldCompInputFilters);
-  soldYrMaxInput?.addEventListener("blur", applySoldCompInputFilters);
-  soldYrMinInput?.addEventListener("change", applySoldCompInputFilters);
-  soldYrMaxInput?.addEventListener("change", applySoldCompInputFilters);
 
   [soldPriceMinInput, soldPriceMaxInput].forEach((inputEl) => {
     inputEl?.addEventListener("blur", () => {
@@ -1088,6 +1544,12 @@ function renderSoldCompsPanel() {
       normalizeShorthandInput(inputEl);
       applySoldCompInputFilters();
     });
+  });
+
+  // Comp numeric filter inputs: use blur + change (NOT input) to avoid re-render mid-keystroke
+  [compLotMinInput, compLotMaxInput, compYrMinInput, compYrMaxInput, compSqftMinInput, compSqftMaxInput].forEach((inputEl) => {
+    inputEl?.addEventListener("blur", applyCompNumericInputFilters);
+    inputEl?.addEventListener("change", applyCompNumericInputFilters);
   });
 
   panel.querySelectorAll(".sold-row[data-sold-idx]").forEach((rowEl) => {
@@ -1250,12 +1712,16 @@ function _normalizeSavedAreaRow(area) {
     id: String(area.area_id || area.id || ""),
     type: String(area.type || "area"),
     name: String(area.name || "Untitled"),
+    share_id: String(area.share_id || ""),
+    user_id: area.user_id != null ? String(area.user_id) : null,
     latlngs: polygon,
     bounds: polygon.length >= 2 ? _savedAreaBoundsFromLatLngs(polygon) : null,
     savedAt: area.updated_at || area.created_at || new Date().toISOString(),
     filter_state: area.filter_state && typeof area.filter_state === "object" ? area.filter_state : null,
     lat: Number.isFinite(Number(area.lat)) ? Number(area.lat) : null,
     lng: Number.isFinite(Number(area.lng)) ? Number(area.lng) : null,
+    originator_parcel_county: String(area.originator_parcel_county || "").trim().toLowerCase() || null,
+    originator_parcel_account_num: String(area.originator_parcel_account_num || "").trim() || null,
     shared_by_username: area.shared_by_username || null,
   };
 }
@@ -1311,6 +1777,18 @@ async function _reloadSavedResources() {
   _restoreAllSavedParcelOutlines();
   renderSavedAreasList();
   renderSavedSessionsList();
+}
+
+// Sync the browser tab title to the active workspace name.
+// Called after every _currentLoadedAreaId assignment.
+function _syncTabTitle() {
+  if (_currentLoadedAreaId) {
+    const area = _savedAreasCache.find((a) => String(a.id) === String(_currentLoadedAreaId));
+    const name = String(area?.name || "").trim();
+    document.title = name || "LotLedger";
+  } else {
+    document.title = "LotLedger";
+  }
 }
 
 function _isLoadedAreaWithFilterDrift(area) {
@@ -1370,6 +1848,7 @@ async function saveCurrentArea(name) {
   const trimmed = String(name || "").trim();
   if (!trimmed) return;
   bumpUndoPillVersion();
+  const origin = _currentTargetParcel;
   const created = await _apiJson("/api/areas", {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders() },
@@ -1378,14 +1857,116 @@ async function saveCurrentArea(name) {
       type: "area",
       polygon: lastDrawnLatLngs,
       filter_state: captureFilterState(),
+      job_id: currentJobId || null,
+      ...(origin ? {
+        originator_parcel_county: origin.county,
+        originator_parcel_account_num: origin.account,
+      } : {}),
     }),
   });
   const normalized = _normalizeSavedAreaRow(created);
   _savedAreasCache.unshift(normalized);
   // Mark the just-saved area as the currently-loaded one so the Update button
   // becomes available the moment the user tweaks any filter after saving.
+  _clearOriginatorStar();
+  _currentTargetParcel = null;
   _currentLoadedAreaId = normalized.id;
+  _syncTabTitle();
+  _selectedSavedItemId = normalized.id;
+  // Render the originator star immediately if captured at save time.
+  // Use lat/lng from origin (the pre-save _currentTargetParcel) to skip
+  // the /api/parcel fetch round-trip since we already have coordinates.
+  if (normalized.originator_parcel_county && normalized.originator_parcel_account_num) {
+    _currentTargetParcel = {
+      county: normalized.originator_parcel_county,
+      account: normalized.originator_parcel_account_num,
+      lat: origin?.lat,
+      lng: origin?.lng,
+    };
+    void _renderOriginatorTargetStar(
+      normalized.originator_parcel_county,
+      normalized.originator_parcel_account_num,
+      origin?.lat,
+      origin?.lng,
+    );
+  }
+  setActiveItem("Workspace", normalized.name);
   renderSavedAreasList();
+  // If there's already a Propelio pull on screen for this polygon, attach
+  // the existing comp list to the new saved area's archive so the comps
+  // pick up stable comp_address_keys. We AWAIT this so the user can't
+  // race a filter change against the merge — the buttons must be live by
+  // the time saveCurrentArea returns.
+  if (window._propelioLast && Array.isArray(window._propelioLast.comps) && window._propelioLast.comps.length) {
+    await _reattachPropelioToSavedArea(normalized.id);
+  }
+}
+
+// On saved-area load: pull the archived comps for that workspace from
+// the session DB and rehydrate the propelio panel. No Propelio quota
+// hit, no scrape — just a DB read of comps the workspace already
+// owns. Comps come back with comp_address_key + user_rating already
+// stamped, so good/bad/dim states restore exactly as the user left
+// them. Empty archive → leave UI quiet (no error noise).
+async function _hydratePropelioFromArchive(savedAreaId) {
+  if (!savedAreaId) return;
+  // Reset any prior workspace's propelio state first.
+  window._propelioLast = null;
+  _updatePropelioStatusCounts();
+  propelioCompLayer.clearLayers();
+  propelioCompLayerByKey.clear();
+  renderPropelioCompList([]);
+  propelioCmaChip.hide();
+  const countEl = document.getElementById("propelio-filter-count");
+  if (countEl) countEl.textContent = "";
+
+  try {
+    const resp = await fetch(
+      `/api/propelio/by-saved-area?saved_area_id=${encodeURIComponent(savedAreaId)}`,
+      { headers: { ...authHeaders() } },
+    );
+    if (!resp.ok) {
+      console.warn("[propelio] hydrate from archive failed:", resp.status);
+      return;
+    }
+    const data = await resp.json();
+    const comps = Array.isArray(data?.comps) ? data.comps : [];
+    if (!comps.length) return;
+    window._propelioLast = { comps };
+    _updatePropelioStatusCounts();
+    applyPropelioClientFilters();
+  } catch (err) {
+    console.error("[propelio] hydrate error:", err);
+  }
+}
+
+async function _reattachPropelioToSavedArea(savedAreaId) {
+  if (!savedAreaId) return;
+  if (!window._propelioLast || !Array.isArray(window._propelioLast.comps) || !window._propelioLast.comps.length) return;
+  try {
+    const resp = await fetch("/api/propelio/attach-to-area", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify({
+        saved_area_id: savedAreaId,
+        comps: window._propelioLast.comps,
+      }),
+    });
+    if (!resp.ok) {
+      console.warn("[propelio] attach-to-area failed:", resp.status);
+      return;
+    }
+    const data = await resp.json();
+    window._propelioLast = {
+      ...window._propelioLast,
+      comps: Array.isArray(data?.comps) ? data.comps : window._propelioLast.comps,
+      archive_meta: data?.archive_meta || null,
+    };
+    _updatePropelioStatusCounts();
+    applyPropelioClientFilters();
+  } catch (err) {
+    console.error("[propelio] attach-to-area error:", err);
+  }
 }
 
 async function deleteSavedArea(item) {
@@ -1402,14 +1983,26 @@ async function deleteSavedArea(item) {
       savedParcelLayer.removeLayer(layer);
       delete savedParcelLayers[item.account_num];
     }
+    _removeSavedTargetStar(item.account_num);
+    const clickLayer = savedParcelClickLayers[item.account_num];
+    if (clickLayer) {
+      savedParcelClickLayer.removeLayer(clickLayer);
+      delete savedParcelClickLayers[item.account_num];
+    }
   } else {
     await _apiJson(`/api/areas/${encodeURIComponent(item.id)}`, {
       method: "DELETE",
       headers: { ...authHeaders() },
     });
     _savedAreasCache = _savedAreasCache.filter((a) => a.id !== item.id);
-    if (_currentLoadedAreaId === item.id) _currentLoadedAreaId = null;
+    if (_currentLoadedAreaId === item.id) {
+      _clearOriginatorStar();
+      _currentTargetParcel = null;
+      _currentLoadedAreaId = null;
+      _syncTabTitle();
+    }
   }
+  if (_selectedSavedItemId === item.id) _selectedSavedItemId = null;
   renderSavedAreasList();
 }
 
@@ -1445,6 +2038,7 @@ async function saveCurrentSession(name) {
   _savedSessionsCache.unshift(normalized);
   _currentSessionIsNamed = true;
   _updateSaveSessionButtonState();
+  setActiveItem("Snapshot", normalized.name);
   renderSavedSessionsList();
 }
 
@@ -1512,49 +2106,289 @@ async function _renameSavedSessionInline(session, rowEl) {
   input.addEventListener("blur", () => { if (!input.value.trim()) cancel(); });
 }
 
-const SAVED_PARCEL_COLOR = "#e67e22";
+const SAVED_PARCEL_COLOR = "#FFD700";
+const savedTargetStarIcon = L.divIcon({
+  className: "saved-target-star",
+  html: '<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false"><path d="M12 1.8l3.16 6.4 7.06 1.03-5.11 4.98 1.2 7.04L12 17.93 5.69 21.25l1.2-7.04-5.11-4.98 7.06-1.03L12 1.8z" fill="#e2c075" stroke="#8b6b1f" stroke-width="1.2"/></svg>',
+  iconSize: [22, 22],
+  iconAnchor: [11, 11],
+});
+
+function _clearOriginatorStar() {
+  if (_originatorStarMarker) {
+    _ORIGINATOR_STAR_LAYER.removeLayer(_originatorStarMarker);
+    _originatorStarMarker = null;
+  }
+}
+
+async function _renderOriginatorTargetStar(county, account, lat, lng) {
+  if (_originatorStarMarker) {
+    _ORIGINATOR_STAR_LAYER.removeLayer(_originatorStarMarker);
+    _originatorStarMarker = null;
+  }
+  const c = String(county || "").trim().toLowerCase();
+  const a = String(account || "").trim();
+  if (!c || !a) return;
+
+  let resolvedLat = Number(lat);
+  let resolvedLng = Number(lng);
+  if (!Number.isFinite(resolvedLat) || !Number.isFinite(resolvedLng)) {
+    try {
+      const resp = await fetch(`/api/parcel/${encodeURIComponent(c)}/${encodeURIComponent(a)}`);
+      if (!resp.ok) return;
+      const detail = await resp.json();
+      const props = detail.properties || detail;
+      resolvedLat = Number(props.lat);
+      resolvedLng = Number(props.lng);
+      if (!Number.isFinite(resolvedLat) || !Number.isFinite(resolvedLng)) return;
+    } catch (err) {
+      console.warn("[target-star] fetch failed:", err);
+      return;
+    }
+  }
+
+  const icon = L.divIcon({
+    className: "saved-target-star is-originator",
+    html: `<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false">
+        <path d="M12 1.8l3.16 6.4 7.06 1.03-5.11 4.98 1.2 7.04L12 17.93 5.69 21.25l1.2-7.04-5.11-4.98 7.06-1.03L12 1.8z"
+              fill="#e2c075" stroke="#8b6b1f" stroke-width="1.2"/>
+      </svg>`,
+    iconSize: [22, 22],
+    iconAnchor: [11, 11],
+  });
+  _originatorStarMarker = L.marker([resolvedLat, resolvedLng], {
+    icon,
+    pane: "savedTargetStarPane",
+  }).addTo(_ORIGINATOR_STAR_LAYER);
+}
+
+function _updateSavedTargetStarVisibility() {
+  // Regular gold target stars: zoom-gated. Purpose is wide-view nav so
+  // they only show when zoomed out far enough that parcel outlines
+  // aren't readable. Above the threshold the parcel outlines themselves
+  // are the visible markers.
+  if (map.getZoom() < SAVED_TARGET_STAR_MAX_ZOOM) {
+    if (!map.hasLayer(savedTargetStarLayer)) map.addLayer(savedTargetStarLayer);
+  } else if (map.hasLayer(savedTargetStarLayer)) {
+    map.removeLayer(savedTargetStarLayer);
+  }
+  // Originator star is NOT zoom-gated. Its purpose is to distinguish
+  // THE intended target from other gold-saved targets in the same
+  // workspace at every zoom level — the user always needs to know
+  // which parcel was the originator regardless of view scale.
+  if (!map.hasLayer(_ORIGINATOR_STAR_LAYER)) map.addLayer(_ORIGINATOR_STAR_LAYER);
+}
+
+function _removeSavedTargetStar(accountNum) {
+  const key = String(accountNum || "");
+  if (!key) return;
+  const marker = savedTargetStarMarkers[key];
+  if (!marker) return;
+  savedTargetStarLayer.removeLayer(marker);
+  delete savedTargetStarMarkers[key];
+}
+
+function _renderSavedTargetStar(area) {
+  const accountNum = String(area?.account_num || "").trim();
+  if (!accountNum) return;
+  if (savedTargetStarMarkers[accountNum]) return;
+
+  const lat = Number(area?.lat);
+  const lng = Number(area?.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+
+  const marker = L.marker([lat, lng], { icon: savedTargetStarIcon, pane: "savedTargetStarPane" });
+  marker.on("click", async (ev) => {
+    L.DomEvent.stopPropagation(ev);
+    const county = String(area.county || "dcad").trim().toLowerCase();
+    const account = String(area.account_num || "").trim();
+    if (!account) return;
+    try {
+      const resp = await fetch(`/api/parcel/${encodeURIComponent(county)}/${encodeURIComponent(account)}`);
+      if (!resp.ok) return;
+      const detail = await resp.json();
+      openParcelDetailPanel(detail.properties || detail, { latlng: ev.latlng, geometry: detail.geometry });
+    } catch (err) {
+      console.error("[saved-target-star] open failed", err);
+    }
+  });
+  marker.addTo(savedTargetStarLayer);
+  savedTargetStarMarkers[accountNum] = marker;
+}
 
 function _renderSavedParcelOutline(area) {
   if (savedParcelLayers[area.account_num]) return; // already on map
   if (!area.geometry || !["Polygon", "MultiPolygon"].includes(area.geometry.type)) return;
   const layer = L.geoJSON({ type: "Feature", geometry: area.geometry, properties: {} }, {
-    style: { color: SAVED_PARCEL_COLOR, weight: 3, fill: false, interactive: false },
+    pane: "savedParcelPane",
+    className: "saved-parcel-glow",
+    style: {
+      color: SAVED_PARCEL_COLOR,
+      weight: 4,
+      fill: true,
+      fillColor: SAVED_PARCEL_COLOR,
+      fillOpacity: 0.16,
+      interactive: false,
+    },
     interactive: false,
   }).addTo(savedParcelLayer);
   savedParcelLayers[area.account_num] = layer;
+
+  // Sibling click-catcher on the default overlay pane. Transparent fill, no
+  // stroke — exists only to make the gold target reliably clickable even when
+  // an active draw has set lastAnalysisGeojson (which makes the browse-layer
+  // click handler bail), or when the target sits outside the draw polygon and
+  // therefore has no entry in parcelTypeLayers.
+  const county = area.county || "dcad";
+  const accountNum = area.account_num;
+  const clickLayer = L.geoJSON({ type: "Feature", geometry: area.geometry, properties: {} }, {
+    style: { stroke: false, fill: true, fillOpacity: 0, fillColor: SAVED_PARCEL_COLOR },
+    interactive: true,
+  });
+  clickLayer.on("click", async (ev) => {
+    L.DomEvent.stopPropagation(ev);
+    try {
+      const resp = await fetch(`/api/parcel/${county}/${accountNum}`);
+      if (!resp.ok) return;
+      const detail = await resp.json();
+      openParcelDetailPanel(detail.properties || detail, { latlng: ev.latlng, geometry: detail.geometry });
+    } catch (e) {
+      console.error("Saved-target popup failed", e);
+    }
+  });
+  clickLayer.addTo(savedParcelClickLayer);
+  savedParcelClickLayers[accountNum] = clickLayer;
+}
+
+function _clearSelectedOutline() {
+  selectedOutlineLayer.clearLayers();
+}
+
+// Render a crisp purple outline of `geometry` (Polygon or MultiPolygon)
+// in selectedOutlinePane. No-op if geometry is missing or not a polygon
+// type — point-only selections (e.g., type=location saved items) don't
+// get a polygon outline.
+function _renderSelectedOutline(geometry) {
+  _clearSelectedOutline();
+  if (!geometry) return;
+  if (geometry.type !== "Polygon" && geometry.type !== "MultiPolygon") return;
+  L.geoJSON({ type: "Feature", geometry, properties: {} }, {
+    pane: "selectedOutlinePane",
+    className: "selected-outline-glow",
+    style: { color: "#a855f7", weight: 3, fill: false, interactive: false },
+    interactive: false,
+  }).addTo(selectedOutlineLayer);
 }
 
 async function saveParcel(account_num, county, addr, lat, lng, geometry) {
   if (!account_num) return;
   bumpUndoPillVersion();
+  // If a workspace is currently loaded, ask the server to also create a
+  // bonded copy of this target into that workspace. Backend silently skips
+  // if the user doesn't own that workspace.
+  const requestBody = {
+    account_num,
+    county: county || "dcad",
+    payload: {
+      account_num,
+      county,
+      name: addr || account_num,
+      lat,
+      lng,
+      geometry: geometry || null,
+    },
+  };
+  if (_currentLoadedAreaId) {
+    requestBody.area_id = _currentLoadedAreaId;
+  }
   const created = await _apiJson("/api/parcels", {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders() },
-    body: JSON.stringify({
-      account_num,
-      county: county || "dcad",
-      payload: {
-        account_num,
-        county,
-        name: addr || account_num,
-        lat,
-        lng,
-        geometry: geometry || null,
-      },
-    }),
+    body: JSON.stringify(requestBody),
   });
   const row = _normalizeSavedParcelRow(created);
   _savedParcelsCache = _savedParcelsCache.filter((p) => !(p.account_num === row.account_num && p.county === row.county));
   _savedParcelsCache.unshift(row);
+  _selectedSavedItemId = row.id;
   renderSavedAreasList();
   _renderSavedParcelOutline(row);
+  _renderSavedTargetStar(row);
+  // Single choke point for both right-click and popup-save paths.
+  // Setting the current target + rendering the TARGET-badged star
+  // happens here, so any saveParcel caller (right-click handler,
+  // popup .parcel-save-link, future paths) gets it for free.
+  const targetCounty = String(county || "dcad").trim().toLowerCase();
+  const targetAccount = String(account_num || "").trim();
+  if (targetAccount) {
+    _currentTargetParcel = { county: targetCounty, account: targetAccount, lat, lng };
+    void _renderOriginatorTargetStar(targetCounty, targetAccount, lat, lng);
+  }
+  setActiveItem("Workspace", row.name);
+}
+
+async function _rightClickSaveParcel(p, knownGeometry) {
+  if (!_isPowerUserOrAbove()) return;
+  if (!_currentUser) {
+    _showToast("Sign in to save", "error");
+    return;
+  }
+  const account = String(p?.account_num || "").trim();
+  const county = String(p?.source_county || "dcad").trim().toLowerCase();
+  if (!account || !county) return;
+
+  const already = _savedParcelsCache.find((a) =>
+    String(a.account_num || "").trim() === account
+    && String(a.county || "").trim().toLowerCase() === county,
+  );
+  if (already) {
+    _showToast("Already saved");
+    return;
+  }
+
+  let addr = String(p?.addr || "").trim();
+  let lat = Number(p?.lat);
+  let lng = Number(p?.lng);
+  let geometry = knownGeometry;
+
+  if (!addr || !Number.isFinite(lat) || !Number.isFinite(lng) || !geometry) {
+    try {
+      const resp = await fetch(`/api/parcel/${encodeURIComponent(county)}/${encodeURIComponent(account)}`);
+      if (resp.ok) {
+        const detail = await resp.json();
+        const props = detail.properties || detail;
+        addr = addr || String(props.addr || "");
+        if (!Number.isFinite(lat) && Number.isFinite(Number(props.lat))) lat = Number(props.lat);
+        if (!Number.isFinite(lng) && Number.isFinite(Number(props.lng))) lng = Number(props.lng);
+        if (!geometry && (detail.geometry?.type === "Polygon" || detail.geometry?.type === "MultiPolygon")) {
+          geometry = detail.geometry;
+        }
+      }
+    } catch (_) { /* proceed with what we have */ }
+  }
+
+  try {
+    await saveParcel(account, county, addr, lat, lng, geometry);
+    _showToast(addr ? `Saved: ${addr}` : "Saved");
+  } catch (err) {
+    console.error("right-click save failed", err);
+    _showToast("Save failed", "error");
+  }
 }
 
 function _restoreAllSavedParcelOutlines() {
   Object.values(savedParcelLayers).forEach((layer) => savedParcelLayer.removeLayer(layer));
   Object.keys(savedParcelLayers).forEach((key) => delete savedParcelLayers[key]);
+  Object.values(savedParcelClickLayers).forEach((layer) => savedParcelClickLayer.removeLayer(layer));
+  Object.keys(savedParcelClickLayers).forEach((key) => delete savedParcelClickLayers[key]);
+  Object.values(savedTargetStarMarkers).forEach((marker) => savedTargetStarLayer.removeLayer(marker));
+  Object.keys(savedTargetStarMarkers).forEach((key) => delete savedTargetStarMarkers[key]);
   _savedParcelsCache.forEach(_renderSavedParcelOutline);
+  _savedParcelsCache.forEach(_renderSavedTargetStar);
+  _updateSavedTargetStarVisibility();
 }
+
+map.on("zoomend", _updateSavedTargetStarVisibility);
+_updateSavedTargetStarVisibility();
 
 function _createUndoSnapshot() {
   return {
@@ -1649,14 +2483,40 @@ function _showUndoPill(snapshot, restoredCount) {
   }, 6000);
 }
 
+function _suspendViewportRender(ms = 700) {
+  _suspendViewportRenderUntil = Math.max(_suspendViewportRenderUntil, Date.now() + ms);
+}
+
+function _captureParcelPopupState(meta) {
+  if (!meta?.accountNum) return;
+  _activeParcelPopupState = {
+    accountNum: String(meta.accountNum),
+  };
+}
+
+function _restoreActiveParcelPopup() {
+  if (!_activeParcelPopupState?.props) return;
+  _suspendViewportRender();
+  setTimeout(() => {
+    if (!_activeParcelPopupState?.props) return;
+    openParcelDetailPanel(_activeParcelPopupState.props, {
+      latlng: _activeParcelPopupState.latlng || null,
+      matchedComp: _activeParcelPopupState.matchedComp || null,
+      geometry: _activeParcelPopupState.geometry || null,
+      suppressFly: true,
+    });
+  }, 0);
+}
+
 async function restoreSavedArea(area, options = {}) {
   const rowEl = options.rowEl || null;
+  _selectedSavedItemId = area?.id || null;
   // Location pins (from address search) — just fly there and show the ring.
   if (area.type === "location") {
     const latlng = [area.lat, area.lng];
     const clickMode = getClickMode();
     if (clickMode === "jump") {
-      map.flyTo(latlng, 17);
+      map.flyTo(latlng, 16);
     } else {
       // Stay mode: only pan if location is off-screen
       if (!isPointInViewport(latlng)) {
@@ -1699,20 +2559,23 @@ async function restoreSavedArea(area, options = {}) {
       })();
     };
     map.once("moveend", window._searchMoveEndHandler);
+    setActiveItem("Location", area.name);
     return;
   }
 
   if (area.type === "parcel") {
     _renderSavedParcelOutline(area);
+    _renderSavedTargetStar(area);
     const clickMode = getClickMode();
     if (clickMode === "jump") {
-      map.flyTo([area.lat, area.lng], 18);
+      map.flyTo([area.lat, area.lng], 16);
     } else {
       // Stay mode: only pan if parcel is off-screen
       if (!isPointInViewport([area.lat, area.lng])) {
         map.setView([area.lat, area.lng], map.getZoom());
       }
     }
+    setActiveItem("Workspace", area.name);
     return;
   }
 
@@ -1722,6 +2585,7 @@ async function restoreSavedArea(area, options = {}) {
     ? area.filter_state
     : null;
   clearDrawResults();
+  setActiveItem("Workspace", area.name);
   if (savedFilterState) {
     restoreFilterState(savedFilterState);
   }
@@ -1745,7 +2609,7 @@ async function restoreSavedArea(area, options = {}) {
   // Respect click mode: Jump = fitBounds, Stay = auto-pan only if off-screen
   const clickMode = getClickMode();
   if (clickMode === "jump") {
-    if (bounds) map.fitBounds(bounds, { padding: [40, 40] });
+    if (bounds) map.fitBounds(bounds, { padding: [40, 40], maxZoom: 16 });
   } else {
     // Stay mode: only auto-pan if bounds are off-screen
     if (bounds && !areaBoundsInViewport(bounds)) {
@@ -1765,7 +2629,6 @@ async function restoreSavedArea(area, options = {}) {
 
   const includeRedfin = true;
   const includeSold = Boolean(filterState.sold);
-  document.getElementById("sidebar-instructions")?.classList.add("hidden");
   document.getElementById("sidebar-results")?.classList.add("hidden");
   document.getElementById("sidebar-loading")?.classList.remove("hidden");
   document.getElementById("redfin-status").textContent = "Loading area analysis...";
@@ -1773,7 +2636,7 @@ async function restoreSavedArea(area, options = {}) {
   if (options.undoSnapshot) options.undoSnapshot.abortCtrl = _activeAnalysisAbortController;
 
   try {
-    const data = await runAnalysis(polygon, includeRedfin, includeSold, { signal: analysisRequest.signal });
+    const data = await runAnalysis(polygon, includeRedfin, includeSold, { signal: analysisRequest.signal, areaId: area.id });
     if (analysisRequest.signal.aborted) return;
     if (!isActiveAnalysisRequest(analysisRequest.requestId)) return;
     if (data.source_status && (!data.source_status.dcad_ok || !data.source_status.tad_ok)) {
@@ -1831,14 +2694,49 @@ async function restoreSavedArea(area, options = {}) {
     }
     renderSidebar(data.counts, markers);
     applyResultTags(data);
+    _clearOriginatorStar();
+    _currentTargetParcel = null;
     _currentLoadedAreaId = area.id;
+    _syncTabTitle();
+    if (area.originator_parcel_county && area.originator_parcel_account_num) {
+      _currentTargetParcel = {
+        county: area.originator_parcel_county,
+        account: area.originator_parcel_account_num,
+      };
+      void _renderOriginatorTargetStar(
+        area.originator_parcel_county,
+        area.originator_parcel_account_num,
+      );
+    }
+    // Show the sticky Get Comps button so a quick sweep is one click away
+    // after loading a saved area. Guard against mid-sweep: if a deep-pull
+    // is in flight, surface the anchor but skip _showPropelioPolygonButton's
+    // state reset so we don't trample the running label/disabled/is-running.
+    if (_activeDeepPullJobId) {
+      _ensureStickyPropelioButton();
+      propelioStickyAnchor?.classList.add("visible");
+    } else {
+      _showPropelioPolygonButton();
+    }
+    // Workspace = parcels + archived comps. Hydrate propelio comps from the
+    // session DB so the analyst lands back in the exact state they left
+    // (good/bad ratings, dimmed bad-comps, footprints, list).
+    void _hydratePropelioFromArchive(area.id);
+    // NOTE: don't re-call setActiveItem here. It was already set at line 1885
+    // before the await. Calling it again post-analysis stomps any active
+    // selection the user made during the analysis (e.g., clicking a target
+    // while the workspace was still loading would briefly show the target,
+    // then this would override it back to "Workspace").
     renderSavedAreasList();
+    // Debug: sold-count restore diagnostics (remove after Bug 2 confirmed fixed)
+    console.debug("[restoreSavedArea] post-render sold state — allSoldPointsRef:", allSoldPointsRef.length, "lastSoldPanelPoints:", lastSoldPanelPoints.length, "soldCompsFilter:", JSON.stringify(soldCompsFilter), "filterState.sold:", filterState.sold);
+    applyAndRenderSoldFilters();
+    applyMapVisibilityFilters();
   } catch (err) {
     if (isAbortError(err) || !isActiveAnalysisRequest(analysisRequest.requestId)) return;
     console.error("[restoreSavedArea] Analysis failed:", err);
     document.getElementById("redfin-status").textContent = getAnalysisErrorMessage(err, "Area analysis failed. Please try again.");
     document.getElementById("sidebar-loading")?.classList.add("hidden");
-    document.getElementById("sidebar-instructions")?.classList.remove("hidden");
   } finally {
     if (rowEl) rowEl.classList.remove("row-shimmer");
   }
@@ -1846,12 +2744,16 @@ async function restoreSavedArea(area, options = {}) {
 
 async function restoreNamedSession(session, options = {}) {
   const rowEl = options.rowEl || null;
+  _selectedSavedItemId = null;
   if (!session.latlngs || session.latlngs.length < 3) {
     console.warn("[restoreNamedSession] session has no polygon", session);
     return;
   }
   if (rowEl) rowEl.classList.add("row-shimmer");
+  _clearOriginatorStar();
+  _currentTargetParcel = null;
   _currentLoadedAreaId = null;
+  _syncTabTitle();
   renderSavedAreasList();
   const savedFilterState = session.filter_state && typeof session.filter_state === "object"
     ? session.filter_state
@@ -1870,7 +2772,7 @@ async function restoreNamedSession(session, options = {}) {
   // Respect click mode: Jump = fitBounds, Stay = auto-pan only if off-screen
   const clickMode = getClickMode();
   if (clickMode === "jump") {
-    if (bounds) map.fitBounds(bounds, { padding: [40, 40] });
+    if (bounds) map.fitBounds(bounds, { padding: [40, 40], maxZoom: 16 });
   } else {
     // Stay mode: only auto-pan if bounds are off-screen
     if (bounds && !areaBoundsInViewport(bounds)) {
@@ -1885,10 +2787,11 @@ async function restoreNamedSession(session, options = {}) {
   lastPolygon = polygon;
   if (map.hasLayer(browseLayer)) browseLayer.remove();
   const includeSold = Boolean(filterState.sold);
-  document.getElementById("sidebar-instructions")?.classList.add("hidden");
-  document.getElementById("sidebar-results")?.classList.add("hidden");
   document.getElementById("sidebar-loading")?.classList.remove("hidden");
   document.getElementById("redfin-status").textContent = "Loading session…";
+  // Set the slot BEFORE the await so it shows up immediately and so a user
+  // clicking a different item during the analysis isn't stomped post-analysis.
+  setActiveItem("Snapshot", session.name);
   const analysisRequest = beginLatestAnalysisRequest();
   if (options.undoSnapshot) options.undoSnapshot.abortCtrl = _activeAnalysisAbortController;
 
@@ -1960,17 +2863,19 @@ async function restoreNamedSession(session, options = {}) {
     }
     renderSidebar(data.counts, markers);
     applyResultTags(data);
+    // NOTE: don't re-call setActiveItem here. Already set before the await.
     if (loadedFromSessionCache && data.redfin_skipped === true) {
       _setSessionCacheNote("Active listings not shown - re-analyze for current");
     } else {
       _setSessionCacheNote("");
     }
+    applyAndRenderSoldFilters();
+    applyMapVisibilityFilters();
   } catch (err) {
     if (isAbortError(err) || !isActiveAnalysisRequest(analysisRequest.requestId)) return;
     console.error("[restoreNamedSession] failed:", err);
     document.getElementById("redfin-status").textContent = getAnalysisErrorMessage(err, "Session load failed. Please try again.");
     document.getElementById("sidebar-loading")?.classList.add("hidden");
-    document.getElementById("sidebar-instructions")?.classList.remove("hidden");
     _setSessionCacheNote("");
   } finally {
     if (rowEl) rowEl.classList.remove("row-shimmer");
@@ -2016,6 +2921,7 @@ async function _renameSavedItemInline(item, rowEl) {
       body: JSON.stringify({ name: nextName }),
     });
     await _reloadSavedResources();
+    _syncTabTitle();
   };
 
   input.addEventListener("keydown", async (e) => {
@@ -2037,24 +2943,37 @@ function _renderList(sectionId, listId, items) {
   const list = document.getElementById(listId);
   if (!section || !list) return;
   section.classList.toggle("hidden", items.length === 0);
-  _renderCurrentViewingArea();
   list.innerHTML = items.map((area) => {
     const date = new Date(area.savedAt).toLocaleDateString(undefined, { month: "short", day: "numeric" });
     const icon = area.type === "parcel" ? "📌" : area.type === "location" ? "📍" : "▭";
     const chip = _formatFilterDiffChip(area);
     const canRename = area.type !== "parcel";
-    const activeClass = area.id === _currentLoadedAreaId ? " saved-area-row-active" : "";
+    const canShare = area.type === "area" && Boolean(String(area.share_id || "").trim());
+    const isActiveRow = area.id === _currentLoadedAreaId || area.id === _selectedSavedItemId;
+    const activeClass = isActiveRow ? " saved-area-row-active" : "";
+    const secondaryLine = [chip, `saved ${date}`].filter(Boolean).join(" · ");
+
+    // Ownership + role gating for Rename / Delete / Fork
+    const isOwn = area.user_id != null
+      ? String(area.user_id) === String(_currentUser?.id || "")
+      : true; // no user_id on row → treat as own (legacy safe)
+    const showFullControls = isOwn || _canEditAnyArea();
+
     return `
       <div class="saved-area-row${activeClass}" tabindex="0" data-id="${area.id}" data-type="${area.type}">
         <div class="saved-area-main">
           <span class="saved-area-icon">${icon}</span>
           <span class="saved-area-name">${area.name}</span>
-          <span class="saved-area-date">${date}</span>
+          ${showFullControls ? `<button type="button" class="saved-area-quick-delete-btn" data-action="delete" title="Delete">🗑</button>` : ""}
+          ${canShare ? `<button type="button" class="saved-area-action-btn saved-area-share-btn" data-action="share" data-share-id="${_esc(area.share_id)}" title="Share">🔗 Share</button>` : ""}
         </div>
-        ${chip ? `<div class="saved-row-filter-chip">${chip}</div>` : ""}
-        <div class="saved-area-row-actions">
-          ${canRename ? `<button type="button" class="saved-area-action-btn rename" data-action="rename" title="Rename">✎ Rename</button>` : "<span></span>"}
-          <button type="button" class="saved-area-action-btn delete" data-action="delete" title="Delete">🗑 Delete</button>
+        <div class="saved-area-secondary-line">${secondaryLine}</div>
+        <div class="saved-area-row-secondary-actions">
+          <hr class="saved-area-actions-divider">
+          <div class="saved-area-secondary-btns">
+            ${!showFullControls && canShare ? `<button type="button" class="saved-area-action-btn" data-action="fork" data-share-id="${_esc(area.share_id)}" title="Make my own copy">📋 Make my copy</button>` : ""}
+            ${showFullControls && canRename ? `<button type="button" class="saved-area-action-btn rename" data-action="rename" title="Rename">✎ Rename</button>` : ""}
+          </div>
         </div>
       </div>`;
   }).join("");
@@ -2065,6 +2984,57 @@ function _renderList(sectionId, listId, items) {
       const all = [..._savedAreasCache, ..._savedParcelsCache];
       const area = all.find((a) => a.id === id);
       if (!area) return;
+      if (actionEl?.dataset.action === "share") {
+        e.stopPropagation();
+        const shareId = String(actionEl.dataset.shareId || "").trim();
+        if (!shareId) return;
+        const url = `${window.location.origin}/?area=${shareId}`;
+        try {
+          if (!navigator.clipboard || typeof navigator.clipboard.writeText !== "function") {
+            throw new Error("Clipboard API unavailable");
+          }
+          await navigator.clipboard.writeText(url);
+          _showToast("Link copied");
+        } catch {
+          _showToast("Copy failed - try again", "error");
+        }
+        return;
+      }
+      if (actionEl?.dataset.action === "fork") {
+        e.stopPropagation();
+        const shareId = String(actionEl.dataset.shareId || "").trim();
+        if (!shareId) return;
+        try {
+          const cloned = await _apiJson("/api/areas/from-share-id/" + encodeURIComponent(shareId), {
+            method: "POST",
+            headers: { "Content-Type": "application/json", ...authHeaders() },
+            body: "{}",
+          });
+          const normalizedFork = _normalizeSavedAreaRow(cloned);
+          _savedAreasCache.unshift(normalizedFork);
+          _clearOriginatorStar();
+          _currentTargetParcel = null;
+          _currentLoadedAreaId = cloned.area_id;
+          _syncTabTitle();
+          _selectedSavedItemId = cloned.area_id;
+          // Carry the originator TARGET star through the fork.
+          if (normalizedFork.originator_parcel_county && normalizedFork.originator_parcel_account_num) {
+            _currentTargetParcel = {
+              county: normalizedFork.originator_parcel_county,
+              account: normalizedFork.originator_parcel_account_num,
+            };
+            void _renderOriginatorTargetStar(
+              normalizedFork.originator_parcel_county,
+              normalizedFork.originator_parcel_account_num,
+            );
+          }
+          renderSavedAreasList();
+          _showToast(`Forked → "${cloned.name}"`);
+        } catch {
+          _showToast("Could not fork area", "error");
+        }
+        return;
+      }
       if (actionEl?.dataset.action === "delete") {
         e.stopPropagation();
         await deleteSavedArea(area);
@@ -2075,6 +3045,24 @@ function _renderList(sectionId, listId, items) {
         await _renameSavedItemInline(area, row);
         return;
       }
+      if (!_navigationGuardForActiveDeepPull("switch workspaces")) {
+        return;
+      }
+      _selectedSavedItemId = area.id;
+      // Purple selection outline highlights a single parcel footprint.
+      // Skip for saved area drawings (type="area" — the polygon wraps many
+      // parcels and reads as a ring around them) and saved locations
+      // (type="location" — no polygon anyway). Saved parcels (type="parcel")
+      // and comp-list clicks are the only paths that get the highlight.
+      if (area.type === "parcel") {
+        _renderSelectedOutline(area.geometry || null);
+      } else {
+        _clearSelectedOutline();
+      }
+      document.querySelectorAll(".saved-area-row-active").forEach((el) => {
+        if (el !== row) el.classList.remove("saved-area-row-active");
+      });
+      row.classList.add("saved-area-row-active");
       bumpUndoPillVersion();
       const snapshot = _createUndoSnapshot();
       await restoreSavedArea(area, { rowEl: row, undoSnapshot: snapshot });
@@ -2085,7 +3073,6 @@ function _renderList(sectionId, listId, items) {
 }
 
 function renderSavedAreasList() {
-  _renderCurrentViewingArea();
   _renderList("saved-areas", "saved-areas-list", _savedAreasCache.filter((a) => a.type === "area"));
   _renderList("saved-parcels", "saved-parcels-list", [..._savedAreasCache.filter((a) => a.type === "location"), ..._savedParcelsCache]);
   _updateUpdateAreaButtonVisibility();
@@ -2153,6 +3140,9 @@ function _renderSessionsList(sectionId, listId, items) {
         await _renameSavedSessionInline(session, row);
         return;
       }
+      if (!_navigationGuardForActiveDeepPull("switch snapshots")) {
+        return;
+      }
       bumpUndoPillVersion();
       const snapshot = _createUndoSnapshot();
       await restoreNamedSession(session, { rowEl: row, undoSnapshot: snapshot });
@@ -2179,6 +3169,42 @@ function _readLegacySavedItems() {
 
 function _hideImportBanner() {
   document.getElementById("import-banner")?.classList.add("hidden");
+}
+
+let _toastTimer = null;
+function _showToast(message, variant = "ok") {
+  let toast = document.getElementById("ll-toast");
+  if (!toast) {
+    toast = document.createElement("div");
+    toast.id = "ll-toast";
+    toast.style.position = "fixed";
+    toast.style.right = "16px";
+    toast.style.bottom = "16px";
+    toast.style.zIndex = "12000";
+    toast.style.padding = "10px 12px";
+    toast.style.borderRadius = "8px";
+    toast.style.fontSize = "13px";
+    toast.style.boxShadow = "0 10px 24px rgba(0,0,0,0.22)";
+    toast.style.opacity = "0";
+    toast.style.pointerEvents = "none";
+    toast.style.transition = "opacity 150ms ease";
+    document.body.appendChild(toast);
+  }
+  toast.textContent = String(message || "");
+  if (variant === "error") {
+    toast.style.background = "#ffe5e5";
+    toast.style.color = "#7a1111";
+    toast.style.border = "1px solid #ffc9c9";
+  } else {
+    toast.style.background = "#1f2937";
+    toast.style.color = "#ffffff";
+    toast.style.border = "1px solid #111827";
+  }
+  toast.style.opacity = "1";
+  if (_toastTimer) clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => {
+    toast.style.opacity = "0";
+  }, 2000);
 }
 
 async function _importLegacySavedItems() {
@@ -2288,6 +3314,7 @@ const MapToolbar = L.Control.extend({
     drawBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="16 3 21 8 8 21 3 21 3 16 16 3"></polygon></svg>';
     L.DomEvent.on(drawBtn, "click", (e) => {
       L.DomEvent.preventDefault(e);
+      if (!_navigationGuardForActiveDeepPull("draw a new area")) return;
       const handler = getPolygonDrawHandler();
       if (!handler) return;
       if (handler.enabled()) {
@@ -2317,10 +3344,11 @@ const MapToolbar = L.Control.extend({
     clearBtn.id = "btn-draw-clear";
     clearBtn.href = "#";
     clearBtn.title = "Clear results and draw a new area";
-    clearBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6l-1 14H6L5 6"></path><path d="M10 11v6"></path><path d="M14 11v6"></path><path d="M9 6V4h6v2"></path></svg>';
+    clearBtn.textContent = "CLEAR";
     L.DomEvent.on(clearBtn, "click", (e) => {
       L.DomEvent.preventDefault(e);
       clearDrawResults();
+      clearActiveItem();
     });
 
     const hoaBtn = L.DomUtil.create("a", "", container);
@@ -2341,6 +3369,40 @@ const MapToolbar = L.Control.extend({
     L.DomEvent.on(countyBtn, "click", (e) => {
       L.DomEvent.preventDefault(e);
       toggleCountyLayer();
+    });
+
+    // ZOOM toggle — click-mode (jump = zoom on click, stay = keep current
+    // zoom). Active (green) = jump mode. Bidirectional with setClickMode
+    // so any caller mutating currentClickMode keeps this button visually
+    // in sync via updateClickModeButtonState below.
+    const zoomBtn = L.DomUtil.create("a", "", container);
+    zoomBtn.id = "btn-zoom-toggle";
+    zoomBtn.href = "#";
+    zoomBtn.title = "Toggle auto-zoom on parcel/comp click";
+    zoomBtn.textContent = "ZOOM";
+    L.DomEvent.on(zoomBtn, "click", (e) => {
+      L.DomEvent.preventDefault(e);
+      setClickMode(currentClickMode === "jump" ? "stay" : "jump");
+    });
+
+    // OAC (Outside Area Comps) toggle — mirrors the #prop-outside-area
+    // checkbox in the Map Filters card. Clicking either UI updates the
+    // shared state and reflects on the other surface. Active (green) =
+    // outside-polygon comps included.
+    const oacBtn = L.DomUtil.create("a", "", container);
+    oacBtn.id = "btn-outside-area-toggle";
+    oacBtn.href = "#";
+    oacBtn.title = "Toggle Outside Area Comps (also in Map Filters)";
+    oacBtn.textContent = "OAC";
+    L.DomEvent.on(oacBtn, "click", (e) => {
+      L.DomEvent.preventDefault(e);
+      const checkbox = document.getElementById("prop-outside-area");
+      if (!checkbox) return;
+      checkbox.checked = !checkbox.checked;
+      // Bubble a change event so the existing checkbox-change wiring fires
+      // (refilters comps, updates count chip, etc.). Toolbar button's own
+      // visual state then updates via the change-listener below.
+      checkbox.dispatchEvent(new Event("change", { bubbles: true }));
     });
 
     return container;
@@ -2425,6 +3487,1634 @@ const BasemapSwitcher = L.Control.extend({
   },
 });
 new BasemapSwitcher().addTo(map);
+
+// ── Propelio per-address comp fetch + render ─────────────────────────────
+// Fires after every address search. Hits /api/propelio/by-address (which is
+// auth-gated and 7-day cached). Renders each returned comp as a pulsing
+// cyan dot with a popup. Subject parcel data lands in window._propelioLast
+// for future popup-enrichment work; not yet wired into the existing parcel
+// popups (Chunk 4 territory).
+function _propelioEscape(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (m) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[m])
+  );
+}
+
+// Find the Propelio comp matching a parcel by account number. Returns null
+// if no comps loaded or no match. Used by the unified popup to enrich a
+// CAD parcel popup with its matched comp's MLS data + rating buttons.
+function _findMatchedCompForAccount(accountNum) {
+  const account = String(accountNum || "").trim();
+  if (!account) return null;
+  const comps = window._propelioLast?.comps;
+  if (!Array.isArray(comps)) return null;
+  return comps.find((c) => String(c?.parcel_account_num || "").trim() === account) || null;
+}
+
+// Render the Good / Bad / Clear rating button row for a comp. Always
+// renders the row so the affordance is visible; when no saved area is
+// loaded or the comp lacks a stable archive key, the buttons are
+// disabled and a "Save area to enable ratings" hint is shown beneath.
+function _buildRatingButtonsHtml(comp) {
+  const compKey = String(comp?.comp_address_key || "").trim();
+  const currentRating = comp?.user_rating === "good" || comp?.user_rating === "bad" ? comp.user_rating : null;
+  const ratingsEnabled = Boolean(_currentLoadedAreaId && compKey);
+  const goodActive = ratingsEnabled && currentRating === "good" ? " is-active" : "";
+  const badActive = ratingsEnabled && currentRating === "bad" ? " is-active" : "";
+  const keyAttr = _propelioEscape(compKey);
+  const disabledAttr = ratingsEnabled ? "" : " disabled";
+  const wrapTitle = ratingsEnabled ? "" : ' title="Save this area to enable ratings"';
+  const hintHtml = ratingsEnabled ? "" : `<div class="propelio-rate-hint">Save area to enable ratings</div>`;
+  return `
+      <div class="propelio-popup-rating${ratingsEnabled ? "" : " is-disabled"}" data-comp-key="${keyAttr}"${wrapTitle}>
+        <button type="button" class="propelio-rate-btn good${goodActive}" data-rating="good" data-comp-key="${keyAttr}"${disabledAttr}>Good</button>
+        <button type="button" class="propelio-rate-btn bad${badActive}" data-rating="bad" data-comp-key="${keyAttr}"${disabledAttr}>Bad</button>
+        <button type="button" class="propelio-rate-btn clear" data-rating="clear" data-comp-key="${keyAttr}"${disabledAttr}>Clear</button>
+      </div>${hintHtml}`;
+}
+
+// Render the MLS-comp section for a unified popup. Mirrors the layout of
+// the Propelio standalone popup but is meant to live underneath the CAD
+// table inside makePopupHtml. Includes price, sold/list info, dims,
+// beds/baths, MLS metadata, school/agent enrichment, photo count, full
+// remarks, and a best-effort external MLS lookup link.
+function _buildPropelioCompSectionHtml(c) {
+  if (!c) return "";
+  const fmtPrice = (n) => Number.isFinite(n) ? `$${Math.round(n).toLocaleString()}` : "—";
+  const fmtNum = (n) => Number.isFinite(n) ? Number(n).toLocaleString() : null;
+  const fmtDate = (s) => {
+    if (!s) return null;
+    const d = new Date(s);
+    return Number.isFinite(d.getTime()) ? d.toISOString().slice(0, 10) : null;
+  };
+  const ex = c?.extra || {};
+  const raw = c?.extra?.raw || {};
+  const status = String(c?.status || "");
+  const isSold = status === "sold";
+  const firstSeenDate = fmtDate(c?.first_seen_at);
+  const todayDate = new Date().toISOString().slice(0, 10);
+  const capturedLabel = firstSeenDate
+    ? (firstSeenDate === todayDate ? "🔥 Captured today" : `Captured ${firstSeenDate}`)
+    : "";
+
+  const sqft = fmtNum(c?.sqft);
+  const lot = fmtNum(c?.lot_size);
+  const year = Number.isFinite(c?.year_built) ? c.year_built : null;
+  const beds = ex.beds;
+  const baths = ex.baths;
+  const bathsFull = ex.baths_full;
+  const bathsHalf = ex.baths_half;
+  const garage = ex.garage;
+  const dom = ex.dom;
+  const listPrice = Number(ex.list_price);
+  const closeDate = fmtDate(ex.close_date);
+  const modifiedTs = fmtDate(ex.modified_timestamp);
+  const propertyType = ex.property_type;
+  const mls = ex.mls || "";
+  const source = ex.source || "";
+  const zipCode = ex.zip || "";
+  const remarks = String(ex.remarks || raw.remarks || "").trim();
+  const listingAgent = {
+    name: raw.listing_agent_name,
+    phone: raw.listing_agent_phone,
+    email: raw.listing_agent_email,
+    officeName: raw.listing_office_name,
+    officePhone: raw.listing_office_phone,
+    officeEmail: raw.listing_office_email,
+  };
+  const buyerAgent = {
+    name: raw.buyer_agent_name,
+    phone: raw.buyer_agent_phone,
+    email: raw.buyer_agent_email,
+    officeName: raw.buyer_office_name,
+    officePhone: raw.buyer_office_phone,
+    officeEmail: raw.buyer_office_email,
+  };
+  const schools = {
+    elementary: raw.elementary_school,
+    middle: raw.middle_school || raw.junior_high_school || raw.intermediate_school,
+    high: raw.high_school || raw.senior_high_school,
+  };
+  const photoCountValue = Number(raw.photo_count);
+  const photoCount = Number.isFinite(photoCountValue) ? photoCountValue : 0;
+
+  const dims = [];
+  if (sqft) dims.push(`${sqft} sqft`);
+  if (lot) dims.push(`${lot} sqft lot`);
+  if (year) dims.push(`built ${year}`);
+
+  const bbLine = [];
+  if (beds != null) bbLine.push(`${beds}bd`);
+  if (Number.isFinite(bathsFull) || Number.isFinite(bathsHalf)) {
+    const fullStr = Number.isFinite(bathsFull) ? `${bathsFull}` : "0";
+    const halfStr = Number.isFinite(bathsHalf) && bathsHalf > 0 ? ` + ${bathsHalf}½` : "";
+    bbLine.push(`${fullStr}ba${halfStr}`);
+  } else if (baths != null) {
+    bbLine.push(`${baths}ba`);
+  }
+  if (Number.isFinite(garage) && garage > 0) bbLine.push(`${garage}-car gar`);
+
+  const priceLineParts = [fmtPrice(c?.price), _propelioEscape(status)];
+  let listVsCloseHtml = "";
+  if (isSold && Number.isFinite(listPrice) && Number.isFinite(c?.price) && listPrice > 0 && Math.abs(listPrice - c.price) > 1) {
+    const delta = c.price - listPrice;
+    const deltaPct = Math.round((delta / listPrice) * 100);
+    const sign = delta > 0 ? "+" : "";
+    listVsCloseHtml = `<div class="propelio-popup-meta">List was ${fmtPrice(listPrice)} (${sign}${deltaPct}% close vs list)</div>`;
+  } else if (!isSold && Number.isFinite(listPrice) && listPrice > 0 && Number(c?.price) !== listPrice) {
+    listVsCloseHtml = `<div class="propelio-popup-meta">List: ${fmtPrice(listPrice)}</div>`;
+  }
+
+  const soldMeta = [];
+  if (isSold && closeDate) soldMeta.push(`closed ${closeDate}`);
+  if (Number.isFinite(dom)) soldMeta.push(`DOM ${dom}`);
+
+  const subLine = [];
+  if (c?.neighborhood) subLine.push(c.neighborhood);
+  if (zipCode) subLine.push(zipCode);
+
+  const idLine = [];
+  if (mls) idLine.push(`MLS ${mls}`);
+  if (propertyType) idLine.push(propertyType);
+
+  const schoolsHtml = schools.elementary || schools.middle || schools.high
+    ? `<div class="propelio-popup-schools">
+        ${schools.elementary ? `<span class="propelio-popup-school"><span class="label">ES</span> ${_propelioEscape(schools.elementary)}</span>` : ""}
+        ${schools.middle ? `<span class="propelio-popup-school"><span class="label">MS</span> ${_propelioEscape(schools.middle)}</span>` : ""}
+        ${schools.high ? `<span class="propelio-popup-school"><span class="label">HS</span> ${_propelioEscape(schools.high)}</span>` : ""}
+      </div>`
+    : "";
+  const listingAgentHtml = listingAgent.name
+    ? `<div class="propelio-popup-agent-block">
+        <div class="propelio-popup-agent-label">Listing Agent</div>
+        <div class="propelio-popup-agent-name">${_propelioEscape(listingAgent.name || "—")}</div>
+        ${listingAgent.officeName ? `<div class="propelio-popup-agent-line">${_propelioEscape(listingAgent.officeName)}</div>` : ""}
+        <div class="propelio-popup-agent-contact">
+          ${listingAgent.phone ? `<a href="tel:${encodeURIComponent(listingAgent.phone)}">${_propelioEscape(listingAgent.phone)}</a>` : ""}
+          ${listingAgent.email ? `<a href="mailto:${encodeURIComponent(listingAgent.email)}">${_propelioEscape(listingAgent.email)}</a>` : ""}
+          ${listingAgent.officePhone && listingAgent.officePhone !== listingAgent.phone ? `<a href="tel:${encodeURIComponent(listingAgent.officePhone)}" class="muted">office: ${_propelioEscape(listingAgent.officePhone)}</a>` : ""}
+        </div>
+      </div>`
+    : "";
+  const buyerAgentHtml = isSold && buyerAgent.name
+    ? `<div class="propelio-popup-agent-block">
+        <div class="propelio-popup-agent-label">Buyer Agent</div>
+        <div class="propelio-popup-agent-name">${_propelioEscape(buyerAgent.name || "—")}</div>
+        ${buyerAgent.officeName ? `<div class="propelio-popup-agent-line">${_propelioEscape(buyerAgent.officeName)}</div>` : ""}
+        <div class="propelio-popup-agent-contact">
+          ${buyerAgent.phone ? `<a href="tel:${encodeURIComponent(buyerAgent.phone)}">${_propelioEscape(buyerAgent.phone)}</a>` : ""}
+          ${buyerAgent.email ? `<a href="mailto:${encodeURIComponent(buyerAgent.email)}">${_propelioEscape(buyerAgent.email)}</a>` : ""}
+          ${buyerAgent.officePhone && buyerAgent.officePhone !== buyerAgent.phone ? `<a href="tel:${encodeURIComponent(buyerAgent.officePhone)}" class="muted">office: ${_propelioEscape(buyerAgent.officePhone)}</a>` : ""}
+        </div>
+      </div>`
+    : "";
+  const photoCountHtml = photoCount > 0
+    ? `<div class="propelio-popup-meta-mute">${photoCount} listing photo${photoCount === 1 ? "" : "s"} (Propelio-hosted)</div>`
+    : "";
+  const remarksHtml = remarks
+    ? `<div class="propelio-popup-remarks-full">${_propelioEscape(remarks)}</div>`
+    : "";
+  const realtorLinkHtml = mls
+    ? `<a class="propelio-popup-realtor-link" href="https://www.realtor.com/realestateandhomes-search/MLSID-${encodeURIComponent(mls)}" target="_blank" rel="noopener noreferrer">🔗 Look up MLS# ${_propelioEscape(mls)} on Realtor.com (best-effort)</a>`
+    : "";
+
+  return `
+    <div class="popup-propelio-section">
+      <div class="popup-propelio-header">MLS Comp</div>
+      <div class="propelio-popup-price">${priceLineParts.join(" · ")}</div>
+      ${capturedLabel ? `<div class="propelio-popup-meta">${_propelioEscape(capturedLabel)}</div>` : ""}
+      ${listVsCloseHtml}
+      ${soldMeta.length ? `<div class="propelio-popup-meta">${_propelioEscape(soldMeta.join(" · "))}</div>` : ""}
+      ${dims.length ? `<div class="propelio-popup-meta">${_propelioEscape(dims.join(" · "))}</div>` : ""}
+      ${bbLine.length ? `<div class="propelio-popup-meta">${_propelioEscape(bbLine.join(" · "))}</div>` : ""}
+      ${subLine.length ? `<div class="propelio-popup-meta">${_propelioEscape(subLine.join(" · "))}</div>` : ""}
+      ${idLine.length ? `<div class="propelio-popup-meta">${_propelioEscape(idLine.join(" · "))}${source ? ` <span class="propelio-popup-source">(${_propelioEscape(source)})</span>` : ""}</div>` : ""}
+      ${modifiedTs ? `<div class="popup-propelio-meta-mute">MLS updated ${_propelioEscape(modifiedTs)}</div>` : ""}
+      ${schoolsHtml}
+      ${listingAgentHtml}
+      ${buyerAgentHtml}
+      ${photoCountHtml}
+      ${remarksHtml}
+      ${realtorLinkHtml}
+    </div>
+  `;
+}
+
+// Async resolver for Propelio comp popup content. Returns the unified
+// CAD+MLS popup when the comp's parcel is reachable (either already in the
+// current draw analysis OR fetchable from the parcels API for spillover
+// comps via parcel_county + parcel_account_num set in api/propelio/
+// parcel_match.py). Falls back to the standalone Propelio-only popup
+// (_propelioBuildPopup) if the comp doesn't have a matched parcel or the
+// fetch fails. Used by the click handler and flyToAndOpenPropelioComp.
+async function _resolvePropelioPopupContent(comp) {
+  const accountNum = String(comp?.parcel_account_num || "").trim();
+
+  // Fast path: in-memory match against the current draw analysis.
+  if (accountNum && lastAnalysisGeojson && Array.isArray(lastAnalysisGeojson.features)) {
+    const matched = lastAnalysisGeojson.features.find(
+      (f) => String(f?.properties?.account_num || "").trim() === accountNum
+    );
+    if (matched?.properties) return makePopupHtml(matched.properties);
+  }
+
+  // Slow path: spillover comps (Propelio search circumradius extends past
+  // the polygon) still have parcel_county + parcel_account_num attached by
+  // parcel_match.py. Fetch the parcel detail so the unified popup shows
+  // for those too — same behavior as clicking the parcel from browse mode.
+  const county = String(comp?.parcel_county || "").trim();
+  if (accountNum && county) {
+    try {
+      const resp = await fetch(`/api/parcel/${county}/${accountNum}`);
+      if (resp.ok) {
+        const detail = await resp.json();
+        return makePopupHtml(detail.properties || detail);
+      }
+    } catch (err) {
+      console.error("Propelio spillover parcel fetch failed", err);
+    }
+  }
+
+  // Final fallback: unmatched comp (no account_num at all, or fetch
+  // failed) gets the standalone Propelio popup.
+  return _propelioBuildPopup(comp);
+}
+
+async function _openUnifiedPropelioPopup(comp, latlng) {
+  if (!comp || !latlng) return;
+  const accountNum = String(comp?.parcel_account_num || "").trim();
+
+  if (accountNum && lastAnalysisGeojson && Array.isArray(lastAnalysisGeojson.features)) {
+    const matched = lastAnalysisGeojson.features.find(
+      (f) => String(f?.properties?.account_num || "").trim() === accountNum
+    );
+    if (matched?.properties) {
+      openParcelDetailPanel(matched.properties, { latlng, matchedComp: comp, geometry: matched.geometry });
+      return;
+    }
+  }
+
+  const county = String(comp?.parcel_county || "").trim();
+  if (accountNum && county) {
+    try {
+      const resp = await fetch(`/api/parcel/${county}/${accountNum}`);
+      if (resp.ok) {
+        const detail = await resp.json();
+        openParcelDetailPanel(detail.properties || detail, { latlng, matchedComp: comp, geometry: detail.geometry });
+        return;
+      }
+    } catch (err) {
+      console.error("Propelio spillover parcel fetch failed", err);
+    }
+  }
+
+  openParcelDetailPanel({
+    addr: comp?.address || "Unknown address",
+    owner: "N/A",
+    land_val: "N/A",
+    tot_val: "N/A",
+    land_pct: "N/A",
+    lot_sqft: Number.isFinite(Number(comp?.lot_size)) ? `${Math.round(Number(comp.lot_size)).toLocaleString()} sf` : "N/A",
+    lot_acres: Number.isFinite(Number(comp?.lot_size)) ? (Number(comp.lot_size) / 43560).toFixed(2) : "N/A",
+    frontage: "N/A",
+    depth: "N/A",
+    state_code: "N/A",
+    zoning: "N/A",
+    school: "N/A",
+    yr_built: Number.isFinite(Number(comp?.year_built)) ? Number(comp.year_built) : "N/A",
+    sqft: Number.isFinite(Number(comp?.sqft)) ? Math.round(Number(comp.sqft)).toLocaleString() : "N/A",
+    source_county: county || "dcad",
+    account_num: accountNum || "",
+    lat: comp?.extra?.lat || null,
+    lng: comp?.extra?.lon || comp?.extra?.lng || null,
+  }, { latlng, matchedComp: comp, geometry: comp?.parcel_geom || null });
+}
+
+function _propelioBuildPopup(c) {
+  // Standalone Propelio-only popup. Used as the final fallback by
+  // _resolvePropelioPopupContent — direct callers should prefer that
+  // resolver so spillover comps get the unified popup.
+  const accountNum = String(c?.parcel_account_num || "").trim();
+  if (accountNum && lastAnalysisGeojson && Array.isArray(lastAnalysisGeojson.features)) {
+    const matched = lastAnalysisGeojson.features.find(
+      (f) => String(f?.properties?.account_num || "").trim() === accountNum
+    );
+    if (matched?.properties) {
+      return makePopupHtml(matched.properties);
+    }
+  }
+
+  const fmtPrice = (n) => Number.isFinite(n) ? `$${Math.round(n).toLocaleString()}` : "—";
+  const fmtNum = (n) => Number.isFinite(n) ? Number(n).toLocaleString() : null;
+  const fmtDate = (s) => {
+    if (!s) return null;
+    const d = new Date(s);
+    return Number.isFinite(d.getTime()) ? d.toISOString().slice(0, 10) : null;
+  };
+  const ex = c?.extra || {};
+  const status = String(c?.status || "");
+  const isSold = status === "sold";
+
+  const sqft = fmtNum(c?.sqft);
+  const lot = fmtNum(c?.lot_size);
+  const year = Number.isFinite(c?.year_built) ? c.year_built : null;
+  const beds = ex.beds;
+  const baths = ex.baths;
+  const bathsFull = ex.baths_full;
+  const bathsHalf = ex.baths_half;
+  const garage = ex.garage;
+  const dom = ex.dom;
+  const listPrice = Number(ex.list_price);
+  const closeDate = fmtDate(ex.close_date);
+  const modifiedTs = fmtDate(ex.modified_timestamp);
+  const propertyType = ex.property_type;
+  const mls = ex.mls || "";
+  const source = ex.source || "";
+  const zipCode = ex.zip || "";
+  const remarks = String(ex.remarks || "").trim();
+
+  // Dimensions line: sqft · lot · year built
+  const dims = [];
+  if (sqft) dims.push(`${sqft} sqft`);
+  if (lot) dims.push(`${lot} sqft lot`);
+  if (year) dims.push(`built ${year}`);
+
+  // Bed/bath/garage line — prefer baths_full+baths_half breakdown if present
+  const bbLine = [];
+  if (beds != null) bbLine.push(`${beds}bd`);
+  if (Number.isFinite(bathsFull) || Number.isFinite(bathsHalf)) {
+    const fullStr = Number.isFinite(bathsFull) ? `${bathsFull}` : "0";
+    const halfStr = Number.isFinite(bathsHalf) && bathsHalf > 0 ? ` + ${bathsHalf}½` : "";
+    bbLine.push(`${fullStr}ba${halfStr}`);
+  } else if (baths != null) {
+    bbLine.push(`${baths}ba`);
+  }
+  if (Number.isFinite(garage) && garage > 0) bbLine.push(`${garage}-car gar`);
+
+  // Sold-or-active price line
+  const priceLineParts = [fmtPrice(c?.price), _propelioEscape(status)];
+  // If sold and list price was different, show the delta in parens
+  let listVsCloseHtml = "";
+  if (isSold && Number.isFinite(listPrice) && Number.isFinite(c?.price) && listPrice > 0 && Math.abs(listPrice - c.price) > 1) {
+    const delta = c.price - listPrice;
+    const deltaPct = Math.round((delta / listPrice) * 100);
+    const sign = delta > 0 ? "+" : "";
+    listVsCloseHtml = `<div class="propelio-popup-meta">List was ${fmtPrice(listPrice)} (${sign}${deltaPct}% close vs list)</div>`;
+  } else if (!isSold && Number.isFinite(listPrice) && listPrice > 0 && Number(c?.price) !== listPrice) {
+    listVsCloseHtml = `<div class="propelio-popup-meta">List: ${fmtPrice(listPrice)}</div>`;
+  }
+
+  // Sold-specific metadata (close date, DOM)
+  const soldMeta = [];
+  if (isSold && closeDate) soldMeta.push(`closed ${closeDate}`);
+  if (Number.isFinite(dom)) soldMeta.push(`DOM ${dom}`);
+
+  // Subdivision + zip
+  const subLine = [];
+  if (c?.neighborhood) subLine.push(c.neighborhood);
+  if (zipCode) subLine.push(zipCode);
+
+  // MLS / source / property type
+  const idLine = [];
+  if (mls) idLine.push(`MLS ${mls}`);
+  if (propertyType) idLine.push(propertyType);
+
+  // Remarks excerpt (truncated)
+  const REMARKS_MAX = 280;
+  const remarksHtml = remarks
+    ? `<div class="propelio-popup-remarks">${_propelioEscape(remarks.length > REMARKS_MAX ? remarks.slice(0, REMARKS_MAX).trim() + "…" : remarks)}</div>`
+    : "";
+
+  const ratingHtml = _buildRatingButtonsHtml(c);
+
+  return `
+    <div class="propelio-popup">
+      <div class="propelio-popup-addr">${_propelioEscape(c?.address || "")}</div>
+      <div class="propelio-popup-price">${priceLineParts.join(" · ")}</div>
+      ${listVsCloseHtml}
+      ${soldMeta.length ? `<div class="propelio-popup-meta">${_propelioEscape(soldMeta.join(" · "))}</div>` : ""}
+      ${dims.length ? `<div class="propelio-popup-meta">${_propelioEscape(dims.join(" · "))}</div>` : ""}
+      ${bbLine.length ? `<div class="propelio-popup-meta">${_propelioEscape(bbLine.join(" · "))}</div>` : ""}
+      ${subLine.length ? `<div class="propelio-popup-meta">${_propelioEscape(subLine.join(" · "))}</div>` : ""}
+      ${idLine.length ? `<div class="propelio-popup-meta">${_propelioEscape(idLine.join(" · "))}${source ? ` <span class="propelio-popup-source">(${_propelioEscape(source)})</span>` : ""}</div>` : ""}
+      ${modifiedTs ? `<div class="propelio-popup-meta-mute">MLS updated ${_propelioEscape(modifiedTs)}</div>` : ""}
+      ${remarksHtml}
+      ${ratingHtml}
+    </div>
+  `;
+}
+
+// CMA settings chip — bottom-left Leaflet control showing the filter
+// Propelio applied + count + Propelio's own ARV estimate for the most
+// recent fetch. Updated by firePropelioFetch when that path comes back
+// online via the planned "Comps" button (see firePropelioFetch comment
+// below). Currently dormant — no auto-pull on address search.
+const PropelioCmaChip = L.Control.extend({
+  options: { position: "bottomleft" },
+  onAdd() {
+    const el = L.DomUtil.create("div", "propelio-cma-chip hidden");
+    L.DomEvent.disableClickPropagation(el);
+    L.DomEvent.disableScrollPropagation(el);
+    this._el = el;
+    return el;
+  },
+  setData(data) {
+    if (!this._el) return;
+    if (!data || !Array.isArray(data.comps)) {
+      this._el.classList.add("hidden");
+      this._el.innerHTML = "";
+      return;
+    }
+    const settings = data.cma_settings || {};
+    const params = settings.params || {};
+    const fmtMoney = (n) => Number.isFinite(n) ? `$${Math.round(n).toLocaleString()}` : null;
+    const escape = _propelioEscape;
+    const pieces = [];
+    if (Number.isFinite(params.range)) pieces.push(`${params.range} mi radius`);
+    if (Number.isFinite(params.months)) pieces.push(`last ${params.months} mo`);
+    const lotMax = params.lot_size_acres?.max;
+    if (Number.isFinite(lotMax)) pieces.push(`lot ≤ ${lotMax} ac`);
+    const filterLine = pieces.join(" · ") || "Propelio default filter";
+
+    const arv = fmtMoney(settings.arv);
+    const arvType = settings.arv_type ? ` (${settings.arv_type})` : "";
+    const cmaId = settings.cma_id ? `CMA #${settings.cma_id}` : "";
+    const cached = data.cached ? " · cached" : "";
+    const totalSales = settings.sales_count;
+    const fetchedCount = Array.isArray(data.comps) ? data.comps.length : 0;
+    const polygonMeta = data?.polygon_meta && typeof data.polygon_meta === "object" ? data.polygon_meta : null;
+    const insideCount = Number.isFinite(Number(polygonMeta?.comps_in_polygon))
+      ? Number(polygonMeta.comps_in_polygon)
+      : null;
+    const outsideCount = Number.isFinite(Number(polygonMeta?.comps_outside_polygon))
+      ? Number(polygonMeta.comps_outside_polygon)
+      : null;
+    const inWindowCount = Number.isFinite(Number(totalSales)) ? Number(totalSales) : null;
+
+    // Empty-result branch: render a friendly "no comps" notice with the warning text.
+    if (data.comps.length === 0) {
+      const warning = data.warning || "No comps returned by Propelio for this address.";
+      this._el.innerHTML = `
+        <div class="propelio-cma-chip-title">Propelio CMA — 0 comps</div>
+        <div class="propelio-cma-chip-row">${escape(warning)}</div>
+        <div class="propelio-cma-chip-row muted">Try: 4044 Williamsburg Rd · 6710 Northport Dr · 9012 Hunters Creek Dr</div>
+      `;
+      this._el.classList.remove("hidden");
+      return;
+    }
+
+    this._el.innerHTML = `
+      <div class="propelio-cma-chip-title">Propelio CMA${cached}</div>
+      <div class="propelio-cma-chip-row">${escape(filterLine)}</div>
+      <div class="propelio-cma-chip-row">${insideCount != null && outsideCount != null
+        ? `${insideCount} inside · ${outsideCount} outside · ${fetchedCount} fetched · ${inWindowCount != null ? inWindowCount : "—"} total in window`
+        : `${fetchedCount} comp${fetchedCount === 1 ? "" : "s"} returned${Number.isFinite(totalSales) && totalSales !== fetchedCount ? ` (of ${totalSales} sales)` : ""}`
+      }</div>
+      ${arv ? `<div class="propelio-cma-chip-row"><strong>Propelio ARV:</strong> ${escape(arv)}${escape(arvType)}</div>` : ""}
+      ${cmaId ? `<div class="propelio-cma-chip-row muted">${escape(cmaId)}</div>` : ""}
+    `;
+    this._el.classList.remove("hidden");
+  },
+  hide() {
+    if (this._el) {
+      this._el.classList.add("hidden");
+      this._el.innerHTML = "";
+    }
+  },
+});
+const propelioCmaChip = new PropelioCmaChip().addTo(map);
+
+
+const PROPELIO_STATUS_PRIORITY = { sold: 3, pending: 2, active: 1 };
+
+function _dedupCompsForRender(comps) {
+  // Dedup by lat/lng rounded to 4 decimals (~10m precision). Propelio
+  // sometimes returns the same physical property with slightly different
+  // geocodes across MLS records (e.g., listing geocoded to parcel
+  // centroid, sold record geocoded to building centroid). 6-decimal
+  // comp_address_key was too strict and let these stack on the map;
+  // 4-decimal rounding collapses near-duplicates while keeping adjacent
+  // properties distinct (typical urban lot is 20-30m).
+  const winners = new Map();
+  const noKey = [];
+  const round4 = (n) => {
+    const x = Number(n);
+    return Number.isFinite(x) ? x.toFixed(4) : null;
+  };
+  for (const c of comps) {
+    const lat = round4(c?.lat);
+    const lng = round4(c?.lng);
+    const key = lat && lng ? `${lat},${lng}` : String(c?.comp_address_key || "").trim();
+    if (!key) {
+      noKey.push(c);
+      continue;
+    }
+    const current = winners.get(key);
+    if (!current) {
+      winners.set(key, c);
+      continue;
+    }
+    // Good-rating tie-break BEFORE status priority.
+    const currentGood = current?.user_rating === "good";
+    const newGood = c?.user_rating === "good";
+    if (newGood && !currentGood) {
+      winners.set(key, c);
+      continue;
+    }
+    if (currentGood && !newGood) continue;
+    // Both good or both non-good → status priority.
+    const curPri = PROPELIO_STATUS_PRIORITY[_propelioStatusBucket(current)] || 0;
+    const newPri = PROPELIO_STATUS_PRIORITY[_propelioStatusBucket(c)] || 0;
+    if (newPri > curPri) winners.set(key, c);
+  }
+  return [...winners.values(), ...noKey];
+}
+
+const PROPELIO_POLYGON_MONTHS = 24;
+
+
+function _updatePropelioStatusCounts(_unusedFullList) {
+  // Compute counts independent of status/OAC toggles — answer "how many
+  // would render per category if this toggle were on, with all other
+  // filters as currently set." Other filters (price, sqft, year,
+  // sold-within, lot, year-built) still apply.
+  if (!window._propelioLast || !Array.isArray(window._propelioLast.comps)) {
+    const ids = [
+      "prop-count-sold", "prop-count-active", "prop-count-pending",
+      "cf-count-sold", "cf-count-active", "cf-count-pending",
+      "prop-count-oac",
+    ];
+    ids.forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) el.textContent = "0";
+    });
+    return;
+  }
+  // Synthetic filter state: all status toggles + OAC simulated ON.
+  const baselineFilters = {
+    ...propelioFilterState,
+    statusSold: true,
+    statusActive: true,
+    statusPending: true,
+    showOutsideArea: true,
+  };
+  const baselineVisible = window._propelioLast.comps.filter(
+    (c) => compPassesPropelioFilters(c, baselineFilters)
+  );
+  const baselineWinners = _dedupCompsForRender(baselineVisible);
+
+  let sold = 0, active = 0, pending = 0, oac = 0;
+  for (const c of baselineWinners) {
+    const bucket = _propelioStatusBucket(c);
+    if (bucket === "sold") sold++;
+    else if (bucket === "pending") pending++;
+    else active++;
+    if (c?.extra?.is_outside_polygon) oac++;
+  }
+
+  const setText = (id, val) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = String(val);
+  };
+  setText("prop-count-sold", sold);
+  setText("prop-count-active", active);
+  setText("prop-count-pending", pending);
+  setText("cf-count-sold", sold);
+  setText("cf-count-active", active);
+  setText("cf-count-pending", pending);
+  setText("prop-count-oac", oac);
+}
+
+_updatePropelioStatusCounts();
+
+function _propelioCompLatLng(comp) {
+  const lat = Number(comp?.extra?.lat);
+  const lng = Number(comp?.extra?.lon ?? comp?.extra?.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  return [lat, lng];
+}
+
+function _propelioStatusBucket(comp) {
+  const raw = String(comp?.status || "").trim().toLowerCase();
+  if (raw === "sold") return "sold";
+  if (raw === "pending") return "pending";
+  if (raw === "for_sale") return "active";
+  return "active";
+}
+
+function _pointInPolygonLngLat(lng, lat, polygon) {
+  if (!Array.isArray(polygon) || polygon.length < 3) return false;
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const xi = Number(polygon[i]?.[0]);
+    const yi = Number(polygon[i]?.[1]);
+    const xj = Number(polygon[j]?.[0]);
+    const yj = Number(polygon[j]?.[1]);
+    if (!Number.isFinite(xi) || !Number.isFinite(yi) || !Number.isFinite(xj) || !Number.isFinite(yj)) continue;
+
+    const intersects = ((yi > lat) !== (yj > lat)) &&
+      (lng < ((xj - xi) * (lat - yi)) / ((yj - yi) || 1e-12) + xi);
+    if (intersects) inside = !inside;
+  }
+  return inside;
+}
+
+function _propelioFootprintStyle(statusClass) {
+  return {
+    weight: 2.5,
+    className: `propelio-footprint-glow ${statusClass}`,
+  };
+}
+
+// Map: comp_address_key → leaflet layer (geoJSON or marker). Used so the
+// sidebar list can fly-to and open the matching popup on click and toggle a
+// hover highlight class on the matching footprint.
+const propelioCompLayerByKey = new Map();
+
+// Invisible CircleMarker anchors at each comp's centroid, used to bind
+// permanent zoom-gated price tooltips ("price balloons"). Mirrors the
+// soldMarkers / redfinMarkers pattern. Cleared and rebuilt on every
+// _renderPropelioComps call. Refresh is called on zoom changes too.
+let propelioPriceMarkers = [];
+
+// Drop a green checkmark badge at the geometric center of a good-rated comp.
+// For polygon footprints we use the bounds center (visually close enough to
+// a true centroid for our parcel sizes); for fallback dots we just stack
+// the badge on top of the dot's latlng.
+function _maybeAddGoodCompMark(comp, footprint, fallbackLatLng) {
+  if (comp?.user_rating !== "good") return;
+  let target = null;
+  if (footprint && typeof footprint.getBounds === "function") {
+    try {
+      const b = footprint.getBounds();
+      if (b && b.isValid()) target = b.getCenter();
+    } catch (_) { /* noop */ }
+  }
+  if (!target && fallbackLatLng) target = fallbackLatLng;
+  if (!target) return;
+  const goodIcon = L.divIcon({
+    className: "propelio-good-mark-wrap",
+    html: `<div class="propelio-good-mark">&#10003;</div>`,
+    iconSize: [16, 16],
+    iconAnchor: [8, 8],
+  });
+  const goodMarker = L.marker(target, {
+    icon: goodIcon,
+    interactive: false,
+    keyboard: false,
+  });
+  goodMarker.addTo(propelioCompLayer);
+}
+
+function _renderPropelioComps(data) {
+  propelioCompLayer.clearLayers();
+  propelioCompLayerByKey.clear();
+  propelioPriceMarkers = [];
+  if (!data || !Array.isArray(data.comps)) return { total: 0, footprintCount: 0, fallbackCount: 0 };
+
+  let footprintCount = 0;
+  let fallbackCount = 0;
+  let insideCount = 0;
+  const hasPolygonContext = Boolean(data?.polygon_meta) && Array.isArray(lastPolygon) && lastPolygon.length >= 3;
+
+  data.comps.forEach((comp) => {
+    const statusClass = _propelioStatusBucket(comp);
+    const isBad = comp?.user_rating === "bad";
+    const compClass = isBad ? `${statusClass} bad-comp` : statusClass;
+    const compKey = String(comp?.comp_address_key || "").trim();
+    const latlng = _propelioCompLatLng(comp);
+    if (hasPolygonContext && latlng && _pointInPolygonLngLat(latlng[1], latlng[0], lastPolygon)) {
+      insideCount += 1;
+    }
+
+    const geom = comp?.parcel_geom;
+    const hasGeom = geom && (geom.type === "Polygon" || geom.type === "MultiPolygon");
+
+    if (hasGeom) {
+      const footprint = L.geoJSON(geom, {
+        style: () => _propelioFootprintStyle(compClass),
+        onEachFeature: (_feature, layer) => {
+          // No bindPopup — we resolve unified-vs-standalone popup content
+          // asynchronously on click so spillover comps (outside the drawn
+          // polygon) still get the unified CAD+MLS popup via on-demand
+          // parcel fetch.
+          layer.on("click", async (ev) => {
+            L.DomEvent.stopPropagation(ev);
+            await _openUnifiedPropelioPopup(comp, ev.latlng);
+          });
+        },
+      });
+      footprint.addTo(propelioCompLayer);
+      footprint._lotLedgerComp = comp;
+      if (compKey) propelioCompLayerByKey.set(compKey, footprint);
+      footprintCount += 1;
+      _maybeAddGoodCompMark(comp, footprint, latlng);
+      return;
+    }
+
+    if (!latlng) return;
+
+    const fallbackIcon = L.divIcon({
+      className: "propelio-fallback-dot-wrap",
+      html: `<div class="propelio-fallback-dot ${compClass}"></div>`,
+      iconSize: [14, 14],
+      iconAnchor: [7, 7],
+    });
+
+    const marker = L.marker(latlng, {
+      icon: fallbackIcon,
+      riseOnHover: true,
+    });
+    marker._lotLedgerComp = comp;
+    marker.on("click", async (ev) => {
+      L.DomEvent.stopPropagation(ev);
+      await _openUnifiedPropelioPopup(comp, ev.latlng);
+    });
+    marker.addTo(propelioCompLayer);
+    if (compKey) propelioCompLayerByKey.set(compKey, marker);
+    fallbackCount += 1;
+    _maybeAddGoodCompMark(comp, null, latlng);
+  });
+
+  // After visible footprints/dots are placed, lay down invisible
+  // CircleMarker anchors at each comp's centroid so we can bind
+  // permanent price tooltips on top. Bad-rated comps are excluded from
+  // the balloon set entirely (they're already dim — no need to add
+  // a price chip for a comp the analyst already rejected).
+  data.comps.forEach((comp) => {
+    if (comp?.user_rating === "bad") return;
+    const priceLabel = abbreviatePrice(Number(comp?.price));
+    if (!priceLabel) return;
+    let anchorLatLng = null;
+    const compKey = String(comp?.comp_address_key || "").trim();
+    const layer = compKey ? propelioCompLayerByKey.get(compKey) : null;
+    if (layer && typeof layer.getBounds === "function") {
+      try {
+        const b = layer.getBounds();
+        if (b && b.isValid()) anchorLatLng = b.getCenter();
+      } catch (_) { /* noop */ }
+    }
+    if (!anchorLatLng) anchorLatLng = _propelioCompLatLng(comp);
+    if (!anchorLatLng) return;
+    if (Array.isArray(anchorLatLng)) anchorLatLng = L.latLng(anchorLatLng[0], anchorLatLng[1]);
+    const anchor = L.circleMarker(anchorLatLng, {
+      radius: 1,
+      opacity: 0,
+      fillOpacity: 0,
+      interactive: false,
+    });
+    anchor.addTo(propelioCompLayer);
+    const bucket = _propelioStatusBucket(comp);
+    const soldDateLabel = bucket === "sold" ? formatSoldDateLabel(comp?.extra?.close_date) : "";
+    propelioPriceMarkers.push({
+      marker: anchor,
+      priceLabel,
+      bucket,
+      soldDateLabel,
+    });
+  });
+  refreshPropelioPriceLabels();
+
+  if (data?.polygon_meta) {
+    const total = data.comps.length;
+    data.polygon_meta.comps_in_polygon = insideCount;
+    data.polygon_meta.comps_outside_polygon = Math.max(total - insideCount, 0);
+  }
+
+  return {
+    total: data.comps.length,
+    footprintCount,
+    fallbackCount,
+  };
+}
+
+// === Propelio sidebar filter card (Phase 3 Chunk C) ========================
+// Two tiers: API-side filters (months, range) require an explicit Refresh
+// button (1 credit). Client-side filters (status checkboxes, sold-within,
+// lot/sqft/year/price min-max) apply instantly to the existing comp pool
+// without re-hitting Propelio.
+
+const DEFAULT_PROPELIO_FILTERS = {
+  months: 24,
+  range: 1.0,
+  statusSold: true,
+  statusActive: true,
+  statusPending: true,
+  showOutsideArea: false,
+  soldWithinDays: null,
+  lotMin: null, lotMax: null,
+  sqftMin: null, sqftMax: null,
+  yearMin: null, yearMax: null,
+  priceMin: null, priceMax: null,
+};
+let propelioFilterState = { ...DEFAULT_PROPELIO_FILTERS };
+
+function _propNumIn(id) {
+  const el = document.getElementById(id);
+  if (!el) return null;
+  const v = String(el.value || "").trim();
+  if (!v) return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function _propIntIn(id) {
+  const v = _propNumIn(id);
+  return v != null && Number.isFinite(v) ? Math.round(v) : null;
+}
+
+function _propPriceIn(id) {
+  const el = document.getElementById(id);
+  if (!el) return null;
+  const v = parseShorthand(el.value);
+  return Number.isFinite(v) ? v : null;
+}
+
+function readPropelioFiltersFromUI() {
+  const sold = document.getElementById("prop-status-sold");
+  const active = document.getElementById("prop-status-active");
+  const pending = document.getElementById("prop-status-pending");
+  const outside = document.getElementById("prop-outside-area");
+  return {
+    months: _propNumIn("prop-months") ?? DEFAULT_PROPELIO_FILTERS.months,
+    range: _propNumIn("prop-range") ?? DEFAULT_PROPELIO_FILTERS.range,
+    statusSold: sold ? sold.checked : true,
+    statusActive: active ? active.checked : true,
+    statusPending: pending ? pending.checked : true,
+    showOutsideArea: outside ? outside.checked : false,
+    soldWithinDays: _propIntIn("prop-sold-within"),
+    lotMin: _propNumIn("prop-lot-min"),
+    lotMax: _propNumIn("prop-lot-max"),
+    sqftMin: _propIntIn("prop-sqft-min"),
+    sqftMax: _propIntIn("prop-sqft-max"),
+    yearMin: _propIntIn("prop-year-min"),
+    yearMax: _propIntIn("prop-year-max"),
+    priceMin: _propPriceIn("prop-price-min"),
+    priceMax: _propPriceIn("prop-price-max"),
+  };
+}
+
+function compPassesPropelioFilters(comp, filters) {
+  const status = String(comp?.status || "").toLowerCase();
+  // Status checkbox filters
+  if (status === "sold" && !filters.statusSold) return false;
+  if ((status === "for_sale" || status === "active") && !filters.statusActive) return false;
+  if (status === "pending" && !filters.statusPending) return false;
+  // If status is unknown/other, fall through (don't filter out)
+
+  // Outside-area gate. Default off → only comps inside the drawn polygon
+  // pass. Toggle on → also let through Propelio's spillover comps from
+  // its circumradius search. Falls open when there is no polygon yet
+  // (e.g. by-address pulls), so that path is unaffected.
+  if (!filters.showOutsideArea && Array.isArray(lastPolygon) && lastPolygon.length >= 3) {
+    const latlng = _propelioCompLatLng(comp);
+    if (!latlng || !_pointInPolygonLngLat(latlng[1], latlng[0], lastPolygon)) {
+      return false;
+    }
+  }
+
+  // Sold-within (days) — only applies to sold comps
+  if (status === "sold" && filters.soldWithinDays != null) {
+    const cd = comp?.extra?.close_date;
+    if (!cd) return false;
+    const dt = new Date(cd);
+    if (!Number.isFinite(dt.getTime())) return false;
+    const days = (Date.now() - dt.getTime()) / 86400000;
+    if (days > filters.soldWithinDays) return false;
+  }
+
+  // Lot acres (lot_size is in sqft from Propelio)
+  const lotSqft = Number(comp?.lot_size);
+  const acres = Number.isFinite(lotSqft) && lotSqft > 0 ? lotSqft / 43560 : null;
+  if (filters.lotMin != null && (acres == null || acres < filters.lotMin)) return false;
+  if (filters.lotMax != null && (acres == null || acres > filters.lotMax)) return false;
+
+  // Living sqft
+  const sqft = Number(comp?.sqft);
+  if (filters.sqftMin != null && (!Number.isFinite(sqft) || sqft < filters.sqftMin)) return false;
+  if (filters.sqftMax != null && (!Number.isFinite(sqft) || sqft > filters.sqftMax)) return false;
+
+  // Year built
+  const yr = Number(comp?.year_built);
+  if (filters.yearMin != null && (!Number.isFinite(yr) || yr < filters.yearMin)) return false;
+  if (filters.yearMax != null && (!Number.isFinite(yr) || yr > filters.yearMax)) return false;
+
+  // Price
+  const price = Number(comp?.price);
+  if (filters.priceMin != null && (!Number.isFinite(price) || price < filters.priceMin)) return false;
+  if (filters.priceMax != null && (!Number.isFinite(price) || price > filters.priceMax)) return false;
+
+  return true;
+}
+
+let _propelioFilterDebounceId = null;
+let propelioCompSortMode = "price_desc";
+
+
+function applyPropelioClientFilters() {
+  if (!window._propelioLast || !Array.isArray(window._propelioLast.comps)) {
+    const countEl = document.getElementById("propelio-filter-count");
+    if (countEl) countEl.textContent = "";
+    renderPropelioCompList([]);
+    return;
+  }
+  propelioFilterState = readPropelioFiltersFromUI();
+  const all = window._propelioLast.comps;
+  // Map view: render every passing comp (good/unrated AND bad — bad gets
+  // the `.bad-comp` class for visual de-emphasis but stays on the map).
+  const visibleOnMap = all.filter((c) => compPassesPropelioFilters(c, propelioFilterState));
+  _updatePropelioStatusCounts();
+  // Render-only dedup: collapse multi-status records on the same parcel
+  // to only the highest-priority status (good-rated wins tie-break).
+  // Status counts above use a baseline-on filter state so badges still
+  // show "what WOULD render if toggled on" — independent of toggle state.
+  const visibleOnMapForRender = _dedupCompsForRender(visibleOnMap);
+  _renderPropelioComps({ ...window._propelioLast, comps: visibleOnMapForRender });
+  if (window._propelioLast) propelioCmaChip.setData(window._propelioLast);
+  // List view: hide bad-rated comps entirely from the sidebar list.
+  const visibleInList = visibleOnMap.filter((c) => c?.user_rating !== "bad");
+  renderPropelioCompList(visibleInList);
+  // Update the card-head count chip
+  const countEl = document.getElementById("propelio-filter-count");
+  if (countEl) {
+    countEl.textContent = visibleOnMapForRender.length === all.length
+      ? `${all.length}`
+      : `${visibleOnMapForRender.length} / ${all.length}`;
+  }
+  _updateUpdateAreaButtonVisibility();
+}
+
+function _sortPropelioComps(comps, mode) {
+  const list = Array.isArray(comps) ? comps.slice() : [];
+  const num = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
+  const cmp = (a, b, dir) => {
+    if (a == null && b == null) return 0;
+    if (a == null) return 1;
+    if (b == null) return -1;
+    return dir === "asc" ? a - b : b - a;
+  };
+  switch (mode) {
+    case "price_asc":
+      list.sort((a, b) => cmp(num(a?.price), num(b?.price), "asc"));
+      break;
+    case "sqft_desc":
+      list.sort((a, b) => cmp(num(a?.sqft), num(b?.sqft), "desc"));
+      break;
+    case "year_desc":
+      list.sort((a, b) => cmp(num(a?.year_built), num(b?.year_built), "desc"));
+      break;
+    case "distance_asc":
+      list.sort((a, b) => cmp(num(a?.distance_mi), num(b?.distance_mi), "asc"));
+      break;
+    case "price_desc":
+    default:
+      list.sort((a, b) => cmp(num(a?.price), num(b?.price), "desc"));
+      break;
+  }
+  return list;
+}
+
+function _propelioCompRowHtml(comp) {
+  const fmtPrice = (n) => Number.isFinite(n) ? `$${Math.round(n).toLocaleString()}` : "—";
+  const fmtNum = (n) => Number.isFinite(n) ? Number(n).toLocaleString() : null;
+  const ex = comp?.extra || {};
+  const status = String(comp?.status || "").toLowerCase();
+  const statusClass = _propelioStatusBucket(comp);
+  const sqft = fmtNum(Number(comp?.sqft));
+  const yr = Number.isFinite(comp?.year_built) ? comp.year_built : null;
+  const beds = ex.beds;
+  const baths = ex.baths;
+  const lotSqft = Number(comp?.lot_size);
+  const lotAcres = Number.isFinite(lotSqft) && lotSqft > 0 ? (lotSqft / 43560) : null;
+  const lotAcresStr = lotAcres != null ? `${lotAcres.toFixed(lotAcres < 1 ? 2 : 1)} ac lot` : null;
+  const neighborhood = String(comp?.neighborhood || "").trim();
+
+  const dim = [];
+  if (sqft) dim.push(`${sqft} sqft`);
+  if (lotAcresStr) dim.push(lotAcresStr);
+  if (yr) dim.push(`${yr}`);
+  if (beds != null) dim.push(`${beds}bd`);
+  if (baths != null) dim.push(`${baths}ba`);
+
+  const compKey = String(comp?.comp_address_key || "").trim();
+  const keyAttr = _propelioEscape(compKey);
+  return `
+    <div class="propelio-comp-row" data-comp-key="${keyAttr}">
+      <div class="propelio-comp-row-top">
+        <span class="propelio-comp-row-price">${fmtPrice(Number(comp?.price))}</span>
+        <span class="propelio-comp-row-status ${statusClass}">${_propelioEscape(status || "—")}</span>
+      </div>
+      <div class="propelio-comp-row-mid">${_propelioEscape(comp?.address || "")}</div>
+      ${neighborhood ? `<div class="propelio-comp-row-nbhd">${_propelioEscape(neighborhood)}</div>` : ""}
+      ${dim.length ? `<div class="propelio-comp-row-meta">${_propelioEscape(dim.join(" · "))}</div>` : ""}
+    </div>
+  `;
+}
+
+function renderPropelioCompList(comps) {
+  const listEl = document.getElementById("propelio-comp-list");
+  if (!listEl) return;
+  const sorted = _sortPropelioComps(comps, propelioCompSortMode);
+  if (!sorted.length) {
+    listEl.innerHTML = `<div class="propelio-comp-list-empty">No comps to show.</div>`;
+    return;
+  }
+  listEl.innerHTML = sorted.map(_propelioCompRowHtml).join("");
+}
+
+function _findPropelioCompByKey(key) {
+  const k = String(key || "").trim();
+  if (!k) return null;
+  const all = window._propelioLast?.comps;
+  if (!Array.isArray(all)) return null;
+  return all.find((c) => String(c?.comp_address_key || "").trim() === k) || null;
+}
+
+async function flyToAndOpenPropelioComp(compKey) {
+  const layer = propelioCompLayerByKey.get(String(compKey || "").trim());
+  if (!layer) return;
+  const comp = layer._lotLedgerComp
+    || (typeof layer.getLayers === "function" ? layer.getLayers()[0]?._lotLedgerComp : null);
+
+  // Show a crisp purple outline on the map for the clicked comp. If the
+  // comp rendered as a footprint, outline its polygon; if it's a fallback
+  // dot, skip the outline (no polygon to draw) — the fly-to still happens.
+  try {
+    if (typeof layer.toGeoJSON === "function") {
+      const gj = layer.toGeoJSON();
+      // L.geoJSON returns a FeatureCollection wrapping one Feature, OR a
+      // single Feature, depending on Leaflet version. Handle both shapes.
+      const feat = gj?.type === "FeatureCollection"
+        ? (gj.features && gj.features[0])
+        : gj;
+      _renderSelectedOutline(feat?.geometry || null);
+    } else {
+      _clearSelectedOutline();
+    }
+  } catch (_) {
+    _clearSelectedOutline();
+  }
+
+  // Resolve a bounds (preferred) and a center point for the layer.
+  let bounds = null;
+  let center = null;
+  if (typeof layer.getBounds === "function") {
+    try {
+      const b = layer.getBounds();
+      if (b && b.isValid()) {
+        bounds = b;
+        center = b.getCenter();
+      }
+    } catch (_) { /* noop */ }
+  }
+  if (!center && typeof layer.getLatLng === "function") {
+    center = layer.getLatLng();
+  }
+
+  // Honor the global click-mode toggle so list-clicks behave the same as
+  // saved-area / target clicks.
+  const mode = (typeof getClickMode === "function" ? getClickMode() : "jump");
+  if (mode === "jump") {
+    if (bounds) {
+      map.fitBounds(bounds, { padding: [40, 40], maxZoom: 17 });
+    } else if (center) {
+      map.flyTo(center, Math.max(map.getZoom(), 17), { duration: 0.4 });
+    }
+  } else if (center) {
+    if (!isPointInViewport(center)) {
+      if (bounds) map.fitBounds(bounds, { padding: [40, 40], maxZoom: map.getZoom() });
+      else map.panTo(center);
+    }
+  }
+
+  // Open via the unified async resolver so spillover comps (outside the
+  // drawn polygon) get the unified CAD+MLS popup, not just the standalone
+  // Propelio-only popup. layer._lotLedgerComp is stashed at render time
+  // in _renderPropelioComps.
+  if (comp && center) {
+    await _openUnifiedPropelioPopup(comp, center);
+  }
+}
+
+function _setPropelioFootprintHighlight(compKey, on) {
+  const layer = propelioCompLayerByKey.get(String(compKey || "").trim());
+  if (!layer) return;
+  const apply = (l) => {
+    const el = typeof l.getElement === "function" ? l.getElement() : null;
+    if (el && el.classList) {
+      el.classList.toggle("propelio-footprint-highlight", !!on);
+    }
+  };
+  if (typeof layer.eachLayer === "function") layer.eachLayer(apply);
+  else apply(layer);
+}
+
+async function ratePropelioComp(compKey, rating) {
+  const areaId = (typeof _currentLoadedAreaId === "string" ? _currentLoadedAreaId : "") || "";
+  if (!areaId || !compKey) return false;
+  const body = {
+    saved_area_id: areaId,
+    comp_address_key: compKey,
+    rating: rating === "good" || rating === "bad" ? rating : null,
+  };
+  try {
+    const resp = await fetch("/api/propelio/comp/rate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) {
+      console.warn("[propelio] rate failed:", resp.status);
+      return false;
+    }
+    // Update the in-memory comp so re-render reflects the new rating
+    // without a round-trip to the archive.
+    const comp = _findPropelioCompByKey(compKey);
+    if (comp) comp.user_rating = body.rating;
+    applyPropelioClientFilters();
+    return true;
+  } catch (err) {
+    console.error("[propelio] rate error:", err);
+    return false;
+  }
+}
+
+function applyPropelioClientFiltersDebounced() {
+  if (_propelioFilterDebounceId) clearTimeout(_propelioFilterDebounceId);
+  _propelioFilterDebounceId = setTimeout(applyPropelioClientFilters, 150);
+}
+
+async function pullPropelioRefresh() {
+  const btn = document.getElementById("btn-propelio-refresh");
+  if (!btn) return;
+  if (_activeDeepPullJobId) {
+    _showDeepPullBanner("A quick sweep is running — wait for it to finish.");
+    setTimeout(_hideDeepPullBanner, 4000);
+    return;
+  }
+  const filters = readPropelioFiltersFromUI();
+  propelioFilterState = filters;
+  const targetAddress = _deriveDeepPullTargetAddress();
+  const savedAreaId = (typeof _currentLoadedAreaId === "string" ? _currentLoadedAreaId : "") || "";
+  btn.disabled = true;
+  _showDeepPullBanner("Running custom search...");
+  try {
+    let data;
+    if (savedAreaId) {
+      const resp = await fetch("/api/propelio/refresh", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({
+          saved_area_id: savedAreaId,
+          months: filters.months,
+          range_override_mi: filters.range,
+          target_address: targetAddress || null,
+        }),
+      });
+      if (!resp.ok) throw new Error(`refresh failed: ${resp.status}`);
+      data = await resp.json();
+    } else {
+      if (!Array.isArray(lastPolygon) || lastPolygon.length < 3) {
+        console.warn("[propelio] no polygon to refresh against");
+        return;
+      }
+      const resp = await fetch("/api/propelio/by-polygon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({
+          polygon: lastPolygon,
+          months: filters.months,
+          range_override_mi: filters.range,
+          target_address: targetAddress || null,
+        }),
+      });
+      if (!resp.ok) throw new Error(`by-polygon failed: ${resp.status}`);
+      data = await resp.json();
+    }
+    // Reload polygon cache so display filters operate on accumulated
+    // cache, not on this narrow scrape's response. Server-side merge
+    // already inserted any net-new comps. Fall back to the response if
+    // the reload didn't populate (missing polygon, empty cache, error).
+    let cacheLoaded = false;
+    try {
+      const cacheResp = await _fetchPolygonCacheOnly();
+      cacheLoaded = !!(
+        cacheResp
+        && Array.isArray(cacheResp.comps)
+        && cacheResp.comps.length > 0
+      );
+    } catch (cacheErr) {
+      console.warn("[propelio] cache reload after custom search failed:", cacheErr);
+    }
+    if (!cacheLoaded) {
+      window._propelioLast = data;
+      _updatePropelioStatusCounts();
+      applyPropelioClientFilters();
+    }
+    const returned = Number(data?.ingestion_stats?.returned || 0);
+    const newToCache = Number(data?.ingestion_stats?.new_to_cache || 0);
+    if (returned > 0 && newToCache > 0) {
+      _showDeepPullBanner(`Returned ${returned} comps · ${newToCache} new to cache`);
+    } else if (returned > 0) {
+      _showDeepPullBanner(`Returned ${returned} comps · 0 new since last pull`);
+    } else {
+      _showDeepPullBanner("0 comps returned for these filters");
+    }
+    setTimeout(_hideDeepPullBanner, 6000);
+  } catch (err) {
+    console.error("[propelio] refresh error:", err);
+    _showDeepPullBanner(`Custom search failed: ${err?.message || err}`);
+    setTimeout(_hideDeepPullBanner, 6000);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function resetPropelioFilters() {
+  const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+  const setChk = (id, v) => { const el = document.getElementById(id); if (el) el.checked = v; };
+  set("prop-months", String(DEFAULT_PROPELIO_FILTERS.months));
+  set("prop-range", String(DEFAULT_PROPELIO_FILTERS.range));
+  _setPropStatusFilter("sold", true, { apply: false });
+  _setPropStatusFilter("active", true, { apply: false });
+  _setPropStatusFilter("pending", true, { apply: false });
+  setChk("prop-outside-area", false);
+  set("prop-sold-within", "");
+  set("prop-lot-min", ""); set("prop-lot-max", "");
+  set("prop-sqft-min", ""); set("prop-sqft-max", "");
+  set("prop-year-min", ""); set("prop-year-max", "");
+  set("prop-price-min", ""); set("prop-price-max", "");
+  applyPropelioClientFilters();
+}
+
+function _setPropStatusFilter(status, checked, options = {}) {
+  const apply = options.apply !== false;
+  const next = Boolean(checked);
+  const mapBox = document.getElementById(`prop-status-${status}`);
+  const cfBox = document.getElementById(`cf-status-${status}`);
+  if (mapBox) mapBox.checked = next;
+  if (cfBox) cfBox.checked = next;
+  if (apply) applyPropelioClientFilters();
+}
+
+(function _initPropelioFilterListeners() {
+  const liveIds = [
+    "prop-outside-area",
+    "prop-sold-within",
+    "prop-lot-min", "prop-lot-max",
+    "prop-sqft-min", "prop-sqft-max",
+    "prop-year-min", "prop-year-max",
+    "prop-price-min", "prop-price-max",
+  ];
+  liveIds.forEach((id) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener("input", applyPropelioClientFiltersDebounced);
+    el.addEventListener("change", applyPropelioClientFiltersDebounced);
+  });
+  ["sold", "active", "pending"].forEach((status) => {
+    const mapBox = document.getElementById(`prop-status-${status}`);
+    const cfBox = document.getElementById(`cf-status-${status}`);
+    mapBox?.addEventListener("change", (ev) => {
+      _setPropStatusFilter(status, Boolean(ev.target?.checked));
+    });
+    cfBox?.addEventListener("change", (ev) => {
+      _setPropStatusFilter(status, Boolean(ev.target?.checked));
+    });
+  });
+  const refreshBtn = document.getElementById("btn-propelio-refresh");
+  if (refreshBtn) refreshBtn.addEventListener("click", () => void pullPropelioRefresh());
+  const resetBtn = document.getElementById("btn-propelio-reset");
+  if (resetBtn) resetBtn.addEventListener("click", resetPropelioFilters);
+
+  const sortEl = document.getElementById("propelio-comp-sort");
+  if (sortEl) {
+    sortEl.value = propelioCompSortMode;
+    sortEl.addEventListener("change", () => {
+      propelioCompSortMode = sortEl.value || "price_desc";
+      applyPropelioClientFilters();
+    });
+  }
+
+  const listEl = document.getElementById("propelio-comp-list");
+  if (listEl) {
+    listEl.addEventListener("click", (ev) => {
+      const row = ev.target.closest(".propelio-comp-row");
+      if (!row) return;
+      const k = row.getAttribute("data-comp-key");
+      if (k) flyToAndOpenPropelioComp(k);
+    });
+    listEl.addEventListener("mouseover", (ev) => {
+      const row = ev.target.closest(".propelio-comp-row");
+      if (!row) return;
+      const k = row.getAttribute("data-comp-key");
+      if (k) _setPropelioFootprintHighlight(k, true);
+    });
+    listEl.addEventListener("mouseout", (ev) => {
+      const row = ev.target.closest(".propelio-comp-row");
+      if (!row) return;
+      const k = row.getAttribute("data-comp-key");
+      if (k) _setPropelioFootprintHighlight(k, false);
+    });
+  }
+
+  // Document-level delegation for popup rating buttons. Popups are recreated
+  // on every render so a single delegated listener is simpler than per-popup
+  // wiring.
+  document.addEventListener("click", (ev) => {
+    const btn = ev.target.closest(".propelio-rate-btn");
+    if (!btn) return;
+    const key = btn.getAttribute("data-comp-key");
+    const rating = btn.getAttribute("data-rating");
+    if (!key) return;
+    void ratePropelioComp(key, rating === "clear" ? null : rating);
+  });
+})();
+
+// Sticky bottom-center button (DOM-anchored, not map-pinned). Lives inside
+// the Leaflet map container so it's automatically right of the sidebar
+// and recenters when the sidebar collapses/expands.
+let propelioStickyAnchor = null;
+let propelioStickyBtn = null;
+let propelioCacheEmptyChip = null;
+
+function _hideCacheEmptyChip() {
+  if (propelioCacheEmptyChip) propelioCacheEmptyChip.classList.add("hidden");
+}
+
+function _showCacheEmptyChip() {
+  if (!propelioStickyAnchor) return;
+  if (!propelioCacheEmptyChip) {
+    propelioCacheEmptyChip = document.createElement("div");
+    propelioCacheEmptyChip.className = "propelio-cache-empty-chip hidden";
+    propelioCacheEmptyChip.textContent = "Cache empty - click Get Comps for fresh data";
+    propelioStickyAnchor.appendChild(propelioCacheEmptyChip);
+  }
+  propelioCacheEmptyChip.classList.remove("hidden");
+  setTimeout(_hideCacheEmptyChip, 6000);
+}
+
+function _setPropelioGetCompsLabel(main, subtitle = "Deep Pull · ~3 min") {
+  if (!propelioStickyBtn) return;
+  propelioStickyBtn.innerHTML = `
+    <span class="get-comps-main">${_esc(main || "Get Comps")}</span>
+    <span class="get-comps-subtitle">${_esc(subtitle)}</span>
+  `;
+}
+
+async function _fetchPolygonCacheOnly() {
+  if (!Array.isArray(lastPolygon) || lastPolygon.length < 3) return null;
+  const savedAreaId = (typeof _currentLoadedAreaId === "string" ? _currentLoadedAreaId : "") || "";
+  const reqBody = {
+    polygon: lastPolygon,
+    months: PROPELIO_POLYGON_MONTHS,
+  };
+  if (savedAreaId) reqBody.saved_area_id = savedAreaId;
+
+  const resp = await _apiJson("/api/propelio/by-polygon?cache_only=true", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify(reqBody),
+  });
+
+  if (Array.isArray(resp?.comps) && resp.comps.length > 0) {
+    window._propelioLast = resp;
+    _updatePropelioStatusCounts();
+    applyPropelioClientFilters();
+    _hideCacheEmptyChip();
+  } else {
+    _showCacheEmptyChip();
+  }
+  return resp;
+}
+
+async function _autoCacheOnDraw() {
+  const suggestedName = _suggestAreaNameFromContainedParcels()
+    || `Workspace ${new Date().toISOString().slice(0, 16).replace("T", " ")}`;
+
+  try {
+    await saveCurrentArea(suggestedName);
+  } catch (err) {
+    console.warn("[auto-cache-on-draw] auto-save failed, continuing without saved area id:", err);
+  }
+
+  try {
+    await _fetchPolygonCacheOnly();
+  } catch (err) {
+    console.warn("[auto-cache-on-draw] cache lookup failed:", err);
+  }
+}
+
+function _navigationGuardForActiveDeepPull(actionDescription) {
+  if (!_activeDeepPullJobId) return true;
+  return window.confirm(
+    "A deep pull is still running on this workspace. "
+    + "It will continue saving comps in the background even if you switch. "
+    + `Do you want to ${actionDescription} anyway?`
+  );
+}
+
+function _deriveDeepPullTargetAddress() {
+  const currentWorkspace = _currentLoadedAreaId
+    ? _savedAreasCache.find((a) => a.id === _currentLoadedAreaId)
+    : null;
+  return _lastSearchedAddress
+    || _suggestAreaNameFromContainedParcels()
+    || (currentWorkspace?.name || null);
+}
+
+function _ensureStickyPropelioButton() {
+  if (propelioStickyBtn) return propelioStickyBtn;
+  propelioStickyAnchor = L.DomUtil.create("div", "propelio-get-comps-anchor");
+  const controlsWrap = document.createElement("div");
+  controlsWrap.className = "propelio-action-row";
+  propelioStickyBtn = document.createElement("button");
+  propelioStickyBtn.type = "button";
+  propelioStickyBtn.className = "propelio-get-comps-btn";
+  propelioStickyBtn.classList.add("power-user-only");
+  _setPropelioGetCompsLabel("Get Comps");
+  controlsWrap.appendChild(propelioStickyBtn);
+
+  propelioStickyAnchor.appendChild(controlsWrap);
+  L.DomEvent.disableClickPropagation(propelioStickyAnchor);
+  L.DomEvent.disableScrollPropagation(propelioStickyAnchor);
+  L.DomEvent.on(propelioStickyBtn, "click", (evt) => {
+    L.DomEvent.stopPropagation(evt);
+    void _refreshRecentByPolygon();
+  });
+  map.getContainer().appendChild(propelioStickyAnchor);
+  return propelioStickyBtn;
+}
+
+function _removePropelioPolygonButton() {
+  if (propelioStickyAnchor) {
+    propelioStickyAnchor.classList.remove("visible");
+  }
+}
+
+function _setPropelioPolygonButtonState({ text, disabled }) {
+  if (!propelioStickyBtn) return;
+  if (typeof text === "string") _setPropelioGetCompsLabel(text, "Deep Pull · ~3 min");
+  if (typeof disabled === "boolean") propelioStickyBtn.disabled = disabled;
+  propelioStickyBtn.classList.toggle("is-running", Boolean(disabled));
+}
+
+function _polygonButtonLatLng(latlngs) {
+  const pts = Array.isArray(latlngs) ? latlngs : [];
+  if (!pts.length) return null;
+
+  let north = -Infinity;
+  let south = Infinity;
+  let east = -Infinity;
+  let west = Infinity;
+
+  pts.forEach((p) => {
+    const lat = Number(p?.lat);
+    const lng = Number(p?.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+    if (lat > north) north = lat;
+    if (lat < south) south = lat;
+    if (lng > east) east = lng;
+    if (lng < west) west = lng;
+  });
+
+  if (!Number.isFinite(north) || !Number.isFinite(south) || !Number.isFinite(east) || !Number.isFinite(west)) {
+    return null;
+  }
+
+  const centerLng = (east + west) / 2;
+  const latPad = Math.max((north - south) * 0.12, 0.00035);
+  return L.latLng(Math.min(89.9999, north + latPad), centerLng);
+}
+
+async function _pullPropelioByPolygon() {
+  if (propelioPolygonPullInFlight || !Array.isArray(lastPolygon) || lastPolygon.length < 3) return;
+  if (_activeDeepPullJobId) return;
+
+  const targetAddress = _deriveDeepPullTargetAddress();
+  if (!targetAddress) {
+    _showDeepPullBanner("Search for an address or save a parcel first.");
+    setTimeout(_hideDeepPullBanner, 4000);
+    return;
+  }
+
+  propelioPolygonPullInFlight = true;
+  _setPropelioPolygonButtonState({ text: "Get Comps", disabled: true });
+  _showDeepPullBanner("Pass 0/6, queued - don't refresh, comps are saving in the background...");
+  try {
+    const resp = await _apiJson("/api/propelio/deep-pull/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify({
+        target_address: targetAddress,
+        saved_area_id: _currentLoadedAreaId || null,
+      }),
+    });
+    _activeDeepPullJobId = resp.job_id;
+    if (_deepPullPollTimer) clearInterval(_deepPullPollTimer);
+    _deepPullPollTimer = setInterval(_pollDeepPullStatus, 5000);
+  } catch (err) {
+    console.error("[propelio] deep-pull start failed:", err);
+    _showDeepPullBanner("Deep pull failed to start (see console)");
+    setTimeout(_hideDeepPullBanner, 4000);
+  } finally {
+    propelioPolygonPullInFlight = false;
+    if (!_activeDeepPullJobId) {
+      _setPropelioPolygonButtonState({ text: "Get Comps", disabled: false });
+    }
+  }
+}
+
+async function _refreshRecentByPolygon() {
+  // "Refresh Recent" — a tighter, recency-focused deep-pull that catches
+  // stragglers (recent pendings, just-listed actives) the broad 24mo
+  // sweep missed due to Propelio's 100-cap per CMA call. Same job
+  // infrastructure as Get Comps, different pass config.
+  if (propelioPolygonPullInFlight || !Array.isArray(lastPolygon) || lastPolygon.length < 3) return;
+  if (_activeDeepPullJobId) return;
+
+  const targetAddress = _deriveDeepPullTargetAddress();
+  if (!targetAddress) {
+    _showDeepPullBanner("Search for an address or save a parcel first.");
+    setTimeout(_hideDeepPullBanner, 4000);
+    return;
+  }
+
+  propelioPolygonPullInFlight = true;
+  _setPropelioPolygonButtonState({ text: "Get Comps", disabled: true });
+  _showDeepPullBanner("Quick sweep · queued - 3 passes (1mo, 2mo, 3mo), ~2-3 min");
+  try {
+    const resp = await _apiJson("/api/propelio/refresh-recent/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify({
+        target_address: targetAddress,
+        saved_area_id: _currentLoadedAreaId || null,
+      }),
+    });
+    _activeDeepPullJobId = resp.job_id;
+    if (_deepPullPollTimer) clearInterval(_deepPullPollTimer);
+    _deepPullPollTimer = setInterval(_pollDeepPullStatus, 5000);
+  } catch (err) {
+    console.error("[propelio] refresh-recent start failed:", err);
+    _showDeepPullBanner("Quick sweep failed: see console");
+    setTimeout(_hideDeepPullBanner, 4000);
+  } finally {
+    propelioPolygonPullInFlight = false;
+    if (!_activeDeepPullJobId) {
+      _setPropelioPolygonButtonState({ text: "Get Comps", disabled: false });
+    }
+  }
+}
+
+function _showPropelioPolygonButton(_latlngs) {
+  // _latlngs no longer needed — button is sticky bottom-center, not
+  // anchored to polygon geometry. Argument retained so existing call
+  // sites don't have to change.
+  _ensureStickyPropelioButton();
+  if (!propelioStickyBtn) return;
+  _setPropelioGetCompsLabel("Get Comps");
+  propelioStickyBtn.disabled = false;
+  propelioStickyBtn.classList.remove("is-running");
+  if (propelioStickyAnchor) {
+    propelioStickyAnchor.classList.add("visible");
+  }
+}
+
+// TODO(comps-button): intentionally retained. As of 2026-05-10 this
+// function has ZERO callers — the two address-search auto-pull sites
+// were removed by design (chunk 1 of the 2026-05-10 UI initiative).
+// The planned explicit "Comps" button next to the address search bar
+// will reconnect this code path. See memory:
+//   project_propelio_comp_harvest.md  (two-button search split + deep-pull)
+// If you are reading this AFTER the Comps button has shipped AND this
+// function is still unreferenced, then it really is dead — remove it
+// and the matching CMA-chip dormancy note above. Otherwise: leave it.
+async function firePropelioFetch(addressString) {
+  if (!addressString || typeof addressString !== "string") return;
+  propelioCompLayer.clearLayers();
+  propelioCmaChip.hide();
+  try {
+    const resp = await fetch(`/api/propelio/by-address?address=${encodeURIComponent(addressString)}`);
+    if (!resp.ok) {
+      console.warn("[propelio] fetch failed:", resp.status);
+      return;
+    }
+    const data = await resp.json();
+    window._propelioLast = data;
+    _updatePropelioStatusCounts();
+    // applyPropelioClientFilters renders + sets chip + updates count chip
+    applyPropelioClientFilters();
+    console.info(
+      `[propelio] received ${Array.isArray(data?.comps) ? data.comps.length : 0} address comp(s)${data.cached ? " (cached)" : ""}`
+    );
+  } catch (e) {
+    console.error("[propelio] fetch error:", e);
+  }
+}
 
 const AddressSearch = L.Control.extend({
   options: { position: "topright" },
@@ -2546,6 +5236,7 @@ const AddressSearch = L.Control.extend({
     const selectSuggestion = (idx) => {
       const item = suggestItems[idx];
       if (!item) return;
+      _lastSearchedAddress = item.address;
       highlightSearchResult([Number(item.lat), Number(item.lng)]);
     };
 
@@ -2616,6 +5307,7 @@ const AddressSearch = L.Control.extend({
     const doSearch = async () => {
       const q = input.value.trim();
       if (!q) return;
+      _lastSearchedAddress = q;
       clearSuggestList();
       btn.disabled = true;
       btn.textContent = "…";
@@ -2689,14 +5381,35 @@ const sidebarToggleBtn = document.getElementById("sidebar-toggle");
 const drawHelper = document.getElementById("draw-helper");
 
 function initSidebarCollapsibles() {
+  let savedStates = {};
+  try {
+    const raw = localStorage.getItem(SIDEBAR_SECTION_STATE_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object") savedStates = parsed;
+    }
+  } catch (_) {}
+
   document.querySelectorAll(".section-toggle[data-target]").forEach((btn) => {
     const targetId = btn.dataset.target;
     const body = targetId ? document.getElementById(targetId) : null;
     if (!body) return;
+
+    if (Object.prototype.hasOwnProperty.call(savedStates, targetId)) {
+      const expanded = Boolean(savedStates[targetId]);
+      btn.setAttribute("aria-expanded", String(expanded));
+      body.classList.toggle("hidden", !expanded);
+    }
+
     btn.addEventListener("click", () => {
       const expanded = btn.getAttribute("aria-expanded") !== "false";
-      btn.setAttribute("aria-expanded", String(!expanded));
-      body.classList.toggle("hidden", expanded);
+      const nextExpanded = !expanded;
+      btn.setAttribute("aria-expanded", String(nextExpanded));
+      body.classList.toggle("hidden", !nextExpanded);
+      try {
+        savedStates[targetId] = nextExpanded;
+        localStorage.setItem(SIDEBAR_SECTION_STATE_STORAGE_KEY, JSON.stringify(savedStates));
+      } catch (_) {}
     });
   });
 }
@@ -2705,20 +5418,27 @@ function initClickModeToggle() {
   // Restore saved mode from localStorage
   const saved = localStorage.getItem(CLICK_MODE_STORAGE_KEY);
   currentClickMode = (saved === "stay" || saved === "jump") ? saved : "jump";
-  
-  // Set up button click handlers
+
+  // Set up button click handlers (legacy saved-areas-section toggle —
+  // markup may have been removed in the 2026-05-11 toolbar relocation,
+  // so these querySelectors might return null; that's fine, the toolbar
+  // ZOOM button updated via updateClickModeButtonState is the active UI).
   const jumpBtn = document.querySelector(".click-mode-btn.jump-mode");
   const stayBtn = document.querySelector(".click-mode-btn.stay-mode");
-  
-  if (jumpBtn) {
-    jumpBtn.addEventListener("click", () => setClickMode("jump"));
-  }
-  if (stayBtn) {
-    stayBtn.addEventListener("click", () => setClickMode("stay"));
-  }
-  
-  // Apply active state to current mode
+  if (jumpBtn) jumpBtn.addEventListener("click", () => setClickMode("jump"));
+  if (stayBtn) stayBtn.addEventListener("click", () => setClickMode("stay"));
+
   updateClickModeButtonState();
+}
+
+// Bidirectional sync between the toolbar OAC button and the Map Filters
+// prop-outside-area checkbox. Run once at startup after the checkbox
+// + toolbar button both exist in the DOM.
+function initOACToggleSync() {
+  const checkbox = document.getElementById("prop-outside-area");
+  if (!checkbox) return;
+  checkbox.addEventListener("change", _updateOACButtonState);
+  _updateOACButtonState();
 }
 
 function getPolygonDrawHandler() {
@@ -2744,6 +5464,7 @@ sidebarToggleBtn.addEventListener("click", () => {
 
 initSidebarCollapsibles();
 initClickModeToggle();
+initOACToggleSync();
 
 function applyMapVisibilityFilters() {
   const previousSoldLayerVisible = soldLayerVisible;
@@ -2776,7 +5497,32 @@ function applyMapVisibilityFilters() {
     }
   }
 
+  _updateMergedSidebarCounts();
   updateSoldStatusText();
+}
+
+// Light-touch count refresh for the merged Map Filters counts. Avoids the full
+// renderSidebar (which re-renders the sold panel) when all we need is the
+// number next to each checkbox.
+function _updateMergedSidebarCounts() {
+  if (!Array.isArray(allAnalysisFeatures) || !allAnalysisFeatures.length) return;
+  const visibleCounts = getVisibleFeatureCounts(allAnalysisFeatures, { ignoreBucketToggles: true });
+  const soldCount = Array.isArray(lastSoldPanelPoints) && lastSoldPanelPoints.length
+    ? lastSoldPanelPoints.length
+    : (Array.isArray(allSoldPointsRef) ? allSoldPointsRef.length : 0);
+  const rows = [
+    ["active", visibleCounts.active],
+    ["sold", soldCount],
+    ["off_market", visibleCounts.off_market],
+    ["vacant", visibleCounts.vacant],
+    ["multifamily", visibleCounts.multifamily],
+    ["commercial", visibleCounts.commercial],
+    ["exempt", visibleCounts.exempt],
+  ];
+  rows.forEach(([key, val]) => {
+    const el = document.getElementById(`filter-count-${key}`);
+    if (el) el.textContent = String(Number(val) || 0);
+  });
 }
 
 loadFilters();
@@ -2788,7 +5534,7 @@ function _applyNumericFilters() {
   const markers = viewportRenderMode
     ? renderViewportFeatures()
     : renderFeatures(lastAnalysisGeojson);
-  const counts = getVisibleFeatureCounts(lastAnalysisGeojson.features || []);
+  const counts = getVisibleFeatureCounts(lastAnalysisGeojson.features || [], { ignoreBucketToggles: true });
   if (lastAnalysisCounts) renderSidebar(counts, markers || {});
   _refreshLoadedAreaUi();
 }
@@ -2851,6 +5597,65 @@ document.getElementById("btn-filters-reset")?.addEventListener("click", () => {
   _refreshLoadedAreaUi();
 });
 
+// Comp Filters: read from nf-comp-* inputs and apply
+function _readCompNumericInputs() {
+  const compInputs = [
+    { id: "nf-comp-lot-min", key: "lot_sqft_min" },
+    { id: "nf-comp-lot-max", key: "lot_sqft_max" },
+    { id: "nf-comp-val-min", key: "appr_val_min" },
+    { id: "nf-comp-val-max", key: "appr_val_max" },
+    { id: "nf-comp-yr-min", key: "yr_built_min" },
+    { id: "nf-comp-yr-max", key: "yr_built_max" },
+    { id: "nf-comp-sqft-min", key: "sqft_min" },
+    { id: "nf-comp-sqft-max", key: "sqft_max" },
+  ];
+  compInputs.forEach(({ id, key }) => {
+    const el = document.getElementById(id);
+    const raw = el ? el.value.trim() : "";
+    if (raw === "") {
+      compNumericFilters[key] = null;
+      return;
+    }
+    if (key === "appr_val_min" || key === "appr_val_max") {
+      compNumericFilters[key] = parseShorthand(raw);
+      return;
+    }
+    if (key === "lot_sqft_min" || key === "lot_sqft_max") {
+      const acres = Number(raw);
+      compNumericFilters[key] = Number.isFinite(acres) ? acres * 43_560 : null;
+      return;
+    }
+    const n = Number(raw);
+    compNumericFilters[key] = Number.isFinite(n) ? n : null;
+  });
+}
+
+function _applyCompNumericFilters() {
+  _readCompNumericInputs();
+  if (!lastAnalysisGeojson) return;
+  // Recompute the sold-points sidebar list so it reflects the new comp filters.
+  // _soldPointPassesFilter now reads compNumericFilters for lot/sqft/year-built,
+  // but lastSoldPanelPoints would otherwise stay stale until a separate sold-comps
+  // input change. Run the filter pass before rendering so renderSidebar ->
+  // renderSoldCompsPanel sees the up-to-date list.
+  lastSoldPanelPoints = allSoldPointsRef.filter((p) =>
+    _soldPointPassesFilter(p, soldCompsFilter)
+  );
+  const markers = viewportRenderMode
+    ? renderViewportFeatures()
+    : renderFeatures(lastAnalysisGeojson);
+  const counts = getVisibleFeatureCounts(lastAnalysisGeojson.features || []);
+  if (lastAnalysisCounts) renderSidebar(counts, markers || {});
+  _refreshLoadedAreaUi();
+}
+
+// Comp numeric filter event listeners are wired INSIDE renderSoldCompsPanel
+// (using blur + change) since the inputs are part of dynamically rendered
+// HTML. Don't re-attach at module level — the renderSoldCompsPanel-internal
+// setup is correct and complete. Module-level attachment with an `input`
+// event would also re-introduce the focus-stealing-mid-keystroke regression
+// we just fixed for the lot-size filter.
+
 applyMapVisibilityFilters();
 
 function isRedfinVisualActive(feature) {
@@ -2902,41 +5707,507 @@ function geometryKey(geometry) {
   }
 }
 
+function _panelDisplayValue(value) {
+  return value && value !== "N/A" ? value : "N/A";
+}
+
+function _buildParcelDetailTableRow(label, value) {
+  return `<tr><td class="popup-label">${label}</td><td class="popup-val">${value || "N/A"}</td></tr>`;
+}
+
+function _buildParcelDeltaMeta(p, label, numeric) {
+  if (!Number.isFinite(numeric) || numeric <= 0) return null;
+  const dcadRaw = String(p?.tot_val || "").replace(/[^0-9]/g, "");
+  const dcadNum = dcadRaw ? parseInt(dcadRaw, 10) : NaN;
+  if (!Number.isFinite(dcadNum) || dcadNum <= 0) return null;
+  const delta = Math.round(numeric) - dcadNum;
+  const pct = ((delta / dcadNum) * 100).toFixed(1);
+  const sign = delta >= 0 ? "+" : "";
+  return {
+    label,
+    text: `${sign}$${Math.abs(delta).toLocaleString()} (${sign}${pct}%)`,
+    color: delta >= 0 ? "#16a34a" : "#dc2626",
+  };
+}
+
+function _getParcelPanelCompDetails(comp) {
+  if (!comp) return null;
+  const fmtPrice = (n) => Number.isFinite(n) ? `$${Math.round(n).toLocaleString()}` : "—";
+  const fmtNum = (n) => Number.isFinite(n) ? Number(n).toLocaleString() : null;
+  const fmtDate = (s) => {
+    if (!s) return null;
+    const d = new Date(s);
+    return Number.isFinite(d.getTime()) ? d.toISOString().slice(0, 10) : null;
+  };
+
+  const ex = comp?.extra || {};
+  const raw = comp?.extra?.raw || {};
+  const status = String(comp?.status || "");
+  const isSold = status === "sold";
+  const sqft = fmtNum(comp?.sqft);
+  const lot = fmtNum(comp?.lot_size);
+  const year = Number.isFinite(comp?.year_built) ? comp.year_built : null;
+  const beds = ex.beds;
+  const baths = ex.baths;
+  const bathsFull = ex.baths_full;
+  const bathsHalf = ex.baths_half;
+  const garage = ex.garage;
+  const dom = ex.dom;
+  const listPrice = Number(ex.list_price);
+  const closeDate = fmtDate(ex.close_date);
+  const modifiedTs = fmtDate(ex.modified_timestamp);
+  const propertyType = ex.property_type;
+  const mls = ex.mls || "";
+  const source = ex.source || "";
+  const remarks = String(ex.remarks || raw.remarks || "").trim();
+  const schools = {
+    elementary: raw.elementary_school,
+    middle: raw.middle_school || raw.junior_high_school || raw.intermediate_school,
+    high: raw.high_school || raw.senior_high_school,
+  };
+  const listingAgent = {
+    name: raw.listing_agent_name,
+    phone: raw.listing_agent_phone,
+    email: raw.listing_agent_email,
+    officeName: raw.listing_office_name,
+    officePhone: raw.listing_office_phone,
+  };
+  const buyerAgent = {
+    name: raw.buyer_agent_name,
+    phone: raw.buyer_agent_phone,
+    email: raw.buyer_agent_email,
+    officeName: raw.buyer_office_name,
+    officePhone: raw.buyer_office_phone,
+  };
+  const seenPhotoUrls = new Set();
+  const photos = Array.isArray(raw.photos)
+    ? raw.photos.filter((photo) => {
+        const url = typeof photo?.url === "string" ? photo.url.trim() : "";
+        if (!url || seenPhotoUrls.has(url)) return false;
+        seenPhotoUrls.add(url);
+        return true;
+      })
+    : [];
+  const photoCountValue = Number(raw.photo_count);
+  const photoCount = photos.length || (Number.isFinite(photoCountValue) ? photoCountValue : 0);
+
+  const dims = [];
+  if (sqft) dims.push(`${sqft} sqft`);
+  if (lot) dims.push(`${lot} sqft lot`);
+  if (year) dims.push(`built ${year}`);
+
+  const bbLine = [];
+  if (beds != null) bbLine.push(`${beds}bd`);
+  if (Number.isFinite(bathsFull) || Number.isFinite(bathsHalf)) {
+    const fullStr = Number.isFinite(bathsFull) ? `${bathsFull}` : "0";
+    const halfStr = Number.isFinite(bathsHalf) && bathsHalf > 0 ? ` + ${bathsHalf}½` : "";
+    bbLine.push(`${fullStr}ba${halfStr}`);
+  } else if (baths != null) {
+    bbLine.push(`${baths}ba`);
+  }
+  if (Number.isFinite(garage) && garage > 0) bbLine.push(`${garage}-car gar`);
+
+  let listVsCloseText = "";
+  if (isSold && Number.isFinite(listPrice) && Number.isFinite(comp?.price) && listPrice > 0 && Math.abs(listPrice - comp.price) > 1) {
+    const delta = comp.price - listPrice;
+    const deltaPct = Math.round((delta / listPrice) * 100);
+    const sign = delta > 0 ? "+" : "";
+    listVsCloseText = `List was ${fmtPrice(listPrice)} (${sign}${deltaPct}% close vs list)`;
+  } else if (!isSold && Number.isFinite(listPrice) && listPrice > 0 && Number(comp?.price) !== listPrice) {
+    listVsCloseText = `List: ${fmtPrice(listPrice)}`;
+  }
+
+  const soldMeta = [];
+  if (isSold && closeDate) soldMeta.push(`closed ${closeDate}`);
+  if (Number.isFinite(dom)) soldMeta.push(`DOM ${dom}`);
+
+  const idLine = [];
+  if (mls) idLine.push(`MLS ${mls}`);
+  if (propertyType) idLine.push(propertyType);
+
+  return {
+    status,
+    priceText: fmtPrice(comp?.price),
+    soldMetaText: soldMeta.join(" · "),
+    dimsText: dims.join(" · "),
+    bbText: bbLine.join(" · "),
+    idText: idLine.join(" · "),
+    source,
+    modifiedTs,
+    listVsCloseText,
+    remarks,
+    schools,
+    listingAgent,
+    buyerAgent,
+    photoCount,
+    photos,
+    mls,
+  };
+}
+
+function _buildPanelAgentBlockHtml(title, agent, emptyText) {
+  if (agent?.name) {
+    return `
+      <div class="propelio-popup-agent-block">
+        <div class="propelio-popup-agent-label">${title}</div>
+        <div class="propelio-popup-agent-name">${_propelioEscape(agent.name || "—")}</div>
+        ${agent.officeName ? `<div class="propelio-popup-agent-line">${_propelioEscape(agent.officeName)}</div>` : ""}
+        <div class="propelio-popup-agent-contact">
+          ${agent.phone ? `<a href="tel:${encodeURIComponent(agent.phone)}">${_propelioEscape(agent.phone)}</a>` : ""}
+          ${agent.email ? `<a href="mailto:${encodeURIComponent(agent.email)}">${_propelioEscape(agent.email)}</a>` : ""}
+          ${agent.officePhone && agent.officePhone !== agent.phone ? `<a href="tel:${encodeURIComponent(agent.officePhone)}" class="muted">office: ${_propelioEscape(agent.officePhone)}</a>` : ""}
+        </div>
+      </div>`;
+  }
+  return `
+    <div class="propelio-popup-agent-block parcel-panel-agent-empty">
+      <div class="propelio-popup-agent-label">${title}</div>
+      <div class="parcel-panel-empty-copy">${emptyText}</div>
+    </div>`;
+}
+
+function _buildParcelDetailPanelHtml(p, matchedComp) {
+  const pseudoFeature = { properties: p };
+  const hasVisibleSoldComp = Boolean(p?.sold_comp);
+  const effectiveMatchedComp = matchedComp || _findMatchedCompForAccount(p?.account_num);
+  const PROPELIO_HEADER_COLORS = { sold: "#dc2626", active: "#22c55e", pending: "#0284c7" };
+  const matchedBucket = effectiveMatchedComp ? _propelioStatusBucket(effectiveMatchedComp) : null;
+  const matchedHeaderColor = matchedBucket ? PROPELIO_HEADER_COLORS[matchedBucket] : null;
+  const matchedHeaderText = effectiveMatchedComp
+    ? String(effectiveMatchedComp?.status || matchedBucket || "").toUpperCase()
+    : "";
+  const matchedHeaderPrice = effectiveMatchedComp && Number.isFinite(Number(effectiveMatchedComp.price))
+    ? `$${Math.round(Number(effectiveMatchedComp.price)).toLocaleString()}`
+    : "";
+  const statusColor = matchedHeaderColor || (hasVisibleSoldComp ? SOLD_OUTLINE_COLOR : getColor(pseudoFeature));
+  const statusText = matchedHeaderText || (hasVisibleSoldComp ? "SOLD" : getStatusLabel(pseudoFeature));
+  const soldHeaderPrice = matchedHeaderPrice
+    || (hasVisibleSoldComp
+      ? (typeof p.sold_comp?.sold_price === "number"
+        ? `$${p.sold_comp.sold_price.toLocaleString()}`
+        : String(p.sold_comp?.sold_price || ""))
+      : "");
+  const activeListingPrice = p.on_redfin && p.redfin_price ? String(p.redfin_price) : "";
+  const listingDelta = p.on_redfin && p.redfin_price
+    ? _buildParcelDeltaMeta(p, "LP vs CAD", parseInt(String(p.redfin_price).replace(/[^0-9]/g, ""), 10))
+    : null;
+  const compDelta = effectiveMatchedComp && Number.isFinite(Number(effectiveMatchedComp.price))
+    ? _buildParcelDeltaMeta(p, "Comp vs CAD", Number(effectiveMatchedComp.price))
+    : null;
+  const headerDelta = compDelta || listingDelta;
+  const compDetails = _getParcelPanelCompDetails(effectiveMatchedComp);
+  const ratingButtonsHtml = effectiveMatchedComp ? _buildRatingButtonsHtml(effectiveMatchedComp) : "";
+  const realtorLinkHtml = compDetails?.mls
+    ? `<a class="propelio-popup-realtor-link" href="https://www.realtor.com/realestateandhomes-search/MLSID-${encodeURIComponent(compDetails.mls)}" target="_blank" rel="noopener noreferrer">Look up MLS# ${_propelioEscape(compDetails.mls)} on Realtor.com</a>`
+    : "";
+  const saveLinkHtml = p.account_num
+    ? `<a href="#" class="parcel-panel-save-link parcel-save-link" data-account="${_propelioEscape(p.account_num)}" data-county="${_propelioEscape(p.source_county || "dcad")}" data-addr="${_propelioEscape(p.addr || "")}" data-lat="${_propelioEscape(p.lat || "")}" data-lng="${_propelioEscape(p.lng || "")}">📌 Save parcel</a>`
+    : `<span class="parcel-panel-action-muted">Parcel save unavailable</span>`;
+  const photoHeroHtml = compDetails
+    ? (compDetails.photos.length
+      ? `<div class="parcel-panel-photo-hero">
+          <img class="parcel-panel-photo-image" data-photo-hero src="/api/propelio/photo?url=${encodeURIComponent(compDetails.photos[0].url)}" alt="MLS listing photo 1 of ${compDetails.photos.length}">
+          ${compDetails.photos.length > 1 ? `<button type="button" class="parcel-panel-photo-nav prev" data-photo-nav="prev" aria-label="Previous photo">&#8249;</button>
+          <button type="button" class="parcel-panel-photo-nav next" data-photo-nav="next" aria-label="Next photo">&#8250;</button>
+          <div class="parcel-panel-photo-counter" data-photo-counter>1 / ${compDetails.photos.length}</div>` : ""}
+        </div>`
+      : `<div class="parcel-panel-photo-hero is-empty"><div class="parcel-panel-photo-placeholder">No photos available</div></div>`)
+    : `<div class="parcel-panel-photo-hero is-empty"><div class="parcel-panel-photo-placeholder">No MLS comp</div></div>`;
+
+  const schoolsHtml = compDetails && (compDetails.schools.elementary || compDetails.schools.middle || compDetails.schools.high)
+    ? `<div class="propelio-popup-schools">
+        ${compDetails.schools.elementary ? `<span class="propelio-popup-school"><span class="label">ES</span> ${_propelioEscape(compDetails.schools.elementary)}</span>` : ""}
+        ${compDetails.schools.middle ? `<span class="propelio-popup-school"><span class="label">MS</span> ${_propelioEscape(compDetails.schools.middle)}</span>` : ""}
+        ${compDetails.schools.high ? `<span class="propelio-popup-school"><span class="label">HS</span> ${_propelioEscape(compDetails.schools.high)}</span>` : ""}
+      </div>`
+    : "";
+
+  const soldCompRows = p.sold_comp
+    ? `
+      <tr><td colspan="2" class="parcel-panel-table-break">Recent Sold Comp</td></tr>
+      ${_buildParcelDetailTableRow("Sold Price", typeof p.sold_comp?.sold_price === "number" ? `$${p.sold_comp.sold_price.toLocaleString()}` : p.sold_comp?.sold_price)}
+      ${_buildParcelDetailTableRow("Sold Date", p.sold_comp?.sold_date ? String(p.sold_comp.sold_date).slice(0, 10) : "N/A")}
+      ${_buildParcelDetailTableRow("Days on Market", p.sold_comp?.dom == null ? "N/A" : String(p.sold_comp.dom))}
+      ${_buildParcelDetailTableRow("Listing", p.sold_comp?.listing_url ? `<a href="${p.sold_comp.listing_url}" target="_blank" rel="noopener noreferrer">View listing</a>` : "N/A")}
+    `
+    : "";
+
+  const mlsHtml = compDetails
+    ? `
+      ${photoHeroHtml}
+      <div class="propelio-popup-price">${_propelioEscape(compDetails.priceText)} · ${_propelioEscape(compDetails.status.toUpperCase())}</div>
+      ${compDetails.listVsCloseText ? `<div class="propelio-popup-meta">${_propelioEscape(compDetails.listVsCloseText)}</div>` : ""}
+      ${compDetails.soldMetaText ? `<div class="propelio-popup-meta">${_propelioEscape(compDetails.soldMetaText)}</div>` : ""}
+      ${compDetails.dimsText ? `<div class="propelio-popup-meta">${_propelioEscape(compDetails.dimsText)}</div>` : ""}
+      ${compDetails.bbText ? `<div class="propelio-popup-meta">${_propelioEscape(compDetails.bbText)}</div>` : ""}
+      ${compDetails.idText ? `<div class="propelio-popup-meta">${_propelioEscape(compDetails.idText)}${compDetails.source ? ` <span class="propelio-popup-source">(${_propelioEscape(compDetails.source)})</span>` : ""}</div>` : ""}
+      ${compDetails.modifiedTs ? `<div class="popup-propelio-meta-mute">MLS updated ${_propelioEscape(compDetails.modifiedTs)}</div>` : ""}
+      ${schoolsHtml}
+      ${compDetails.photoCount > 0 ? `<div class="propelio-popup-meta-mute">${compDetails.photoCount} listing photo${compDetails.photoCount === 1 ? "" : "s"} (Propelio-hosted)</div>` : ""}
+    `
+    : `
+      ${photoHeroHtml}
+      <div class="parcel-panel-empty-copy">No MLS comp for this parcel. Pull comps from a polygon draw to see matched listings here.</div>
+    `;
+
+  return {
+    photos: compDetails?.photos || [],
+    html: `
+      <div class="parcel-panel-header">
+        <div>
+          <div class="parcel-panel-address">${_propelioEscape(p.addr || "Unknown address")}</div>
+          <div class="parcel-panel-header-meta">
+            <span class="parcel-panel-status-pill" style="--status-color:${statusColor}">${_propelioEscape(statusText)}</span>
+            ${matchedHeaderPrice || activeListingPrice || soldHeaderPrice ? `<span class="parcel-panel-header-price">${matchedHeaderPrice || activeListingPrice || soldHeaderPrice}</span>` : ""}
+            ${headerDelta ? `<span class="parcel-panel-header-delta" style="color:${headerDelta.color}">${_propelioEscape(headerDelta.label)} ${_propelioEscape(headerDelta.text)}</span>` : ""}
+          </div>
+        </div>
+        <button type="button" class="parcel-panel-close" aria-label="Close parcel details">&times;</button>
+      </div>
+      <div class="parcel-panel-body">
+        <div class="parcel-panel-body-grid">
+          <section class="parcel-panel-cad">
+            <div class="parcel-panel-section-title">CAD</div>
+            <table class="popup-table">
+              ${_buildParcelDetailTableRow("Owner", _panelDisplayValue(p.owner))}
+              ${_buildParcelDetailTableRow("Land Value", _panelDisplayValue(p.land_val))}
+              ${_buildParcelDetailTableRow("Total Value", _panelDisplayValue(p.tot_val))}
+              ${listingDelta ? _buildParcelDetailTableRow(listingDelta.label, `<span style="color:${listingDelta.color}">${_propelioEscape(listingDelta.text)}</span>`) : ""}
+              ${compDelta ? _buildParcelDetailTableRow(compDelta.label, `<span style="color:${compDelta.color}">${_propelioEscape(compDelta.text)}</span>`) : ""}
+              ${_buildParcelDetailTableRow("Land % of Total", _panelDisplayValue(p.land_pct))}
+              ${_buildParcelDetailTableRow("Lot Size", _panelDisplayValue(p.lot_sqft))}
+              ${_buildParcelDetailTableRow("Acres", _panelDisplayValue(p.lot_acres))}
+              ${_buildParcelDetailTableRow("Frontage", _panelDisplayValue(p.frontage))}
+              ${_buildParcelDetailTableRow("Depth", _panelDisplayValue(p.depth))}
+              ${_buildParcelDetailTableRow("State Code", _panelDisplayValue(p.state_code))}
+              ${_buildParcelDetailTableRow("Zoning", _panelDisplayValue(p.zoning))}
+              ${_buildParcelDetailTableRow("School District", _panelDisplayValue(p.school))}
+              ${_buildParcelDetailTableRow("Year Built", _panelDisplayValue(p.yr_built))}
+              ${_buildParcelDetailTableRow("Living Area", p.sqft && p.sqft !== "N/A" ? `${p.sqft} sf` : "N/A")}
+              ${p.on_redfin && p.redfin_url ? _buildParcelDetailTableRow("Listing", `<a href="${p.redfin_url}" target="_blank" rel="noopener noreferrer">View listing</a>`) : ""}
+              ${soldCompRows}
+            </table>
+          </section>
+          <section class="parcel-panel-mls">
+            <div class="parcel-panel-section-title">MLS</div>
+            ${mlsHtml}
+          </section>
+        </div>
+        <section class="parcel-panel-agents">
+          ${compDetails
+            ? _buildPanelAgentBlockHtml("Listing Agent", compDetails.listingAgent, "No listing agent details available.")
+            : _buildPanelAgentBlockHtml("Listing Agent", null, "No listing agent details available.")}
+          ${compDetails && compDetails.status === "sold"
+            ? _buildPanelAgentBlockHtml("Buyer Agent", compDetails.buyerAgent, "No buyer agent details available.")
+            : _buildPanelAgentBlockHtml("Buyer Agent", null, "Buyer agent only appears on sold comps.")}
+        </section>
+        <section class="parcel-panel-remarks">
+          <div class="parcel-panel-section-title">Remarks</div>
+          ${compDetails?.remarks
+            ? `<div class="propelio-popup-remarks-full parcel-panel-remarks-box">${_propelioEscape(compDetails.remarks)}</div>`
+            : `<div class="parcel-panel-empty-copy">No remarks available for this parcel.</div>`}
+        </section>
+      </div>
+      <section class="parcel-panel-actions">
+        <div class="parcel-panel-action-slot parcel-panel-action-ratings">
+          ${ratingButtonsHtml || '<span class="parcel-panel-action-muted">No MLS comp to rate</span>'}
+        </div>
+        <div class="parcel-panel-action-slot parcel-panel-action-save">
+          ${saveLinkHtml}
+        </div>
+      </section>`,
+  };
+}
+
+function _flyToParcelDetailLatLng(latlng) {
+  if (!latlng) return;
+  const ll = Array.isArray(latlng) ? L.latLng(latlng[0], latlng[1]) : L.latLng(latlng);
+  const panel = document.getElementById("parcel-detail-panel");
+  const xOffset = panel ? Math.round(Math.min(panel.offsetWidth || 0, 820) * 0.18) : 0;
+
+  // Honor the global Keep View toggle. In stay mode we DO NOT change the
+  // zoom level — only pan when the clicked parcel would otherwise sit
+  // behind the panel or off-screen. In jump mode (default) we still
+  // zoom toward 17 (or further in if the user was already zoomed deeper).
+  const mode = (typeof getClickMode === "function" ? getClickMode() : "jump");
+
+  if (mode === "stay") {
+    const currentZoom = map.getZoom();
+    const shiftedCenter = map.unproject(map.project(ll, currentZoom).add([xOffset, 0]), currentZoom);
+    const inView = typeof isPointInViewport === "function" ? isPointInViewport(ll) : true;
+    if (inView) return; // already visible at current zoom — nothing to do
+    map.panTo(shiftedCenter, { animate: true, duration: 0.35 });
+    return;
+  }
+
+  const targetZoom = Math.max(map.getZoom(), 17);
+  const shiftedCenter = map.unproject(map.project(ll, targetZoom).add([xOffset, 0]), targetZoom);
+  map.flyTo(shiftedCenter, targetZoom, { duration: 0.35, animate: true });
+}
+
+function closeParcelDetailPanel() {
+  const panel = document.getElementById("parcel-detail-panel");
+  if (!panel) return;
+  panel.classList.add("hidden");
+  panel.classList.remove("is-open");
+  panel.setAttribute("aria-hidden", "true");
+  panel.innerHTML = "";
+  _activeParcelPopupState = null;
+}
+
+function openParcelDetailPanel(parcelProps, opts = {}) {
+  const panel = document.getElementById("parcel-detail-panel");
+  if (!panel || !parcelProps) return;
+
+  const matchedComp = Object.prototype.hasOwnProperty.call(opts, "matchedComp")
+    ? opts.matchedComp
+    : _findMatchedCompForAccount(parcelProps?.account_num);
+  const render = _buildParcelDetailPanelHtml(parcelProps, matchedComp);
+
+  panel.innerHTML = render.html;
+  panel.classList.remove("hidden");
+  panel.classList.add("is-open");
+  panel.setAttribute("aria-hidden", "false");
+  const body = panel.querySelector(".parcel-panel-body");
+  if (body) body.scrollTop = 0;
+
+  panel.querySelector(".parcel-panel-close")?.addEventListener("click", closeParcelDetailPanel);
+  _wireParcelInteractiveUi(panel, { close: closeParcelDetailPanel });
+
+  // Pre-fetch every photo through the proxy as soon as the panel opens so
+  // next/prev clicks pull from browser cache (Cache-Control: immutable from
+  // the proxy) instead of doing a fresh round-trip each time. Skip the hero
+  // — it's already loading via the visible <img>. Fire-and-forget; browser
+  // limits concurrency naturally.
+  for (let i = 1; i < render.photos.length; i += 1) {
+    const url = render.photos[i]?.url;
+    if (!url) continue;
+    const preloader = new Image();
+    preloader.src = `/api/propelio/photo?url=${encodeURIComponent(url)}`;
+  }
+
+  if (render.photos.length > 1) {
+    let currentPhotoIndex = 0;
+    const img = panel.querySelector("[data-photo-hero]");
+    const counter = panel.querySelector("[data-photo-counter]");
+    const updatePhoto = () => {
+      if (!img) return;
+      const photo = render.photos[currentPhotoIndex];
+      if (!photo?.url) return;
+      img.src = `/api/propelio/photo?url=${encodeURIComponent(photo.url)}`;
+      img.alt = `MLS listing photo ${currentPhotoIndex + 1} of ${render.photos.length}`;
+      if (counter) counter.textContent = `${currentPhotoIndex + 1} / ${render.photos.length}`;
+    };
+    panel.querySelector('[data-photo-nav="prev"]')?.addEventListener("click", () => {
+      currentPhotoIndex = (currentPhotoIndex - 1 + render.photos.length) % render.photos.length;
+      updatePhoto();
+    });
+    panel.querySelector('[data-photo-nav="next"]')?.addEventListener("click", () => {
+      currentPhotoIndex = (currentPhotoIndex + 1) % render.photos.length;
+      updatePhoto();
+    });
+  }
+
+  _activeParcelPopupState = {
+    accountNum: String(parcelProps?.account_num || ""),
+    props: parcelProps,
+    latlng: opts.latlng || null,
+    matchedComp: matchedComp || null,
+    geometry: opts.geometry || null,
+  };
+
+  // Drop a purple selected-outline on the parcel currently in the panel so the
+  // user can still see WHICH parcel they were just looking at after they close
+  // the panel. The outline persists until a different parcel is clicked OR
+  // they click the empty map (which clears it via the chunk-5 map.on("click")
+  // listener). Falls back gracefully when no geometry is available — the
+  // outline just doesn't render for that case.
+  if (opts.geometry) {
+    _renderSelectedOutline(opts.geometry);
+  }
+
+  map.closePopup();
+  closeTransientSoldSidebarPopup();
+
+  if (opts.latlng && !opts.suppressFly) {
+    _suspendViewportRender(500);
+    _flyToParcelDetailLatLng(opts.latlng);
+  }
+}
+
 function makePopupHtml(p) {
   const pseudoFeature = { properties: p };
-  const statusColor = getColor(pseudoFeature);
-  const statusText = getStatusLabel(pseudoFeature);
+  const hasVisibleSoldComp = Boolean(p?.sold_comp);
+
+  // If this parcel has a matched Propelio comp, the popup header takes
+  // its status + price from the comp instead of the CAD classification:
+  // sold → purple, active → red, pending → amber. This mirrors the
+  // legacy R.F. card pattern where the header signaled the comp's MLS
+  // status and its price front-and-center.
+  const matchedComp = _findMatchedCompForAccount(p?.account_num);
+  const PROPELIO_HEADER_COLORS = { sold: "#dc2626", active: "#22c55e", pending: "#0284c7" };
+  const matchedBucket = matchedComp ? _propelioStatusBucket(matchedComp) : null;
+  const matchedHeaderColor = matchedBucket ? PROPELIO_HEADER_COLORS[matchedBucket] : null;
+  const matchedHeaderText = matchedComp
+    ? String(matchedComp?.status || matchedBucket || "").toUpperCase()
+    : "";
+  const matchedHeaderPrice = matchedComp && Number.isFinite(Number(matchedComp.price))
+    ? `$${Math.round(Number(matchedComp.price)).toLocaleString()}`
+    : "";
+
+  const statusColor = matchedHeaderColor
+    || (hasVisibleSoldComp ? SOLD_OUTLINE_COLOR : getColor(pseudoFeature));
+  const statusText = matchedHeaderText
+    || (hasVisibleSoldComp ? "SOLD" : getStatusLabel(pseudoFeature));
+  const soldHeaderPrice = matchedHeaderPrice
+    || (hasVisibleSoldComp
+      ? (typeof p.sold_comp?.sold_price === "number"
+        ? `$${p.sold_comp.sold_price.toLocaleString()}`
+        : String(p.sold_comp?.sold_price || ""))
+      : "");
   const verifiedVacant = normalizeVerificationValue(
     verificationByAccount.get(p.account_num) || p.verified_vacant
   );
-  const potentialTarget = String(potentialTargetByAccount.get(p.account_num) || p.potential_target || "").trim();
   const row = (label, val) => `<tr><td class="popup-label">${label}</td><td class="popup-val">${val || "N/A"}</td></tr>`;
 
-  // Redfin price row + delta (active parcels only — sits near Total Value)
-  let redfinPriceRow = "";
-  let redfinListingRow = "";
-  if (p.on_redfin && p.redfin_price) {
-    const urlWrap = p.redfin_url
-      ? `<a href="${p.redfin_url}" target="_blank" rel="noopener noreferrer">${p.redfin_price}</a>`
-      : p.redfin_price;
-    redfinPriceRow = row("Redfin List Price", urlWrap);
-
-    // Numeric delta: parse both values
-    const rfNum = parseInt(String(p.redfin_price).replace(/[^0-9]/g, ""), 10);
+  // Helper — produce a colored over/under-CAD delta row for any price source.
+  // dcadRaw is just `${p.tot_val}` (already a "$NNN,NNN" string); numeric is
+  // the comp-side price (Propelio raw number, or parsed RF price string).
+  const buildDeltaRow = (label, numeric) => {
+    if (!Number.isFinite(numeric) || numeric <= 0) return "";
     const dcadRaw = String(p.tot_val || "").replace(/[^0-9]/g, "");
     const dcadNum = dcadRaw ? parseInt(dcadRaw, 10) : NaN;
-    if (!isNaN(rfNum) && !isNaN(dcadNum) && dcadNum > 0) {
-      const delta = rfNum - dcadNum;
-      const pct = ((delta / dcadNum) * 100).toFixed(1);
-      const sign = delta >= 0 ? "+" : "";
-      const color = delta >= 0 ? "#27ae60" : "#e74c3c";
-      redfinPriceRow += `<tr><td class="popup-label">vs DCAD Value</td><td class="popup-val" style="color:${color}">${sign}$${Math.abs(delta).toLocaleString()} (${sign}${pct}%)</td></tr>`;
-    }
+    if (!Number.isFinite(dcadNum) || dcadNum <= 0) return "";
+    const delta = Math.round(numeric) - dcadNum;
+    const pct = ((delta / dcadNum) * 100).toFixed(1);
+    const sign = delta >= 0 ? "+" : "";
+    const color = delta >= 0 ? "#27ae60" : "#e74c3c";
+    return `<tr><td class="popup-label">${label}</td><td class="popup-val" style="color:${color}">${sign}$${Math.abs(delta).toLocaleString()} (${sign}${pct}%)</td></tr>`;
+  };
 
-    // Separate "Listing | View listing" row goes immediately under Potential Target
+  // Active listing price in header + delta row in table.
+  let activeListingPrice = "";
+  let listingDeltaRow = "";
+  let redfinListingRow = "";
+  if (p.on_redfin && p.redfin_price) {
+    activeListingPrice = p.redfin_url
+      ? `<a href="${p.redfin_url}" target="_blank" rel="noopener noreferrer">${p.redfin_price}</a>`
+      : p.redfin_price;
+
+    const rfNum = parseInt(String(p.redfin_price).replace(/[^0-9]/g, ""), 10);
+    listingDeltaRow = buildDeltaRow("LP vs DCAD", rfNum);
+
     if (p.redfin_url) {
       redfinListingRow = row("Listing", `<a href="${p.redfin_url}" target="_blank" rel="noopener noreferrer">View listing</a>`);
     }
+  }
+
+  // Propelio comp price (sold or list, whichever the matched comp carries) vs
+  // CAD total value — same red/green delta treatment so investors can scan
+  // over/under-CAD at a glance across all counties.
+  let propelioDeltaRow = "";
+  if (matchedComp && Number.isFinite(Number(matchedComp.price))) {
+    propelioDeltaRow = buildDeltaRow("Comp vs CAD", Number(matchedComp.price));
   }
 
   let soldCompRows = "";
@@ -2958,15 +6229,29 @@ function makePopupHtml(p) {
     `;
   }
 
+  // matchedComp resolved above (drives both the header recolor and these).
+  const propelioSectionHtml = matchedComp ? _buildPropelioCompSectionHtml(matchedComp) : "";
+  const ratingButtonsHtml = matchedComp ? _buildRatingButtonsHtml(matchedComp) : "";
+
   return `
       <div class="popup">
         <div class="popup-addr">${p.addr || "Unknown address"}</div>
-        <div class="popup-status" style="color:${statusColor};">${statusText}</div>
+        <div class="popup-status-row">
+          <div class="popup-status" style="color:${statusColor};">${statusText}</div>
+          ${matchedHeaderPrice
+            ? `<div class="popup-sold-price" style="color:${statusColor};">${matchedHeaderPrice}</div>`
+            : activeListingPrice
+              ? `<div class="popup-list-price">${activeListingPrice}</div>`
+              : soldHeaderPrice
+                ? `<div class="popup-sold-price">${soldHeaderPrice}</div>`
+                : ""}
+        </div>
         <table class="popup-table">
           ${row("Owner", p.owner)}
           ${row("Land Value", p.land_val)}
           ${row("Total Value", p.tot_val)}
-          ${redfinPriceRow}
+          ${listingDeltaRow}
+          ${propelioDeltaRow}
           ${row("Land % of Total", p.land_pct)}
           ${row("Lot Size", p.lot_sqft)}
           ${row("Acres", p.lot_acres)}
@@ -2977,31 +6262,20 @@ function makePopupHtml(p) {
           ${row("School District", p.school)}
           ${row("Year Built", p.yr_built)}
           ${row("Living Area", p.sqft && p.sqft !== "N/A" ? p.sqft + " sf" : "N/A")}
-          ${row("Verified Vacant", verificationDisplay(verifiedVacant))}
-          ${row("Potential Target", potentialTarget || "No")}
           ${redfinListingRow}
           ${soldCompRows}
         </table>
-        ${p.account_num ? `<div style="margin-top:8px;border-top:1px solid #e2e8f0;padding-top:6px;display:flex;gap:12px;align-items:center;">
+        ${propelioSectionHtml}
+        ${ratingButtonsHtml}
+        ${p.account_num ? `<div style="margin-top:8px;display:flex;gap:6px;align-items:center;justify-content:flex-end;font-size:11px;padding-top:6px;border-top:1px solid #e2e8f0;">
           <a href="#" class="parcel-save-link"
             data-account="${p.account_num}"
             data-county="${p.source_county || "dcad"}"
             data-addr="${(p.addr || "").replace(/"/g, "&quot;")}"
             data-lat="${p.lat || ""}"
             data-lng="${p.lng || ""}"
-            style="color:#e67e22;text-decoration:none;font-size:11px;">📌 Save parcel</a>
-          <a href="#" class="parcel-clear-link" style="color:#aaa;text-decoration:none;font-size:11px;">✕ Clear</a>
-        </div>
-        <div style="margin-top:8px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding-top:6px;border-top:1px solid #e2e8f0;">
-          <div style="flex:1;display:flex;gap:6px;font-size:11px;">
-            <a href="#" class="parcel-verify-yes" data-account="${p.account_num}" data-lat="${p.lat || ""}" data-lng="${p.lng || ""}" style="color:#27ae60;text-decoration:none;">✓ Vacant</a>
-            <a href="#" class="parcel-verify-no" data-account="${p.account_num}" data-lat="${p.lat || ""}" data-lng="${p.lng || ""}" style="color:#e74c3c;text-decoration:none;">✗ Not vacant</a>
-            <a href="#" class="parcel-verify-clear" data-account="${p.account_num}" style="color:#aaa;text-decoration:none;">· Clear</a>
-          </div>
-          <div style="flex:1;display:flex;gap:6px;font-size:11px;justify-content:flex-end;">
-            <a href="#" class="parcel-target-on" data-account="${p.account_num}" data-lat="${p.lat || ""}" data-lng="${p.lng || ""}" style="color:#e67e22;text-decoration:none;">★ Interested</a>
-            <a href="#" class="parcel-target-off" data-account="${p.account_num}" style="color:#aaa;text-decoration:none;">· Clear</a>
-          </div>
+            style="color:#e67e22;text-decoration:none;">📌 Save parcel</a>
+          <a href="#" class="parcel-clear-link" style="color:#aaa;text-decoration:none;">✕ Clear</a>
         </div>` : ""}
       </div>`;
 }
@@ -3164,6 +6438,7 @@ function attachSoldCompsToFeatures(features, soldPoints) {
     const lng = Number(p.lng);
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
     matchedLabelPoints.push({
+      account_num: String(p.account_num || ""),
       lat,
       lng,
       sold_price: p.sold_comp.sold_price,
@@ -3174,40 +6449,35 @@ function attachSoldCompsToFeatures(features, soldPoints) {
   return { unmatchedSoldPoints, matchedLabelPoints };
 }
 
-function renderSoldPoints(points) {
-  soldLayer.clearLayers();
+function renderSoldPoints() {
+  // Unbind tooltips from prior anchor markers BEFORE clearing the array.
+  // unbindTooltip alone is unreliable when the marker has already been
+  // detached from its layer (which happens because renderFeatures runs
+  // first and clears parcelTypeLayers.sold). Explicitly remove the tooltip
+  // from the map first, THEN unbind the marker — and as a final safety
+  // net, sweep the tooltipPane DOM for any orphaned .sold-price-label
+  // elements that survived the cleanup.
+  soldMarkers.forEach(({ marker }) => {
+    const tooltip = marker?.getTooltip?.();
+    if (tooltip) {
+      try { tooltip.remove(); } catch {}
+    }
+    try { marker?.unbindTooltip?.(); } catch {}
+  });
+  document.querySelectorAll(".leaflet-tooltip.sold-price-label").forEach((el) => el.remove());
   soldMarkers = [];
   if (!filterState.sold) return;
-  const soldPoints = Array.isArray(points) ? points : [];
-  soldPoints.forEach((point) => {
-    const lat = Number(point.lat);
-    const lng = Number(point.lng);
-    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
-    const marker = L.circleMarker([lat, lng], {
-      pane: "soldPane",
-      radius: 4,
-      fillColor: SOLD_FALLBACK_DOT_COLOR,
-      color: SOLD_FALLBACK_DOT_BORDER,
-      weight: 1.2,
-      opacity: 1,
-      fillOpacity: 0.85,
-      bubblingMouseEvents: false,
-    }).bindPopup(() => makeSoldPopupHtml(point), {
-      maxWidth: 300,
-      autoPan: true,
-      autoPanPadding: [10, 50],
-      keepInView: true,
-    }).addTo(soldLayer);
-    soldMarkers.push({
-      marker,
-      priceLabel: null,
-      soldDateLabel: null,
-    });
-  });
+  const soldParcelLayer = parcelTypeLayers.sold;
+  if (!soldParcelLayer) return;
 
-  // Matched sold comps are represented by gold parcel outlines. Create
-  // invisible anchor markers so zoomed sold price labels still render.
-  matchedSoldLabelPoints.forEach((point) => {
+  // Matched sold comps are represented by sold parcel polygons. Create
+  // invisible anchors only for zoom-gated price labels — and only for
+  // parcels that ACTUALLY rendered (passed numeric filters like lot-size),
+  // so labels follow the parcel visibility instead of leaking when filtered out.
+  const visibleMatchedPoints = matchedSoldLabelPoints.filter(
+    (point) => !point.account_num || _currentlyRenderedSoldAccounts.has(point.account_num)
+  );
+  visibleMatchedPoints.forEach((point) => {
     const marker = L.circleMarker([point.lat, point.lng], {
       pane: "soldPane",
       radius: 0,
@@ -3217,7 +6487,7 @@ function renderSoldPoints(points) {
       fillOpacity: 0,
       interactive: false,
       bubblingMouseEvents: false,
-    }).addTo(soldLayer);
+    }).addTo(soldParcelLayer);
     soldMarkers.push({
       marker,
       priceLabel: abbreviatePrice(point.sold_price),
@@ -3228,7 +6498,59 @@ function renderSoldPoints(points) {
   refreshSoldPriceLabels();
 }
 
+function renderRedfinPoints() {
+  // Mirror of renderSoldPoints for active (Redfin) listings. Anchors are
+  // invisible CircleMarkers placed at on_redfin parcel centroids; they exist
+  // solely to host zoom-gated price tooltips. Cleaning up tooltips before
+  // clearing the array uses the same belt-and-suspenders pattern as sold to
+  // avoid orphaned .leaflet-tooltip.redfin-price-label nodes after re-renders.
+  redfinMarkers.forEach(({ marker }) => {
+    const tooltip = marker?.getTooltip?.();
+    if (tooltip) {
+      try { tooltip.remove(); } catch {}
+    }
+    try { marker?.unbindTooltip?.(); } catch {}
+  });
+  document.querySelectorAll(".leaflet-tooltip.redfin-price-label").forEach((el) => el.remove());
+  redfinMarkers = [];
+  if (!filterState.active) return;
+  const activeParcelLayer = parcelTypeLayers.active;
+  if (!activeParcelLayer) return;
+
+  const features = Array.isArray(allAnalysisFeatures) ? allAnalysisFeatures : [];
+  features.forEach((feature) => {
+    const p = feature?.properties || {};
+    if (!p.on_redfin) return;
+    const lat = Number(p.lat);
+    const lng = Number(p.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+    if (!passesNumericFilters(feature)) return;
+    if (!passesCompFilters(feature)) return;
+    const numeric = parseInt(String(p.redfin_price || "").replace(/[^0-9]/g, ""), 10);
+    const priceLabel = Number.isFinite(numeric) && numeric > 0 ? abbreviatePrice(numeric) : "";
+    if (!priceLabel) return;
+
+    const marker = L.circleMarker([lat, lng], {
+      pane: "soldPane",
+      radius: 0,
+      stroke: false,
+      fill: false,
+      opacity: 0,
+      fillOpacity: 0,
+      interactive: false,
+      bubblingMouseEvents: false,
+    }).addTo(activeParcelLayer);
+    redfinMarkers.push({ marker, priceLabel });
+  });
+
+  refreshRedfinPriceLabels();
+}
+
 function renderFeatures(geojson) {
+  const shouldRestorePopup = Boolean(_activeParcelPopupState?.accountNum);
+  _isRefreshingParcelLayers = shouldRestorePopup;
+  _renderedParcelPopupLayers.clear();
+  _currentlyRenderedSoldAccounts.clear();
   PARCEL_LAYER_KEYS.forEach((key) => parcelTypeLayers[key]?.clearLayers());
   redfinLayer.clearLayers();
   verificationBadgeLayer.clearLayers();
@@ -3242,13 +6564,26 @@ function renderFeatures(geojson) {
   geojson.features.forEach((feature) => {
     const p = feature.properties;
     const bucket = classifyFeatureForFilter(feature);
+    // All parcels must pass Property Filters
     if (!passesNumericFilters(feature)) return;
-    const targetLayer = parcelTypeLayers[bucket] || markerLayer;
+    // Listings + sold-matched parcels must ALSO pass Comp Filters
+    const isListingOrSold = Boolean(p.on_redfin || p.sold_comp);
+    if (isListingOrSold && !passesCompFilters(feature)) return;
+    const hasSoldComp = Boolean(p.sold_comp);
+    const targetLayer = (hasSoldComp ? parcelTypeLayers.sold : parcelTypeLayers[bucket]) || markerLayer;
+    if (hasSoldComp && p.account_num) {
+      _currentlyRenderedSoldAccounts.add(String(p.account_num));
+    }
     const color = getColor(feature);
     const borderColor = getBorderColor(feature);
-    const hasVisibleSoldComp = Boolean(p.sold_comp) && soldLayerVisible;
-    const parcelBorderColor = hasVisibleSoldComp ? SOLD_OUTLINE_COLOR : borderColor;
-    const parcelBorderWeight = hasVisibleSoldComp ? 3.2 : (p.on_redfin ? 2.8 : 1.5);
+    const hasVisibleSoldComp = hasSoldComp;
+    const parcelBorderColor = borderColor;
+    // Vacant parcels get the THICKEST border on the map (4px) so they stand
+    // out at a glance. When a vacant lot is also matched to a Propelio comp,
+    // the comp's footprint-glow renders on top of this polygon via a separate
+    // layer, so "comp color inside, thick green ring outside" comes for free —
+    // no second polygon needed.
+    const parcelBorderWeight = hasVisibleSoldComp ? 5 : (p.on_redfin ? 2.8 : (bucket === "vacant" ? 4 : 1.5));
     if (p.lat == null || p.lng == null) return;
     const hasPolygonGeometry =
       feature.geometry?.type === "Polygon" || feature.geometry?.type === "MultiPolygon";
@@ -3306,18 +6641,32 @@ function renderFeatures(geojson) {
         bubblingMouseEvents: false,
         style: {
           color: parcelBorderColor,
-          fillColor: hasVisibleSoldComp ? SOLD_OUTLINE_COLOR : (p.on_redfin ? COLORS.active : color),
-          fillOpacity: (hasVisibleSoldComp || p.on_redfin) ? 0.65 : 0.12,
+          fillColor: p.on_redfin ? COLORS.active : color,
+          fillOpacity: hasVisibleSoldComp ? 0 : (p.on_redfin ? 0.65 : 0.12),
           weight: parcelBorderWeight,
           opacity: 0.85,
         },
-      }).bindPopup(() => makePopupHtml(p), {
-        maxWidth: 280,
-        autoPan: true,
-        autoPanPadding: [10, 50],
-        keepInView: true,
       });
+      layer.on("click", (ev) => {
+        L.DomEvent.stopPropagation(ev);
+        openParcelDetailPanel(p, { latlng: ev.latlng, geometry: feature.geometry });
+      });
+      layer.on("contextmenu", (ev) => {
+        if (!_isPowerUserOrAbove()) return;
+        ev.originalEvent?.preventDefault();
+        L.DomEvent.stopPropagation(ev);
+        void _rightClickSaveParcel(p, feature.geometry || null);
+      });
+      // L.geoJSON returns a FeatureGroup wrapper; click events fire on inner child layers,
+      // so popup._source is the child, not the wrapper. Propagate metadata to children
+      // so the popupopen handler can find it for suspend/restore protection.
+      const polygonPopupMeta = { type: "parcel", accountNum: String(p.account_num || "") };
+      layer._lotLedgerPopupMeta = polygonPopupMeta;
+      layer.eachLayer((child) => { child._lotLedgerPopupMeta = polygonPopupMeta; });
       layer.addTo(targetLayer);
+      if (p.account_num) {
+        _renderedParcelPopupLayers.set(String(p.account_num), layer);
+      }
       // No circle marker rendered when polygon geometry exists — polygon fill IS the click target.
       if (p.account_num) accountRenderedAsPolygon.add(p.account_num);
     } else {
@@ -3334,23 +6683,42 @@ function renderFeatures(geojson) {
       layer = L.circleMarker([p.lat, p.lng], {
         renderer: MAP_SVG_RENDERER,
         radius: p.on_redfin ? 7 : 5,
-        fillColor: hasVisibleSoldComp ? SOLD_OUTLINE_COLOR : (p.on_redfin ? COLORS.active : color),
+        fillColor: p.on_redfin ? COLORS.active : color,
         color: parcelBorderColor,
         weight: 1.5,
         opacity: 1,
         fillOpacity: 0.9,
         bubblingMouseEvents: false,
-      }).bindPopup(() => makePopupHtml(p), {
-        maxWidth: 280,
-        autoPan: true,
-        autoPanPadding: [10, 50],
-        keepInView: true,
       });
+      layer.on("click", (ev) => {
+        L.DomEvent.stopPropagation(ev);
+        openParcelDetailPanel(p, { latlng: ev.latlng, geometry: feature.geometry });
+      });
+      layer.on("contextmenu", (ev) => {
+        if (!_isPowerUserOrAbove()) return;
+        ev.originalEvent?.preventDefault();
+        L.DomEvent.stopPropagation(ev);
+        void _rightClickSaveParcel(p, feature.geometry || null);
+      });
+      layer._lotLedgerPopupMeta = { type: "parcel", accountNum: String(p.account_num || "") };
       layer.addTo(circleLayer);
+      if (p.account_num) {
+        _renderedParcelPopupLayers.set(String(p.account_num), layer);
+      }
     }
 
     markers[p.addr] = { layer, feature };
   });
+  _isRefreshingParcelLayers = false;
+  if (shouldRestorePopup) {
+    _restoreActiveParcelPopup();
+  }
+  // After re-render the parcelTypeLayers.sold layer was cleared, so the anchor
+  // markers that price labels bind to are gone. Re-create them here so price
+  // labels survive every render pass (including viewport re-renders triggered
+  // by zoom/pan events).
+  renderSoldPoints();
+  renderRedfinPoints();
   return markers;
 }
 
@@ -3502,16 +6870,15 @@ function renderViewportFeatures() {
 // Debounced wrapper so pan/zoom events don't fire renderViewportFeatures dozens of times.
 function _scheduleViewportRender() {
   clearTimeout(_vpRenderTimeout);
-  _vpRenderTimeout = setTimeout(renderViewportFeatures, 150);
+  const delay = Math.max(150, _suspendViewportRenderUntil - Date.now());
+  _vpRenderTimeout = setTimeout(renderViewportFeatures, delay);
 }
 
 function renderSidebar(counts, markers) {
   document.getElementById("sidebar-loading").classList.add("hidden");
   document.getElementById("sidebar-results").classList.remove("hidden");
-
-  const countsPanel = document.getElementById("counts-panel");
   const visibleCounts = Array.isArray(allAnalysisFeatures) && allAnalysisFeatures.length
-    ? getVisibleFeatureCounts(allAnalysisFeatures)
+    ? getVisibleFeatureCounts(allAnalysisFeatures, { ignoreBucketToggles: true })
     : {
       active: counts.active,
       off_market: counts.off_market,
@@ -3533,15 +6900,10 @@ function renderSidebar(counts, markers) {
     ["exempt", visibleCounts.exempt],
   ];
 
-  countsPanel.innerHTML = orderedCountRows
-    .map(([key, val]) => `
-      <div class="count-row">
-        <span class="count-dot" style="background:${COLORS[key] || COLORS.exempt}"></span>
-        <span class="count-label">${TYPE_LABELS[key] || key}</span>
-        <span class="count-val">${Number(val) || 0}</span>
-      </div>`
-    )
-    .join("");
+  orderedCountRows.forEach(([key, val]) => {
+    const countEl = document.getElementById(`filter-count-${key}`);
+    if (countEl) countEl.textContent = String(Number(val) || 0);
+  });
 
   renderSoldCompsPanel();
 
@@ -3841,13 +7203,13 @@ async function postJsonWithRetry(endpoint, payload, options = {}) {
 }
 
 async function fetchTileDataRecursive(tilePolygon, includeRedfin, includeSold, depth, tileLabel, options = {}) {
-  const { signal } = options;
+  const { signal, areaId } = options;
   const redfinStatus = document.getElementById("redfin-status");
   let data;
   try {
     data = await postJsonWithRetry(
       "/api/analyze",
-      { polygon: tilePolygon, include_redfin: includeRedfin, include_sold: includeSold },
+      { polygon: tilePolygon, include_redfin: includeRedfin, include_sold: includeSold, area_id: areaId || null },
       {
         signal,
         maxRetries: 2,
@@ -3966,7 +7328,7 @@ async function runTiledAnalysis(polygon, includeRedfin, includeSold, options = {
   // Merge server-side so export + verification have a single stable job_id
   const mergeData = await postJsonWithRetry(
     "/api/merge-jobs",
-    { job_ids: tileJobIds },
+    { job_ids: tileJobIds, area_id: options.areaId || null },
     {
       signal: options.signal,
       maxRetries: 2,
@@ -3991,15 +7353,17 @@ async function runTiledAnalysis(polygon, includeRedfin, includeSold, options = {
 }
 
 async function runAnalysis(polygon, includeRedfin, includeSold, options = {}) {
+  const resolvedAreaId = (Object.prototype.hasOwnProperty.call(options, "areaId") ? options.areaId : _currentLoadedAreaId) || null;
+  const requestOptions = { ...options, areaId: resolvedAreaId };
   const bbox = getPolygonBbox(polygon);
   if (bboxArea(bbox) > TILE_AREA_THRESHOLD) {
-    return runTiledAnalysis(polygon, includeRedfin, includeSold, options);
+    return runTiledAnalysis(polygon, includeRedfin, includeSold, requestOptions);
   }
   return postJsonWithRetry(
     "/api/analyze",
-    { polygon, include_redfin: includeRedfin, include_sold: includeSold },
+    { polygon, include_redfin: includeRedfin, include_sold: includeSold, area_id: resolvedAreaId },
     {
-      signal: options.signal,
+      signal: requestOptions.signal,
       maxRetries: 2,
       statusElement: document.getElementById("redfin-status"),
       retryMessageBuilder: (attempt, total, waitMs, status) =>
@@ -4099,7 +7463,14 @@ map.on("draw:created", async (e) => {
   closeTransientSoldSidebarPopup();
   map.getContainer().classList.remove("drawing-active");
   _currentSessionIsNamed = false;
+  // Intentionally NOT clearing _currentTargetParcel or _originatorStarMarker
+  // here — saveCurrentArea (called downstream via _autoCacheOnDraw) needs
+  // to read _currentTargetParcel as the originator for the new workspace.
+  // saveCurrentArea handles the clear-and-re-render with the bonded value
+  // after the area is persisted.
   _currentLoadedAreaId = null;
+  _syncTabTitle();
+  _selectedSavedItemId = null;
   _setSessionCacheNote("");
   renderSavedAreasList();
   drawLayer.clearLayers();
@@ -4112,7 +7483,7 @@ map.on("draw:created", async (e) => {
   potentialTargetByAccount.clear();
   verificationBadgeMarkers.clear();
   targetBadgeMarkers.clear();
-  document.getElementById("sidebar-instructions").classList.add("hidden");
+  // Instructions section removed; results manage visibility
   document.getElementById("sidebar-results").classList.add("hidden");
   document.getElementById("sidebar-loading").classList.remove("hidden");
   const includeRedfin = true;
@@ -4134,6 +7505,15 @@ map.on("draw:created", async (e) => {
   const polygon = e.layer.getLatLngs()[0].map((ll) => [ll.lng, ll.lat]);
   lastDrawnLatLngs = e.layer.getLatLngs()[0].map((ll) => [ll.lat, ll.lng]);
   lastPolygon = polygon;
+  // Clear any Propelio comps + chip from a prior polygon — those comps
+  // were filtered to a different shape and shouldn't linger when the
+  // user redraws.
+  propelioCompLayer.clearLayers();
+  propelioCompLayerByKey.clear();
+  renderPropelioCompList([]);
+  propelioCmaChip.hide();
+  void _autoCacheOnDraw();
+  _showPropelioPolygonButton(e.layer.getLatLngs()[0]);
   const analysisRequest = beginLatestAnalysisRequest();
 
   try {
@@ -4155,6 +7535,9 @@ map.on("draw:created", async (e) => {
     });
     document.getElementById("redfin-status").textContent = "Analysis complete";
     _updateSaveSessionButtonState();
+    if (!_currentLoadedAreaId) {
+      setActiveItem("Unsaved area", "Unsaved");
+    }
     redfinLayerVisible = false;
     soldLayerVisible = Boolean(filterState.sold);
     map.removeLayer(redfinLayer);
@@ -4204,12 +7587,14 @@ map.on("draw:created", async (e) => {
     applyResultTags(data);
     const soldStatus = document.getElementById("sold-toggle-status");
     if (soldStatus) updateSoldStatusText();
+    applyAndRenderSoldFilters();
+    applyMapVisibilityFilters();
   } catch (err) {
     if (isAbortError(err) || !isActiveAnalysisRequest(analysisRequest.requestId)) return;
     console.error("[draw:created] Analysis failed:", err);
     document.getElementById("redfin-status").textContent = getAnalysisErrorMessage(err, "Analysis failed. Please try drawing a smaller area.");
     document.getElementById("sidebar-loading").classList.add("hidden");
-    document.getElementById("sidebar-instructions").classList.remove("hidden");
+    // Instructions section removed
     document.getElementById("btn-draw-clear")?.classList.remove("hidden");
   }
 });
@@ -4221,6 +7606,7 @@ function clearDrawResults() {
   clearTimeout(_vpRenderTimeout);
   drawLayer.clearLayers();
   maskLayer.clearLayers();
+  _removePropelioPolygonButton();
   if (!map.hasLayer(browseLayer)) browseLayer.addTo(map);
   PARCEL_LAYER_KEYS.forEach((key) => parcelTypeLayers[key]?.clearLayers());
   redfinLayer.clearLayers();
@@ -4231,11 +7617,26 @@ function clearDrawResults() {
   potentialTargetByAccount.clear();
   verificationBadgeMarkers.clear();
   targetBadgeMarkers.clear();
+  // Propelio surface: footprints/dots/checkmarks on the map, the
+  // sidebar comp list, the CMA chip, and the count chip on the card
+  // header. The archive in the DB is untouched — clicking the saved
+  // workspace again rehydrates everything exactly as it was.
+  propelioCompLayer.clearLayers();
+  propelioCompLayerByKey.clear();
+  window._propelioLast = null;
+  _updatePropelioStatusCounts();
+  propelioCmaChip.hide();
+  renderPropelioCompList([]);
+  const _propelioCountEl = document.getElementById("propelio-filter-count");
+  if (_propelioCountEl) _propelioCountEl.textContent = "";
   currentJobId = null;
   lastPolygon = null;
   lastDrawnLatLngs = null;
   _currentSessionIsNamed = false;
+  _clearOriginatorStar();
+  _currentTargetParcel = null;
   _currentLoadedAreaId = null;
+  _syncTabTitle();
   _updateSaveSessionButtonState();
   _setSessionCacheNote("");
   lastAnalysisGeojson = null;
@@ -4256,14 +7657,22 @@ function clearDrawResults() {
   document.getElementById("redfin-toggle-status").textContent = "";
   document.getElementById("sold-toggle-status").textContent = "";
   document.getElementById("sidebar-results")?.classList.add("hidden");
-  document.getElementById("sidebar-instructions")?.classList.remove("hidden");
   document.getElementById("sidebar-loading")?.classList.add("hidden");
-  document.getElementById("btn-draw-clear")?.classList.add("hidden");
-  document.getElementById("btn-saved-area-clear")?.classList.add("hidden");
+  document.getElementById("btn-drawd-area-clear")?.classList.add("hidden");
+  // NOTE: clearActiveItem is intentionally NOT called here. Callers that
+  // immediately follow clearDrawResults() with setActiveItem(...) would
+  // otherwise toggle .is-collapsed twice in the same JS tick, which the
+  // browser batches and skips the slide-in animation. Explicit slot
+  // management lives at the Deselect button + the slot × dismiss.
   renderSavedAreasList();
 }
 
 map.on("draw:drawstart", () => {
+  if (!_navigationGuardForActiveDeepPull("draw a new area")) {
+    const handler = getPolygonDrawHandler();
+    if (handler && handler.enabled()) handler.disable();
+    return;
+  }
   bumpUndoPillVersion();
   drawHelper.classList.remove("hidden");
   document.getElementById("btn-draw")?.classList.add("active");
@@ -4274,6 +7683,8 @@ map.on("draw:drawstart", () => {
   map.getContainer().classList.add("drawing-active");
   _currentSessionIsNamed = false;
   _currentLoadedAreaId = null;
+  _syncTabTitle();
+  _selectedSavedItemId = null;
   _setSessionCacheNote("");
   renderSavedAreasList();
   _updateSaveSessionButtonState();
@@ -4286,11 +7697,33 @@ map.on("draw:drawstop", () => {
   map.getContainer().classList.remove("drawing-active");
 });
 
-map.on("contextmenu", () => {
-  const handler = getPolygonDrawHandler();
-  if (handler && handler.enabled()) {
-    handler.completeShape();
+map.on("contextmenu", async (ev) => {
+  const drawHandler = getPolygonDrawHandler();
+  if (drawHandler && drawHandler.enabled()) {
+    drawHandler.completeShape();
+    return;
   }
+
+  if (!_isPowerUserOrAbove()) return;
+
+  if (!browseLayer || !browseLayer._map) return;
+  if (lastAnalysisGeojson) return;
+  ev.originalEvent?.preventDefault();
+
+  const result = browseLayer.queryTileFeaturesDebug(ev.latlng.lng, ev.latlng.lat);
+  const allFeatures = result instanceof Map
+    ? [...result.values()].flat()
+    : (Array.isArray(result) ? result : []);
+  if (allFeatures.length === 0) return;
+
+  const parcel = allFeatures.find((f) => {
+    const props = (f.feature && f.feature.props) || f.props || {};
+    return props.source_county === "dcad" || props.source_county === "tad" || props.source_county === "collin" || props.source_county === "denton";
+  });
+  if (!parcel) return;
+
+  const pProps = (parcel.feature && parcel.feature.props) || parcel.props || {};
+  void _rightClickSaveParcel(pProps, null);
 });
 
 // Sidebar-triggered sold popups should dismiss once the map is moved away.
@@ -4360,6 +7793,19 @@ document.getElementById("btn-download").addEventListener("click", async () => {
   }
 });
 
+function _suggestAreaNameFromContainedParcels() {
+  if (!Array.isArray(lastPolygon) || lastPolygon.length < 3) return null;
+  if (!Array.isArray(_savedParcelsCache) || _savedParcelsCache.length === 0) return null;
+  for (const p of _savedParcelsCache) {
+    if (!Number.isFinite(p.lat) || !Number.isFinite(p.lng)) continue;
+    if (pointInPolygonLngLat([p.lng, p.lat], lastPolygon)) {
+      const name = String(p.name || "").trim();
+      if (name) return name;
+    }
+  }
+  return null;
+}
+
 function _openSaveAreaInlineInput() {
   const btn = document.getElementById("btn-save-area");
   if (!btn) return;
@@ -4377,6 +7823,9 @@ function _openSaveAreaInlineInput() {
   input.style.minWidth = "0";
   input.style.maxWidth = "100%";
   input.style.flex = "1 1 auto";
+
+  const suggested = _suggestAreaNameFromContainedParcels();
+  if (suggested) input.value = suggested;
 
   const cancel = document.createElement("button");
   cancel.type = "button";
@@ -4423,7 +7872,10 @@ function _openSaveAreaInlineInput() {
   wrap.appendChild(cancel);
   parent.appendChild(wrap);
   btn.classList.add("hidden");
-  requestAnimationFrame(() => input.focus());
+  requestAnimationFrame(() => {
+    input.focus();
+    if (input.value) input.select();
+  });
 }
 
 document.getElementById("btn-save-area")?.addEventListener("click", () => {
@@ -4501,14 +7953,9 @@ document.getElementById("btn-update-saved-area")?.addEventListener("click", asyn
   await _updateSavedAreaFilters(area, e.currentTarget);
 });
 
-document.getElementById("btn-saved-area-current-clear")?.addEventListener("click", () => {
-  bumpUndoPillVersion();
-  _currentLoadedAreaId = null;
-  renderSavedAreasList();
-});
-
 document.getElementById("btn-clear").addEventListener("click", () => {
   clearDrawResults();
+  clearActiveItem();
 });
 
 // ── Save Session helpers ─────────────────────────────────────────────────────
@@ -4595,6 +8042,8 @@ async function rerunWithRedfin() {
         statusEl.textContent = `${data.counts.active} active listing${data.counts.active !== 1 ? "s" : ""} found`;
       }
     }
+    applyAndRenderSoldFilters();
+    applyMapVisibilityFilters();
   } catch (err) {
     if (statusEl) statusEl.textContent = "Redfin fetch failed";
     console.error("Redfin re-fetch failed", err);
@@ -4630,6 +8079,8 @@ document.getElementById("toggle-redfin")?.addEventListener("change", async (e) =
     if (lastAnalysisCounts) {
       renderSidebar(lastAnalysisCounts, markers);
     }
+    applyAndRenderSoldFilters();
+    applyMapVisibilityFilters();
   }
 });
 
@@ -4668,6 +8119,8 @@ async function rerunWithSold() {
     }
 
     if (statusEl) updateSoldStatusText();
+    applyAndRenderSoldFilters();
+    applyMapVisibilityFilters();
   } catch (err) {
     if (statusEl) statusEl.textContent = "Sold comps unavailable";
     console.error("Sold re-fetch failed", err);
@@ -4700,6 +8153,11 @@ document.getElementById("toggle-sold")?.addEventListener("change", async (e) => 
 map.on("mousemove", (ev) => {
   if (lastAnalysisGeojson) return;
   if (map.getZoom() < 14) return;
+  // Defensive: browseLayer can be detached from the map during certain
+  // saved-area restore + viewport-suspend cycles. Without this guard
+  // queryTileFeaturesDebug throws TypeError "this._map is null" on every
+  // mousemove and blocks all subsequent map interactions.
+  if (!browseLayer._map) return;
   const result = browseLayer.queryTileFeaturesDebug(ev.latlng.lng, ev.latlng.lat);
   const hit = result instanceof Map
     ? [...result.values()].flat().length > 0
@@ -4719,6 +8177,8 @@ map.on("click", async (ev) => {
   // Any map click clears an orphaned search highlight (search popup was replaced by this click).
   window._clearSearchHighlight?.();
 
+  // Defensive: same browseLayer-detached guard as the mousemove handler above.
+  if (!browseLayer._map) return;
   const result = browseLayer.queryTileFeaturesDebug(ev.latlng.lng, ev.latlng.lat);
   // v3 returns Map<string, PickedFeature[]> — flatten all values regardless of key name
   const allFeatures = result instanceof Map
@@ -4741,21 +8201,25 @@ map.on("click", async (ev) => {
     const resp = await fetch(`/api/parcel/${county}/${accountNum}`);
     if (!resp.ok) return;
     const detail = await resp.json();
-    L.popup()
-      .setLatLng(ev.latlng)
-      .setContent(makePopupHtml(detail.properties || detail))
-      .openOn(map);
+    openParcelDetailPanel(detail.properties || detail, { latlng: ev.latlng });
   } catch (e) {
     console.error("Browse popup failed", e);
   }
 });
 
-// Wire up "Save parcel" link in any popup — uses data attributes from makePopupHtml.
-map.on("popupopen", (e) => {
-  const el = e.popup.getElement();
-  if (!el) return;
+// Clear the selected outline on any map click. Sidebar and comp-list
+// clicks go through DOM event paths, NOT map clicks — so the only way
+// to reach this listener is by clicking the map proper. Always-clears
+// is intentional and runs even during an active draw.
+map.on("click", () => {
+  _clearSelectedOutline();
+});
 
-  const saveLink = el.querySelector(".parcel-save-link");
+function _wireParcelInteractiveUi(root, options = {}) {
+  if (!root) return;
+  const close = typeof options.close === "function" ? options.close : () => {};
+
+  const saveLink = root.querySelector(".parcel-save-link");
   if (saveLink) {
     saveLink.addEventListener("click", async (ev) => {
       ev.preventDefault();
@@ -4769,7 +8233,7 @@ map.on("popupopen", (e) => {
             geometry = detail.geometry;
           }
         }
-      } catch { /* geometry stays null — outline skipped */ }
+      } catch {}
       try {
         await saveParcel(account, county, addr, parseFloat(lat), parseFloat(lng), geometry);
         saveLink.textContent = "✓ Saved";
@@ -4782,9 +8246,8 @@ map.on("popupopen", (e) => {
     });
   }
 
-  const clearLink = el.querySelector(".parcel-clear-link");
+  const clearLink = root.querySelector(".parcel-clear-link");
   if (clearLink) {
-    // Hide the clear link if there's no active search highlight.
     if (!window._searchHighlight) clearLink.style.display = "none";
     clearLink.addEventListener("click", (ev) => {
       ev.preventDefault();
@@ -4793,61 +8256,58 @@ map.on("popupopen", (e) => {
     });
   }
 
-  // Verify buttons
-  const verifyYes = el.querySelector(".parcel-verify-yes");
+  const verifyYes = root.querySelector(".parcel-verify-yes");
   if (verifyYes) {
     verifyYes.addEventListener("click", (ev) => {
       ev.preventDefault();
       const { account, lat, lng } = verifyYes.dataset;
       setVerification(account, "yes", parseFloat(lat), parseFloat(lng));
       persistSingleTag(account, "verified_vacant", "yes");
-      e.popup.close();
+      close();
     });
   }
 
-  const verifyNo = el.querySelector(".parcel-verify-no");
+  const verifyNo = root.querySelector(".parcel-verify-no");
   if (verifyNo) {
     verifyNo.addEventListener("click", (ev) => {
       ev.preventDefault();
       const { account, lat, lng } = verifyNo.dataset;
       setVerification(account, "no", parseFloat(lat), parseFloat(lng));
       persistSingleTag(account, "verified_vacant", "no");
-      e.popup.close();
+      close();
     });
   }
 
-  const verifyClear = el.querySelector(".parcel-verify-clear");
+  const verifyClear = root.querySelector(".parcel-verify-clear");
   if (verifyClear) {
     verifyClear.addEventListener("click", (ev) => {
       ev.preventDefault();
       const { account } = verifyClear.dataset;
       setVerification(account, null);
       persistSingleTag(account, "verified_vacant", null);
-      e.popup.close();
+      close();
     });
   }
+}
 
-  // Target buttons
-  const targetOn = el.querySelector(".parcel-target-on");
-  if (targetOn) {
-    targetOn.addEventListener("click", (ev) => {
-      ev.preventDefault();
-      const { account, lat, lng } = targetOn.dataset;
-      setTarget(account, true, parseFloat(lat), parseFloat(lng));
-      persistSingleTag(account, "potential_target", "yes");
-      e.popup.close();
-    });
+// Wire up parcel action links for any remaining popup paths.
+map.on("popupopen", (e) => {
+  const popupMeta = e.popup?._source?._lotLedgerPopupMeta;
+  if (popupMeta?.type === "parcel") {
+    _captureParcelPopupState(popupMeta);
+    _suspendViewportRender();
   }
+  const el = e.popup.getElement();
+  if (!el) return;
+  _wireParcelInteractiveUi(el, { close: () => e.popup.close() });
+});
 
-  const targetOff = el.querySelector(".parcel-target-off");
-  if (targetOff) {
-    targetOff.addEventListener("click", (ev) => {
-      ev.preventDefault();
-      const { account } = targetOff.dataset;
-      setTarget(account, false);
-      persistSingleTag(account, "potential_target", null);
-      e.popup.close();
-    });
+map.on("popupclose", (e) => {
+  const popupMeta = e.popup?._source?._lotLedgerPopupMeta;
+  if (popupMeta?.type !== "parcel") return;
+  if (_isRefreshingParcelLayers) return;
+  if (_activeParcelPopupState?.accountNum === String(popupMeta.accountNum || "")) {
+    _activeParcelPopupState = null;
   }
 });
 
@@ -4860,6 +8320,23 @@ map.on("popupopen", (e) => {
 
 let _currentUser = null;        // null = not logged in, object = logged-in user dict
 let _authDropdownOpen = false;  // tracks whether the username dropdown is expanded
+
+// Role helpers — always read from _currentUser so they stay in sync with server state
+const _currentRole    = () => (_currentUser?.role || "").toLowerCase();
+const _isPowerUserOrAbove = () => ["power_user", "owner", "developer"].includes(_currentRole());
+const _isAdmin        = () => ["owner", "developer"].includes(_currentRole());
+const _canDownloadCsv = () => _currentRole() !== "user";
+const _canEditAnyArea = () => _currentRole() === "developer";
+
+function _applyRoleVisibility() {
+  if (_isPowerUserOrAbove()) {
+    document.body.classList.remove("is-not-power-user");
+  } else {
+    document.body.classList.add("is-not-power-user");
+  }
+}
+
+_applyRoleVisibility();
 
 // ---------------------------------------------------------------------------
 // Helpers to show/hide the modal
@@ -4898,23 +8375,31 @@ function _showLoginForm(errorMsg = "") {
   box.innerHTML = `
     <span class="auth-modal-title">Sign In to Lot Ledger</span>
     <span class="auth-modal-subtitle">Enter your credentials to continue.</span>
-    <form id="auth-login-form" class="auth-form" autocomplete="on">
+    <form id="auth-login-form" class="auth-form" autocomplete="off">
       <div class="auth-field">
-        <label for="auth-email">Email</label>
-        <input type="email" id="auth-email" name="email" autocomplete="username" required placeholder="you@example.com">
+        <label for="auth-identifier">Username or Email</label>
+        <input type="text" id="auth-identifier" name="identifier" autocomplete="off" autocapitalize="off" spellcheck="false" required placeholder="username or you@example.com">
       </div>
       <div class="auth-field">
         <label for="auth-password">Password</label>
-        <input type="password" id="auth-password" name="password" autocomplete="current-password" required>
+        <input type="password" id="auth-password" name="password" autocomplete="new-password" data-lpignore="true" required>
       </div>
       <p id="auth-login-error" class="auth-error${errorMsg ? "" : " hidden"}">${errorMsg}</p>
       <button type="submit" id="auth-login-btn" class="auth-submit-btn">Sign In</button>
     </form>`;
   _showAuthModal();
 
+  // Avoid misleading browser autofill bullets in auth password fields.
+  const pwdEl = document.getElementById("auth-password");
+  if (pwdEl) pwdEl.value = "";
+  setTimeout(() => {
+    const delayedPwdEl = document.getElementById("auth-password");
+    if (delayedPwdEl) delayedPwdEl.value = "";
+  }, 0);
+
   document.getElementById("auth-login-form").addEventListener("submit", async (e) => {
     e.preventDefault();
-    const email = document.getElementById("auth-email").value.trim();
+    const identifier = document.getElementById("auth-identifier").value.trim();
     const password = document.getElementById("auth-password").value;
     _setAuthError("auth-login-error", "");
     _setAuthBusy("auth-login-btn", true, "Sign In");
@@ -4923,7 +8408,7 @@ function _showLoginForm(errorMsg = "") {
       const resp = await fetch("/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json", ...authHeaders() },
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({ identifier, password }),
         credentials: "same-origin",
       });
       const data = await resp.json().catch(() => ({}));
@@ -4931,8 +8416,14 @@ function _showLoginForm(errorMsg = "") {
         _hideAuthModal();
         _currentUser = data.user || data;
         _renderUserBar(_currentUser);
+        _applyRoleVisibility();
         await _reloadSavedResources().catch((err) => console.error("load saved resources failed", err));
         _maybeShowImportBanner();
+        const pendingShareId = _pendingAreaShareId;
+        _pendingAreaShareId = null;
+        if (pendingShareId) {
+          await _loadAreaFromShareId(pendingShareId);
+        }
         if (data.force_password_change) {
           _showChangePasswordForm(true);
         }
@@ -4947,8 +8438,8 @@ function _showLoginForm(errorMsg = "") {
     }
   });
 
-  // Autofocus email field
-  requestAnimationFrame(() => document.getElementById("auth-email")?.focus());
+  // Autofocus identifier field
+  requestAnimationFrame(() => document.getElementById("auth-identifier")?.focus());
 }
 
 // ---------------------------------------------------------------------------
@@ -4967,20 +8458,33 @@ function _showChangePasswordForm(forced = false) {
     <form id="auth-chpw-form" class="auth-form" autocomplete="off">
       <div class="auth-field">
         <label>Current Password</label>
-        <input type="password" id="auth-chpw-current" autocomplete="current-password" required>
+        <input type="password" id="auth-chpw-current" autocomplete="off" data-lpignore="true" required>
       </div>
       <div class="auth-field">
         <label>New Password</label>
-        <input type="password" id="auth-chpw-new" autocomplete="new-password" required>
+        <input type="password" id="auth-chpw-new" autocomplete="off" data-lpignore="true" required>
       </div>
       <div class="auth-field">
         <label>Confirm New Password</label>
-        <input type="password" id="auth-chpw-confirm" autocomplete="new-password" required>
+        <input type="password" id="auth-chpw-confirm" autocomplete="off" data-lpignore="true" required>
       </div>
       <p id="auth-chpw-error" class="auth-error hidden"></p>
       <button type="submit" id="auth-chpw-btn" class="auth-submit-btn">Update Password</button>
     </form>`;
   _showAuthModal();
+
+  // Stomp browser-autofilled password values. Some password managers re-fill
+  // after the synchronous JS, so clear immediately, on the next tick, and
+  // again at 100ms to catch slower autofill paths.
+  const _clearChpwFields = () => {
+    ["auth-chpw-current", "auth-chpw-new", "auth-chpw-confirm"].forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) el.value = "";
+    });
+  };
+  _clearChpwFields();
+  setTimeout(_clearChpwFields, 0);
+  setTimeout(_clearChpwFields, 100);
 
   document.getElementById("auth-close-chpw")?.addEventListener("click", () => {
     _hideAuthModal();
@@ -5013,9 +8517,18 @@ function _showChangePasswordForm(forced = false) {
       });
       const data = await resp.json().catch(() => ({}));
       if (resp.ok) {
+        if (forced) {
+          _hideAuthModal();
+          _currentUser = null;
+          _renderUserBar(null);
+          _applyRoleVisibility();
+          _showLoginForm("Password updated. Sign in with your new password.");
+          return;
+        }
         _currentUser = data.user || _currentUser;
         if (_currentUser) _currentUser.force_password_change = false;
         _renderUserBar(_currentUser);
+        _applyRoleVisibility();
         _hideAuthModal();
       } else {
         const detail = data?.detail;
@@ -5051,14 +8564,15 @@ async function _showAdminPanel() {
     <div id="admin-user-table-wrap">Loading…</div>
     <p class="admin-section-title">Add New User</p>
     <div class="admin-add-form">
-      <input type="email" id="admin-new-email" placeholder="Email" autocomplete="off">
       <input type="text"  id="admin-new-username" placeholder="Username" autocomplete="off">
+      <input type="password" id="admin-new-temp-password" placeholder="Temp Password (10+ chars)" autocomplete="new-password">
       <select id="admin-new-role">
-        <option value="member">Member</option>
-        <option value="owner">Owner</option>
+        <option value="user">User</option>
+        <option value="power_user">Power User</option>
+        ${_currentRole() === "developer" ? `<option value="owner">Owner</option>` : ""}
       </select>
-    </div>
-    <div style="margin-top:8px; display:flex; gap:8px; align-items:center;">
+      <button type="button" id="admin-toggle-email" class="admin-link-btn">+ Add email (optional)</button>
+      <input type="email" id="admin-new-email" placeholder="Email (optional)" autocomplete="off" class="hidden">
       <button id="admin-add-btn" class="admin-add-btn">+ Add User</button>
       <p id="admin-add-msg" class="admin-msg"></p>
     </div>`;
@@ -5066,6 +8580,14 @@ async function _showAdminPanel() {
 
   document.getElementById("auth-close-admin").addEventListener("click", _hideAuthModal);
   document.getElementById("admin-add-btn").addEventListener("click", _adminAddUser);
+  document.getElementById("admin-toggle-email")?.addEventListener("click", () => {
+    const emailEl = document.getElementById("admin-new-email");
+    const toggleBtn = document.getElementById("admin-toggle-email");
+    if (!emailEl || !toggleBtn) return;
+    emailEl.classList.remove("hidden");
+    toggleBtn.classList.add("hidden");
+    emailEl.focus();
+  });
 
   await _adminRefreshTable();
 }
@@ -5095,11 +8617,14 @@ async function _adminRefreshTable() {
         const resetBtn = selfRole === "developer" || (selfRole === "owner" && !isSelf(u))
           ? `<button class="admin-action-btn" data-action="reset" data-uid="${u.id}" data-uname="${_esc(u.username)}">Reset Pw</button>`
           : "";
-        actions = (disableBtn + resetBtn) || "—";
+        const deleteBtn = selfRole === "developer" || (selfRole === "owner" && !isSelf(u))
+          ? `<button class="admin-action-btn danger-strong" data-action="delete" data-uid="${u.id}" data-uname="${_esc(u.username)}">Delete</button>`
+          : "";
+        actions = (disableBtn + resetBtn + deleteBtn) || "—";
       }
       return `<tr>
         <td>${statusDot}${_esc(u.username)}</td>
-        <td>${_esc(u.email)}</td>
+        <td>${u.email ? _esc(u.email) : '<span class="admin-cell-empty">—</span>'}</td>
         <td>${roleBadge}</td>
         <td>${actions}</td>
       </tr>`;
@@ -5120,20 +8645,37 @@ async function _adminRefreshTable() {
 }
 
 async function _adminAction(action, uid, uname, btn) {
+  if (action === "delete") {
+    const confirmed = confirm(`PERMANENTLY DELETE user '${uname}'?\n\nThis removes their account and ALL their saved areas, parcels, sessions, and tags. Audit history is preserved.\n\nThis cannot be undone.`);
+    if (!confirmed) return;
+  }
+
   btn.disabled = true;
   const endpoint = action === "reset"
     ? `/admin/users/${uid}/reset-password`
-    : `/admin/users/${uid}/${action}`;
+    : action === "delete"
+      ? `/admin/users/${uid}`
+      : `/admin/users/${uid}/${action}`;
+  const method = action === "delete" ? "DELETE" : "POST";
 
   try {
     const resp = await fetch(endpoint, {
-      method: "POST",
+      method,
       headers: { "Content-Type": "application/json", ...authHeaders() },
       credentials: "same-origin",
     });
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) {
-      alert(data?.detail || `Action failed.`);
+      const detail = data?.detail;
+      let msg;
+      if (typeof detail === "string") {
+        msg = detail;
+      } else if (Array.isArray(detail) && detail.length > 0) {
+        msg = "Validation error: " + detail.map(d => d?.msg || "invalid input").join("; ");
+      } else {
+        msg = "Action failed.";
+      }
+      alert(msg);
       btn.disabled = false;
       return;
     }
@@ -5148,13 +8690,19 @@ async function _adminAction(action, uid, uname, btn) {
 }
 
 async function _adminAddUser() {
-  const email    = document.getElementById("admin-new-email")?.value.trim();
+  const email    = document.getElementById("admin-new-email")?.value.trim() || "";
   const username = document.getElementById("admin-new-username")?.value.trim();
+  const tempPassword = document.getElementById("admin-new-temp-password")?.value;
   const role     = document.getElementById("admin-new-role")?.value;
   const msgEl    = document.getElementById("admin-add-msg");
 
-  if (!email || !username) {
-    if (msgEl) { msgEl.textContent = "Email and username are required."; msgEl.className = "admin-msg err"; }
+  if (!username || !tempPassword) {
+    if (msgEl) { msgEl.textContent = "Username and temporary password are required."; msgEl.className = "admin-msg err"; }
+    return;
+  }
+
+  if (tempPassword.length < 10) {
+    if (msgEl) { msgEl.textContent = "Temporary password must be at least 10 characters."; msgEl.className = "admin-msg err"; }
     return;
   }
 
@@ -5163,10 +8711,12 @@ async function _adminAddUser() {
   if (btn) btn.disabled = true;
 
   try {
+    const body = { username, temp_password: tempPassword, role };
+    if (email) body.email = email;
     const resp = await fetch("/admin/users", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...authHeaders() },
-      body: JSON.stringify({ email, username, role }),
+      body: JSON.stringify(body),
       credentials: "same-origin",
     });
     const data = await resp.json().catch(() => ({}));
@@ -5175,14 +8725,10 @@ async function _adminAddUser() {
       if (btn) btn.disabled = false;
       return;
     }
-    const tmpPw = data.temp_password || data.user?.temp_password;
-    if (tmpPw) {
-      alert(`User created.\n\nTemporary password for ${username}:\n\n${tmpPw}\n\nShare this with the user; they must change it on first login.`);
-    } else {
-      if (msgEl) { msgEl.textContent = `User ${username} added.`; msgEl.className = "admin-msg ok"; }
-    }
+    if (msgEl) { msgEl.textContent = `User ${username} created. They must change the password on first login.`; msgEl.className = "admin-msg ok"; }
     document.getElementById("admin-new-email").value = "";
     document.getElementById("admin-new-username").value = "";
+    document.getElementById("admin-new-temp-password").value = "";
     await _adminRefreshTable();
   } catch {
     if (msgEl) { msgEl.textContent = "Network error. Please try again."; msgEl.className = "admin-msg err"; }
@@ -5202,13 +8748,16 @@ function _renderUserBar(user) {
     bar.querySelector("#auth-open-login").addEventListener("click", () => _showLoginForm());
     return;
   }
-  const canManage = user.role === "developer" || user.role === "owner";
+  // Gate CSV download button visibility by role
+  const dlBtn = document.getElementById("btn-download");
+  if (dlBtn) dlBtn.classList.toggle("hidden", !_canDownloadCsv());
+
   bar.innerHTML = `
     <div style="position:relative;">
       <button class="auth-username-btn" id="auth-user-menu-btn" title="Account menu">${_esc(user.username)}</button>
       <div id="auth-dropdown" class="auth-dropdown hidden">
         <button class="auth-dropdown-item" id="auth-menu-chpw">Change Password</button>
-        ${canManage ? `<button class="auth-dropdown-item" id="auth-menu-admin">Manage Users</button>` : ""}
+        ${_isAdmin() ? `<button class="auth-dropdown-item" id="auth-menu-admin">Manage Users</button>` : ""}
         <div class="auth-dropdown-divider"></div>
         <button class="auth-dropdown-item danger" id="auth-menu-signout">Sign Out</button>
       </div>
@@ -5257,6 +8806,7 @@ async function _doSignOut() {
   } catch { /* ignore */ }
   _currentUser = null;
   _renderUserBar(null);
+  _applyRoleVisibility();
   _showLoginForm();
 }
 
@@ -5267,11 +8817,81 @@ async function _doSignOut() {
 function _handle401() {
   _currentUser = null;
   _renderUserBar(null);
+  _applyRoleVisibility();
   _showLoginForm("Your session expired. Please sign in again.");
 }
 
 function _handleForcePasswordChange() {
   _showChangePasswordForm(true);
+}
+
+async function _loadAreaFromShareId(shareId) {
+  try {
+    const resp = await fetch(`/api/area/by-share-id/${encodeURIComponent(shareId)}`, {
+      credentials: "same-origin",
+    });
+    if (!resp.ok) {
+      if (resp.status === 404) {
+        _showToast("Shared link not found - it may have been deleted", "error");
+      } else {
+        _showToast("Could not open shared workspace", "error");
+      }
+      return;
+    }
+    const area = await resp.json();
+    const seedParcels = Array.isArray(area.seed_parcels) ? area.seed_parcels : [];
+    await restoreSavedArea(_normalizeSavedAreaRow(area));
+    // Render the workspace's bonded seed targets as gold-glow polygons.
+    // Skipped automatically by _renderSavedParcelOutline if the same account_num
+    // is already on the map (e.g., user opened their own workspace and the
+    // seed is also one of their standalones).
+    seedParcels.forEach((sp) => {
+      const normalized = _normalizeSavedParcelRow(sp);
+      if (normalized.geometry) {
+        _renderSavedParcelOutline(normalized);
+      }
+      _renderSavedTargetStar(normalized);
+    });
+
+    // Best-effort owner skip: if this share_id is already in cache, the
+    // current user is likely the owner. Not airtight if cache load failed.
+    const isOwner = _savedAreasCache.some((a) => String(a.share_id || "") === String(shareId));
+    if (_currentUser && !isOwner) {
+      try {
+        const cloned = await _apiJson(`/api/areas/from-share-id/${encodeURIComponent(shareId)}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...authHeaders() },
+          body: "{}",
+        });
+        const normalized = _normalizeSavedAreaRow(cloned);
+        _savedAreasCache.unshift(normalized);
+        _clearOriginatorStar();
+        _currentTargetParcel = null;
+        _currentLoadedAreaId = cloned.area_id;
+        _syncTabTitle();
+        _selectedSavedItemId = cloned.area_id;
+        // Carry the originator TARGET star through the auto-fork.
+        if (normalized.originator_parcel_county && normalized.originator_parcel_account_num) {
+          _currentTargetParcel = {
+            county: normalized.originator_parcel_county,
+            account: normalized.originator_parcel_account_num,
+          };
+          void _renderOriginatorTargetStar(
+            normalized.originator_parcel_county,
+            normalized.originator_parcel_account_num,
+          );
+        }
+        renderSavedAreasList();
+        _showToast(`Added to your saved areas: ${cloned.name}`);
+      } catch (forkErr) {
+        console.warn("auto-fork failed; keeping read-only view", forkErr);
+        _showToast("Could not save shared workspace", "error");
+      }
+    }
+  } catch (err) {
+    console.error("Deep-link load failed", err);
+    _showToast("Could not open shared workspace", "error");
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -5280,6 +8900,7 @@ function _handleForcePasswordChange() {
 (async function initAuth() {
   // Render the "Sign In" button immediately while we check.
   _renderUserBar(null);
+  _applyRoleVisibility();
 
   try {
     const resp = await fetch("/auth/me", { credentials: "same-origin" });
@@ -5300,8 +8921,14 @@ function _handleForcePasswordChange() {
       const data = await resp.json().catch(() => ({}));
       _currentUser = data.user || data;
       _renderUserBar(_currentUser);
+      _applyRoleVisibility();
       await _reloadSavedResources().catch((err) => console.error("load saved resources failed", err));
       _maybeShowImportBanner();
+      const pendingShareId = _pendingAreaShareId;
+      _pendingAreaShareId = null;
+      if (pendingShareId) {
+        await _loadAreaFromShareId(pendingShareId);
+      }
       if (_currentUser?.force_password_change) {
         _showChangePasswordForm(true);
       }
@@ -5325,3 +8952,133 @@ function _esc(str) {
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
 }
+
+// =============================================================================
+// EXPERIMENTAL: Propelio Deep Pull (dev-only, throwaway scaffold)
+// Removed once the permanent comps DB + production deep-pull is built.
+// =============================================================================
+
+let _deepPullPollTimer = null;
+let _activeDeepPullJobId = null;
+
+function _showDeepPullBanner(text) {
+  const banner = document.getElementById("deep-pull-banner");
+  const textEl = document.getElementById("deep-pull-banner-text");
+  if (banner) banner.classList.remove("hidden");
+  if (textEl) textEl.textContent = text;
+}
+
+function _updateDeepPullBanner(status) {
+  const textEl = document.getElementById("deep-pull-banner-text");
+  if (!textEl) return;
+  // Infer total passes from job_id prefix: rr_* = Refresh Recent (3),
+  // dp_* (default) = Get Comps deep pull (6).
+  const jobId = String(_activeDeepPullJobId || "");
+  // Contract: 3 must match api/propelio/deep_pull.py:PASSES_RECENT_COUNT.
+  const totalPasses = jobId.startsWith("rr_") ? 3 : 6;
+  const passCount = `${status.passes_completed}/${totalPasses}`;
+  const captured = Number(status?.total_unique_comps || 0);
+  const netNew = Number(status?.net_new_comps || 0);
+  if (jobId.startsWith("rr_")) {
+    textEl.textContent = `Pass ${passCount} done · ${captured} captured`;
+    return;
+  }
+  textEl.textContent = `${status.status} - Pass ${passCount}, ${captured} captured (${netNew} net-new). Don't refresh.`;
+}
+
+function _hideDeepPullBanner() {
+  const banner = document.getElementById("deep-pull-banner");
+  if (banner) banner.classList.add("hidden");
+}
+
+async function startDeepPull() {
+  const address = _lastSearchedAddress;
+  if (!address) {
+    console.warn("[deep-pull] no target address. Search for an address first.");
+    _showDeepPullBanner("No target address - search for an address first");
+    setTimeout(_hideDeepPullBanner, 4000);
+    return;
+  }
+
+  if (_activeDeepPullJobId) {
+    console.log("[deep-pull] already running, ignoring duplicate start");
+    return;
+  }
+
+  console.log("[deep-pull] starting for address:", address);
+  try {
+    const resp = await _apiJson("/api/propelio/deep-pull/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify({
+        target_address: address,
+        saved_area_id: _currentLoadedAreaId || null,
+      }),
+    });
+    _activeDeepPullJobId = resp.job_id;
+    console.log("[deep-pull] job started:", resp);
+    _setPropelioPolygonButtonState({ text: "Get Comps", disabled: true });
+    _showDeepPullBanner("Pass 0/6, queued - warming up... Don't refresh.");
+    if (_deepPullPollTimer) clearInterval(_deepPullPollTimer);
+    _deepPullPollTimer = setInterval(_pollDeepPullStatus, 5000);
+  } catch (err) {
+    console.error("[deep-pull] start failed:", err);
+    _showDeepPullBanner("Deep pull failed to start (see console)");
+    setTimeout(_hideDeepPullBanner, 4000);
+  }
+}
+
+async function _pollDeepPullStatus() {
+  if (!_activeDeepPullJobId) return;
+  try {
+    const resp = await _apiJson(`/api/propelio/deep-pull/status/${_activeDeepPullJobId}`);
+    console.log("[deep-pull] status tick:", resp);
+    _updateDeepPullBanner(resp);
+    if (["completed", "saturated", "stopped", "error", "blocked"].includes(resp.status)) {
+      if (_deepPullPollTimer) {
+        clearInterval(_deepPullPollTimer);
+        _deepPullPollTimer = null;
+      }
+      const finishedJobId = _activeDeepPullJobId;
+      _activeDeepPullJobId = null;
+      console.log("[deep-pull] FINAL summary:", resp);
+      const captured = Number(resp?.total_unique_comps || 0);
+      const netNew = Number(resp?.net_new_comps || 0);
+      // Contract: 3 must match api/propelio/deep_pull.py:PASSES_RECENT_COUNT.
+      const totalPasses = String(finishedJobId).startsWith("rr_") ? 3 : 6;
+      if (String(finishedJobId).startsWith("rr_")) {
+        _showDeepPullBanner(
+          `Quick sweep · ${resp.passes_completed}/${totalPasses} passes · ${captured} captured · ${netNew} net-new`
+        );
+      } else {
+        _showDeepPullBanner(
+          `Job ${resp.status} - ${resp.passes_completed}/${totalPasses} passes, ${captured} captured (${netNew} net-new). Job ID: ${finishedJobId}`
+        );
+      }
+      try {
+        await _fetchPolygonCacheOnly();
+      } catch (err) {
+        console.warn("[deep-pull] post-complete cache refresh failed:", err);
+      }
+      _setPropelioPolygonButtonState({ text: "Get Comps", disabled: false });
+      setTimeout(_hideDeepPullBanner, 6000);
+    }
+  } catch (err) {
+    console.error("[deep-pull] poll failed:", err);
+  }
+}
+
+async function stopDeepPull() {
+  if (!_activeDeepPullJobId) return;
+  console.log("[deep-pull] stop requested for", _activeDeepPullJobId);
+  try {
+    await _apiJson(`/api/propelio/deep-pull/stop/${_activeDeepPullJobId}`, {
+      method: "POST",
+      headers: authHeaders(),
+    });
+  } catch (err) {
+    console.error("[deep-pull] stop failed:", err);
+  }
+}
+
+document.getElementById("btn-deep-pull-stop")?.addEventListener("click", stopDeepPull);

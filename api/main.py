@@ -21,6 +21,8 @@ import json
 import logging
 import os
 import re
+import secrets
+import string
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -28,9 +30,10 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import quote_plus
 
-from fastapi import Body, Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Body, Depends, FastAPI, HTTPException, Path as FastAPIPath, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from psycopg2.errors import UniqueViolation
 from psycopg2.extras import Json, execute_values
 from pydantic import BaseModel
 
@@ -45,6 +48,7 @@ from api.auth import (
     get_current_user,
     get_user_by_email,
     get_user_by_id,
+    get_user_by_username_or_email,
     hash_password,
     login_allowed,
     record_login_failure,
@@ -62,6 +66,7 @@ from api.counties.dcad import SPTD_LABELS, _estimate_front_depth, build_feature,
 from api.counties.denton import _classify_denton, _normalize_denton_row, query_denton_parcels
 from api.counties.tad import _normalize_tad_row, _classify_tad, query_tad_parcels
 from api.geo import polygon_bbox
+from api.propelio.routes import router as propelio_router
 from api.redfin import normalize_addr_key
 from api.sold import log_redfin_sold_row_count, query_active_listings, query_sold_parcels
 
@@ -78,6 +83,7 @@ _FILENAME_SAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
 _ADDRESS_SUGGEST_CACHE_TTL_SECONDS = 45
 _ADDRESS_SUGGEST_CACHE_MAX = 512
 _address_suggest_cache: dict[tuple[str, int], tuple[float, list[dict[str, Any]]]] = {}
+_SHARE_ID_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 
 
 def _normalize_suggest_query(raw: str) -> str:
@@ -117,19 +123,78 @@ def _evict_stale_jobs() -> None:
         _job_store.pop(oldest, None)
 
 
+def _is_idempotent_schema_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return "already exists" in msg or "duplicate" in msg
+
+
+def _run_schema_steps(cur: Any, steps: list[tuple[str, str]]) -> None:
+    # Each step runs inside its own SAVEPOINT so that an idempotent-skip
+    # (already exists / duplicate) does not poison the outer transaction.
+    # Without this, the next step after a skipped one fails with
+    # "current transaction is aborted, commands ignored until end of
+    # transaction block" — same pattern already used in _finalize_user_scoping.
+    for i, (step_id, sql) in enumerate(steps):
+        sp_name = f"step_{i}"
+        cur.execute(f"SAVEPOINT {sp_name}")
+        try:
+            cur.execute(sql)
+        except Exception as exc:
+            cur.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+            if _is_idempotent_schema_error(exc):
+                print(f"[session-schema] step skipped (already applied): {step_id}")
+                continue
+            print(f"[session-schema] step failed: {step_id} ({exc})")
+            raise
+        cur.execute(f"RELEASE SAVEPOINT {sp_name}")
+
+
+def _generate_share_id() -> str:
+    return "area_" + "".join(secrets.choice(_SHARE_ID_ALPHABET) for _ in range(10))
+
+
+def _backfill_saved_area_share_ids(cur: Any) -> None:
+    cur.execute("SELECT area_id FROM saved_areas WHERE share_id IS NULL ORDER BY created_at ASC")
+    rows = cur.fetchall() or []
+    if not rows:
+        return
+
+    updated = 0
+    for (area_id,) in rows:
+        assigned = False
+        for _ in range(100):
+            candidate = _generate_share_id()
+            cur.execute("SELECT 1 FROM saved_areas WHERE share_id = %s LIMIT 1", (candidate,))
+            if cur.fetchone() is not None:
+                continue
+            cur.execute(
+                "UPDATE saved_areas SET share_id = %s WHERE area_id = %s AND share_id IS NULL",
+                (candidate, area_id),
+            )
+            if cur.rowcount:
+                updated += 1
+            assigned = True
+            break
+        if not assigned:
+            raise RuntimeError(f"Unable to backfill share_id for saved area {area_id}")
+
+    print(f"[session-schema] backfilled share_id for {updated} saved areas")
+
+
 def _ensure_session_schema() -> None:
     conn = get_session_conn()
     try:
         with conn.cursor() as cur:
             cur.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto")
+            cur.execute("CREATE EXTENSION IF NOT EXISTS postgis")
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS users (
                     id SERIAL PRIMARY KEY,
                     username TEXT NOT NULL,
-                    email TEXT NOT NULL,
+                    email TEXT,
                     password_hash TEXT NOT NULL,
-                    role TEXT NOT NULL CHECK (role IN ('developer', 'owner', 'member')),
+                    role TEXT NOT NULL CHECK (role IN ('developer', 'owner', 'power_user', 'user', 'member')),
                     is_active BOOLEAN NOT NULL DEFAULT true,
                     force_password_change BOOLEAN NOT NULL DEFAULT false,
                     session_version INTEGER NOT NULL DEFAULT 1,
@@ -218,6 +283,7 @@ def _ensure_session_schema() -> None:
                 CREATE TABLE IF NOT EXISTS cached_jobs (
                     job_id       TEXT PRIMARY KEY,
                     user_id      INTEGER REFERENCES users(id),
+                    saved_area_id TEXT REFERENCES saved_areas(area_id) ON DELETE SET NULL,
                     created_at   TIMESTAMPTZ DEFAULT now(),
                     expires_at   TIMESTAMPTZ DEFAULT (now() + interval '{_JOB_TTL_SECONDS} seconds'),
                     rows         JSONB NOT NULL,
@@ -226,51 +292,286 @@ def _ensure_session_schema() -> None:
                 )
                 """
             )
-            cur.execute("ALTER TABLE saved_areas ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)")
-            cur.execute("ALTER TABLE saved_areas ADD COLUMN IF NOT EXISTS filter_state JSONB")
-            cur.execute("ALTER TABLE saved_areas ADD COLUMN IF NOT EXISTS type TEXT")
-            cur.execute("UPDATE saved_areas SET type = 'area' WHERE type IS NULL OR type = ''")
-            cur.execute("ALTER TABLE saved_areas ALTER COLUMN type SET DEFAULT 'area'")
-            cur.execute("ALTER TABLE saved_areas ALTER COLUMN type SET NOT NULL")
             cur.execute(
                 """
-                DO $$
-                BEGIN
-                    IF NOT EXISTS (
-                        SELECT 1
-                        FROM pg_constraint
-                        WHERE conname = 'saved_areas_type_check'
-                    ) THEN
-                        ALTER TABLE saved_areas
-                        ADD CONSTRAINT saved_areas_type_check CHECK (type IN ('area', 'location'));
-                    END IF;
-                END$$;
+                CREATE TABLE IF NOT EXISTS propelio_comps (
+                    comp_id BIGSERIAL PRIMARY KEY,
+                    comp_address_key TEXT UNIQUE NOT NULL,
+                    address TEXT NOT NULL,
+                    neighborhood TEXT,
+                    lat NUMERIC(10, 7),
+                    lng NUMERIC(10, 7),
+                    geom GEOMETRY(POINT, 4326),
+                    status TEXT,
+                    last_status TEXT,
+                    price NUMERIC,
+                    last_price NUMERIC,
+                    sold_date DATE,
+                    close_date DATE,
+                    dom INTEGER,
+                    beds NUMERIC,
+                    baths NUMERIC,
+                    baths_full INTEGER,
+                    baths_half INTEGER,
+                    garage INTEGER,
+                    sqft NUMERIC,
+                    lot_size NUMERIC,
+                    year_built INTEGER,
+                    mls TEXT,
+                    property_type TEXT,
+                    property_category TEXT,
+                    list_price NUMERIC,
+                    remarks TEXT,
+                    listing_agent_name TEXT,
+                    listing_agent_phone TEXT,
+                    listing_agent_email TEXT,
+                    listing_office_name TEXT,
+                    listing_office_phone TEXT,
+                    buyer_agent_name TEXT,
+                    buyer_agent_phone TEXT,
+                    buyer_agent_email TEXT,
+                    buyer_office_name TEXT,
+                    buyer_office_phone TEXT,
+                    photo_count INTEGER,
+                    photos JSONB,
+                    parcel_account_num TEXT,
+                    parcel_county TEXT,
+                    parcel_geom JSONB,
+                    parsed_payload JSONB NOT NULL,
+                    raw_payload JSONB,
+                    first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    first_seen_source TEXT
+                )
                 """
             )
-            cur.execute("ALTER TABLE analysis_sessions ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)")
-            cur.execute("ALTER TABLE analysis_sessions ADD COLUMN IF NOT EXISTS name TEXT")
-            cur.execute("ALTER TABLE analysis_sessions ADD COLUMN IF NOT EXISTS filter_state JSONB")
-            cur.execute("ALTER TABLE analysis_sessions ALTER COLUMN expires_at DROP NOT NULL")
-            cur.execute("ALTER TABLE session_tags ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)")
-            cur.execute("ALTER TABLE saved_parcels ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)")
-            cur.execute("ALTER TABLE cached_jobs ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_session_tags_session ON session_tags (session_id)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_session_tags_user ON session_tags (user_id)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_expires ON analysis_sessions (expires_at)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_saved_area ON analysis_sessions (saved_area_id)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user ON analysis_sessions (user_id)")
             cur.execute(
                 """
-                CREATE INDEX IF NOT EXISTS idx_sessions_named
-                ON analysis_sessions (user_id, name)
-                WHERE name IS NOT NULL
+                CREATE INDEX IF NOT EXISTS idx_propelio_comps_geom
+                    ON propelio_comps USING GIST (geom)
                 """
             )
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_saved_areas_user ON saved_areas (user_id)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_saved_parcels_user ON saved_parcels (user_id)")
-            cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_saved_parcels_user_account ON saved_parcels (user_id, county, account_num)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_cached_jobs_expires ON cached_jobs (expires_at)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_cached_jobs_user ON cached_jobs (user_id)")
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_propelio_comps_status
+                    ON propelio_comps (status)
+                    WHERE status IS NOT NULL
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_propelio_comps_sold_date
+                    ON propelio_comps (sold_date)
+                    WHERE sold_date IS NOT NULL
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_propelio_comps_close_date
+                    ON propelio_comps (close_date)
+                    WHERE close_date IS NOT NULL
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_propelio_comps_last_seen
+                    ON propelio_comps (last_seen_at)
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_propelio_comps_parcel
+                    ON propelio_comps (parcel_county, parcel_account_num)
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS comp_ratings (
+                    rating_id BIGSERIAL PRIMARY KEY,
+                    workspace_id TEXT NOT NULL REFERENCES saved_areas(area_id) ON DELETE CASCADE,
+                    comp_id BIGINT NOT NULL REFERENCES propelio_comps(comp_id) ON DELETE CASCADE,
+                    rating TEXT NOT NULL CHECK (rating IN ('good', 'bad')),
+                    rated_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    rated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    UNIQUE (workspace_id, comp_id)
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_comp_ratings_workspace
+                    ON comp_ratings (workspace_id)
+                """
+            )
+            # One-shot migration: copy legacy propelio_comp_archive.user_rating into
+            # comp_ratings so existing ratings remain visible after the canonical store
+            # cutover. Idempotent — re-runs are safe and a no-op for rows already
+            # migrated by the original Phase 2 backfill script.
+            cur.execute(
+                """
+                INSERT INTO comp_ratings (workspace_id, comp_id, rating, rated_at)
+                SELECT pa.saved_area_id,
+                       pc.comp_id,
+                       pa.user_rating,
+                       COALESCE(pa.rating_at, NOW())
+                FROM propelio_comp_archive pa
+                JOIN propelio_comps pc ON pc.comp_address_key = pa.comp_address_key
+                WHERE pa.user_rating IS NOT NULL
+                ON CONFLICT (workspace_id, comp_id) DO NOTHING
+                """
+            )
+            if os.environ.get("DEEP_PULL_EXPERIMENT") == "true":
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS propelio_deep_pull_jobs (
+                        job_id TEXT PRIMARY KEY,
+                        saved_area_id TEXT,
+                        started_by_user_id INTEGER REFERENCES users(id),
+                        target_address TEXT NOT NULL,
+                        target_lat NUMERIC,
+                        target_lng NUMERIC,
+                        lead_id TEXT,
+                        cma_id TEXT,
+                        status TEXT NOT NULL DEFAULT 'queued'
+                            CHECK (status IN ('queued', 'running', 'completed', 'stopped',
+                                              'error', 'saturated', 'blocked')),
+                        started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        last_pass_at TIMESTAMPTZ,
+                        next_pass_at TIMESTAMPTZ,
+                        passes_completed INTEGER NOT NULL DEFAULT 0,
+                        total_unique_comps INTEGER NOT NULL DEFAULT 0,
+                        last_error TEXT,
+                        stop_requested BOOLEAN NOT NULL DEFAULT FALSE
+                    )
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_deep_pull_jobs_status
+                        ON propelio_deep_pull_jobs (status, next_pass_at)
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS propelio_deep_pull_experiment (
+                        id BIGSERIAL PRIMARY KEY,
+                        job_id TEXT NOT NULL REFERENCES propelio_deep_pull_jobs(job_id) ON DELETE CASCADE,
+                        pass_num INTEGER NOT NULL,
+                        months INTEGER NOT NULL,
+                        range_mi NUMERIC NOT NULL,
+                        pass_label TEXT,
+                        comp_address_key TEXT NOT NULL,
+                        comp_data JSONB NOT NULL,
+                        is_first_seen_in_job BOOLEAN NOT NULL,
+                        fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        UNIQUE (job_id, pass_num, comp_address_key)
+                    )
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_deep_pull_exp_job
+                        ON propelio_deep_pull_experiment (job_id, pass_num)
+                    """
+                )
+            _run_schema_steps(
+                cur,
+                [
+                    ("saved_areas_user_id", "ALTER TABLE saved_areas ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)"),
+                    ("users_email_drop_not_null", "ALTER TABLE users ALTER COLUMN email DROP NOT NULL"),
+                    ("users_role_check_drop", "ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check"),
+                    (
+                        "users_role_check_add",
+                        "ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('developer', 'owner', 'power_user', 'user', 'member'))",
+                    ),
+                    ("users_role_member_alias", "UPDATE users SET role = 'user' WHERE role = 'member'"),
+                    ("saved_areas_filter_state", "ALTER TABLE saved_areas ADD COLUMN IF NOT EXISTS filter_state JSONB"),
+                    ("saved_areas_type", "ALTER TABLE saved_areas ADD COLUMN IF NOT EXISTS type TEXT"),
+                    (
+                        "saved_areas_originator_county",
+                        "ALTER TABLE saved_areas ADD COLUMN IF NOT EXISTS originator_parcel_county TEXT",
+                    ),
+                    (
+                        "saved_areas_originator_account",
+                        "ALTER TABLE saved_areas ADD COLUMN IF NOT EXISTS originator_parcel_account_num TEXT",
+                    ),
+                    ("saved_areas_share_id", "ALTER TABLE saved_areas ADD COLUMN IF NOT EXISTS share_id VARCHAR(20)"),
+                    (
+                        "saved_areas_public_toggle",
+                        "ALTER TABLE saved_areas ADD COLUMN IF NOT EXISTS is_publicly_viewable BOOLEAN NOT NULL DEFAULT FALSE",
+                    ),
+                    ("saved_areas_type_backfill", "UPDATE saved_areas SET type = 'area' WHERE type IS NULL OR type = ''"),
+                    ("saved_areas_type_default", "ALTER TABLE saved_areas ALTER COLUMN type SET DEFAULT 'area'"),
+                    ("saved_areas_type_not_null", "ALTER TABLE saved_areas ALTER COLUMN type SET NOT NULL"),
+                    (
+                        "saved_areas_type_check",
+                        """
+                        DO $$
+                        BEGIN
+                            IF NOT EXISTS (
+                                SELECT 1
+                                FROM pg_constraint
+                                WHERE conname = 'saved_areas_type_check'
+                            ) THEN
+                                ALTER TABLE saved_areas
+                                ADD CONSTRAINT saved_areas_type_check CHECK (type IN ('area', 'location'));
+                            END IF;
+                        END$$;
+                        """,
+                    ),
+                    ("analysis_sessions_user_id", "ALTER TABLE analysis_sessions ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)"),
+                    ("analysis_sessions_name", "ALTER TABLE analysis_sessions ADD COLUMN IF NOT EXISTS name TEXT"),
+                    ("analysis_sessions_filter_state", "ALTER TABLE analysis_sessions ADD COLUMN IF NOT EXISTS filter_state JSONB"),
+                    ("analysis_sessions_expires_nullable", "ALTER TABLE analysis_sessions ALTER COLUMN expires_at DROP NOT NULL"),
+                    ("session_tags_user_id", "ALTER TABLE session_tags ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)"),
+                    ("saved_parcels_user_id", "ALTER TABLE saved_parcels ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)"),
+                    ("saved_parcels_area_id", "ALTER TABLE saved_parcels ADD COLUMN IF NOT EXISTS area_id TEXT REFERENCES saved_areas(area_id) ON DELETE CASCADE"),
+                    ("idx_saved_parcels_area_id", "CREATE INDEX IF NOT EXISTS idx_saved_parcels_area_id ON saved_parcels (area_id)"),
+                    ("uq_saved_parcels_standalone", "CREATE UNIQUE INDEX IF NOT EXISTS uq_saved_parcels_standalone ON saved_parcels (user_id, account_num, county) WHERE area_id IS NULL"),
+                    ("uq_saved_parcels_bonded", "CREATE UNIQUE INDEX IF NOT EXISTS uq_saved_parcels_bonded ON saved_parcels (user_id, account_num, county, area_id) WHERE area_id IS NOT NULL"),
+                    ("cached_jobs_user_id", "ALTER TABLE cached_jobs ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)"),
+                    ("idx_session_tags_session", "CREATE INDEX IF NOT EXISTS idx_session_tags_session ON session_tags (session_id)"),
+                    ("idx_session_tags_user", "CREATE INDEX IF NOT EXISTS idx_session_tags_user ON session_tags (user_id)"),
+                    ("idx_sessions_expires", "CREATE INDEX IF NOT EXISTS idx_sessions_expires ON analysis_sessions (expires_at)"),
+                    ("idx_sessions_saved_area", "CREATE INDEX IF NOT EXISTS idx_sessions_saved_area ON analysis_sessions (saved_area_id)"),
+                    ("idx_sessions_user", "CREATE INDEX IF NOT EXISTS idx_sessions_user ON analysis_sessions (user_id)"),
+                    (
+                        "idx_sessions_named",
+                        """
+                        CREATE INDEX IF NOT EXISTS idx_sessions_named
+                        ON analysis_sessions (user_id, name)
+                        WHERE name IS NOT NULL
+                        """,
+                    ),
+                    ("idx_saved_areas_user", "CREATE INDEX IF NOT EXISTS idx_saved_areas_user ON saved_areas (user_id)"),
+                    (
+                        "uq_saved_areas_share_id",
+                        "CREATE UNIQUE INDEX IF NOT EXISTS uq_saved_areas_share_id ON saved_areas (share_id) WHERE share_id IS NOT NULL",
+                    ),
+                    ("idx_saved_parcels_user", "CREATE INDEX IF NOT EXISTS idx_saved_parcels_user ON saved_parcels (user_id)"),
+                    ("drop_uq_saved_parcels_user_account", "DROP INDEX IF EXISTS uq_saved_parcels_user_account"),
+                    ("idx_cached_jobs_expires", "CREATE INDEX IF NOT EXISTS idx_cached_jobs_expires ON cached_jobs (expires_at)"),
+                    ("idx_cached_jobs_user", "CREATE INDEX IF NOT EXISTS idx_cached_jobs_user ON cached_jobs (user_id)"),
+                    (
+                        "cached_jobs_saved_area_id",
+                        "ALTER TABLE cached_jobs ADD COLUMN IF NOT EXISTS saved_area_id TEXT REFERENCES saved_areas(area_id) ON DELETE SET NULL",
+                    ),
+                    ("idx_cached_jobs_saved_area", "CREATE INDEX IF NOT EXISTS idx_cached_jobs_saved_area ON cached_jobs (saved_area_id)"),
+                    (
+                        "deep_pull_jobs_net_new_comps",
+                        """
+                        DO $$
+                        BEGIN
+                            IF to_regclass('public.propelio_deep_pull_jobs') IS NOT NULL THEN
+                                ALTER TABLE propelio_deep_pull_jobs
+                                ADD COLUMN IF NOT EXISTS net_new_comps INTEGER NOT NULL DEFAULT 0;
+                            END IF;
+                        END$$;
+                        """,
+                    ),
+                ],
+            )
+            _backfill_saved_area_share_ids(cur)
         conn.commit()
     finally:
         release_session_conn(conn)
@@ -309,16 +610,18 @@ def _persist_cached_job_sync(
     rows: list[dict[str, Any]],
     sold_points: list[dict[str, Any]],
     polygon: list[list[float]],
+    saved_area_id: str | None = None,
 ) -> None:
     conn = get_session_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(
                 f"""
-                INSERT INTO cached_jobs (job_id, user_id, rows, sold_points, polygon, expires_at)
-                VALUES (%s, %s, %s, %s, %s, now() + interval '{_JOB_TTL_SECONDS} seconds')
+                INSERT INTO cached_jobs (job_id, user_id, saved_area_id, rows, sold_points, polygon, expires_at)
+                VALUES (%s, %s, %s, %s, %s, %s, now() + interval '{_JOB_TTL_SECONDS} seconds')
                 ON CONFLICT (job_id) DO UPDATE SET
                     user_id = EXCLUDED.user_id,
+                    saved_area_id = COALESCE(EXCLUDED.saved_area_id, cached_jobs.saved_area_id),
                     rows = EXCLUDED.rows,
                     sold_points = EXCLUDED.sold_points,
                     polygon = EXCLUDED.polygon,
@@ -327,7 +630,7 @@ def _persist_cached_job_sync(
                         ELSE now() + interval '{_JOB_TTL_SECONDS} seconds'
                     END
                 """,
-                (job_id, int(user_id), Json(rows), Json(sold_points), Json(polygon)),
+                (job_id, int(user_id), saved_area_id, Json(rows), Json(sold_points), Json(polygon)),
             )
         conn.commit()
     finally:
@@ -340,7 +643,7 @@ def _load_cached_job(job_id: str) -> dict[str, Any] | None:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                                SELECT rows, sold_points, polygon, user_id
+                                SELECT rows, sold_points, polygon, user_id, saved_area_id
                 FROM cached_jobs
                 WHERE job_id = %s
                                     AND (expires_at IS NULL OR expires_at > now())
@@ -362,13 +665,14 @@ def _load_cached_job(job_id: str) -> dict[str, Any] | None:
                 (job_id,),
             )
         conn.commit()
-        rows, sold_points, polygon, user_id = row
+        rows, sold_points, polygon, user_id, saved_area_id = row
         return {
             "rows": rows if isinstance(rows, list) else [],
             "redfin_data": {},
             "sold_points": sold_points if isinstance(sold_points, list) else [],
             "polygon": polygon if isinstance(polygon, list) else [],
             "user_id": int(user_id or 0),
+            "saved_area_id": str(saved_area_id or "").strip() or None,
             "created_at": time.monotonic(),
             "last_accessed": time.monotonic(),
         }
@@ -389,6 +693,50 @@ def _counties_from_rows(rows: list[dict[str, Any]]) -> list[str]:
         else:
             seen.add("dcad")
     return sorted(seen)
+
+
+def _saved_area_exists(area_id: str) -> bool:
+    normalized = str(area_id or "").strip()
+    if not normalized:
+        return False
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM saved_areas WHERE area_id = %s LIMIT 1", (normalized,))
+            return cur.fetchone() is not None
+    finally:
+        release_session_conn(conn)
+
+
+def _job_share_id(job_id: str, fallback_saved_area_id: str | None = None) -> str:
+    saved_area_id = str(fallback_saved_area_id or "").strip()
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            if not saved_area_id:
+                cur.execute(
+                    "SELECT saved_area_id FROM cached_jobs WHERE job_id = %s LIMIT 1",
+                    (job_id,),
+                )
+                row = cur.fetchone()
+                saved_area_id = str(row[0] or "").strip() if row else ""
+            if not saved_area_id:
+                cur.execute(
+                    "SELECT saved_area_id FROM analysis_sessions WHERE session_id = %s LIMIT 1",
+                    (job_id,),
+                )
+                row = cur.fetchone()
+                saved_area_id = str(row[0] or "").strip() if row else ""
+            if not saved_area_id:
+                return ""
+            cur.execute(
+                "SELECT share_id FROM saved_areas WHERE area_id = %s LIMIT 1",
+                (saved_area_id,),
+            )
+            row = cur.fetchone()
+            return str(row[0] or "").strip() if row else ""
+    finally:
+        release_session_conn(conn)
 
 
 def _persist_session_sync(
@@ -440,6 +788,7 @@ async def _persist_session_async(
     parcel_count: int,
     county_coverage: list[str],
     user_id: int,
+    saved_area_id: str | None = None,
 ) -> None:
     try:
         await asyncio.to_thread(
@@ -449,7 +798,7 @@ async def _persist_session_async(
             parcel_count,
             county_coverage,
             user_id,
-            None,
+            saved_area_id,
         )
     except Exception as exc:
         print(f"[session] persist failed for {session_id}: {exc}")
@@ -692,10 +1041,12 @@ class AnalyzeRequest(BaseModel):
     polygon: list[list[float]]
     include_redfin: bool = False
     include_sold: bool = False
+    area_id: str | None = None
 
 
 class MergeJobsRequest(BaseModel):
     job_ids: list[str]
+    area_id: str | None = None
 
 
 class VerificationRequest(BaseModel):
@@ -710,6 +1061,12 @@ class SavedAreaCreateRequest(BaseModel):
     type: Literal["area", "location"] = "area"
     lat: float | None = None
     lng: float | None = None
+    # Optional: the job_id the user was analyzing when they clicked Save Area.
+    # Backfills cached_jobs.saved_area_id and analysis_sessions.saved_area_id so
+    # the next CSV download from this job carries the new area's share_id.
+    job_id: str | None = None
+    originator_parcel_county: str | None = None
+    originator_parcel_account_num: str | None = None
 
 
 class SavedAreaUpdateRequest(BaseModel):
@@ -718,12 +1075,18 @@ class SavedAreaUpdateRequest(BaseModel):
     type: Literal["area", "location"] | None = None
     lat: float | None = None
     lng: float | None = None
+    originator_parcel_county: str | None = None
+    originator_parcel_account_num: str | None = None
 
 
 class SavedParcelCreateRequest(BaseModel):
     account_num: str
     county: str = "dcad"
     payload: dict[str, Any] | None = None
+    # Optional: when set, also creates a bonded copy of this target into the
+    # specified saved area (in addition to ensuring the standalone exists).
+    # Unknown / non-owned area_ids are ignored silently.
+    area_id: str | None = None
 
 
 class SaveSessionRequest(BaseModel):
@@ -737,7 +1100,10 @@ class UpdateSessionRequest(BaseModel):
 
 
 class LoginRequest(BaseModel):
-    email: str
+    # `identifier` is the canonical field (username OR email). `email` is kept
+    # as a backward-compat alias for any client still posting the old shape.
+    identifier: str | None = None
+    email: str | None = None
     password: str
 
 
@@ -749,9 +1115,9 @@ class ChangePasswordRequest(BaseModel):
 
 class AdminCreateUserRequest(BaseModel):
     username: str
-    email: str
+    email: str | None = None
     temp_password: str
-    role: str = "member"
+    role: str = "user"
 
 
 class AdminResetPasswordRequest(BaseModel):
@@ -763,10 +1129,11 @@ def _password_valid(password: str) -> bool:
 
 
 def _serialize_user(user: dict[str, Any]) -> dict[str, Any]:
+    raw_email = user.get("email")
     return {
         "id": int(user["id"]),
         "username": str(user["username"]),
-        "email": str(user["email"]),
+        "email": None if raw_email is None else str(raw_email),
         "role": str(user["role"]),
         "is_active": bool(user.get("is_active")),
         "force_password_change": bool(user.get("force_password_change")),
@@ -843,7 +1210,7 @@ def _require_target_user(cur, target_user_id: int) -> dict[str, Any]:
     return {
         "id": int(row[0]),
         "username": str(row[1]),
-        "email": str(row[2]),
+        "email": row[2] if row[2] is None else str(row[2]),
         "role": str(row[3]),
         "is_active": bool(row[4]),
         "force_password_change": bool(row[5]),
@@ -857,9 +1224,9 @@ def _enforce_admin_target_rules(actor: dict[str, Any], target: dict[str, Any], a
     target_role = str(target.get("role") or "")
     if target_role == "developer":
         raise HTTPException(status_code=403, detail="Developer accounts cannot be modified via admin endpoints")
-    if actor_role == "owner" and target_role != "member":
-        raise HTTPException(status_code=403, detail="Owner can manage member accounts only")
-    if action == "disable" and target_role == "owner":
+    if actor_role == "owner" and target_role not in {"member", "user", "power_user"}:
+        raise HTTPException(status_code=403, detail="Owner can manage user and power_user accounts only")
+    if action in {"disable", "delete"} and target_role == "owner":
         # Keep at least one active owner account.
         conn = get_session_conn()
         try:
@@ -930,10 +1297,28 @@ def _google_maps_link(row: dict[str, Any]) -> str:
     return "https://maps.google.com"
 
 
+def _parcel_addr_match_key(row: dict[str, Any]) -> str:
+    """Return a normalized parcel address key suitable for Redfin joins.
+
+    County ingest sources are inconsistent. Some rows store full display strings
+    like "123 MAIN ST\nCITY, TX 75000" while redfin_active.addr_key is street-only.
+    Use only the first line and first comma-delimited segment before normalization
+    so matching is resilient across counties.
+    """
+    raw = str(row.get("property_address", "") or "").strip()
+    if not raw:
+        return ""
+    first_line = raw.splitlines()[0].strip()
+    street_only = first_line.split(",", 1)[0].strip() if first_line else ""
+    candidate = street_only or first_line or raw
+    return normalize_addr_key(candidate)
+
+
 # Validate required runtime settings at startup.
 get_settings()
 
 app = FastAPI(title="LotLedger")
+app.include_router(propelio_router)
 
 
 _FORCE_PASSWORD_CHANGE_ALLOWED_PATHS = {
@@ -962,6 +1347,20 @@ async def auth_gate(request: Request, call_next):
     is_protected = not _is_public_path(path)
     user: dict[str, Any] | None = None
 
+    def _unauth_response() -> JSONResponse:
+        response = JSONResponse({"detail": "Authentication required"}, status_code=401)
+        clear_auth_cookies(response)
+        response.set_cookie(
+            "ll_csrf",
+            generate_csrf_token(),
+            max_age=8 * 60 * 60,
+            httponly=False,
+            secure=os.getenv("AUTH_COOKIE_SECURE", "true").strip().lower() not in {"0", "false", "no"},
+            samesite="lax",
+            path="/",
+        )
+        return response
+
     if is_protected or path.startswith("/api/") or path.startswith("/auth/") or path.startswith("/admin/"):
         try:
             user = get_current_user(request)
@@ -970,19 +1369,13 @@ async def auth_gate(request: Request, call_next):
             user = None
 
     if path.startswith("/api/") and user is None:
-        response = JSONResponse({"detail": "Authentication required"}, status_code=401)
-        clear_auth_cookies(response)
-        return response
+        return _unauth_response()
 
     if path.startswith("/admin/") and user is None:
-        response = JSONResponse({"detail": "Authentication required"}, status_code=401)
-        clear_auth_cookies(response)
-        return response
+        return _unauth_response()
 
     if path.startswith("/auth/") and path not in {"/auth/login"} and user is None:
-        response = JSONResponse({"detail": "Authentication required"}, status_code=401)
-        clear_auth_cookies(response)
-        return response
+        return _unauth_response()
 
     if user and bool(user.get("force_password_change")):
         if path.startswith("/api/") or path.startswith("/admin/") or path.startswith("/auth/"):
@@ -994,8 +1387,9 @@ async def auth_gate(request: Request, call_next):
 
     response = await call_next(request)
 
-    # Rolling refresh for authenticated requests, except explicit logout.
-    if user and path != "/auth/logout":
+    # Rolling refresh for authenticated requests, except auth endpoints that
+    # explicitly manage cookies themselves.
+    if user and path not in {"/auth/logout", "/auth/change-password", "/auth/login"}:
         refresh_session_cookie(response, user, request)
 
     if request.url.path.endswith((".js", ".css", ".html")):
@@ -1020,15 +1414,21 @@ async def no_cache_frontend(request: Request, call_next):
 
 @app.post("/auth/login")
 async def auth_login(request: Request, payload: LoginRequest, response: Response) -> dict[str, Any]:
-    require_csrf(request)
+    # No CSRF check on login: there's no authenticated session to protect yet.
+    # Requiring CSRF here only creates a chicken-and-egg cookie-timing bug
+    # (the legitimate case where users hit "Sign In" on a cold page load and
+    # the browser hasn't yet processed the csrf cookie from the prior 401).
+    # CSRF still protects every other endpoint (logout, change-password, all /api/*).
     ip = get_client_ip(request)
     allowed, retry_after = login_allowed(ip)
     if not allowed:
         raise HTTPException(status_code=429, detail=f"Too many failed attempts. Retry in {retry_after}s")
 
-    email = str(payload.email or "").strip().lower()
+    identifier = str(payload.identifier or payload.email or "").strip()
     password = str(payload.password or "")
-    user = get_user_by_email(email)
+    if not identifier:
+        raise HTTPException(status_code=422, detail="Username or email is required")
+    user = get_user_by_username_or_email(identifier)
     if user is None or not verify_password(password, str(user.get("password_hash") or "")):
         record_login_failure(ip)
         raise HTTPException(status_code=401, detail="Invalid credentials")
@@ -1097,7 +1497,7 @@ async def auth_change_password(
     refreshed_user = {
         "id": int(row[0]),
         "username": str(row[1]),
-        "email": str(row[2]),
+        "email": row[2] if row[2] is None else str(row[2]),
         "role": str(row[3]),
         "is_active": bool(row[4]),
         "force_password_change": bool(row[5]),
@@ -1123,7 +1523,7 @@ async def admin_list_users(user: dict[str, Any] = Depends(require_role("owner", 
                 {
                     "id": int(row[0]),
                     "username": str(row[1]),
-                    "email": str(row[2]),
+                    "email": row[2] if row[2] is None else str(row[2]),
                     "role": str(row[3]),
                     "is_active": bool(row[4]),
                     "force_password_change": bool(row[5]),
@@ -1145,19 +1545,28 @@ async def admin_create_user(
 ) -> dict[str, Any]:
     require_csrf(request)
     username = str(payload.username or "").strip()
-    email = str(payload.email or "").strip().lower()
+    email_raw = str(payload.email or "").strip().lower()
+    email_or_null: str | None = email_raw if email_raw else None
     temp_password = str(payload.temp_password or "")
-    role = str(payload.role or "member").strip().lower()
+    role = str(payload.role or "user").strip().lower()
 
-    if not username or not email:
-        raise HTTPException(status_code=422, detail="Username and email are required")
+    if not username:
+        raise HTTPException(status_code=422, detail="Username is required")
     if not _password_valid(temp_password):
         raise HTTPException(status_code=422, detail="Password must be at least 10 characters")
 
+    if role == "member":
+        role = "user"
+
+    allowed_roles_by_owner = {"power_user", "user", "member"}
+    allowed_roles_by_developer = {"owner", "power_user", "user", "member"}
+
     if actor["role"] == "owner":
-        role = "member"
-    elif role not in {"owner", "member"}:
-        raise HTTPException(status_code=422, detail="Developer may create owner or member users only")
+        if role not in allowed_roles_by_owner:
+            raise HTTPException(status_code=403, detail=f"Owners cannot create role '{role}'")
+    elif actor["role"] == "developer":
+        if role not in allowed_roles_by_developer:
+            raise HTTPException(status_code=403, detail=f"Developers cannot create role '{role}' via this path")
 
     conn = get_session_conn()
     try:
@@ -1168,7 +1577,7 @@ async def admin_create_user(
                 VALUES (%s, %s, %s, %s, true, true, %s)
                 RETURNING id, username, email, role, is_active, force_password_change
                 """,
-                (username, email, hash_password(temp_password), role, actor["username"]),
+                (username, email_or_null, hash_password(temp_password), role, actor["username"]),
             )
             row = cur.fetchone()
             write_auth_audit_log(
@@ -1194,7 +1603,7 @@ async def admin_create_user(
         "user": {
             "id": int(row[0]),
             "username": str(row[1]),
-            "email": str(row[2]),
+            "email": row[2] if row[2] is None else str(row[2]),
             "role": str(row[3]),
             "is_active": bool(row[4]),
             "force_password_change": bool(row[5]),
@@ -1264,13 +1673,11 @@ async def admin_enable_user(
 async def admin_reset_password(
     user_id: int,
     request: Request,
-    payload: AdminResetPasswordRequest,
     actor: dict[str, Any] = Depends(require_role("owner", "developer")),
 ) -> dict[str, Any]:
     require_csrf(request)
-    temp_password = str(payload.temp_password or "")
-    if not _password_valid(temp_password):
-        raise HTTPException(status_code=422, detail="Password must be at least 10 characters")
+    alphabet = string.ascii_letters + string.digits
+    temp_password = "".join(secrets.choice(alphabet) for _ in range(14))
 
     conn = get_session_conn()
     try:
@@ -1298,6 +1705,50 @@ async def admin_reset_password(
                 user_agent=request.headers.get("user-agent", ""),
             )
         conn.commit()
+    finally:
+        release_session_conn(conn)
+    return {"ok": True, "temp_password": temp_password}
+
+
+@app.delete("/admin/users/{user_id}")
+async def admin_delete_user(
+    user_id: int,
+    request: Request,
+    actor: dict[str, Any] = Depends(require_role("owner", "developer")),
+) -> dict[str, Any]:
+    require_csrf(request)
+
+    if int(user_id) == int(actor["id"]):
+        raise HTTPException(status_code=403, detail="Cannot delete yourself")
+
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            target = _require_target_user(cur, user_id)
+            _enforce_admin_target_rules(actor, target, "delete")
+            write_auth_audit_log(
+                actor=actor["username"],
+                actor_user_id=int(actor["id"]),
+                action="delete_user",
+                target_user=target["username"],
+                target_user_id=int(target["id"]),
+                detail=f"role={target['role']}",
+                ip=get_client_ip(request),
+                user_agent=request.headers.get("user-agent", ""),
+            )
+            cur.execute("DELETE FROM session_tags WHERE user_id = %s", (int(user_id),))
+            cur.execute("DELETE FROM saved_parcels WHERE user_id = %s", (int(user_id),))
+            cur.execute("DELETE FROM cached_jobs WHERE user_id = %s", (int(user_id),))
+            cur.execute("DELETE FROM analysis_sessions WHERE user_id = %s", (int(user_id),))
+            cur.execute("DELETE FROM saved_areas WHERE user_id = %s", (int(user_id),))
+            cur.execute("DELETE FROM users WHERE id = %s", (int(user_id),))
+        conn.commit()
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         release_session_conn(conn)
     return {"ok": True}
@@ -2084,7 +2535,10 @@ async def analyze(request: AnalyzeRequest, req: Request, user: dict[str, Any] = 
     polygon = request.polygon
     include_redfin = bool(request.include_redfin)
     include_sold = bool(request.include_sold)
+    area_id = str(request.area_id or "").strip() or None
     user_id = int(user["id"])
+    if area_id and not _saved_area_exists(area_id):
+        raise HTTPException(status_code=404, detail="Saved area not found")
     if len(polygon) < 3:
         raise HTTPException(status_code=400, detail="Polygon must have at least 3 points")
 
@@ -2182,11 +2636,12 @@ async def analyze(request: AnalyzeRequest, req: Request, user: dict[str, Any] = 
             "sold_points": sold_points,
             "polygon": polygon,
             "user_id": user_id,
+            "saved_area_id": area_id,
             "created_at": time.monotonic(),
             "last_accessed": time.monotonic(),
         }
         try:
-            await asyncio.to_thread(_persist_cached_job_sync, empty_job_id, user_id, [], sold_points, polygon)
+            await asyncio.to_thread(_persist_cached_job_sync, empty_job_id, user_id, [], sold_points, polygon, area_id)
         except Exception as exc:
             logger.warning("Failed to persist job to cache (non-fatal): %s", exc)
         return {
@@ -2225,7 +2680,7 @@ async def analyze(request: AnalyzeRequest, req: Request, user: dict[str, Any] = 
         # TAD stores parcel_key as "account:000"; Collin as "account:R-XXXX-...".
         # Both start with account_num + ":" — treat those as a direct match too.
         direct_match = (not parcel_key) or (parcel_key == account_num) or parcel_key.startswith(account_num + ":")
-        addr_key = normalize_addr_key(str(row.get("property_address", "") or ""))
+        addr_key = _parcel_addr_match_key(row)
         on_redfin = addr_key in redfin_data and direct_match
         redfin_listing = redfin_data.get(addr_key) if on_redfin else None
         # TAD rows carry division_cd="TAD" — use TAD classifier; DCAD rows use existing classifier.
@@ -2275,11 +2730,12 @@ async def analyze(request: AnalyzeRequest, req: Request, user: dict[str, Any] = 
         "sold_points": sold_points,
         "polygon": polygon,
         "user_id": user_id,
+        "saved_area_id": area_id,
         "created_at": time.monotonic(),
         "last_accessed": time.monotonic(),
     }
     try:
-        await asyncio.to_thread(_persist_cached_job_sync, job_id, user_id, rows, sold_points, polygon)
+        await asyncio.to_thread(_persist_cached_job_sync, job_id, user_id, rows, sold_points, polygon, area_id)
     except Exception as exc:
         logger.warning("Failed to persist job to cache (non-fatal): %s", exc)
     asyncio.create_task(
@@ -2289,6 +2745,7 @@ async def analyze(request: AnalyzeRequest, req: Request, user: dict[str, Any] = 
             len(rows),
             county_coverage,
             user_id,
+            area_id,
         )
     )
     return {
@@ -2319,10 +2776,17 @@ async def merge_jobs(request: MergeJobsRequest, req: Request, user: dict[str, An
     seen_keys: set[str] = set()
     seen_sold_keys: set[str] = set()
     user_id = int(user["id"])
+    area_id = str(request.area_id or "").strip() or None
+    if area_id and not _saved_area_exists(area_id):
+        raise HTTPException(status_code=404, detail="Saved area not found")
     for job_id in request.job_ids:
         job = _get_job(job_id, user_id)
         if job is None:
             continue
+        if area_id is None:
+            inferred_area = str(job.get("saved_area_id") or "").strip()
+            if inferred_area:
+                area_id = inferred_area
         for row in job.get("rows", []):
             key = str(row.get("parcel_key") or row.get("account_num") or "")
             if key and key in seen_keys:
@@ -2343,6 +2807,8 @@ async def merge_jobs(request: MergeJobsRequest, req: Request, user: dict[str, An
 
     if not merged_rows:
         raise HTTPException(status_code=404, detail="No valid tile jobs found to merge")
+    if area_id and not _saved_area_exists(area_id):
+        area_id = None
 
     _evict_stale_jobs()
     new_job_id = str(uuid.uuid4())
@@ -2352,11 +2818,12 @@ async def merge_jobs(request: MergeJobsRequest, req: Request, user: dict[str, An
         "sold_points": merged_sold_points,
         "polygon": [],
         "user_id": user_id,
+        "saved_area_id": area_id,
         "created_at": time.monotonic(),
         "last_accessed": time.monotonic(),
     }
     try:
-        await asyncio.to_thread(_persist_cached_job_sync, new_job_id, user_id, merged_rows, merged_sold_points, [])
+        await asyncio.to_thread(_persist_cached_job_sync, new_job_id, user_id, merged_rows, merged_sold_points, [], area_id)
     except Exception as exc:
         logger.warning("Failed to persist job to cache (non-fatal): %s", exc)
     return {"job_id": new_job_id}
@@ -2568,6 +3035,9 @@ async def set_tag(req: Request, payload: dict[str, Any] = Body(...), user: dict[
 
 @app.get("/api/download/{job_id}")
 async def download(job_id: str, filename: str | None = None, user: dict[str, Any] = Depends(get_current_user)) -> StreamingResponse:
+    if str(user.get("role") or "").strip().lower() == "user":
+        raise HTTPException(status_code=403, detail="CSV export not available for this role")
+
     job = _get_job(job_id, int(user["id"]))
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -2575,7 +3045,25 @@ async def download(job_id: str, filename: str | None = None, user: dict[str, Any
     rows = job.get("rows", [])
     redfin_data: dict[str, dict] = job.get("redfin_data", {})
     sold_points: list[dict[str, Any]] = job.get("sold_points", []) or []
+    job_saved_area_id = str(job.get("saved_area_id") or "").strip() or None
+    csv_share_id = _job_share_id(job_id, job_saved_area_id)
     logger.info("Download job %s: %d parcel rows, %d sold points", job_id, len(rows), len(sold_points))
+
+    # Look up bonded seed-target account_nums for this area (if any), so the
+    # CSV can mark each row with whether it was a seed of this workspace.
+    # Empty set when the job has no saved_area_id (analysis-only, not yet saved).
+    seed_account_nums: set[str] = set()
+    if job_saved_area_id:
+        _conn = get_session_conn()
+        try:
+            with _conn.cursor() as _cur:
+                _cur.execute(
+                    "SELECT account_num FROM saved_parcels WHERE area_id = %s",
+                    (job_saved_area_id,),
+                )
+                seed_account_nums = {str(r[0]) for r in _cur.fetchall() if r and r[0]}
+        finally:
+            release_session_conn(_conn)
 
     def _deg_dist(lat1, lng1, lat2, lng2):
         return ((lat1 - lat2) ** 2 + (lng1 - lng2) ** 2) ** 0.5
@@ -2700,6 +3188,8 @@ async def download(job_id: str, filename: str | None = None, user: dict[str, Any
                 "Comp Baths",
                 "Comp Days on Market",
                 "Comp Listing URL",
+                "Seed Target",
+                "share_id",
             ]
         )
         buffer.seek(0)
@@ -2721,7 +3211,7 @@ async def download(job_id: str, filename: str | None = None, user: dict[str, Any
             parcel_key = str(row.get("parcel_key", "") or "")
             account_num = str(row.get("account_num", "") or "")
             direct_match = (not parcel_key) or (parcel_key == account_num) or parcel_key.startswith(account_num + ":")
-            addr_key = normalize_addr_key(str(row.get("property_address", "") or ""))
+            addr_key = _parcel_addr_match_key(row)
             on_redfin = addr_key in redfin_data and direct_match
             redfin_listing = redfin_data.get(addr_key) if on_redfin else None
 
@@ -2862,6 +3352,8 @@ async def download(job_id: str, filename: str | None = None, user: dict[str, Any
                     int(_safe_float(comp.get("baths"))) if comp and _safe_float(comp.get("baths")) not in (None, 0.0) else "",
                     int(_safe_float(comp.get("dom"))) if comp and _safe_float(comp.get("dom")) not in (None, 0.0) else "",
                     (comp.get("listing_url", "") or "") if comp else "",
+                    "yes" if str(row.get("account_num", "") or "") in seed_account_nums else "",
+                    csv_share_id,
                 ]
             )
             buffer.seek(0)
@@ -3017,28 +3509,37 @@ async def save_session(
     if not name:
         raise HTTPException(status_code=400, detail="Session name is required")
     uid = int(user["id"])
+    is_developer = str(user.get("role") or "").strip().lower() == "developer"
     conn = get_session_conn()
     try:
         with conn.cursor() as cur:
+            select_where = "WHERE session_id = %s" if is_developer else "WHERE session_id = %s AND user_id = %s"
+            select_params = (session_id,) if is_developer else (session_id, uid)
             cur.execute(
-                "SELECT 1 FROM analysis_sessions WHERE session_id = %s AND user_id = %s",
-                (session_id, uid),
+                f"SELECT 1 FROM analysis_sessions {select_where}",
+                select_params,
             )
             if cur.fetchone() is None:
                 raise HTTPException(status_code=404, detail="Session not found")
+            update_where = "WHERE session_id = %s" if is_developer else "WHERE session_id = %s AND user_id = %s"
+            update_params: tuple[Any, ...] = (
+                name,
+                Json(request.filter_state) if isinstance(request.filter_state, dict) else None,
+                session_id,
+            ) if is_developer else (
+                name,
+                Json(request.filter_state) if isinstance(request.filter_state, dict) else None,
+                session_id,
+                uid,
+            )
             cur.execute(
-                """
+                f"""
                 UPDATE analysis_sessions
                 SET name = %s, filter_state = %s, expires_at = NULL, last_accessed = now()
-                WHERE session_id = %s AND user_id = %s
+                {update_where}
                 RETURNING session_id, name, parcel_count, county_coverage, filter_state, polygon, created_at
                 """,
-                (
-                    name,
-                    Json(request.filter_state) if isinstance(request.filter_state, dict) else None,
-                    session_id,
-                    uid,
-                ),
+                update_params,
             )
             row = cur.fetchone()
             if row is None:
@@ -3074,11 +3575,12 @@ async def update_session(
     req: Request,
     user: dict[str, Any] = Depends(get_current_user),
 ) -> dict[str, Any]:
-    """Rename a session and/or update its filter_state. Caller must own the session."""
+    """Rename a session and/or update its filter_state."""
     require_csrf(req)
     if request.name is None and request.filter_state is None:
         raise HTTPException(status_code=400, detail="Nothing to update")
     uid = int(user["id"])
+    is_developer = str(user.get("role") or "").strip().lower() == "developer"
 
     update_cols: list[str] = []
     params: list[Any] = []
@@ -3095,14 +3597,18 @@ async def update_session(
     conn = get_session_conn()
     try:
         with conn.cursor() as cur:
+            where_clause = "WHERE session_id = %s" if is_developer else "WHERE session_id = %s AND user_id = %s"
+            query_params: list[Any] = [*params, session_id]
+            if not is_developer:
+                query_params.append(uid)
             cur.execute(
                 f"""
                 UPDATE analysis_sessions
                 SET {', '.join(update_cols)}
-                WHERE session_id = %s AND user_id = %s
+                {where_clause}
                 RETURNING session_id, name, parcel_count, county_coverage, filter_state, polygon, created_at
                 """,
-                (*params, session_id, uid),
+                tuple(query_params),
             )
             row = cur.fetchone()
         conn.commit()
@@ -3132,16 +3638,16 @@ async def delete_session(
     req: Request,
     user: dict[str, Any] = Depends(get_current_user),
 ) -> dict[str, Any]:
-    """Delete a named session and its cached_jobs row. Cascades to session_tags via FK. Caller must own it."""
+    """Delete a named session and its cached_jobs row. Cascades to session_tags via FK."""
     require_csrf(req)
     uid = int(user["id"])
+    is_developer = str(user.get("role") or "").strip().lower() == "developer"
     conn = get_session_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                "DELETE FROM analysis_sessions WHERE session_id = %s AND user_id = %s",
-                (session_id, uid),
-            )
+            where_clause = "WHERE session_id = %s" if is_developer else "WHERE session_id = %s AND user_id = %s"
+            query_params = (session_id,) if is_developer else (session_id, uid)
+            cur.execute(f"DELETE FROM analysis_sessions {where_clause}", query_params)
             if cur.rowcount == 0:
                 raise HTTPException(status_code=404, detail="Session not found")
             # Explicit delete — cached_jobs has no FK to analysis_sessions
@@ -3165,7 +3671,9 @@ async def list_saved_areas(user: dict[str, Any] = Depends(get_current_user)) -> 
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT area_id, name, polygon, filter_state, type, created_at, updated_at
+                SELECT area_id, name, polygon, filter_state, type, share_id,
+                       originator_parcel_county, originator_parcel_account_num,
+                       created_at, updated_at
                 FROM saved_areas
                 WHERE user_id = %s
                 ORDER BY created_at DESC
@@ -3179,16 +3687,86 @@ async def list_saved_areas(user: dict[str, Any] = Depends(get_current_user)) -> 
                     "polygon": _to_leaflet_polygon(row[2]),
                     "filter_state": row[3] if isinstance(row[3], dict) else None,
                     "type": str(row[4] or "area"),
+                    "share_id": str(row[5] or ""),
+                    "originator_parcel_county": str(row[6] or "").strip().lower() or None,
+                    "originator_parcel_account_num": str(row[7] or "").strip() or None,
                     "lat": (float(row[2][0][1]) if isinstance(row[2], list) and row[2] and len(row[2][0]) >= 2 else None) if str(row[4] or "area") == "location" else None,
                     "lng": (float(row[2][0][0]) if isinstance(row[2], list) and row[2] and len(row[2][0]) >= 2 else None) if str(row[4] or "area") == "location" else None,
-                    "created_at": row[5].isoformat() if row[5] else None,
-                    "updated_at": row[6].isoformat() if row[6] else None,
+                    "created_at": row[8].isoformat() if row[8] else None,
+                    "updated_at": row[9].isoformat() if row[9] else None,
                 }
                 for row in cur.fetchall()
             ]
     finally:
         release_session_conn(conn)
     return {"areas": areas}
+
+
+def _point_in_polygon(lat: float, lng: float, polygon: list[list[float]]) -> bool:
+    """Ray-casting point-in-polygon test. Polygon is a list of [lng, lat] pairs
+    (GeoJSON convention, NOT Leaflet [lat, lng]). Returns True if the point
+    falls inside or on the polygon boundary."""
+    if not isinstance(polygon, list) or len(polygon) < 3:
+        return False
+    inside = False
+    n = len(polygon)
+    j = n - 1
+    for i in range(n):
+        xi, yi = float(polygon[i][0]), float(polygon[i][1])
+        xj, yj = float(polygon[j][0]), float(polygon[j][1])
+        if ((yi > lat) != (yj > lat)) and (lng < (xj - xi) * (lat - yi) / ((yj - yi) or 1e-12) + xi):
+            inside = not inside
+        j = i
+    return inside
+
+
+def _bond_standalone_targets_to_area(cur: Any, *, user_id: int, area_id: str, polygon_geojson: list[list[float]]) -> int:
+    """For all of the user's standalone targets (area_id IS NULL) whose
+    payload['lat'], payload['lng'] falls inside the given GeoJSON polygon,
+    INSERT a bonded copy with area_id set. Returns the number of bonds created.
+
+    Standalones are NOT modified - they remain as the user's master library.
+    Bonded copies inherit account_num, county, and payload from the standalone.
+    Conflicts (a bond already exists) are silently ignored.
+    """
+    if not isinstance(polygon_geojson, list) or len(polygon_geojson) < 3:
+        return 0
+    cur.execute(
+        """
+        SELECT account_num, county, payload
+        FROM saved_parcels
+        WHERE user_id = %s AND area_id IS NULL
+        """,
+        (int(user_id),),
+    )
+    standalones = cur.fetchall()
+    bonded_count = 0
+    for account_num, county, payload in standalones:
+        if not isinstance(payload, dict):
+            continue
+        lat_raw = payload.get("lat")
+        lng_raw = payload.get("lng")
+        if lat_raw is None or lng_raw is None:
+            continue
+        try:
+            lat = float(lat_raw)
+            lng = float(lng_raw)
+        except (TypeError, ValueError):
+            continue
+        if not _point_in_polygon(lat, lng, polygon_geojson):
+            continue
+        cur.execute(
+            """
+            INSERT INTO saved_parcels (account_num, county, payload, user_id, area_id)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (user_id, account_num, county, area_id) WHERE area_id IS NOT NULL
+            DO NOTHING
+            """,
+            (account_num, county, Json(payload), int(user_id), area_id),
+        )
+        if cur.rowcount > 0:
+            bonded_count += 1
+    return bonded_count
 
 
 @app.post("/api/areas")
@@ -3198,20 +3776,80 @@ async def create_saved_area(request: SavedAreaCreateRequest, req: Request, user:
     if not name:
         raise HTTPException(status_code=400, detail="Area name is required")
     area_type, polygon_geojson, lat, lng = _normalize_saved_area_payload(request)
+    originator_county = str(request.originator_parcel_county or "").strip().lower() or None
+    originator_account = str(request.originator_parcel_account_num or "").strip() or None
+    if bool(originator_county) != bool(originator_account):
+        raise HTTPException(
+            status_code=400,
+            detail="originator_parcel_county and originator_parcel_account_num must be provided together",
+        )
 
     conn = get_session_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO saved_areas (name, polygon, filter_state, type, user_id)
-                VALUES (%s, %s, %s, %s, %s)
-                RETURNING area_id, created_at, updated_at
-                """,
-                (name, Json(polygon_geojson), Json(request.filter_state) if isinstance(request.filter_state, dict) else None, area_type, int(user["id"])),
-            )
-            row = cur.fetchone()
+            row = None
+            share_id = ""
+            for _ in range(10):
+                share_id = _generate_share_id()
+                try:
+                    cur.execute("SAVEPOINT sp_create_saved_area")
+                    cur.execute(
+                        """
+                        INSERT INTO saved_areas (
+                            name, polygon, filter_state, type, share_id, user_id,
+                            originator_parcel_county, originator_parcel_account_num
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        RETURNING area_id, originator_parcel_county, originator_parcel_account_num, created_at, updated_at
+                        """,
+                        (
+                            name,
+                            Json(polygon_geojson),
+                            Json(request.filter_state) if isinstance(request.filter_state, dict) else None,
+                            area_type,
+                            share_id,
+                            int(user["id"]),
+                            originator_county,
+                            originator_account,
+                        ),
+                    )
+                    row = cur.fetchone()
+                    cur.execute("RELEASE SAVEPOINT sp_create_saved_area")
+                    break
+                except UniqueViolation:
+                    cur.execute("ROLLBACK TO SAVEPOINT sp_create_saved_area")
+                    cur.execute("RELEASE SAVEPOINT sp_create_saved_area")
+                    continue
+            if row is None:
+                raise HTTPException(status_code=503, detail="Failed to allocate unique share_id")
+            # Backfill linkage: if the user was analyzing a job when they hit Save,
+            # link that job (and its session) to the new area so CSV exports from
+            # this point on carry the correct share_id.
+            inflight_job_id = str(request.job_id or "").strip()
+            if inflight_job_id:
+                new_area_id = row[0]
+                cur.execute(
+                    "UPDATE cached_jobs SET saved_area_id = %s WHERE job_id = %s AND saved_area_id IS NULL AND user_id = %s",
+                    (new_area_id, inflight_job_id, int(user["id"])),
+                )
+                cur.execute(
+                    "UPDATE analysis_sessions SET saved_area_id = %s WHERE session_id = %s AND saved_area_id IS NULL AND user_id = %s",
+                    (new_area_id, inflight_job_id, int(user["id"])),
+                )
+
+            # Bond standalone targets inside the polygon to the new area.
+            # Only meaningful for type='area' (location pins are single points).
+            if area_type == "area" and isinstance(polygon_geojson, list) and len(polygon_geojson) >= 3:
+                _bond_standalone_targets_to_area(
+                    cur,
+                    user_id=int(user["id"]),
+                    area_id=row[0],
+                    polygon_geojson=polygon_geojson,
+                )
         conn.commit()
+    except HTTPException:
+        conn.rollback()
+        raise
     except Exception:
         conn.rollback()
         raise
@@ -3224,17 +3862,292 @@ async def create_saved_area(request: SavedAreaCreateRequest, req: Request, user:
         "polygon": _to_leaflet_polygon(polygon_geojson),
         "filter_state": request.filter_state if isinstance(request.filter_state, dict) else None,
         "type": area_type,
+        "share_id": share_id,
+        "originator_parcel_county": str(row[1] or "").strip().lower() or None,
+        "originator_parcel_account_num": str(row[2] or "").strip() or None,
         "lat": lat,
         "lng": lng,
-        "created_at": row[1].isoformat() if row[1] else None,
-        "updated_at": row[2].isoformat() if row[2] else None,
+        "created_at": row[3].isoformat() if row[3] else None,
+        "updated_at": row[4].isoformat() if row[4] else None,
+    }
+
+
+@app.get("/api/areas/{area_id}")
+async def get_saved_area(area_id: str, user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT area_id, name, polygon, filter_state, type, share_id,
+                       originator_parcel_county, originator_parcel_account_num,
+                       user_id, created_at, updated_at
+                FROM saved_areas
+                WHERE area_id = %s
+                LIMIT 1
+                """,
+                (area_id,),
+            )
+            row = cur.fetchone()
+
+            seed_parcels: list[dict[str, Any]] = []
+            if row is not None:
+                cur.execute(
+                    """
+                    SELECT account_num, county, payload
+                    FROM saved_parcels
+                    WHERE area_id = %s
+                    ORDER BY created_at ASC
+                    """,
+                    (row[0],),
+                )
+                for sp_row in cur.fetchall():
+                    seed_parcels.append(
+                        {
+                            "account_num": sp_row[0],
+                            "county": sp_row[1],
+                            "payload": sp_row[2] if isinstance(sp_row[2], dict) else {},
+                        }
+                    )
+    finally:
+        release_session_conn(conn)
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="Saved area not found")
+    if int(row[8] or 0) != int(user["id"]):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    return {
+        "area_id": row[0],
+        "name": row[1],
+        "polygon": _to_leaflet_polygon(row[2]),
+        "filter_state": row[3] if isinstance(row[3], dict) else None,
+        "type": str(row[4] or "area"),
+        "share_id": str(row[5] or ""),
+        "originator_parcel_county": str(row[6] or "").strip().lower() or None,
+        "originator_parcel_account_num": str(row[7] or "").strip() or None,
+        "lat": (float(row[2][0][1]) if isinstance(row[2], list) and row[2] and len(row[2][0]) >= 2 else None) if str(row[4] or "area") == "location" else None,
+        "lng": (float(row[2][0][0]) if isinstance(row[2], list) and row[2] and len(row[2][0]) >= 2 else None) if str(row[4] or "area") == "location" else None,
+        "created_at": row[9].isoformat() if row[9] else None,
+        "updated_at": row[10].isoformat() if row[10] else None,
+        "seed_parcels": seed_parcels,
+    }
+
+
+@app.get("/api/area/by-share-id/{share_id}")
+async def get_saved_area_by_share_id(
+    share_id: str = FastAPIPath(..., regex=r"^area_[A-Za-z0-9]{10}$"),
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                  SELECT area_id, name, polygon, filter_state, type, share_id,
+                      originator_parcel_county, originator_parcel_account_num,
+                      created_at, updated_at,
+                       COUNT(*) OVER() AS match_count
+                FROM saved_areas
+                WHERE share_id = %s
+                LIMIT 1
+                """,
+                (share_id,),
+            )
+            row = cur.fetchone()
+
+            seed_parcels: list[dict[str, Any]] = []
+            if row is not None:
+                cur.execute(
+                    """
+                    SELECT account_num, county, payload
+                    FROM saved_parcels
+                    WHERE area_id = %s
+                    ORDER BY created_at ASC
+                    """,
+                    (row[0],),
+                )
+                for sp_row in cur.fetchall():
+                    seed_parcels.append(
+                        {
+                            "account_num": sp_row[0],
+                            "county": sp_row[1],
+                            "payload": sp_row[2] if isinstance(sp_row[2], dict) else {},
+                        }
+                    )
+    finally:
+        release_session_conn(conn)
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="Saved area not found")
+
+    if int(row[10] or 0) > 1:
+        logger.warning("Multiple saved_areas rows found for share_id=%s", share_id)
+
+    return {
+        "area_id": row[0],
+        "name": row[1],
+        "polygon": _to_leaflet_polygon(row[2]),
+        "filter_state": row[3] if isinstance(row[3], dict) else None,
+        "type": str(row[4] or "area"),
+        "share_id": str(row[5] or ""),
+        "originator_parcel_county": str(row[6] or "").strip().lower() or None,
+        "originator_parcel_account_num": str(row[7] or "").strip() or None,
+        "lat": (float(row[2][0][1]) if isinstance(row[2], list) and row[2] and len(row[2][0]) >= 2 else None) if str(row[4] or "area") == "location" else None,
+        "lng": (float(row[2][0][0]) if isinstance(row[2], list) and row[2] and len(row[2][0]) >= 2 else None) if str(row[4] or "area") == "location" else None,
+        "created_at": row[8].isoformat() if row[8] else None,
+        "updated_at": row[9].isoformat() if row[9] else None,
+        "seed_parcels": seed_parcels,
+    }
+
+
+@app.post("/api/areas/from-share-id/{share_id}")
+async def fork_saved_area(
+    req: Request,
+    share_id: str = FastAPIPath(..., regex=r"^area_[A-Za-z0-9]{10}$"),
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    require_csrf(req)
+
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT area_id, name, polygon, filter_state, type,
+                       originator_parcel_county, originator_parcel_account_num
+                FROM saved_areas
+                WHERE share_id = %s
+                LIMIT 1
+                """,
+                (share_id,),
+            )
+            source = cur.fetchone()
+            if source is None:
+                raise HTTPException(status_code=404, detail="Saved area not found")
+
+            source_area_id = source[0]
+            source_name = str(source[1] or "Untitled")
+            source_polygon = source[2] if isinstance(source[2], list) else []
+            source_filter_state = source[3] if isinstance(source[3], dict) else None
+            source_type = str(source[4] or "area")
+            source_originator_county = str(source[5] or "").strip().lower() or None
+            source_originator_account = str(source[6] or "").strip() or None
+
+            cur.execute("SELECT id FROM users WHERE id = %s FOR UPDATE", (int(user["id"]),))
+            if cur.fetchone() is None:
+                raise HTTPException(status_code=403, detail="User not found")
+
+            cur.execute(
+                """
+                SELECT name
+                FROM saved_areas
+                WHERE user_id = %s
+                  AND (name = %s OR name LIKE %s)
+                """,
+                (int(user["id"]), source_name, f"{source_name} (%)"),
+            )
+            taken_names = {str(row[0] or "") for row in cur.fetchall()}
+            if source_name not in taken_names:
+                fork_name = source_name
+            else:
+                next_n = 2
+                while f"{source_name} ({next_n})" in taken_names:
+                    next_n += 1
+                fork_name = f"{source_name} ({next_n})"
+
+            row = None
+            new_share_id = ""
+            for _ in range(10):
+                new_share_id = _generate_share_id()
+                try:
+                    cur.execute("SAVEPOINT sp_fork_saved_area")
+                    cur.execute(
+                        """
+                        INSERT INTO saved_areas (
+                            name, polygon, filter_state, type, share_id, user_id,
+                            originator_parcel_county, originator_parcel_account_num
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        RETURNING area_id, originator_parcel_county, originator_parcel_account_num, created_at, updated_at
+                        """,
+                        (
+                            fork_name,
+                            Json(source_polygon),
+                            Json(source_filter_state) if isinstance(source_filter_state, dict) else None,
+                            source_type,
+                            new_share_id,
+                            int(user["id"]),
+                            source_originator_county,
+                            source_originator_account,
+                        ),
+                    )
+                    row = cur.fetchone()
+                    cur.execute("RELEASE SAVEPOINT sp_fork_saved_area")
+                    break
+                except UniqueViolation:
+                    cur.execute("ROLLBACK TO SAVEPOINT sp_fork_saved_area")
+                    cur.execute("RELEASE SAVEPOINT sp_fork_saved_area")
+                    continue
+            if row is None:
+                raise HTTPException(status_code=503, detail="Failed to allocate unique share_id")
+
+            # Note: user_rating + rating_at intentionally NOT copied here. Ratings
+            # are now in comp_ratings (canonical Phase 2 store, copied separately
+            # below). The archive is comp-data only.
+            cur.execute(
+                """
+                INSERT INTO propelio_comp_archive (
+                    saved_area_id, comp_address_key, comp_mls, comp_data,
+                    parcel_geom, parcel_account_num, status, last_status, last_price
+                )
+                SELECT %s, comp_address_key, comp_mls, comp_data,
+                       parcel_geom, parcel_account_num, status, last_status, last_price
+                FROM propelio_comp_archive
+                WHERE saved_area_id = %s
+                """,
+                (row[0], source_area_id),
+            )
+
+            cur.execute(
+                """
+                INSERT INTO comp_ratings (workspace_id, comp_id, rating, rated_by_user_id, rated_at)
+                SELECT %s, comp_id, rating, rated_by_user_id, rated_at
+                FROM comp_ratings
+                WHERE workspace_id = %s
+                """,
+                (row[0], source_area_id),
+            )
+        conn.commit()
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        release_session_conn(conn)
+
+    return {
+        "area_id": row[0],
+        "name": fork_name,
+        "polygon": _to_leaflet_polygon(source_polygon),
+        "filter_state": source_filter_state if isinstance(source_filter_state, dict) else None,
+        "type": source_type,
+        "share_id": new_share_id,
+        "originator_parcel_county": str(row[1] or "").strip().lower() or None,
+        "originator_parcel_account_num": str(row[2] or "").strip() or None,
+        "lat": (float(source_polygon[0][1]) if isinstance(source_polygon, list) and source_polygon and len(source_polygon[0]) >= 2 else None) if source_type == "location" else None,
+        "lng": (float(source_polygon[0][0]) if isinstance(source_polygon, list) and source_polygon and len(source_polygon[0]) >= 2 else None) if source_type == "location" else None,
+        "created_at": row[3].isoformat() if row[3] else None,
+        "updated_at": row[4].isoformat() if row[4] else None,
     }
 
 
 @app.put("/api/areas/{area_id}")
 async def update_saved_area(area_id: str, request: SavedAreaUpdateRequest, req: Request, user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
     require_csrf(req)
-    if request.name is None and request.filter_state is None and request.type is None and request.lat is None and request.lng is None:
+    if request.name is None and request.filter_state is None and request.type is None and request.lat is None and request.lng is None and request.originator_parcel_county is None and request.originator_parcel_account_num is None:
         raise HTTPException(status_code=400, detail="Nothing to update")
 
     update_cols: list[str] = ["updated_at = now()"]
@@ -3260,6 +4173,25 @@ async def update_saved_area(area_id: str, request: SavedAreaUpdateRequest, req: 
             update_cols.append("polygon = %s")
             params.append(Json(polygon_geojson))
 
+    if request.originator_parcel_county is not None or request.originator_parcel_account_num is not None:
+        if request.originator_parcel_county is None or request.originator_parcel_account_num is None:
+            raise HTTPException(
+                status_code=400,
+                detail="originator_parcel_county and originator_parcel_account_num must be provided together",
+            )
+        county = str(request.originator_parcel_county or "").strip().lower() or None
+        account = str(request.originator_parcel_account_num or "").strip() or None
+        update_cols.append("originator_parcel_county = %s")
+        params.append(county)
+        update_cols.append("originator_parcel_account_num = %s")
+        params.append(account)
+
+    is_developer = str(user.get("role") or "").strip().lower() == "developer"
+    where_clause = "WHERE area_id = %s" if is_developer else "WHERE area_id = %s AND user_id = %s"
+    query_params: list[Any] = [*params, area_id]
+    if not is_developer:
+        query_params.append(int(user["id"]))
+
     conn = get_session_conn()
     try:
         with conn.cursor() as cur:
@@ -3267,10 +4199,12 @@ async def update_saved_area(area_id: str, request: SavedAreaUpdateRequest, req: 
                 f"""
                 UPDATE saved_areas
                 SET {', '.join(update_cols)}
-                WHERE area_id = %s AND user_id = %s
-                RETURNING area_id, name, polygon, filter_state, type, updated_at
+                {where_clause}
+                RETURNING area_id, name, polygon, filter_state, type,
+                          originator_parcel_county, originator_parcel_account_num,
+                          updated_at
                 """,
-                (*params, area_id, int(user["id"])),
+                tuple(query_params),
             )
             row = cur.fetchone()
         conn.commit()
@@ -3288,18 +4222,24 @@ async def update_saved_area(area_id: str, request: SavedAreaUpdateRequest, req: 
         "polygon": _to_leaflet_polygon(row[2]),
         "filter_state": row[3] if isinstance(row[3], dict) else None,
         "type": str(row[4] or "area"),
+        "originator_parcel_county": str(row[5] or "").strip().lower() or None,
+        "originator_parcel_account_num": str(row[6] or "").strip() or None,
         "lat": (float(row[2][0][1]) if isinstance(row[2], list) and row[2] and len(row[2][0]) >= 2 else None) if str(row[4] or "area") == "location" else None,
         "lng": (float(row[2][0][0]) if isinstance(row[2], list) and row[2] and len(row[2][0]) >= 2 else None) if str(row[4] or "area") == "location" else None,
-        "updated_at": row[5].isoformat() if row[5] else None,
+        "updated_at": row[7].isoformat() if row[7] else None,
     }
 
 
 @app.delete("/api/areas/{area_id}")
 async def delete_saved_area(area_id: str, user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
+    is_developer = str(user.get("role") or "").strip().lower() == "developer"
+    where_clause = "WHERE area_id = %s" if is_developer else "WHERE area_id = %s AND user_id = %s"
+    params = (area_id,) if is_developer else (area_id, int(user["id"]))
+
     conn = get_session_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM saved_areas WHERE area_id = %s AND user_id = %s", (area_id, int(user["id"])))
+            cur.execute(f"DELETE FROM saved_areas {where_clause}", params)
             deleted = cur.rowcount or 0
         conn.commit()
     except Exception:
@@ -3322,7 +4262,7 @@ async def list_saved_parcels(user: dict[str, Any] = Depends(get_current_user)) -
                 """
                 SELECT account_num, county, payload, created_at
                 FROM saved_parcels
-                WHERE user_id = %s
+                WHERE user_id = %s AND area_id IS NULL
                 ORDER BY created_at DESC
                 """,
                 (int(user["id"]),),
@@ -3349,20 +4289,48 @@ async def create_saved_parcel(request: SavedParcelCreateRequest, req: Request, u
     if not account_num:
         raise HTTPException(status_code=400, detail="account_num is required")
 
+    payload_data = request.payload if isinstance(request.payload, dict) else {}
+    target_area_id = str(request.area_id or "").strip() or None
+
     conn = get_session_conn()
     try:
         with conn.cursor() as cur:
+            # Always ensure a standalone target row exists for this user/parcel.
+            # If one already exists, refresh its payload (matches prior behavior).
             cur.execute(
                 """
-                INSERT INTO saved_parcels (account_num, county, payload, user_id)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (user_id, county, account_num)
+                INSERT INTO saved_parcels (account_num, county, payload, user_id, area_id)
+                VALUES (%s, %s, %s, %s, NULL)
+                ON CONFLICT (user_id, account_num, county) WHERE area_id IS NULL
                 DO UPDATE SET payload = EXCLUDED.payload
-                RETURNING account_num, county, payload, created_at
+                RETURNING account_num, county, payload, created_at, area_id
                 """,
-                (account_num, county, Json(request.payload) if isinstance(request.payload, dict) else Json({}), int(user["id"])),
+                (account_num, county, Json(payload_data), int(user["id"])),
             )
-            row = cur.fetchone()
+            standalone_row = cur.fetchone()
+
+            # If a workspace area_id was supplied, also create a bonded copy.
+            # Validate the area exists AND belongs to this user (or skip silently
+            # - we don't want to leak whether an area exists).
+            bonded_row = None
+            if target_area_id:
+                cur.execute(
+                    "SELECT 1 FROM saved_areas WHERE area_id = %s AND user_id = %s LIMIT 1",
+                    (target_area_id, int(user["id"])),
+                )
+                area_owned = cur.fetchone() is not None
+                if area_owned:
+                    cur.execute(
+                        """
+                        INSERT INTO saved_parcels (account_num, county, payload, user_id, area_id)
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (user_id, account_num, county, area_id) WHERE area_id IS NOT NULL
+                        DO UPDATE SET payload = EXCLUDED.payload
+                        RETURNING account_num, county, payload, created_at, area_id
+                        """,
+                        (account_num, county, Json(payload_data), int(user["id"]), target_area_id),
+                    )
+                    bonded_row = cur.fetchone()
         conn.commit()
     except Exception:
         conn.rollback()
@@ -3370,12 +4338,19 @@ async def create_saved_parcel(request: SavedParcelCreateRequest, req: Request, u
     finally:
         release_session_conn(conn)
 
-    return {
-        "account_num": row[0],
-        "county": row[1],
-        "payload": row[2] if isinstance(row[2], dict) else {},
-        "created_at": row[3].isoformat() if row[3] else None,
+    # Return the standalone row by default (matches prior shape). If a bonded
+    # copy was also created, surface its area_id so the frontend can confirm
+    # the bond happened.
+    response: dict[str, Any] = {
+        "account_num": standalone_row[0],
+        "county": standalone_row[1],
+        "payload": standalone_row[2] if isinstance(standalone_row[2], dict) else {},
+        "created_at": standalone_row[3].isoformat() if standalone_row[3] else None,
+        "area_id": None,
     }
+    if bonded_row is not None:
+        response["bonded_area_id"] = bonded_row[4]
+    return response
 
 
 @app.delete("/api/parcels/{county}/{account_num}")
