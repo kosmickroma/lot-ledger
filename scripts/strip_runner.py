@@ -558,6 +558,87 @@ def _parse_cma_envelope_sales(envelope: dict[str, Any]) -> list[dict[str, Any]]:
     return [item for item in sales if isinstance(item, dict)]
 
 
+@dataclass
+class RunSummary:
+    addresses_total: int = 0
+    addresses_complete: int = 0
+    addresses_partial: int = 0
+    addresses_skipped: int = 0
+    filter_pulls_total: int = 0
+    propelio_returned_sum: int = 0
+    comps_net_new_total: int = 0
+    elapsed_min: float = 0.0
+    partial_list: list[tuple[str, int]] = None  # type: ignore[assignment]  # filled in __post_init__
+    skipped_list: list[tuple[str, str]] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.partial_list is None:
+            self.partial_list = []
+        if self.skipped_list is None:
+            self.skipped_list = []
+
+
+def run_all(*, client: Any, addresses: list[str], mock: bool = False) -> RunSummary:
+    """Drive the full address list through run_address, pacing between, accumulating totals.
+
+    Per spec §10, the summary is printed in BOTH normal exit AND auth-block exit
+    paths. We use try/finally so the summary always emits — including when an
+    AuthBlockExit propagates from run_address mid-loop.
+    """
+    summary = RunSummary(addresses_total=len(addresses))
+    start_monotonic = time.monotonic()
+
+    try:
+        for idx, address in enumerate(addresses, start=1):
+            if idx > 1:
+                time.sleep(inter_address_sleep_seconds())
+                print()  # blank line between addresses per spec §9
+
+            outcome = run_address(client=client, address=address, idx=idx, total=len(addresses), mock=mock)
+
+            summary.filter_pulls_total += outcome.filters_ok + outcome.filters_errored
+            summary.propelio_returned_sum += outcome.propelio_returned
+            summary.comps_net_new_total += outcome.addr_net_new
+
+            if outcome.status == "complete":
+                summary.addresses_complete += 1
+            elif outcome.status == "partial":
+                summary.addresses_partial += 1
+                summary.partial_list.append((address, outcome.filters_errored))
+            else:  # "skipped"
+                summary.addresses_skipped += 1
+                summary.skipped_list.append((address, outcome.skip_reason or "unknown"))
+    finally:
+        summary.elapsed_min = (time.monotonic() - start_monotonic) / 60.0
+        _print_summary(summary)
+
+    return summary
+
+
+def _print_summary(s: RunSummary) -> None:
+    print()
+    print("=== strip_runner summary ===")
+    print(f"addresses_total:        {s.addresses_total}")
+    print(f"addresses_complete:     {s.addresses_complete}  (all 21 filters fired)")
+    print(f"addresses_partial:      {s.addresses_partial}  (some filters errored)")
+    print(f"addresses_skipped:      {s.addresses_skipped}  (setup failed — lead lookup, cma setup, or burst-error guard)")
+    print(f"filter_pulls_total:     {s.filter_pulls_total}")
+    print(f"propelio_returned_sum:  {s.propelio_returned_sum}  (raw comps returned across all pulls, duplicates included)")
+    print(f"comps_net_new_total:    {s.comps_net_new_total}  (rows inserted into propelio_comps cache)")
+    print(f"elapsed_min:            {s.elapsed_min:.0f}")
+
+    if s.partial_list:
+        print()
+        print("addresses_partial:")
+        for addr, errs in s.partial_list:
+            print(f"  - {addr}  ({errs} filter{'s' if errs != 1 else ''} errored)")
+    if s.skipped_list:
+        print()
+        print("addresses_skipped:")
+        for addr, reason in s.skipped_list:
+            print(f"  - {addr}  ({reason})")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Strip Runner — hand-curated Propelio comp sweep")
     parser.add_argument(
@@ -572,7 +653,28 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    print("strip_runner.py scaffolded; main loop not implemented yet")
+    try:
+        addresses = load_addresses(args.addresses)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"address file error: {exc}", file=sys.stderr)
+        return 1
+
+    if args.mock:
+        client = MockPropelioClient()
+        client.login()
+    else:
+        from api.propelio.scraper import PropelioClient
+        from api.propelio.config import PROPELIO_USERNAME, PROPELIO_PASSWORD
+        client = PropelioClient(username=PROPELIO_USERNAME, password=PROPELIO_PASSWORD)
+        client.login()
+
+    try:
+        run_all(client=client, addresses=addresses, mock=args.mock)
+    except AuthBlockExit as exc:
+        # run_all's try/finally already printed the summary before re-raising,
+        # so we just need to surface the CRITICAL banner and exit with code 2.
+        print(f"\nCRITICAL: {exc.message}", file=sys.stderr)
+        return 2
     return 0
 
 

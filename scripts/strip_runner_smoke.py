@@ -442,6 +442,66 @@ def _test_is_auth_class_equivalence():
     _assert_eq(_is_auth_class(_FakeExc()), False, "no message no status")
 
 
+import io
+
+
+@selftest("run_all: 3 addresses (2 happy + 1 lead-fail) produce expected summary")
+def _test_run_all_mixed():
+    from scripts.strip_runner import run_all
+    client = MockPropelioClient()
+    client.login()
+    addresses = [
+        "1234 Main St, Dallas TX 75201",
+        "POISON_LEAD 0000, Dallas TX",
+        "5678 Oak Ave, Dallas TX 75223",
+    ]
+
+    buf = io.StringIO()
+    with _zero_pacing():
+        with contextlib.redirect_stdout(buf):
+            summary = run_all(client=client, addresses=addresses, mock=True)
+
+    _assert_eq(summary.addresses_total, 3, "total")
+    _assert_eq(summary.addresses_complete, 2, "complete")
+    _assert_eq(summary.addresses_partial, 0, "partial")
+    _assert_eq(summary.addresses_skipped, 1, "skipped")
+    _assert_eq(summary.filter_pulls_total, 42, "21 filters × 2 happy addresses")
+    _assert_true(summary.comps_net_new_total > 0, f"net-new > 0 (got {summary.comps_net_new_total})")
+    _assert_true(summary.propelio_returned_sum > summary.comps_net_new_total, "returned > net-new")
+
+    output = buf.getvalue()
+    _assert_in("=== strip_runner summary ===", output, "summary header in output")
+    _assert_in("POISON_LEAD 0000", output, "skipped address listed in output")
+
+
+@selftest("run_all: auth-block exit prints summary BEFORE re-raising AuthBlockExit (spec §10)")
+def _test_run_all_auth_block_summary():
+    from scripts.strip_runner import run_all
+    client = MockPropelioClient()
+    client.login()
+    addresses = [
+        "1234 Main St, Dallas TX 75201",
+        "POISON_AUTH 0000, Dallas TX",   # 2nd address triggers AuthBlockExit
+        "9999 Never Reached, Dallas TX",
+    ]
+
+    buf = io.StringIO()
+    raised = False
+    try:
+        with _zero_pacing():
+            with contextlib.redirect_stdout(buf):
+                run_all(client=client, addresses=addresses, mock=True)
+    except AuthBlockExit:
+        raised = True
+
+    _assert_true(raised, "AuthBlockExit propagated out of run_all")
+    output = buf.getvalue()
+    # The summary must have been emitted (try/finally in run_all) BEFORE the exit propagated
+    _assert_in("=== strip_runner summary ===", output, "summary header printed despite auth-block exit")
+    _assert_in("addresses_complete:     1", output, "first address completed before block")
+    _assert_in("1234 Main St", output, "completed address visible in output")
+
+
 def main() -> int:
     print(f"strip_runner_smoke: running {len(SELFTESTS)} selftest(s)")
     failures: list[tuple[str, str]] = []
