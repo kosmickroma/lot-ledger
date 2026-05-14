@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import sys
 import traceback
+from collections.abc import Callable
 from pathlib import Path
 
 
@@ -36,7 +37,7 @@ def _assert_true(cond: bool, label: str) -> None:
         raise AssertionError(f"{label}: expected True")
 
 
-SELFTESTS: list[tuple[str, callable]] = []
+SELFTESTS: list[tuple[str, Callable[[], None]]] = []
 
 
 def selftest(label: str):
