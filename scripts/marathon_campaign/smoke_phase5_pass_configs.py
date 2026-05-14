@@ -19,8 +19,8 @@ from scripts.marathon_campaign.pass_configs import PASSES  # noqa: E402
 
 
 def test_passes_shape() -> None:
-    # Exactly 9 passes — 3 recent-tight + 6 broad sweep.
-    assert len(PASSES) == 9, f"expected 9 passes, got {len(PASSES)}"
+    # Exactly 6 passes — 3 recent-tight + 3 broad sweep.
+    assert len(PASSES) == 6, f"expected 6 passes, got {len(PASSES)}"
 
     # Recent-tight passes come first, in (1mo, 2mo, 3mo) order.
     months_seq = [p["months"] for p in PASSES[:3]]
@@ -49,7 +49,7 @@ def test_passes_shape() -> None:
     # Mutation isolation — returned list is a copy, not the original.
     copy = list(PASSES)
     copy.append({"months": 99, "range_mi": 99.0, "label": "mutated"})
-    assert len(PASSES) == 9, "PASSES constant was mutated through a returned reference"
+    assert len(PASSES) == 6, "PASSES constant was mutated through a returned reference"
 
 
 if __name__ == "__main__":

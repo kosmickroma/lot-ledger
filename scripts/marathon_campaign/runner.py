@@ -177,6 +177,7 @@ def claim_next_seed(campaign_id: int, runner_id: str) -> dict[str, object] | Non
                     SELECT seed_id
                     FROM propelio_marathon_seeds
                     WHERE campaign_id = %s
+                                            AND parcel_county = 'dcad'
                       AND (
                         status = 'queued'
                         OR (
@@ -184,7 +185,7 @@ def claim_next_seed(campaign_id: int, runner_id: str) -> dict[str, object] | Non
                             AND (retry_after IS NULL OR retry_after <= NOW())
                         )
                       )
-                    ORDER BY RANDOM()
+                                        ORDER BY grid_lat ASC, grid_lng ASC
                     LIMIT 1
                     FOR UPDATE SKIP LOCKED
                 )
@@ -561,6 +562,103 @@ def handle_transient_failure(
     return "failed_retryable"
 
 
+def handle_terminal_failure(
+    seed: dict[str, Any],
+    error: object,
+    *,
+    error_class: str,
+    from_state: str = "running",
+) -> None:
+    """Mark a seed as permanently skipped due to a non-retryable error.
+
+    Unlike handle_transient_failure, this does not schedule a retry.
+    """
+    seed_id = int(seed["seed_id"])
+    error_text = _truncate_error(error)
+    campaign_key = str(seed.get("campaign_key") or "")
+
+    _transition_best_effort(seed_id, from_state=from_state, to_state="skipped")
+
+    # Gate the error-field update on actually being in skipped state to
+    # avoid stamping a raced row that transitioned elsewhere.
+    updated_rows = 0
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE propelio_marathon_seeds
+                SET last_error = %s,
+                    last_error_class = %s,
+                    updated_at = NOW()
+                WHERE seed_id = %s
+                  AND status = 'skipped'
+                """,
+                (error_text, str(error_class or "unexpected")[:64], seed_id),
+            )
+            updated_rows = int(cur.rowcount or 0)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        release_session_conn(conn)
+
+    if updated_rows == 0:
+        logger.warning(
+            "[marathon] terminal failure stamp skipped - seed %s no longer in 'skipped' state "
+            "(probable race). error_class=%s error=%s",
+            seed_id,
+            error_class,
+            error_text,
+        )
+
+    emit_event(
+        "seed_skipped_terminal",
+        campaign=campaign_key,
+        seed_id=seed_id,
+        error_class=error_class,
+        error=error_text,
+    )
+
+
+def _classify_remote_error_and_dispatch(
+    seed: dict[str, Any],
+    error: object,
+    *,
+    from_state: str = "running",
+    retry_min: int | None = None,
+) -> None:
+    """Dispatch permanent remote errors to skipped, otherwise retryable.
+
+    retry_min only forwards when explicitly set so None never reaches
+    transient helper int() conversion.
+    """
+    text = str(error or "").lower()
+    if "mls_coverage_error" in text or "we don't have coverage" in text:
+        handle_terminal_failure(
+            seed,
+            error,
+            error_class="no_coverage",
+            from_state=from_state,
+        )
+    elif "no parcel match" in text or "suggest exact / close / fuzzy all returned no items" in text:
+        handle_terminal_failure(
+            seed,
+            error,
+            error_class="no_parcel_match",
+            from_state=from_state,
+        )
+    else:
+        kwargs: dict[str, Any] = {
+            "error_class": "remote_error",
+            "from_state": from_state,
+        }
+        if retry_min is not None:
+            kwargs["retry_min"] = retry_min
+        handle_transient_failure(seed, error, **kwargs)
+
+
 async def verify_remote_state(
     seed: dict[str, object],
     *,
@@ -597,10 +695,9 @@ async def verify_remote_state(
         if mock:
             job = _MOCK_JOBS.get(job_id)
             if job is None:
-                handle_transient_failure(
+                _classify_remote_error_and_dispatch(
                     seed,
                     "mock job not found in verify_remote_state",
-                    error_class="remote_error",
                     from_state="verifying",
                 )
                 return Outcome(status="error", error="mock job not found")
@@ -611,10 +708,9 @@ async def verify_remote_state(
         else:
             snapshot = _fetch_job_snapshot(job_id)
             if snapshot is None:
-                handle_transient_failure(
+                _classify_remote_error_and_dispatch(
                     seed,
                     f"job missing during verify_remote_state: {job_id}",
-                    error_class="remote_error",
                     from_state="verifying",
                 )
                 return Outcome(status="error", error="job missing")
@@ -635,10 +731,9 @@ async def verify_remote_state(
             return Outcome(status=remote_status, total=total_unique, net_new=net_new)
 
         if remote_status == "error":
-            handle_transient_failure(
+            _classify_remote_error_and_dispatch(
                 seed,
                 last_error,
-                error_class="remote_error",
                 from_state="verifying",
             )
             return Outcome(status="error", error=last_error)
@@ -717,10 +812,9 @@ async def verify_remote_state(
     if outcome.status == "blocked":
         raise PropelioAuthError(outcome.error or "remote blocked")
 
-    handle_transient_failure(
+    _classify_remote_error_and_dispatch(
         seed,
         outcome.error or outcome.status,
-        error_class="remote_error",
         from_state="running",
     )
     return outcome
@@ -883,10 +977,9 @@ async def run_campaign(
                     )
                     breaker.record_outcome("error")
                 else:
-                    handle_transient_failure(
+                    _classify_remote_error_and_dispatch(
                         seed,
                         outcome.error or outcome.status,
-                        error_class="remote_error",
                         from_state="running",
                     )
                     breaker.record_outcome("error")
