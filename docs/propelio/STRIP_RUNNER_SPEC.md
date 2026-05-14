@@ -1,16 +1,23 @@
-# Strip Runner — Design v1.1
+# Strip Runner — Design v1.2
 
-**Status:** Copilot v1 review folded in (2026-05-14). Build-eligible pending KK approval.
+**Status:** Copilot rounds 1 and 2 review folded in (2026-05-14). Build-eligible pending KK approval.
 **Author:** KK + Claude (brainstorm 2026-05-14).
 **Successor to:** the marathon scraper at `scripts/marathon_campaign/` (which remains untouched on `feat/marathon-campaign`).
 
+## Changes v1.1 → v1.2
+
+1. **§6 / §8 (Copilot R2 finding R2-1, IMPORTANT):** `add_cma` failure now correctly treated as **address-level** skip, not filter-level. Filter-level error row narrowed to `search_cma` only. Prevents the `cma_id`-unbound crash in the `search_cma` loop.
+2. **§9 (Copilot R2 finding R2-2, nice-to-have):** Added `setup: add_cma ok cma_id=… (Ns)` log line between address header and pass 1. Closes the silent-gap concern during a multi-hour run.
+3. **§6 / §7 (Copilot R2 finding R2-3, nice-to-have):** 3-5s fixed-range pause after `add_cma` before the first `search_cma`. Closes the immediate-burst gap on the same CMA object.
+4. **§7 / §14 editorial:** Moved the "drop band A floor to 10s on run 2" relaxation note out of a §7 parenthetical and into §14 as an explicit deferred item. Added KK's future-tuning principle to §7 (*speed up gradually but always preserve the non-uniform two-band shape*).
+
 ## Changes v1 → v1.1
 
-1. **§5 / §6 (Copilot finding #1 — Option A):** `add_cma` reduced to CMA-setup; comps from it are discarded; all 21 filter pulls now run via `search_cma`. Per-address Propelio calls go from 21 to 22.
-2. **§3 / §8 / §14 (Copilot finding #2):** Token-expiry exit documented as expected, idempotent re-run path captured, re-login-on-expiry parked.
-3. **§7 (Copilot finding #3):** Pacing average corrected (22s → 27s); band A floor raised to 15s for conservative-first-run.
-4. **§3 / §12 (Copilot finding #4):** Repo-root invocation requirement made explicit.
-5. **§8 (Copilot finding #5):** 3-consecutive-filter-errors guard added.
+1. **§5 / §6 (Copilot R1 finding #1 — Option A):** `add_cma` reduced to CMA-setup; comps from it are discarded; all 21 filter pulls now run via `search_cma`. Per-address Propelio calls go from 21 to 22.
+2. **§3 / §8 / §14 (Copilot R1 finding #2):** Token-expiry exit documented as expected, idempotent re-run path captured, re-login-on-expiry parked.
+3. **§7 (Copilot R1 finding #3):** Pacing average corrected (22s → 27s); band A floor raised to 15s for conservative-first-run.
+4. **§3 / §12 (Copilot R1 finding #4):** Repo-root invocation requirement made explicit.
+5. **§8 (Copilot R1 finding #5):** 3-consecutive-filter-errors guard added.
 
 ---
 
@@ -127,8 +134,10 @@ This is the heart of the script. Per address:
    - `envelope = client.add_cma(lead_id, confirmation_key, months=FILTERS[0][0], range_mi=FILTERS[0][1])` — purpose: obtain `cma_id` only
    - `cma_id = _extract_cma_id(envelope)`
    - **Comps from this envelope are discarded.** See §5 for the rationale (pre-existing-lead behavior).
+   - **On exception from `add_cma` or `_extract_cma_id` (non-auth):** treat as address-level — log `WARNING [address] cma setup failed: <exc>`, skip remaining steps for this address, continue to next address. Cannot fall through to the search_cma loop because `cma_id` is unbound (Copilot v1.1 review finding R2-1).
+   - **Setup → first pull pause:** `time.sleep(random.uniform(3, 5))` before entering step 3. Closes the immediate-burst gap between `add_cma` and the first `search_cma` against the same CMA (Copilot v1.1 review finding R2-3).
 3. **21 filter pulls** — for each `(months, range_mi)` in `FILTERS` (all 21 entries, including `FILTERS[0]`):
-   - Jittered sleep (see §7) before each pull *except* the very first of the address
+   - Jittered sleep (see §7) before each pull *except* the very first of the address (the 3-5s setup gap from step 2 already separates `add_cma` from the first `search_cma`)
    - `envelope = client.search_cma(lead_id, cma_id, months=months, range_mi=range_mi)`
    - `comps = _parse_cma_envelope_comps(envelope)`
    - Process and persist (see step 4)
@@ -147,19 +156,25 @@ Tighter than the current marathon. No coffee/lunch breaks. KK starts and stops t
 
 **Inter-pull (within one address, between filter pulls):**
 
-- 80% of pauses: `random.uniform(15, 30)` seconds *(floor raised from 10s for run 1 per Copilot v1 review finding #3 — conservative-first-run default; consider dropping the floor to 10s on run 2 if no rate-limit issues surface)*
-- 20% of pauses: `random.uniform(30, 60)` seconds
+- 80% of pauses: `random.uniform(15, 30)` seconds — band A
+- 20% of pauses: `random.uniform(30, 60)` seconds — band B
 - Weighted average: 0.8 × 22.5 + 0.2 × 45 ≈ **27s**. The two-band distribution avoids a uniform-distribution fingerprint without modeling explicit "distraction" breaks.
 
 **Inter-address (between addresses):**
 
 - `random.uniform(15, 45)` seconds. Average ~30s.
 
+**Setup → first pull (after `add_cma`, before first `search_cma`):**
+
+- `random.uniform(3, 5)` seconds (fixed-range, no jitter band). Closes the immediate-burst gap on the same CMA. See §6 step 2.
+
 **No `maybe_take_break` logic.** No multi-minute or multi-hour pauses.
+
+**Future-tuning principle (KK):** *speed up gradually across runs, but always preserve the non-uniform two-band shape — don't fully look like a bot.* Floor reductions and upper-bound trims are deferred to runs 2+ once we observe whether Propelio rate-limits the burst pattern. See §14 for the parked relaxation knob.
 
 Estimated wall time:
 
-- Per address: 21 pauses × ~27s + 22 calls × ~3-5s response ≈ **10-12 min**
+- Per address: 21 pauses × ~27s + 1 setup pause × ~4s + 22 calls × ~3-5s response ≈ **10-12 min**
 - 25-address strip (including 24 × ~30s inter-address pauses): **~4-5 hours**
 
 ## 8. Error handling
@@ -170,7 +185,8 @@ Three error classes only. No retries. No backoff. No state persisted between fil
 |---|---|---|
 | **Auth / rate** | `_classify_propelio_error(exc) == "blocked"` (reuse helper from `api/propelio/deep_pull.py`) | Log `CRITICAL [address] [filter] auth/rate block: <exc>` and exit with code 2. KK investigates before re-running. |
 | **Address-level** (lead lookup) | Any exception from `client.find_lead_id(...)` | Log `WARNING [address] lead lookup failed: <exc>`. Skip ALL remaining filters for this address. Continue to next address. |
-| **Filter-level** (CMA call) | Any non-auth exception from `client.add_cma(...)` or `client.search_cma(...)` | Log `WARNING [address] <M>mo/<R>mi cma call failed: <exc>`. Continue to next filter for the same address — **unless** the burst-filter-errors guard below trips. |
+| **Filter-level** (`search_cma` only) | Any non-auth exception from `client.search_cma(...)` | Log `WARNING [address] <M>mo/<R>mi cma call failed: <exc>`. Continue to next filter for the same address — **unless** the burst-filter-errors guard below trips. |
+| **CMA setup failure** (`add_cma` / `_extract_cma_id`) | Any non-auth exception from `client.add_cma(...)` or `_extract_cma_id(...)` in §6 step 2 | Log `WARNING [address] cma setup failed: <exc>`. **Address-level skip**, not filter-level — `cma_id` is unbound, so the `search_cma` loop cannot proceed. Continue to next address. (Copilot v1.1 review finding R2-1.) |
 | **Burst filter errors** | 3+ consecutive filter-level errors against the same address | Log `WARNING [address] 3 consecutive filter errors — skipping remaining filters for this address` and treat as address-level. Continue to next address. Prevents misreading a broken session as a normal partial run (Copilot v1 review finding #5). |
 
 **Parcel-match exceptions are not address-level or filter-level failures** — they're handled inside the persist step with a WARNING log and a fallback to unmatched merge, exactly as `deep_pull.py` does today. The pull still counts as successful.
@@ -191,16 +207,23 @@ Every pull writes one aligned line to stdout so KK can scan progress in real tim
 
 ```
 [12:05:14] address 4/25: 1234 Main St, Dallas TX 75201
-[12:05:15]   pass  1/21   24mo / 5.0mi   returned 287   new 287   addr_total 287
-[12:05:41]   pass  2/21   24mo / 2.0mi   returned 142   new  18   addr_total 305
-[12:06:08]   pass  3/21   24mo / 1.0mi   returned  87   new   6   addr_total 311
-[12:06:34]   pass  4/21   24mo / 0.5mi   returned  42   new   2   addr_total 313
+[12:05:18]   setup: add_cma ok   cma_id=cma_a1b2c3d4   (3.8s)
+[12:05:22]   pass  1/21   24mo / 5.0mi   returned 287   new 287   addr_total 287
+[12:05:48]   pass  2/21   24mo / 2.0mi   returned 142   new  18   addr_total 305
+[12:06:15]   pass  3/21   24mo / 1.0mi   returned  87   new   6   addr_total 311
+[12:06:41]   pass  4/21   24mo / 0.5mi   returned  42   new   2   addr_total 313
 ...
-[12:24:32]   pass 21/21    1mo / 0.25mi  returned   3   new   0   addr_total 487
-[12:24:32]   address done: 21/21 filters ok, 487 comps written, 423 net-new
-[12:24:55]
-[12:24:55] address 5/25: 5678 Oak Ave, Dallas TX 75223
+[12:24:39]   pass 21/21    1mo / 0.25mi  returned   3   new   0   addr_total 487
+[12:24:39]   address done: 21/21 filters ok, 487 net-new comps to cache
+[12:25:02]
+[12:25:02] address 5/25: 5678 Oak Ave, Dallas TX 75223
 ...
+```
+
+The `setup:` line (Copilot v1.1 review finding R2-2) prints between the address header and pass 1 so KK isn't staring at a silent 3-8s gap during the `add_cma` call + setup pause. It shows the `cma_id` for cross-referencing Propelio manually if needed, and the elapsed time of the `add_cma` round-trip. If CMA setup fails, the line reads:
+
+```
+[12:25:08]   setup: add_cma failed — HTTPError 503; skipping address
 ```
 
 Column meanings:
@@ -218,7 +241,7 @@ Errors print inline with the same indentation so the visual rhythm survives:
 Per-address footer line summarizes:
 
 ```
-[12:24:32]   address done: 20/21 filters ok, 1 errored, 423 net-new comps to cache
+[12:24:39]   address done: 20/21 filters ok, 1 errored, 423 net-new comps to cache
 ```
 
 The single net-new number is the sum of per-pull `new` counts for the address. We avoid double-reporting "comps written" since `merge_comps_into_global` only inserts net-new rows — "written" and "net-new" are the same metric in our pipeline.
@@ -308,6 +331,7 @@ from api.propelio.deep_pull import (
 
 - **Weekly refresh mode:** rerun a saved address list with `[(1, 1.0), (1, 0.5), (1, 0.25)]` only — fast cache freshening pass
 - **Saturation early-exit:** skip remaining filters when net-new rate falls below a threshold (e.g., 3 consecutive pulls with `new < 2`)
+- **Pacing relaxation (run 2+):** after run 1 succeeds without rate-limit symptoms, drop band A floor 15s → 10s and/or reduce band B weight (20% → 10%) to compress wall time. Apply per KK's future-tuning principle in §7 — preserve the two-band shape, don't fully look like a bot.
 - **Re-login on token expiry:** detect 401/403 from `_classify_propelio_error`, instantiate a fresh `PropelioClient`, call `login()`, retry the failed call. Eliminates the mid-run exit described in §8. Easy ~15-line addition; deferred so v1 stays minimal.
 - **Persist address list to DB:** `strip_runner_addresses` table with per-run history and per-address run counters
 - **Concurrency:** 2-3 addresses in parallel against Propelio (would need careful session/rate-limit handling)
@@ -315,9 +339,11 @@ from api.propelio.deep_pull import (
 
 ---
 
-## Copilot v1 review — outcomes (2026-05-14)
+## Copilot review — outcomes (2026-05-14)
 
-Copilot's deep-dive review returned no blockers and five findings. All addressed in v1.1 of this spec:
+### Round 1 (v1 → v1.1)
+
+Five findings, no blockers. All addressed in v1.1:
 
 | # | Section | Severity | Resolution |
 |---|---|---|---|
@@ -328,3 +354,15 @@ Copilot's deep-dive review returned no blockers and five findings. All addressed
 | 5 | §8 | NICE-TO-HAVE | 3-consecutive-filter-errors guard added to error table. |
 
 The `search_cma` CMA-state-corruption concern in the original review note for §8 was explicitly addressed by Copilot: each `search_cma` POST is stateless, a failed call leaves the CMA intact, so continuing to the next filter is safe.
+
+### Round 2 (v1.1 → v1.2)
+
+R1 findings 1-4 all held under fresh scrutiny. One new IMPORTANT and two nice-to-haves. All addressed in v1.2:
+
+| # | Section | Severity | Resolution |
+|---|---|---|---|
+| R2-1 | §6, §8 | IMPORTANT | `add_cma` failure was incorrectly classified as filter-level; would have crashed the script with `NameError: cma_id` when the search_cma loop ran. Reclassified to address-level skip. Filter-level row narrowed to `search_cma` only. |
+| R2-2 | §9 | NICE-TO-HAVE | Added `setup: add_cma ok cma_id=... (Ns)` log line between address header and pass 1, so KK doesn't see a silent 3-8s gap during the CMA setup phase. |
+| R2-3 | §6, §7 | NICE-TO-HAVE | Added `random.uniform(3, 5)` fixed-range pause after `add_cma` before the first `search_cma`. Closes the immediate-burst gap (the only point where two calls hit the same CMA object back-to-back). |
+
+Copilot's round-2 verdict: with R2-1 resolved, the spec is build-eligible.
