@@ -190,6 +190,79 @@ def setup_to_first_pull_sleep_seconds() -> float:
     return random.uniform(SETUP_TO_FIRST_PULL_MIN, SETUP_TO_FIRST_PULL_MAX)
 
 
+# --- Mock client (smoke tests only) -----------------------------------------
+#
+# Mimics the four PropelioClient methods that strip_runner actually calls.
+# Deterministic comp counts so smoke assertions are stable.
+#
+# Trigger addresses for error path coverage in smoke tests:
+#   "POISON_LEAD 0000"  -> find_lead_id raises RuntimeError
+#   "POISON_CMA 0000"   -> add_cma raises RuntimeError
+#   "POISON_FILTER 0000"-> every search_cma raises RuntimeError (for burst guard)
+#   "POISON_AUTH 0000"  -> raises an exception whose str() includes "401" (auth-class)
+
+
+class MockPropelioClient:
+    def __init__(self) -> None:
+        self._logged_in = False
+        self._call_counter = 0
+
+    def login(self) -> None:
+        self._logged_in = True
+
+    def find_lead_id(self, address: str) -> tuple[str, float, dict[str, Any]]:
+        if not self._logged_in:
+            raise RuntimeError("MockPropelioClient: must call login() first")
+        if address.startswith("POISON_LEAD"):
+            raise RuntimeError("MockPropelioClient: poisoned lead")
+        if address.startswith("POISON_AUTH"):
+            raise RuntimeError("Mock 401 unauthorized")
+        # Deterministic lead_id derived from address hash
+        h = abs(hash(address)) % 10_000_000
+        return (f"lead_{h:07d}", 7500.0, {"confirmation_key": f"ck_{h:07d}"})
+
+    def add_cma(
+        self, lead_id: str, confirmation_key: str, months: int, range_mi: float
+    ) -> dict[str, Any]:
+        if not self._logged_in:
+            raise RuntimeError("MockPropelioClient: must call login() first")
+        # NOTE: Task 7 will refactor this whole class to use explicit address-prefix
+        # triggers (POISON_CMA, POISON_FILTER, POISON_BURST) routed through lead_id
+        # encoding. The current hash-based "if lead_id == 'lead_0000001'" trigger is
+        # inert in Task 5's selftests (they don't exercise the poison path here) but
+        # serves as scaffolding for the Task 7 refactor.
+        if lead_id == "lead_0000001":
+            raise RuntimeError("MockPropelioClient: poisoned cma setup")
+        return {
+            "id": f"cma_{abs(hash(lead_id)) % 10_000_000:07d}",
+            "data": {"sales": [{"address_full": "stale comp ignored"}]},
+        }
+
+    def search_cma(
+        self, lead_id: str, cma_id: str, months: int, range_mi: float
+    ) -> dict[str, Any]:
+        if not self._logged_in:
+            raise RuntimeError("MockPropelioClient: must call login() first")
+        # Task 7 trigger scaffolding — currently inert (see add_cma note).
+        if lead_id == "lead_0000002":
+            raise RuntimeError("MockPropelioClient: poisoned filter")
+        # Deterministic comp count: more comps for larger range_mi, fewer for tighter
+        # range. months tweaks the count slightly so different filter combos produce
+        # different (but predictable) comp sets.
+        base = int(20 * range_mi) + months
+        comps = []
+        for i in range(base):
+            comps.append(
+                {
+                    "address_full": f"{lead_id}_{i:03d}_comp_addr",
+                    "comp_address_key": f"{lead_id}_comp_{i:03d}",
+                    "months": months,
+                    "range_mi": range_mi,
+                }
+            )
+        return {"data": {"sales": comps}}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Strip Runner — hand-curated Propelio comp sweep")
     parser.add_argument(

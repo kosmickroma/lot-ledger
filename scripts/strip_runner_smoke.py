@@ -256,6 +256,58 @@ def _test_setup_pause_range():
         _assert_true(3.0 <= v <= 5.0, f"setup pause sample {v} out of [3, 5]")
 
 
+from scripts.strip_runner import MockPropelioClient
+
+
+@selftest("MockPropelioClient.login is a no-op")
+def _test_mock_login():
+    client = MockPropelioClient()
+    client.login()  # must not raise
+    _assert_true(client._logged_in, "logged_in flag set")
+
+
+@selftest("MockPropelioClient.find_lead_id returns triple for normal address")
+def _test_mock_find_lead_happy():
+    client = MockPropelioClient()
+    client.login()
+    lead_id, sqft, bundle = client.find_lead_id("1234 Main St, Dallas TX 75201")
+    _assert_true(lead_id.startswith("lead_"), "lead_id format")
+    _assert_true(isinstance(sqft, (int, float)) and sqft > 0, "sqft positive")
+    _assert_true(bundle.get("confirmation_key", "").startswith("ck_"), "confirmation_key format")
+
+
+@selftest("MockPropelioClient.find_lead_id raises for poisoned address")
+def _test_mock_find_lead_poison():
+    client = MockPropelioClient()
+    client.login()
+    try:
+        client.find_lead_id("POISON_LEAD 0000")
+    except RuntimeError as exc:
+        _assert_in("poisoned lead", str(exc).lower(), "poison error message")
+        return
+    raise AssertionError("expected RuntimeError for POISON_LEAD address")
+
+
+@selftest("MockPropelioClient.add_cma returns envelope with id")
+def _test_mock_add_cma():
+    client = MockPropelioClient()
+    client.login()
+    envelope = client.add_cma("lead_x", "ck_y", months=24, range_mi=5.0)
+    _assert_true(envelope.get("id", "").startswith("cma_"), "cma id format")
+
+
+@selftest("MockPropelioClient.search_cma returns deterministic comp count")
+def _test_mock_search_cma_deterministic():
+    client = MockPropelioClient()
+    client.login()
+    envelope_a = client.search_cma("lead_x", "cma_y", months=24, range_mi=5.0)
+    envelope_b = client.search_cma("lead_x", "cma_y", months=24, range_mi=5.0)
+    sales_a = envelope_a.get("data", {}).get("sales", [])
+    sales_b = envelope_b.get("data", {}).get("sales", [])
+    _assert_eq(len(sales_a), len(sales_b), "same filter returns same comp count")
+    _assert_true(len(sales_a) > 0, "search_cma returns at least one comp")
+
+
 def main() -> int:
     print(f"strip_runner_smoke: running {len(SELFTESTS)} selftest(s)")
     failures: list[tuple[str, str]] = []
