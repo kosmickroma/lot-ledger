@@ -6,13 +6,15 @@
 - Backup: phone (817) 284-0024, ask for the Open Records / Public Information department
 - Bulk Data direct line: 817-884-1069 (per Tarrant County Clerk note)
 
-**Subject:** `Texas Public Information Act request — historical certified appraisal rolls 2010-2020`
+**Subject:** `Texas Public Information Act request — historical certified appraisal rolls (all available digital years)`
 
 ---
 
 To whom it may concern,
 
-Pursuant to the Texas Public Information Act (Texas Government Code Chapter 552), I am requesting copies of the Tarrant Appraisal District certified appraisal rolls for tax years **2010 through 2020**, in the same machine-readable format (CSV, fixed-width text, or zipped Property Data Export) as your currently publicly downloadable data at https://www.tad.org/data-download/.
+Pursuant to the Texas Public Information Act (Texas Government Code Chapter 552), I am requesting copies of the Tarrant Appraisal District certified appraisal rolls **for all tax years your district has on file in machine-readable format**, through tax year 2020. Where possible, please provide the data in the same CSV, fixed-width text, or zipped Property Data Export format used for your currently publicly downloadable data at https://www.tad.org/data-download/.
+
+My goal is to assemble a multi-decade ownership history for parcels in Tarrant County, sufficient to identify the last 3-4 owners of a typical property. I'd welcome the full digital range your district can extract.
 
 For each parcel in the rolls, I am specifically interested in the following fields if available in your archived files:
 

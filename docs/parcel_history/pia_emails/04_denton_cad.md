@@ -5,13 +5,15 @@
 - Email candidate: `info@dentoncad.com` (general inquiries — they will route)
 - Backup: phone (940) 566-0904
 
-**Subject:** `Texas Public Information Act request — historical certified appraisal rolls 2010-2020`
+**Subject:** `Texas Public Information Act request — historical certified appraisal rolls (all available digital years)`
 
 ---
 
 To whom it may concern,
 
-Pursuant to the Texas Public Information Act (Texas Government Code Chapter 552), I am requesting copies of the Denton Central Appraisal District certified appraisal rolls for tax years **2010 through 2020**, in the same machine-readable format (CSV / comma-delimited or fixed-width text) as your currently publicly downloadable data extracts at https://www.dentoncad.com/data-extracts/.
+Pursuant to the Texas Public Information Act (Texas Government Code Chapter 552), I am requesting copies of the Denton Central Appraisal District certified appraisal rolls **for all tax years your district has on file in machine-readable format**, through tax year 2020. Where possible, please provide the data in the same CSV / comma-delimited or fixed-width text format used for your currently publicly downloadable data extracts at https://www.dentoncad.com/data-extracts/.
+
+My goal is to assemble a multi-decade ownership history for parcels in Denton County, sufficient to identify the last 3-4 owners of a typical property. I'd welcome the full digital range your district can extract.
 
 For each parcel in the rolls, I am specifically interested in the following fields if available in your archived files:
 

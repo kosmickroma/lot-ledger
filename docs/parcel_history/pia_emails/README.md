@@ -2,6 +2,8 @@
 
 Drafted 2026-05-14 for KK's parcel-history backlog. Each markdown file contains the recipient address, subject line, and full email body ready to copy/paste.
 
+**Scope:** "all available digital years through 2020" — open-ended, lets each CAD respond with their max. Goal is to assemble ownership history sufficient to identify the last 3-4 owners per parcel (typically 30-40 years of data given ~10-year average turnover).
+
 ## Send order (whichever's easiest first)
 
 | File | County | Recipient | Standard PIA window |

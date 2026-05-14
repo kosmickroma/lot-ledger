@@ -5,13 +5,15 @@
 - Email candidate: `webmaster@collincad.org` (general — they will route to Open Records)
 - Backup: phone (469) 742-9200 or toll-free (866) 467-1110 (Mon-Fri 8am-4pm)
 
-**Subject:** `Texas Public Information Act request — historical certified appraisal rolls 2010-2020`
+**Subject:** `Texas Public Information Act request — historical certified appraisal rolls (all available digital years)`
 
 ---
 
 To whom it may concern,
 
-Pursuant to the Texas Public Information Act (Texas Government Code Chapter 552), I am requesting copies of the Collin Central Appraisal District certified appraisal rolls for tax years **2010 through 2020**, in the same machine-readable format (CSV / comma-delimited or fixed-width text) as your currently publicly downloadable data via the Collin CAD Open Data Portal and Texas.gov Open Data Portal.
+Pursuant to the Texas Public Information Act (Texas Government Code Chapter 552), I am requesting copies of the Collin Central Appraisal District certified appraisal rolls **for all tax years your district has on file in machine-readable format**, through tax year 2020. Where possible, please provide the data in the same CSV / comma-delimited or fixed-width text format used for your currently publicly downloadable data via the Collin CAD Open Data Portal and Texas.gov Open Data Portal.
+
+My goal is to assemble a multi-decade ownership history for parcels in Collin County, sufficient to identify the last 3-4 owners of a typical property. I'd welcome the full digital range your district can extract.
 
 For each parcel in the rolls, I am specifically interested in the following fields if available in your archived files:
 
