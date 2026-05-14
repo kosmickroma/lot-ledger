@@ -203,9 +203,21 @@ def setup_to_first_pull_sleep_seconds() -> float:
 
 
 class MockPropelioClient:
+    """Triggers (address prefix or substring):
+        "POISON_LEAD"     -> find_lead_id raises RuntimeError
+        "POISON_CMA"      -> add_cma raises RuntimeError
+        "POISON_FILTER"   -> every search_cma raises RuntimeError (burst guard trips)
+        "POISON_AUTH"     -> find_lead_id raises with "401" in message (auth-class)
+        "POISON_BURST"    -> search_cma raises on zero-indexed call indices {0,1,3,4};
+                             succeeds elsewhere. Tests burst-guard RESET on success.
+                             Sequence: fail-fail-succeed-fail-fail-then-succeed.
+    """
+
+    _POISON_BURST_FAIL_INDICES = frozenset({0, 1, 3, 4})
+
     def __init__(self) -> None:
         self._logged_in = False
-        self._call_counter = 0
+        self._burst_counter: dict[str, int] = {}
 
     def login(self) -> None:
         self._logged_in = True
@@ -213,25 +225,26 @@ class MockPropelioClient:
     def find_lead_id(self, address: str) -> tuple[str, float, dict[str, Any]]:
         if not self._logged_in:
             raise RuntimeError("MockPropelioClient: must call login() first")
-        if address.startswith("POISON_LEAD"):
+        if "POISON_LEAD" in address:
             raise RuntimeError("MockPropelioClient: poisoned lead")
-        if address.startswith("POISON_AUTH"):
-            raise RuntimeError("Mock 401 unauthorized")
-        # Deterministic lead_id derived from address hash
+        if "POISON_AUTH" in address:
+            raise RuntimeError("Mock 401 unauthorized response from Propelio")
         h = abs(hash(address)) % 10_000_000
-        return (f"lead_{h:07d}", 7500.0, {"confirmation_key": f"ck_{h:07d}"})
+        # Encode the address kind into the lead_id so add_cma/search_cma can detect it
+        kind = (
+            "cma" if "POISON_CMA" in address
+            else "filter" if "POISON_FILTER" in address
+            else "burst" if "POISON_BURST" in address
+            else "ok"
+        )
+        return (f"lead_{kind}_{h:07d}", 7500.0, {"confirmation_key": f"ck_{kind}_{h:07d}"})
 
     def add_cma(
         self, lead_id: str, confirmation_key: str, months: int, range_mi: float
     ) -> dict[str, Any]:
         if not self._logged_in:
             raise RuntimeError("MockPropelioClient: must call login() first")
-        # NOTE: Task 7 will refactor this whole class to use explicit address-prefix
-        # triggers (POISON_CMA, POISON_FILTER, POISON_BURST) routed through lead_id
-        # encoding. The current hash-based "if lead_id == 'lead_0000001'" trigger is
-        # inert in Task 5's selftests (they don't exercise the poison path here) but
-        # serves as scaffolding for the Task 7 refactor.
-        if lead_id == "lead_0000001":
+        if "_cma_" in lead_id:
             raise RuntimeError("MockPropelioClient: poisoned cma setup")
         return {
             "id": f"cma_{abs(hash(lead_id)) % 10_000_000:07d}",
@@ -243,23 +256,25 @@ class MockPropelioClient:
     ) -> dict[str, Any]:
         if not self._logged_in:
             raise RuntimeError("MockPropelioClient: must call login() first")
-        # Task 7 trigger scaffolding — currently inert (see add_cma note).
-        if lead_id == "lead_0000002":
+        if "_filter_" in lead_id:
             raise RuntimeError("MockPropelioClient: poisoned filter")
-        # Deterministic comp count: more comps for larger range_mi, fewer for tighter
-        # range. months tweaks the count slightly so different filter combos produce
-        # different (but predictable) comp sets.
+        if "_burst_" in lead_id:
+            # Use a per-lead_id counter to count zero-indexed search_cma calls
+            n = self._burst_counter.get(lead_id, 0)
+            self._burst_counter[lead_id] = n + 1
+            if n in self._POISON_BURST_FAIL_INDICES:
+                raise RuntimeError(f"MockPropelioClient: poisoned burst call #{n}")
+            # Fall through to success path for indices 2, 5, 6, 7, ...
         base = int(20 * range_mi) + months
-        comps = []
-        for i in range(base):
-            comps.append(
-                {
-                    "address_full": f"{lead_id}_{i:03d}_comp_addr",
-                    "comp_address_key": f"{lead_id}_comp_{i:03d}",
-                    "months": months,
-                    "range_mi": range_mi,
-                }
-            )
+        comps = [
+            {
+                "address_full": f"{lead_id}_{i:03d}_comp_addr",
+                "comp_address_key": f"{lead_id}_comp_{i:03d}",
+                "months": months,
+                "range_mi": range_mi,
+            }
+            for i in range(base)
+        ]
         return {"data": {"sales": comps}}
 
 
@@ -338,6 +353,35 @@ def _persist_pull_real(comps: list[dict[str, Any]]) -> tuple[int, int]:
     return returned, new
 
 
+class AuthBlockExit(SystemExit):
+    """Raised when Propelio returns an auth/rate block. Propagates out of the run loop
+    so the main() driver can exit with code 2 per spec §8."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(2)
+        self.message = message
+
+
+def _is_auth_class(exc: Exception) -> bool:
+    """Mirror api.propelio.deep_pull._classify_propelio_error semantics."""
+    status_code = getattr(exc, "status_code", None)
+    if status_code is None:
+        response = getattr(exc, "response", None)
+        if response is not None:
+            status_code = getattr(response, "status_code", None)
+    if status_code in (401, 403, 429):
+        return True
+    msg = str(exc).lower()
+    if "429" in msg or "rate limit" in msg or "throttle" in msg or "too many" in msg:
+        return True
+    if "401" in msg or "403" in msg or "unauthor" in msg or "forbidden" in msg:
+        return True
+    return False
+
+
+_BURST_GUARD_THRESHOLD = 3
+
+
 def run_address(
     *,
     client: Any,
@@ -346,37 +390,103 @@ def run_address(
     total: int,
     mock: bool = False,
 ) -> AddressOutcome:
-    """Run the full 21-filter sweep against one address.
+    """Run the full 21-filter sweep against one address with full error handling per spec §8."""
+    print(log_addr_header(datetime.now(), idx=idx, total=total, address=address))
 
-    Happy path only in this task. Error handling is added in Task 7.
-    """
-    now = datetime.now()
-    print(log_addr_header(now, idx=idx, total=total, address=address))
+    # --- Step 1: lead lookup ----------------------------------------------
+    try:
+        lead_id, _subject_sqft, parcel_bundle = client.find_lead_id(address)
+    except Exception as exc:
+        if _is_auth_class(exc):
+            print(log_addr_skipped(datetime.now(), reason=f"auth block during lead lookup: {_short_err(exc)}"))
+            raise AuthBlockExit(f"auth block during lead_lookup for {address}: {exc}") from exc
+        print(log_addr_skipped(datetime.now(), reason=f"lead lookup failed: {_short_err(exc)}"))
+        return AddressOutcome(
+            status="skipped",
+            filters_ok=0,
+            filters_errored=0,
+            addr_net_new=0,
+            propelio_returned=0,
+            cma_id=None,
+            skip_reason="lead lookup failed",
+        )
 
-    # Step 1: lead lookup
-    lead_id, _subject_sqft, parcel_bundle = client.find_lead_id(address)
     confirmation_key = parcel_bundle.get("confirmation_key") if isinstance(parcel_bundle, dict) else None
 
-    # Step 2: CMA setup (comps discarded)
+    # --- Step 2: CMA setup ------------------------------------------------
     setup_start = time.monotonic()
-    envelope = client.add_cma(lead_id, confirmation_key, months=FILTERS[0][0], range_mi=FILTERS[0][1])
-    cma_id = _extract_cma_id_from_envelope(envelope)
+    try:
+        envelope = client.add_cma(lead_id, confirmation_key, months=FILTERS[0][0], range_mi=FILTERS[0][1])
+        cma_id = _extract_cma_id_from_envelope(envelope)
+    except Exception as exc:
+        if _is_auth_class(exc):
+            print(log_setup_fail(datetime.now(), error_summary=_short_err(exc)))
+            raise AuthBlockExit(f"auth block during cma setup for {address}: {exc}") from exc
+        print(log_setup_fail(datetime.now(), error_summary=_short_err(exc)))
+        return AddressOutcome(
+            status="skipped",
+            filters_ok=0,
+            filters_errored=0,
+            addr_net_new=0,
+            propelio_returned=0,
+            cma_id=None,
+            skip_reason="cma setup failed",
+        )
     setup_elapsed = time.monotonic() - setup_start
     print(log_setup_ok(datetime.now(), cma_id=cma_id, elapsed_s=setup_elapsed))
 
-    # Setup -> first-pull pause (closes immediate-burst gap on same CMA)
+    # Setup -> first-pull pause
     time.sleep(setup_to_first_pull_sleep_seconds())
 
-    # Step 3: 21 filter pulls via search_cma
+    # --- Step 3: 21 filter pulls ------------------------------------------
     addr_seen_keys: set[str] = set()
     addr_total_new = 0
     propelio_returned_total = 0
     filters_ok = 0
+    filters_errored = 0
+    consecutive_errors = 0
 
     for pass_num, (months, range_mi) in enumerate(FILTERS, start=1):
         if pass_num > 1:
             time.sleep(inter_pull_sleep_seconds())
-        envelope = client.search_cma(lead_id, cma_id, months=months, range_mi=range_mi)
+
+        try:
+            envelope = client.search_cma(lead_id, cma_id, months=months, range_mi=range_mi)
+        except Exception as exc:
+            if _is_auth_class(exc):
+                raise AuthBlockExit(f"auth block on pass {pass_num} for {address}: {exc}") from exc
+            filters_errored += 1
+            consecutive_errors += 1
+            print(
+                log_pass_error(
+                    datetime.now(),
+                    pass_num=pass_num,
+                    pass_total=len(FILTERS),
+                    months=months,
+                    range_mi=range_mi,
+                    error_summary=_short_err(exc),
+                )
+            )
+            if consecutive_errors >= _BURST_GUARD_THRESHOLD:
+                print(
+                    log_addr_skipped(
+                        datetime.now(),
+                        reason=f"{consecutive_errors} consecutive filter errors — skipping remaining filters for this address",
+                    )
+                )
+                return AddressOutcome(
+                    status="skipped",
+                    filters_ok=filters_ok,
+                    filters_errored=filters_errored,
+                    addr_net_new=addr_total_new,
+                    propelio_returned=propelio_returned_total,
+                    cma_id=cma_id,
+                    skip_reason="3 consecutive filter errors",
+                )
+            continue
+
+        # Success path
+        consecutive_errors = 0
         comps = _parse_cma_envelope_sales(envelope)
         if mock:
             returned, new = _persist_pull_mock(addr_seen_keys, comps)
@@ -403,18 +513,24 @@ def run_address(
             datetime.now(),
             filters_ok=filters_ok,
             filters_total=len(FILTERS),
-            filters_errored=0,
+            filters_errored=filters_errored,
             addr_net_new=addr_total_new,
         )
     )
     return AddressOutcome(
-        status="complete",
+        status="complete" if filters_errored == 0 else "partial",
         filters_ok=filters_ok,
-        filters_errored=0,
+        filters_errored=filters_errored,
         addr_net_new=addr_total_new,
         propelio_returned=propelio_returned_total,
         cma_id=cma_id,
     )
+
+
+def _short_err(exc: Exception) -> str:
+    """Compact one-line error summary for log lines: ExceptionClass message."""
+    msg = str(exc).strip().splitlines()[0] if str(exc).strip() else ""
+    return f"{type(exc).__name__} {msg}".strip()
 
 
 # Local re-implementations of the small helpers from api/propelio/deep_pull.py

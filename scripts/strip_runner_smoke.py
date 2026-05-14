@@ -357,6 +357,91 @@ def _test_run_address_happy():
     _assert_true(outcome.cma_id is not None, "cma_id captured")
 
 
+from scripts.strip_runner import AuthBlockExit, _is_auth_class
+
+
+@selftest("run_address: lead lookup failure → skipped (lead lookup failed)")
+def _test_run_address_lead_fail():
+    client = MockPropelioClient()
+    client.login()
+    with _zero_pacing():
+        outcome = run_address(client=client, address="POISON_LEAD 0000, Dallas TX", idx=1, total=1, mock=True)
+    _assert_eq(outcome.status, "skipped", "status")
+    _assert_eq(outcome.skip_reason, "lead lookup failed", "skip reason")
+
+
+@selftest("run_address: cma setup failure → skipped (cma setup failed)")
+def _test_run_address_cma_fail():
+    client = MockPropelioClient()
+    client.login()
+    with _zero_pacing():
+        outcome = run_address(client=client, address="POISON_CMA 0000, Dallas TX", idx=1, total=1, mock=True)
+    _assert_eq(outcome.status, "skipped", "status")
+    _assert_eq(outcome.skip_reason, "cma setup failed", "skip reason")
+
+
+@selftest("run_address: every search_cma fails → burst guard trips after 3 → skipped")
+def _test_run_address_burst_guard():
+    client = MockPropelioClient()
+    client.login()
+    with _zero_pacing():
+        outcome = run_address(client=client, address="POISON_FILTER 0000, Dallas TX", idx=1, total=1, mock=True)
+    _assert_eq(outcome.status, "skipped", "status")
+    _assert_eq(outcome.skip_reason, "3 consecutive filter errors", "skip reason")
+    _assert_eq(outcome.filters_ok, 0, "no filters succeeded")
+    _assert_eq(outcome.filters_errored, 3, "exactly 3 filter errors before escalation")
+
+
+@selftest("run_address: burst guard RESETS on success (fail-fail-succeed-fail-fail-then-succeed)")
+def _test_run_address_burst_reset():
+    # POISON_BURST mock raises on call indices 0, 1, 3, 4 (zero-indexed); succeeds elsewhere.
+    # Sequence: pass1=fail(consec=1), pass2=fail(consec=2), pass3=success(consec=0 RESET),
+    #           pass4=fail(consec=1), pass5=fail(consec=2), pass6+=success.
+    # Guard threshold is 3; should NEVER trip. Address completes as "partial".
+    client = MockPropelioClient()
+    client.login()
+    with _zero_pacing():
+        outcome = run_address(client=client, address="POISON_BURST 0000, Dallas TX", idx=1, total=1, mock=True)
+    _assert_eq(outcome.status, "partial", "status (errors but no skip)")
+    _assert_eq(outcome.skip_reason, None, "skip_reason None — burst guard did NOT trip")
+    _assert_eq(outcome.filters_errored, 4, "exactly 4 errors (passes 1, 2, 4, 5)")
+    _assert_eq(outcome.filters_ok, 17, "17 successful pulls (21 - 4 errors)")
+
+
+@selftest("run_address: auth-class error raises AuthBlockExit")
+def _test_run_address_auth_block():
+    client = MockPropelioClient()
+    client.login()
+    try:
+        with _zero_pacing():
+            run_address(client=client, address="POISON_AUTH 0000, Dallas TX", idx=1, total=1, mock=True)
+    except AuthBlockExit:
+        return
+    raise AssertionError("expected AuthBlockExit for POISON_AUTH address")
+
+
+@selftest("_is_auth_class returns True for 401/403/429 and throttle text, False otherwise")
+def _test_is_auth_class_equivalence():
+    # Local helper replaces deep_pull._classify_propelio_error per §12 divergence note.
+    # Inputs cover: status_code-on-exc, response.status_code-on-exc, message-substring matches, benign.
+    class _FakeExc(Exception):
+        def __init__(self, msg: str = "", status_code: int | None = None) -> None:
+            super().__init__(msg)
+            if status_code is not None:
+                self.status_code = status_code
+
+    _assert_true(_is_auth_class(_FakeExc(status_code=401)), "401")
+    _assert_true(_is_auth_class(_FakeExc(status_code=403)), "403")
+    _assert_true(_is_auth_class(_FakeExc(status_code=429)), "429")
+    _assert_true(_is_auth_class(_FakeExc("rate limit exceeded")), "rate limit text")
+    _assert_true(_is_auth_class(_FakeExc("Too Many Requests")), "too many requests text")
+    _assert_true(_is_auth_class(_FakeExc("403 forbidden")), "403 in text")
+    _assert_true(_is_auth_class(_FakeExc("401 unauthor")), "401 unauthor in text")
+    _assert_eq(_is_auth_class(_FakeExc(status_code=500)), False, "500 is not auth")
+    _assert_eq(_is_auth_class(_FakeExc("generic timeout")), False, "generic message")
+    _assert_eq(_is_auth_class(_FakeExc()), False, "no message no status")
+
+
 def main() -> int:
     print(f"strip_runner_smoke: running {len(SELFTESTS)} selftest(s)")
     failures: list[tuple[str, str]] = []
