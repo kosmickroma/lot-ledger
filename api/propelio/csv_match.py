@@ -57,10 +57,15 @@ def query_propelio_sold_for_parcels(
     if not parcel_input:
         return {}
 
+    # Match the most-recent Propelio record per parcel across any status
+    # (sold / for_sale / pending). The ORDER BY coalesces several timestamp
+    # candidates so we always have a real ordering value regardless of which
+    # event-type column is populated for a given row.
     sql = """
         SELECT DISTINCT ON (parcel_county, parcel_account_num)
             parcel_county,
             parcel_account_num,
+            status,
             price,
             sold_date,
             year_built,
@@ -70,11 +75,14 @@ def query_propelio_sold_for_parcels(
             baths,
             dom
         FROM propelio_comps
-        WHERE status = 'sold'
-          AND parcel_account_num IS NOT NULL
+        WHERE parcel_account_num IS NOT NULL
           AND parcel_county IS NOT NULL
+          AND status IN ('sold', 'for_sale', 'pending')
           AND (parcel_account_num, parcel_county) IN %s
-        ORDER BY parcel_county, parcel_account_num, sold_date DESC NULLS LAST
+        ORDER BY
+            parcel_county,
+            parcel_account_num,
+            COALESCE(status_timestamp, sold_date::timestamp, last_seen_at, first_seen_at) DESC NULLS LAST
     """
 
     parcel_tuples = tuple(parcel_input)
@@ -99,12 +107,24 @@ def query_propelio_sold_for_parcels(
 
 
 def _normalize_propelio_row(row: dict) -> dict:
-    """Coerce propelio_comps row to JSON-safe dict the CSV writer expects."""
+    """Coerce propelio_comps row to JSON-safe dict the CSV writer expects.
+
+    `status` is included so the CSV row-fill can stamp a Comp Status cell.
+    sold_date is only populated when status == 'sold' — keeps the
+    `Comp Sold Date` column name accurate even though the price column
+    now carries list prices for for_sale/pending records.
+    """
+    status = (row.get("status") or "").strip()
     sold_date = row.get("sold_date")
     if sold_date is not None and hasattr(sold_date, "isoformat"):
         sold_date = sold_date.isoformat()
+    if status != "sold":
+        # Keep Comp Sold Date strictly sold-only; Comp Status column
+        # surfaces the event type for for_sale / pending records.
+        sold_date = None
 
     return {
+        "status": status,
         "sold_price": _safe_float(row.get("price")),
         "sold_date": sold_date,
         "yr_built": _safe_float(row.get("year_built")),
