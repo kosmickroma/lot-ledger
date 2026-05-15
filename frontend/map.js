@@ -2866,7 +2866,7 @@ async function restoreSavedArea(area, options = {}) {
 
   if (map.hasLayer(browseLayer)) browseLayer.remove();
 
-  const includeRedfin = true;
+  const includeRedfin = Boolean(filterState.active);
   const includeSold = Boolean(filterState.sold);
   document.getElementById("sidebar-results")?.classList.add("hidden");
   document.getElementById("sidebar-loading")?.classList.remove("hidden");
@@ -7666,7 +7666,7 @@ async function runAnalysis(polygon, includeRedfin, includeSold, options = {}) {
 
 async function refreshExpiredJob() {
   if (!lastPolygon || lastPolygon.length < 3) return false;
-  const includeRedfin = true;
+  const includeRedfin = Boolean(filterState.active);
   const includeSold = Boolean(filterState.sold);
   try {
     const data = await runAnalysis(lastPolygon, includeRedfin, includeSold);
@@ -7777,7 +7777,7 @@ map.on("draw:created", async (e) => {
   // Instructions section removed; results manage visibility
   document.getElementById("sidebar-results").classList.add("hidden");
   document.getElementById("sidebar-loading").classList.remove("hidden");
-  const includeRedfin = true;
+  const includeRedfin = Boolean(filterState.active);
   const includeSold = Boolean(filterState.sold);
   document.getElementById("redfin-status").textContent = "Running analysis...";
   drawLayer.addLayer(e.layer);
