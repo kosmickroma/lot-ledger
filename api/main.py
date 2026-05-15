@@ -609,6 +609,26 @@ def _finalize_user_scoping() -> None:
         release_session_conn(conn)
 
 
+def _json_default(obj: Any) -> Any:
+    """JSON fallback for psycopg2 Json(): coerce date/datetime to ISO strings.
+
+    Fixes a long-standing silent persistence bug where query_sold_parcels
+    returns datetime.date values for `sold_date`, which the default JSON
+    encoder cannot serialize. Json() failed inside _persist_cached_job_sync,
+    the failure was swallowed by the non-fatal try/except around it, and
+    cached_jobs.sold_points consequently stayed empty for every job. The
+    CSV Comp_* columns were never populated as a result.
+    """
+    if hasattr(obj, "isoformat"):
+        return obj.isoformat()
+    raise TypeError(f"Object of type {obj.__class__.__name__} is not JSON serializable")
+
+
+def _json_safe(value: Any) -> Json:
+    """psycopg2 Json wrapper that uses our date-aware default encoder."""
+    return Json(value, dumps=lambda v: json.dumps(v, default=_json_default))
+
+
 def _persist_cached_job_sync(
     job_id: str,
     user_id: int,
@@ -641,10 +661,10 @@ def _persist_cached_job_sync(
                     job_id,
                     int(user_id),
                     saved_area_id,
-                    Json(rows),
-                    Json(sold_points),
-                    Json(propelio_sold_points) if propelio_sold_points is not None else None,
-                    Json(polygon),
+                    _json_safe(rows),
+                    _json_safe(sold_points),
+                    _json_safe(propelio_sold_points) if propelio_sold_points is not None else None,
+                    _json_safe(polygon),
                 ),
             )
         conn.commit()
@@ -3126,6 +3146,7 @@ async def download(job_id: str, filename: str | None = None, user: dict[str, Any
     rows = job.get("rows", [])
     redfin_data: dict[str, dict] = job.get("redfin_data", {})
     sold_points: list[dict[str, Any]] = job.get("sold_points", []) or []
+    propelio_sold_points: list[dict[str, Any]] = _load_propelio_sold_points(job_id) or []
     job_saved_area_id = str(job.get("saved_area_id") or "").strip() or None
     csv_share_id = _job_share_id(job_id, job_saved_area_id)
     logger.info("Download job %s: %d parcel rows, %d sold points", job_id, len(rows), len(sold_points))
@@ -3169,6 +3190,13 @@ async def download(job_id: str, filename: str | None = None, user: dict[str, Any
                 best_comp = _sp
         if best_comp is not None:
             comp_by_parcel_key[str(_pr.get("account_num", "") or "")] = best_comp
+
+    propelio_comp_by_parcel_key: dict[tuple[str, str], dict] = {}
+    for comp in propelio_sold_points:
+        county = str(comp.get("county", "") or "").strip().lower()
+        account_num = str(comp.get("account_num", "") or "").strip()
+        if county and account_num:
+            propelio_comp_by_parcel_key[(county, account_num)] = comp
 
     download_name = _normalize_csv_filename(filename)
 
@@ -3344,7 +3372,12 @@ async def download(job_id: str, filename: str | None = None, user: dict[str, Any
                 or str(row.get("parcel_key", "") or "").strip()
             )
 
-            comp = comp_by_parcel_key.get(str(row.get("account_num", "") or ""))
+            row_key = (
+                str(row.get("county", "") or "").strip().lower(),
+                str(row.get("account_num", "") or "").strip(),
+            )
+            propelio_comp = propelio_comp_by_parcel_key.get(row_key)
+            rf_comp = comp_by_parcel_key.get(str(row.get("account_num", "") or ""))
 
             writer.writerow(
                 [
@@ -3433,16 +3466,26 @@ async def download(job_id: str, filename: str | None = None, user: dict[str, Any
                     row.get("deed_number", "") or "",
                     row.get("deed_date", "") or "",
                     row.get("subdivision", "") or "",
-                    round(_safe_float(comp.get("sold_price")), 0) if comp and _safe_float(comp.get("sold_price")) is not None else "",
-                    (comp.get("sold_date", "") or "") if comp else "",
-                    round(_safe_float(comp.get("price_per_sqft")), 0) if comp and _safe_float(comp.get("price_per_sqft")) is not None else "",
-                    int(_safe_float(comp.get("yr_built"))) if comp and _safe_float(comp.get("yr_built")) not in (None, 0.0) else "",
-                    int(_safe_float(comp.get("sqft"))) if comp and _safe_float(comp.get("sqft")) not in (None, 0.0) else "",
-                    round(_safe_float(comp.get("lot_sqft")), 0) if comp and _safe_float(comp.get("lot_sqft")) is not None else "",
-                    int(_safe_float(comp.get("beds"))) if comp and _safe_float(comp.get("beds")) not in (None, 0.0) else "",
-                    int(_safe_float(comp.get("baths"))) if comp and _safe_float(comp.get("baths")) not in (None, 0.0) else "",
-                    int(_safe_float(comp.get("dom"))) if comp and _safe_float(comp.get("dom")) not in (None, 0.0) else "",
-                    (comp.get("listing_url", "") or "") if comp else "",
+                    round(_safe_float(propelio_comp.get("sold_price")), 0) if propelio_comp and _safe_float(propelio_comp.get("sold_price")) is not None else "",
+                    (propelio_comp.get("sold_date", "") or "") if propelio_comp else "",
+                    round(_safe_float(propelio_comp.get("price_per_sqft")), 0) if propelio_comp and _safe_float(propelio_comp.get("price_per_sqft")) is not None else "",
+                    int(_safe_float(propelio_comp.get("yr_built"))) if propelio_comp and _safe_float(propelio_comp.get("yr_built")) not in (None, 0.0) else "",
+                    int(_safe_float(propelio_comp.get("sqft"))) if propelio_comp and _safe_float(propelio_comp.get("sqft")) not in (None, 0.0) else "",
+                    round(_safe_float(propelio_comp.get("lot_sqft")), 0) if propelio_comp and _safe_float(propelio_comp.get("lot_sqft")) is not None else "",
+                    int(_safe_float(propelio_comp.get("beds"))) if propelio_comp and _safe_float(propelio_comp.get("beds")) not in (None, 0.0) else "",
+                    int(_safe_float(propelio_comp.get("baths"))) if propelio_comp and _safe_float(propelio_comp.get("baths")) not in (None, 0.0) else "",
+                    int(_safe_float(propelio_comp.get("dom"))) if propelio_comp and _safe_float(propelio_comp.get("dom")) not in (None, 0.0) else "",
+                    (propelio_comp.get("listing_url", "") or "") if propelio_comp else "",
+                    round(_safe_float(rf_comp.get("sold_price")), 0) if rf_comp and _safe_float(rf_comp.get("sold_price")) is not None else "",
+                    (rf_comp.get("sold_date", "") or "") if rf_comp else "",
+                    round(_safe_float(rf_comp.get("price_per_sqft")), 0) if rf_comp and _safe_float(rf_comp.get("price_per_sqft")) is not None else "",
+                    int(_safe_float(rf_comp.get("yr_built"))) if rf_comp and _safe_float(rf_comp.get("yr_built")) not in (None, 0.0) else "",
+                    int(_safe_float(rf_comp.get("sqft"))) if rf_comp and _safe_float(rf_comp.get("sqft")) not in (None, 0.0) else "",
+                    round(_safe_float(rf_comp.get("lot_sqft")), 0) if rf_comp and _safe_float(rf_comp.get("lot_sqft")) is not None else "",
+                    int(_safe_float(rf_comp.get("beds"))) if rf_comp and _safe_float(rf_comp.get("beds")) not in (None, 0.0) else "",
+                    int(_safe_float(rf_comp.get("baths"))) if rf_comp and _safe_float(rf_comp.get("baths")) not in (None, 0.0) else "",
+                    int(_safe_float(rf_comp.get("dom"))) if rf_comp and _safe_float(rf_comp.get("dom")) not in (None, 0.0) else "",
+                    (rf_comp.get("listing_url", "") or "") if rf_comp else "",
                     "yes" if str(row.get("account_num", "") or "") in seed_account_nums else "",
                     csv_share_id,
                 ]
