@@ -1,0 +1,10 @@
+# strip_dallas_south_row4_2026_05_15.txt
+# Row 4 — 6 addresses, south Dallas County, NTREIS-covered core
+# Estimated runtime: ~70 min (6 × ~11 min + inter-address pauses)
+
+6900 LAKE RIDGE PKWY
+1375 N CLARK RD
+1617 OLD HICKORY TRL
+1125 W WINTERGREEN RD
+2847 POST OAK RD
+1723 BOWERS RD

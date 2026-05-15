@@ -1,0 +1,13 @@
+# strip_dallas_south_row5_2026_05_15.txt
+# Row 5 — 9 addresses, south Dallas County, NTREIS-covered core
+# Estimated runtime: ~110 min (9 × ~11 min + inter-address pauses)
+
+5163 CLYDESDALE DR
+7010 RED MESA DR
+402 FALLING LEAVES DR
+3200 BAINBRIDGE DR
+115 BECKLEY SIDE DR
+2731 PALO ALTO DR
+223 CHATMAN ST
+3322 MIDDLEFIELD RD
+212 GLENN RD
