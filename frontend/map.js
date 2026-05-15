@@ -1088,11 +1088,14 @@ function restoreFilterState(state) {
   }
   if (Number(state.v || 0) !== 1) return;
   if (state.checkboxes && typeof state.checkboxes === "object") Object.assign(filterState, state.checkboxes);
-  // Legacy R.F. filters never auto-enable from saved state — mirrors the
-  // localStorage-restore guard above. Old saved areas baked R.F. on when
-  // those filters lived in Map Filters; chunk 2 made them opt-in only.
+  // Legacy R.F. Active filter never auto-enables from saved state — mirrors the
+  // localStorage-restore guard above. Old saved areas baked R.F. Active on when
+  // it lived in Map Filters; chunk 2 made it opt-in only. The Sold filter is
+  // no longer force-reset here — Phase 6 of the CSV export refactor enabled
+  // sold-comp inclusion in analyze by default when the user opts in via the
+  // filter checkbox, and forcing it off on every load prevented include_sold
+  // from ever firing on the analyze endpoint.
   filterState.active = false;
-  filterState.sold = false;
   if (state.numeric && typeof state.numeric === "object") Object.assign(numericFilters, state.numeric);
   if (state.comp && typeof state.comp === "object") Object.assign(compNumericFilters, state.comp);
   if (state.sold && typeof state.sold === "object") {
@@ -1155,14 +1158,14 @@ function loadFilters() {
   } catch (_) {
     filterState = { ...DEFAULT_FILTERS };
   }
-  // Legacy R.F. filters (active = R.F. Listings, sold = R.F. Sold) are
-  // tucked away in the collapsed "Legacy Filters" card and should ONLY
-  // turn on when the user opts in by clicking them. localStorage might
-  // hold stale `true` values from before the 2026-05-10 restructure when
-  // these lived in Map Filters and defaulted on — force them off on
-  // every load so they never fire on a search without explicit opt-in.
+  // Legacy R.F. Active filter is tucked away in the collapsed "Legacy Filters"
+  // card and should ONLY turn on when the user opts in by clicking it.
+  // localStorage might hold a stale `true` from before the 2026-05-10
+  // restructure when it lived in Map Filters and defaulted on — force off on
+  // every load so it never fires on a search without explicit opt-in.
+  // The Sold filter is no longer force-reset here — see the matching guard
+  // above for the rationale (CSV export refactor Phase 6).
   filterState.active = false;
-  filterState.sold = false;
 }
 
 function saveFilters() {
