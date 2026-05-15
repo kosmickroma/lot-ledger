@@ -34,7 +34,7 @@ from fastapi import Body, Depends, FastAPI, HTTPException, Path as FastAPIPath, 
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from psycopg2.errors import UniqueViolation
-from psycopg2.extras import Json, execute_values
+from psycopg2.extras import Json, RealDictCursor, execute_values
 from pydantic import BaseModel
 
 from api.auth import (
@@ -66,6 +66,7 @@ from api.counties.dcad import SPTD_LABELS, _estimate_front_depth, build_feature,
 from api.counties.denton import _classify_denton, _normalize_denton_row, query_denton_parcels
 from api.counties.tad import _normalize_tad_row, _classify_tad, query_tad_parcels
 from api.geo import polygon_bbox
+from api.propelio.csv_match import query_propelio_sold_for_parcels
 from api.propelio.routes import router as propelio_router
 from api.redfin import normalize_addr_key
 from api.sold import log_redfin_sold_row_count, query_active_listings, query_sold_parcels
@@ -556,6 +557,10 @@ def _ensure_session_schema() -> None:
                         "cached_jobs_saved_area_id",
                         "ALTER TABLE cached_jobs ADD COLUMN IF NOT EXISTS saved_area_id TEXT REFERENCES saved_areas(area_id) ON DELETE SET NULL",
                     ),
+                    (
+                        "cached_jobs_propelio_sold_points",
+                        "ALTER TABLE cached_jobs ADD COLUMN IF NOT EXISTS propelio_sold_points JSONB",
+                    ),
                     ("idx_cached_jobs_saved_area", "CREATE INDEX IF NOT EXISTS idx_cached_jobs_saved_area ON cached_jobs (saved_area_id)"),
                     (
                         "deep_pull_jobs_net_new_comps",
@@ -604,6 +609,26 @@ def _finalize_user_scoping() -> None:
         release_session_conn(conn)
 
 
+def _json_default(obj: Any) -> Any:
+    """JSON fallback for psycopg2 Json(): coerce date/datetime to ISO strings.
+
+    Fixes a long-standing silent persistence bug where query_sold_parcels
+    returns datetime.date values for `sold_date`, which the default JSON
+    encoder cannot serialize. Json() failed inside _persist_cached_job_sync,
+    the failure was swallowed by the non-fatal try/except around it, and
+    cached_jobs.sold_points consequently stayed empty for every job. The
+    CSV Comp_* columns were never populated as a result.
+    """
+    if hasattr(obj, "isoformat"):
+        return obj.isoformat()
+    raise TypeError(f"Object of type {obj.__class__.__name__} is not JSON serializable")
+
+
+def _json_safe(value: Any) -> Json:
+    """psycopg2 Json wrapper that uses our date-aware default encoder."""
+    return Json(value, dumps=lambda v: json.dumps(v, default=_json_default))
+
+
 def _persist_cached_job_sync(
     job_id: str,
     user_id: int,
@@ -611,28 +636,60 @@ def _persist_cached_job_sync(
     sold_points: list[dict[str, Any]],
     polygon: list[list[float]],
     saved_area_id: str | None = None,
+    propelio_sold_points: list[dict[str, Any]] | None = None,
 ) -> None:
     conn = get_session_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(
                 f"""
-                INSERT INTO cached_jobs (job_id, user_id, saved_area_id, rows, sold_points, polygon, expires_at)
-                VALUES (%s, %s, %s, %s, %s, %s, now() + interval '{_JOB_TTL_SECONDS} seconds')
+                INSERT INTO cached_jobs (job_id, user_id, saved_area_id, rows, sold_points, propelio_sold_points, polygon, expires_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, now() + interval '{_JOB_TTL_SECONDS} seconds')
                 ON CONFLICT (job_id) DO UPDATE SET
                     user_id = EXCLUDED.user_id,
                     saved_area_id = COALESCE(EXCLUDED.saved_area_id, cached_jobs.saved_area_id),
                     rows = EXCLUDED.rows,
                     sold_points = EXCLUDED.sold_points,
+                    propelio_sold_points = EXCLUDED.propelio_sold_points,
                     polygon = EXCLUDED.polygon,
                     expires_at = CASE
                         WHEN cached_jobs.expires_at IS NULL THEN NULL
                         ELSE now() + interval '{_JOB_TTL_SECONDS} seconds'
                     END
                 """,
-                (job_id, int(user_id), saved_area_id, Json(rows), Json(sold_points), Json(polygon)),
+                (
+                    job_id,
+                    int(user_id),
+                    saved_area_id,
+                    _json_safe(rows),
+                    _json_safe(sold_points),
+                    _json_safe(propelio_sold_points) if propelio_sold_points is not None else None,
+                    _json_safe(polygon),
+                ),
             )
         conn.commit()
+    finally:
+        release_session_conn(conn)
+
+
+def _load_propelio_sold_points(job_id: str) -> list[dict[str, Any]] | None:
+    conn = get_session_conn()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT propelio_sold_points
+                FROM cached_jobs
+                WHERE job_id = %s
+                  AND (expires_at IS NULL OR expires_at > now())
+                """,
+                (job_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            value = row.get("propelio_sold_points")
+            return value if isinstance(value, list) else None
     finally:
         release_session_conn(conn)
 
@@ -1268,6 +1325,15 @@ def _safe_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _run_propelio_query_with_conn(parcel_input: list[tuple[str, str]]) -> dict[tuple[str, str], dict]:
+    """Run propelio sold-by-parcels query with session connection management."""
+    conn = get_session_conn()
+    try:
+        return query_propelio_sold_for_parcels(conn, parcel_input)
+    finally:
+        release_session_conn(conn)
 
 
 def _google_maps_link(row: dict[str, Any]) -> str:
@@ -2614,18 +2680,53 @@ async def analyze(request: AnalyzeRequest, req: Request, user: dict[str, Any] = 
             detail=f"County query failed for: {', '.join(failed_sources)}. No partial results returned.",
         )
 
-    # Merge rows from all counties, deduplicating by (account_num, county).
+    # Merge rows from all counties and enforce lowercase shortname county tags
+    # for stable Propelio direct-join keying across all four counties.
     all_rows: list[dict[str, Any]] = []
     exempt_set: set[str] = set()
     if dcad_result:
+        for row in dcad_result.parcels:
+            row["county"] = "dcad"
         all_rows.extend(dcad_result.parcels)
         exempt_set.update(dcad_result.exempt_accounts)
     if tad_result:
+        for row in tad_result.parcels:
+            row["county"] = "tad"
         all_rows.extend(tad_result.parcels)
     if collin_result:
+        for row in collin_result.parcels:
+            row["county"] = "collin"
         all_rows.extend(collin_result.parcels)
     if denton_result:
+        for row in denton_result.parcels:
+            row["county"] = "denton"
         all_rows.extend(denton_result.parcels)
+
+    # Fetch Propelio sold records for these parcels (direct-join by (account_num, county))
+    propelio_sold_points: list[dict[str, Any]] | None = None
+    if include_sold and all_rows:
+        parcel_input = [
+            (row["account_num"], row["county"])
+            for row in all_rows
+            if row.get("account_num") and row.get("county")
+        ]
+        if parcel_input:
+            try:
+                propelio_match_dict = await asyncio.to_thread(
+                    _run_propelio_query_with_conn, parcel_input
+                )
+                propelio_sold_points = [
+                    {"account_num": account_num, "county": county, **comp_dict}
+                    for (county, account_num), comp_dict in propelio_match_dict.items()
+                ]
+            except Exception as exc:
+                logger.warning(
+                    "propelio_sold: analyze-time query failed: %s: %s (parcel_count=%d)",
+                    type(exc).__name__,
+                    exc,
+                    len(parcel_input),
+                )
+                propelio_sold_points = None
 
     if not all_rows:
         _evict_stale_jobs()
@@ -2641,7 +2742,7 @@ async def analyze(request: AnalyzeRequest, req: Request, user: dict[str, Any] = 
             "last_accessed": time.monotonic(),
         }
         try:
-            await asyncio.to_thread(_persist_cached_job_sync, empty_job_id, user_id, [], sold_points, polygon, area_id)
+            await asyncio.to_thread(_persist_cached_job_sync, empty_job_id, user_id, [], sold_points, polygon, area_id, propelio_sold_points=None)
         except Exception as exc:
             logger.warning("Failed to persist job to cache (non-fatal): %s", exc)
         return {
@@ -2735,7 +2836,7 @@ async def analyze(request: AnalyzeRequest, req: Request, user: dict[str, Any] = 
         "last_accessed": time.monotonic(),
     }
     try:
-        await asyncio.to_thread(_persist_cached_job_sync, job_id, user_id, rows, sold_points, polygon, area_id)
+        await asyncio.to_thread(_persist_cached_job_sync, job_id, user_id, rows, sold_points, polygon, area_id, propelio_sold_points=propelio_sold_points)
     except Exception as exc:
         logger.warning("Failed to persist job to cache (non-fatal): %s", exc)
     asyncio.create_task(
@@ -2823,7 +2924,7 @@ async def merge_jobs(request: MergeJobsRequest, req: Request, user: dict[str, An
         "last_accessed": time.monotonic(),
     }
     try:
-        await asyncio.to_thread(_persist_cached_job_sync, new_job_id, user_id, merged_rows, merged_sold_points, [], area_id)
+        await asyncio.to_thread(_persist_cached_job_sync, new_job_id, user_id, merged_rows, merged_sold_points, [], area_id, propelio_sold_points=None)
     except Exception as exc:
         logger.warning("Failed to persist job to cache (non-fatal): %s", exc)
     return {"job_id": new_job_id}
@@ -3045,6 +3146,7 @@ async def download(job_id: str, filename: str | None = None, user: dict[str, Any
     rows = job.get("rows", [])
     redfin_data: dict[str, dict] = job.get("redfin_data", {})
     sold_points: list[dict[str, Any]] = job.get("sold_points", []) or []
+    propelio_sold_points: list[dict[str, Any]] = _load_propelio_sold_points(job_id) or []
     job_saved_area_id = str(job.get("saved_area_id") or "").strip() or None
     csv_share_id = _job_share_id(job_id, job_saved_area_id)
     logger.info("Download job %s: %d parcel rows, %d sold points", job_id, len(rows), len(sold_points))
@@ -3088,6 +3190,13 @@ async def download(job_id: str, filename: str | None = None, user: dict[str, Any
                 best_comp = _sp
         if best_comp is not None:
             comp_by_parcel_key[str(_pr.get("account_num", "") or "")] = best_comp
+
+    propelio_comp_by_parcel_key: dict[tuple[str, str], dict] = {}
+    for comp in propelio_sold_points:
+        county = str(comp.get("county", "") or "").strip().lower()
+        account_num = str(comp.get("account_num", "") or "").strip()
+        if county and account_num:
+            propelio_comp_by_parcel_key[(county, account_num)] = comp
 
     download_name = _normalize_csv_filename(filename)
 
@@ -3188,6 +3297,17 @@ async def download(job_id: str, filename: str | None = None, user: dict[str, Any
                 "Comp Baths",
                 "Comp Days on Market",
                 "Comp Listing URL",
+                "Comp Status",
+                "RF_Comp Sold Price",
+                "RF_Comp Sold Date",
+                "RF_Comp $/sqft",
+                "RF_Comp Year Built",
+                "RF_Comp Living Area (sqft)",
+                "RF_Comp Lot Size (sqft)",
+                "RF_Comp Beds",
+                "RF_Comp Baths",
+                "RF_Comp Days on Market",
+                "RF_Comp Listing URL",
                 "Seed Target",
                 "share_id",
             ]
@@ -3253,7 +3373,12 @@ async def download(job_id: str, filename: str | None = None, user: dict[str, Any
                 or str(row.get("parcel_key", "") or "").strip()
             )
 
-            comp = comp_by_parcel_key.get(str(row.get("account_num", "") or ""))
+            row_key = (
+                str(row.get("county", "") or "").strip().lower(),
+                str(row.get("account_num", "") or "").strip(),
+            )
+            propelio_comp = propelio_comp_by_parcel_key.get(row_key)
+            rf_comp = comp_by_parcel_key.get(str(row.get("account_num", "") or ""))
 
             writer.writerow(
                 [
@@ -3342,16 +3467,27 @@ async def download(job_id: str, filename: str | None = None, user: dict[str, Any
                     row.get("deed_number", "") or "",
                     row.get("deed_date", "") or "",
                     row.get("subdivision", "") or "",
-                    round(_safe_float(comp.get("sold_price")), 0) if comp and _safe_float(comp.get("sold_price")) is not None else "",
-                    (comp.get("sold_date", "") or "") if comp else "",
-                    round(_safe_float(comp.get("price_per_sqft")), 0) if comp and _safe_float(comp.get("price_per_sqft")) is not None else "",
-                    int(_safe_float(comp.get("yr_built"))) if comp and _safe_float(comp.get("yr_built")) not in (None, 0.0) else "",
-                    int(_safe_float(comp.get("sqft"))) if comp and _safe_float(comp.get("sqft")) not in (None, 0.0) else "",
-                    round(_safe_float(comp.get("lot_sqft")), 0) if comp and _safe_float(comp.get("lot_sqft")) is not None else "",
-                    int(_safe_float(comp.get("beds"))) if comp and _safe_float(comp.get("beds")) not in (None, 0.0) else "",
-                    int(_safe_float(comp.get("baths"))) if comp and _safe_float(comp.get("baths")) not in (None, 0.0) else "",
-                    int(_safe_float(comp.get("dom"))) if comp and _safe_float(comp.get("dom")) not in (None, 0.0) else "",
-                    (comp.get("listing_url", "") or "") if comp else "",
+                    round(_safe_float(propelio_comp.get("sold_price")), 0) if propelio_comp and _safe_float(propelio_comp.get("sold_price")) is not None else "",
+                    (propelio_comp.get("sold_date", "") or "") if propelio_comp else "",
+                    round(_safe_float(propelio_comp.get("price_per_sqft")), 0) if propelio_comp and _safe_float(propelio_comp.get("price_per_sqft")) is not None else "",
+                    int(_safe_float(propelio_comp.get("yr_built"))) if propelio_comp and _safe_float(propelio_comp.get("yr_built")) not in (None, 0.0) else "",
+                    int(_safe_float(propelio_comp.get("sqft"))) if propelio_comp and _safe_float(propelio_comp.get("sqft")) not in (None, 0.0) else "",
+                    round(_safe_float(propelio_comp.get("lot_sqft")), 0) if propelio_comp and _safe_float(propelio_comp.get("lot_sqft")) is not None else "",
+                    int(_safe_float(propelio_comp.get("beds"))) if propelio_comp and _safe_float(propelio_comp.get("beds")) not in (None, 0.0) else "",
+                    int(_safe_float(propelio_comp.get("baths"))) if propelio_comp and _safe_float(propelio_comp.get("baths")) not in (None, 0.0) else "",
+                    int(_safe_float(propelio_comp.get("dom"))) if propelio_comp and _safe_float(propelio_comp.get("dom")) not in (None, 0.0) else "",
+                    (propelio_comp.get("listing_url", "") or "") if propelio_comp else "",
+                    (propelio_comp.get("status", "") or "") if propelio_comp else "",
+                    round(_safe_float(rf_comp.get("sold_price")), 0) if rf_comp and _safe_float(rf_comp.get("sold_price")) is not None else "",
+                    (rf_comp.get("sold_date", "") or "") if rf_comp else "",
+                    round(_safe_float(rf_comp.get("price_per_sqft")), 0) if rf_comp and _safe_float(rf_comp.get("price_per_sqft")) is not None else "",
+                    int(_safe_float(rf_comp.get("yr_built"))) if rf_comp and _safe_float(rf_comp.get("yr_built")) not in (None, 0.0) else "",
+                    int(_safe_float(rf_comp.get("sqft"))) if rf_comp and _safe_float(rf_comp.get("sqft")) not in (None, 0.0) else "",
+                    round(_safe_float(rf_comp.get("lot_sqft")), 0) if rf_comp and _safe_float(rf_comp.get("lot_sqft")) is not None else "",
+                    int(_safe_float(rf_comp.get("beds"))) if rf_comp and _safe_float(rf_comp.get("beds")) not in (None, 0.0) else "",
+                    int(_safe_float(rf_comp.get("baths"))) if rf_comp and _safe_float(rf_comp.get("baths")) not in (None, 0.0) else "",
+                    int(_safe_float(rf_comp.get("dom"))) if rf_comp and _safe_float(rf_comp.get("dom")) not in (None, 0.0) else "",
+                    (rf_comp.get("listing_url", "") or "") if rf_comp else "",
                     "yes" if str(row.get("account_num", "") or "") in seed_account_nums else "",
                     csv_share_id,
                 ]

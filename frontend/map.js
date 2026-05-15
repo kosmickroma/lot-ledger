@@ -60,11 +60,14 @@ const CLICK_MODE_STORAGE_KEY = "lot_ledger_click_mode";
 const SIDEBAR_SECTION_STATE_STORAGE_KEY = "lot_ledger_sidebar_sections.v1";
 
 const DEFAULT_FILTERS = {
-  // R.F. Listings + R.F. Sold default OFF — those are the legacy Redfin
-  // overlays. Propelio is the primary comps surface now; legacy stays
-  // around as opt-in for sanity-check or deprecation review.
+  // R.F. Active stays opt-in (Legacy Filters card).
+  // `sold` drives include_sold on the analyze endpoint, which now feeds BOTH
+  // the Propelio direct-join (primary Comp_* columns) and the Redfin nearest
+  // (RF_Comp_* far-right block) in the CSV export. Defaulting it ON so the
+  // visible #toggle-sold checkbox (HTML checked by default) and the analyze
+  // request stay in sync — see the toggle-sold change handler below.
   active: false,
-  sold: false,
+  sold: true,
   off_market: true,
   vacant: true,
   multifamily: false,
@@ -1088,11 +1091,14 @@ function restoreFilterState(state) {
   }
   if (Number(state.v || 0) !== 1) return;
   if (state.checkboxes && typeof state.checkboxes === "object") Object.assign(filterState, state.checkboxes);
-  // Legacy R.F. filters never auto-enable from saved state — mirrors the
-  // localStorage-restore guard above. Old saved areas baked R.F. on when
-  // those filters lived in Map Filters; chunk 2 made them opt-in only.
+  // Legacy R.F. Active filter never auto-enables from saved state — mirrors the
+  // localStorage-restore guard above. Old saved areas baked R.F. Active on when
+  // it lived in Map Filters; chunk 2 made it opt-in only. The Sold filter is
+  // no longer force-reset here — Phase 6 of the CSV export refactor enabled
+  // sold-comp inclusion in analyze by default when the user opts in via the
+  // filter checkbox, and forcing it off on every load prevented include_sold
+  // from ever firing on the analyze endpoint.
   filterState.active = false;
-  filterState.sold = false;
   if (state.numeric && typeof state.numeric === "object") Object.assign(numericFilters, state.numeric);
   if (state.comp && typeof state.comp === "object") Object.assign(compNumericFilters, state.comp);
   if (state.sold && typeof state.sold === "object") {
@@ -1155,14 +1161,14 @@ function loadFilters() {
   } catch (_) {
     filterState = { ...DEFAULT_FILTERS };
   }
-  // Legacy R.F. filters (active = R.F. Listings, sold = R.F. Sold) are
-  // tucked away in the collapsed "Legacy Filters" card and should ONLY
-  // turn on when the user opts in by clicking them. localStorage might
-  // hold stale `true` values from before the 2026-05-10 restructure when
-  // these lived in Map Filters and defaulted on — force them off on
-  // every load so they never fire on a search without explicit opt-in.
+  // Legacy R.F. Active filter is tucked away in the collapsed "Legacy Filters"
+  // card and should ONLY turn on when the user opts in by clicking it.
+  // localStorage might hold a stale `true` from before the 2026-05-10
+  // restructure when it lived in Map Filters and defaulted on — force off on
+  // every load so it never fires on a search without explicit opt-in.
+  // The Sold filter is no longer force-reset here — see the matching guard
+  // above for the rationale (CSV export refactor Phase 6).
   filterState.active = false;
-  filterState.sold = false;
 }
 
 function saveFilters() {
@@ -1172,6 +1178,16 @@ function saveFilters() {
 }
 
 function syncFilterInputs() {
+  // Mirror the visible #toggle-sold checkbox into filterState.sold on load,
+  // so users whose localStorage has stale sold:false from older sessions
+  // pick up the new default (the HTML #toggle-sold defaults to checked).
+  // After this sync, the analyze include_sold flag will match what the user
+  // actually sees in the UI.
+  const visibleSoldToggle = document.getElementById("toggle-sold");
+  if (visibleSoldToggle) {
+    filterState.sold = Boolean(visibleSoldToggle.checked);
+  }
+
   Object.entries(FILTER_INPUT_IDS).forEach(([key, id]) => {
     const input = document.getElementById(id);
     if (input) input.checked = Boolean(filterState[key]);
@@ -2850,7 +2866,7 @@ async function restoreSavedArea(area, options = {}) {
 
   if (map.hasLayer(browseLayer)) browseLayer.remove();
 
-  const includeRedfin = true;
+  const includeRedfin = Boolean(filterState.active);
   const includeSold = Boolean(filterState.sold);
   document.getElementById("sidebar-results")?.classList.add("hidden");
   document.getElementById("sidebar-loading")?.classList.remove("hidden");
@@ -7650,7 +7666,7 @@ async function runAnalysis(polygon, includeRedfin, includeSold, options = {}) {
 
 async function refreshExpiredJob() {
   if (!lastPolygon || lastPolygon.length < 3) return false;
-  const includeRedfin = true;
+  const includeRedfin = Boolean(filterState.active);
   const includeSold = Boolean(filterState.sold);
   try {
     const data = await runAnalysis(lastPolygon, includeRedfin, includeSold);
@@ -7761,7 +7777,7 @@ map.on("draw:created", async (e) => {
   // Instructions section removed; results manage visibility
   document.getElementById("sidebar-results").classList.add("hidden");
   document.getElementById("sidebar-loading").classList.remove("hidden");
-  const includeRedfin = true;
+  const includeRedfin = Boolean(filterState.active);
   const includeSold = Boolean(filterState.sold);
   document.getElementById("redfin-status").textContent = "Running analysis...";
   drawLayer.addLayer(e.layer);
@@ -8417,6 +8433,13 @@ async function rerunWithSold() {
 
 document.getElementById("toggle-sold")?.addEventListener("change", async (e) => {
   soldLayerVisible = e.target.checked;
+
+  // Keep analyze filterState.sold in sync with the visible toggle — the
+  // hidden #filter-sold legacy checkbox is effectively unreachable for
+  // most users, so this one is the de-facto user-facing source of truth
+  // for whether subsequent analyze requests include sold comps.
+  filterState.sold = e.target.checked;
+  saveFilters();
 
   if (soldLayerVisible && !lastIncludedSold && lastPolygon) {
     await rerunWithSold();
