@@ -60,11 +60,14 @@ const CLICK_MODE_STORAGE_KEY = "lot_ledger_click_mode";
 const SIDEBAR_SECTION_STATE_STORAGE_KEY = "lot_ledger_sidebar_sections.v1";
 
 const DEFAULT_FILTERS = {
-  // R.F. Listings + R.F. Sold default OFF — those are the legacy Redfin
-  // overlays. Propelio is the primary comps surface now; legacy stays
-  // around as opt-in for sanity-check or deprecation review.
+  // R.F. Active stays opt-in (Legacy Filters card).
+  // `sold` drives include_sold on the analyze endpoint, which now feeds BOTH
+  // the Propelio direct-join (primary Comp_* columns) and the Redfin nearest
+  // (RF_Comp_* far-right block) in the CSV export. Defaulting it ON so the
+  // visible #toggle-sold checkbox (HTML checked by default) and the analyze
+  // request stay in sync — see the toggle-sold change handler below.
   active: false,
-  sold: false,
+  sold: true,
   off_market: true,
   vacant: true,
   multifamily: false,
@@ -1175,6 +1178,16 @@ function saveFilters() {
 }
 
 function syncFilterInputs() {
+  // Mirror the visible #toggle-sold checkbox into filterState.sold on load,
+  // so users whose localStorage has stale sold:false from older sessions
+  // pick up the new default (the HTML #toggle-sold defaults to checked).
+  // After this sync, the analyze include_sold flag will match what the user
+  // actually sees in the UI.
+  const visibleSoldToggle = document.getElementById("toggle-sold");
+  if (visibleSoldToggle) {
+    filterState.sold = Boolean(visibleSoldToggle.checked);
+  }
+
   Object.entries(FILTER_INPUT_IDS).forEach(([key, id]) => {
     const input = document.getElementById(id);
     if (input) input.checked = Boolean(filterState[key]);
@@ -8420,6 +8433,13 @@ async function rerunWithSold() {
 
 document.getElementById("toggle-sold")?.addEventListener("change", async (e) => {
   soldLayerVisible = e.target.checked;
+
+  // Keep analyze filterState.sold in sync with the visible toggle — the
+  // hidden #filter-sold legacy checkbox is effectively unreachable for
+  // most users, so this one is the de-facto user-facing source of truth
+  // for whether subsequent analyze requests include sold comps.
+  filterState.sold = e.target.checked;
+  saveFilters();
 
   if (soldLayerVisible && !lastIncludedSold && lastPolygon) {
     await rerunWithSold();
