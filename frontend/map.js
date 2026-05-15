@@ -613,6 +613,7 @@ async function _ensureCurrentTargetParcelCoords() {
       if (_sameParcelIdentity(_currentTargetParcel, { county, account })) {
         _currentTargetParcel.lat = lat;
         _currentTargetParcel.lng = lng;
+        _refreshOpenTargetDistanceSurfaces();
         return _currentTargetParcel;
       }
       return null;
@@ -625,6 +626,36 @@ async function _ensureCurrentTargetParcelCoords() {
   })();
 
   return _targetCoordsResolvePromise;
+}
+
+function _refreshOpenTargetDistanceSurfaces() {
+  const popup = map?._popup;
+  if (popup && map.hasLayer(popup)) {
+    let popupParcelProps = _activeParcelPopupState?.props || null;
+    const popupMeta = popup?._source?._lotLedgerPopupMeta;
+    if (!popupParcelProps && popupMeta?.type === "parcel") {
+      const popupAccount = String(popupMeta.accountNum || "").trim();
+      if (popupAccount && Array.isArray(allAnalysisFeatures)) {
+        const matched = allAnalysisFeatures.find(
+          (f) => String(f?.properties?.account_num || "").trim() === popupAccount,
+        );
+        popupParcelProps = matched?.properties || null;
+      }
+    }
+    if (popupParcelProps) {
+      popup.setContent(makePopupHtml(popupParcelProps));
+    }
+  }
+
+  const panel = document.getElementById("parcel-detail-panel");
+  if (panel && panel.classList.contains("is-open") && _activeParcelPopupState?.props) {
+    openParcelDetailPanel(_activeParcelPopupState.props, {
+      latlng: _activeParcelPopupState.latlng || null,
+      matchedComp: _activeParcelPopupState.matchedComp || null,
+      geometry: _activeParcelPopupState.geometry || null,
+      suppressFly: true,
+    });
+  }
 }
 
 function _haversineFeet(lat1, lng1, lat2, lng2) {
@@ -1968,6 +1999,8 @@ function _normalizeSessionRow(session) {
     county_coverage: Array.isArray(session.county_coverage) ? session.county_coverage : [],
     latlngs: Array.isArray(session.latlngs) ? session.latlngs : [],
     filter_state: session.filter_state && typeof session.filter_state === "object" ? session.filter_state : null,
+    originator_parcel_county: String(session.originator_parcel_county || "").trim().toLowerCase() || null,
+    originator_parcel_account_num: String(session.originator_parcel_account_num || "").trim() || null,
     savedAt: session.created_at || new Date().toISOString(),
   };
 }
@@ -3007,6 +3040,18 @@ async function restoreNamedSession(session, options = {}) {
   
   document.getElementById("btn-draw-clear")?.classList.remove("hidden");
   document.getElementById("btn-saved-area-clear")?.classList.remove("hidden");
+
+  if (session.originator_parcel_county && session.originator_parcel_account_num) {
+    _setCurrentTargetParcel({
+      county: session.originator_parcel_county,
+      account: session.originator_parcel_account_num,
+    });
+    void _renderOriginatorTargetStar(
+      session.originator_parcel_county,
+      session.originator_parcel_account_num,
+    );
+  }
+
   const polygon = session.latlngs.map(([lat, lng]) => [lng, lat]);
   lastDrawnLatLngs = session.latlngs;
   lastPolygon = polygon;
