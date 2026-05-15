@@ -34,7 +34,7 @@ from fastapi import Body, Depends, FastAPI, HTTPException, Path as FastAPIPath, 
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from psycopg2.errors import UniqueViolation
-from psycopg2.extras import Json, execute_values
+from psycopg2.extras import Json, RealDictCursor, execute_values
 from pydantic import BaseModel
 
 from api.auth import (
@@ -556,6 +556,10 @@ def _ensure_session_schema() -> None:
                         "cached_jobs_saved_area_id",
                         "ALTER TABLE cached_jobs ADD COLUMN IF NOT EXISTS saved_area_id TEXT REFERENCES saved_areas(area_id) ON DELETE SET NULL",
                     ),
+                    (
+                        "cached_jobs_propelio_sold_points",
+                        "ALTER TABLE cached_jobs ADD COLUMN IF NOT EXISTS propelio_sold_points JSONB",
+                    ),
                     ("idx_cached_jobs_saved_area", "CREATE INDEX IF NOT EXISTS idx_cached_jobs_saved_area ON cached_jobs (saved_area_id)"),
                     (
                         "deep_pull_jobs_net_new_comps",
@@ -611,28 +615,60 @@ def _persist_cached_job_sync(
     sold_points: list[dict[str, Any]],
     polygon: list[list[float]],
     saved_area_id: str | None = None,
+    propelio_sold_points: list[dict[str, Any]] | None = None,
 ) -> None:
     conn = get_session_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(
                 f"""
-                INSERT INTO cached_jobs (job_id, user_id, saved_area_id, rows, sold_points, polygon, expires_at)
-                VALUES (%s, %s, %s, %s, %s, %s, now() + interval '{_JOB_TTL_SECONDS} seconds')
+                INSERT INTO cached_jobs (job_id, user_id, saved_area_id, rows, sold_points, propelio_sold_points, polygon, expires_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, now() + interval '{_JOB_TTL_SECONDS} seconds')
                 ON CONFLICT (job_id) DO UPDATE SET
                     user_id = EXCLUDED.user_id,
                     saved_area_id = COALESCE(EXCLUDED.saved_area_id, cached_jobs.saved_area_id),
                     rows = EXCLUDED.rows,
                     sold_points = EXCLUDED.sold_points,
+                    propelio_sold_points = EXCLUDED.propelio_sold_points,
                     polygon = EXCLUDED.polygon,
                     expires_at = CASE
                         WHEN cached_jobs.expires_at IS NULL THEN NULL
                         ELSE now() + interval '{_JOB_TTL_SECONDS} seconds'
                     END
                 """,
-                (job_id, int(user_id), saved_area_id, Json(rows), Json(sold_points), Json(polygon)),
+                (
+                    job_id,
+                    int(user_id),
+                    saved_area_id,
+                    Json(rows),
+                    Json(sold_points),
+                    Json(propelio_sold_points) if propelio_sold_points is not None else None,
+                    Json(polygon),
+                ),
             )
         conn.commit()
+    finally:
+        release_session_conn(conn)
+
+
+def _load_propelio_sold_points(job_id: str) -> list[dict[str, Any]] | None:
+    conn = get_session_conn()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT propelio_sold_points
+                FROM cached_jobs
+                WHERE job_id = %s
+                  AND (expires_at IS NULL OR expires_at > now())
+                """,
+                (job_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            value = row.get("propelio_sold_points")
+            return value if isinstance(value, list) else None
     finally:
         release_session_conn(conn)
 
