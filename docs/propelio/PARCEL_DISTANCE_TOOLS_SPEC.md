@@ -1,8 +1,17 @@
-# Parcel Distance Tools — Design Spec v1
+# Parcel Distance Tools — Design Spec v1.1
 
-**Status:** Draft pending Copilot deep-dive review, then implementation.
+**Status:** Copilot deep-dive review folded in (2026-05-15). Build-eligible.
 **Branch:** `feat/preview-bundle-2026-05-14` (adds to the OAC fix already on this branch — both ship to preview together)
 **Author:** KK + Copilot (initial brainstorm) + Claude (refinement and spec, 2026-05-15)
+
+## Changes v1 → v1.1 (Copilot review folded in)
+
+1. **§4.2 surface scope (IMPORTANT):** removed "sidebar parcel list rows" — the current sidebar does not render parcel rows. v1 targets parcel popups only.
+2. **§4.5 target lat/lng resolution (IMPORTANT):** added explicit rule for resolving target coordinates once on workspace load + UI behavior during async resolution.
+3. **§5.7 measure-mode click suppression (IMPORTANT, new section):** added explicit central-gate enforcement requirement + validation case that no popup opens from any click path during measure mode.
+4. **§5.2 explicit Clear button (nice-to-have):** added small Clear affordance near the measure button alongside Esc.
+5. **§5.5 Shift-click non-snap modifier (nice-to-have):** noted as deferred behavior.
+6. **§4.3 star icon (nice-to-have):** emoji acceptable for v1; SVG migration noted as deferred polish if preview feedback shows OS inconsistency.
 
 ---
 
@@ -55,15 +64,15 @@ If either condition isn't met (no target, no centroid), the row is hidden (not "
 
 ### 4.2 Where the row appears
 
-Three surfaces in the existing UI:
+**v1 scope: parcel popups only.** The current sidebar (`frontend/map.js:6911` area) does NOT render parcel rows — it only updates count badges and the sold-comp panel. There's no parcel list surface to inject a distance row into.
 
 | Surface | Existing location | New row position |
 |---|---|---|
 | **Parcel popup** (Leaflet popup on click) | `frontend/map.js` parcel popup builder | After address, before owner section |
-| **Sidebar parcel list rows** | The "parcels" panel in the sidebar | Compact form, next to the parcel address |
-| **CSV export** (out of scope for this spec — covered by separate CSV refactor) | — | — |
+| **Sidebar parcel list rows** | **DOES NOT EXIST in current UI** | Out of scope for v1 — defer to whenever a parcel-list surface gets built |
+| **CSV export** | Covered by separate CSV refactor spec | Out of scope for this spec |
 
-For consistency, both popup + sidebar use the same `formatDistanceLabel()` helper.
+Use `formatDistanceLabel()` helper for the popup rendering. When a parcel-list sidebar surface is added in a future feature, the same helper can be reused there.
 
 ### 4.3 Row content
 
@@ -74,6 +83,8 @@ Plain text in the existing styling, with target-star icon prefix to make it visu
 ```
 
 Where `⭐` is the same gold-star glyph already used for the intended-target visual indicator. Maintains visual continuity.
+
+**Star icon: emoji for v1, SVG migration deferred.** Emoji `⭐` is acceptable for v1 — fast to ship, no asset work. If preview feedback shows OS-inconsistent rendering (Windows / Linux / macOS sometimes render emoji differently), migrate to an inline SVG matching the existing gold-star map marker styling in a follow-up.
 
 ### 4.4 The target parcel itself
 
@@ -89,10 +100,34 @@ The intended-target parcel shows a slightly different row:
 
 **Frontend** (`frontend/map.js`). Reasoning:
 
-- The data needed (workspace target lat/lng + each parcel's centroid) is already in the frontend's data structures (loaded with the workspace + parcel data)
+- The data needed (workspace target lat/lng + each parcel's centroid) is in the frontend's data structures (loaded with the workspace + parcel data)
 - Haversine is ~10 lines of JS
 - Avoids server round-trips on every popup open
 - Recomputes for free if the user navigates to a different workspace
+
+### 4.6 Target coordinate resolution
+
+**Important nuance** (Copilot R1 finding): the workspace's target identity (`originator_parcel_county` + `originator_parcel_account_num`) is restored from saved area state BEFORE the target parcel's lat/lng is known. The lat/lng is currently resolved later by the star-render flow (around `map.js:2703`).
+
+Without explicit handling, the distance row could stay hidden during the brief window where the workspace HAS a target but the target's coordinates haven't been resolved yet.
+
+**Implementation rule:**
+
+1. On workspace load: if `originator_parcel_county` + `originator_parcel_account_num` are set but no lat/lng is yet known, trigger a one-time parcel-detail fetch to resolve the coordinates.
+2. Cache the resolved `target_lat` + `target_lng` into the current workspace state alongside the identity fields.
+3. Once cached, distance computation can proceed for all parcel popups.
+4. If a parcel popup is opened DURING resolution (before lat/lng arrives), show no distance row — same as the "no target set" case. Don't show a "loading…" state for v1 — keeps the popup quiet rather than noisy with transient text. The popup-reopen-after-resolve case is rare and the row will appear correctly on the next open.
+
+**UI behavior matrix:**
+
+| Workspace has target identity? | Target lat/lng resolved? | Parcel has centroid? | Distance row shows? |
+|---|---|---|---|
+| No | — | — | Hidden |
+| Yes | No (still resolving) | — | Hidden |
+| Yes | Yes | No | Hidden |
+| Yes | Yes | Yes | **Shown** with distance |
+
+This avoids the "row should show but doesn't" race condition that would otherwise happen on the first popup after loading a workspace.
 
 Shared helper:
 
@@ -141,6 +176,9 @@ While measure mode is on:
 | Third click | Treat as start of a **new measurement**: clear the previous line/markers, plant new start point. |
 | Esc | Cancel any in-progress measurement, clear all measurement layers, exit measure mode. |
 | Click on the measure-mode button again | Same as Esc. |
+| Click on explicit **Clear** button (small "✕" icon next to the measure-mode button) | Clear the current measurement but **stay in measure mode** — useful when the user wants to take another measurement without exiting and re-entering. Discoverability win over Esc-only. |
+
+The explicit Clear button addresses the "user doesn't discover Esc" problem (Copilot R1 finding). Third-click-clears stays the default fast path; Clear button is for users who don't think to click again.
 
 ### 5.3 Single-measurement mode
 
@@ -168,6 +206,8 @@ This gives the user both modes seamlessly:
 - "Parcel A to parcel B" → snap-snap (centroid-to-centroid distance)
 - "Across this empty field" → free-click measurements
 
+**Deferred: Shift-click non-snap modifier.** A future enhancement: holding Shift while clicking inside a parcel polygon would force the literal click point (skip the snap). Useful for measuring "from this specific corner of a parcel" rather than centroid-to-centroid. Not in v1 — adds interaction complexity without clear demand. Documented here so we don't re-derive the idea later.
+
 ### 5.6 Leaflet plumbing
 
 Existing infrastructure to leverage:
@@ -188,14 +228,54 @@ New code surface:
 
 Estimate: ~80-120 lines of new JS in `frontend/map.js`, plus a button in `frontend/index.html` and styles in `frontend/style.css`.
 
+### 5.7 Measure-mode click suppression — central enforcement gate
+
+**Critical implementation rule** (Copilot R1 finding): the current frontend has multiple click entry paths into parcel-detail handling — not a single chokepoint. Specifically:
+
+- `frontend/map.js:8205` — browse-layer hit-testing on click
+- `frontend/map.js:8248` — another click path on parcel features
+- `frontend/map.js:6092` — popup-open path
+
+If we only intercept clicks in ONE of these paths, a parcel popup could still open from another path during measurement, breaking the "measure mode is exclusive" contract.
+
+**Implementation requirement:**
+
+1. Define a single boolean state variable: `_measureModeActive` (initially `false`)
+2. Set it `true` on `toggleMeasureMode()` activation, `false` on deactivation
+3. In EVERY click entry point that could open a parcel popup, add an early-return guard:
+   ```javascript
+   if (_measureModeActive) {
+     handleMeasureClick(latlng);
+     return;  // do not proceed to parcel-popup logic
+   }
+   ```
+4. Or — preferred — centralize parcel-popup-opening behind a single `_openParcelDetailIfAllowed(parcel)` function that does the guard check internally. Then every click path calls that function instead of opening popups directly.
+
+**Validation:** add an explicit manual test case (also called out in §8.2):
+
+- Enter measure mode
+- Click each of: a parcel polygon (Browse mode rendering), a marker, an analyze-mode rendering, a saved-parcel marker
+- Confirm: NO parcel popup opens from any of these clicks while measure mode is active
+- The only thing that happens on click is the measurement points get planted
+
+If any click path bypasses the gate, the spec is violated and needs a fix before merge.
+
 ## 6. UI layout — where the button goes
 
-The map currently has a toolbar / floating-button area near the top-right or top-left of the map canvas (Leaflet's default control position). The "measure" button should:
+The map currently has a toolbar / floating-button area near the top-right or top-left of the map canvas (Leaflet's default control position). Two buttons get added:
 
-- Sit adjacent to the polygon-draw button
-- Use a ruler icon (📏 or SVG equivalent)
-- Title attribute: "Measure distance"
-- Active state: visually distinct (filled background or border ring)
+| Button | Icon | Title | Visible when |
+|---|---|---|---|
+| **Measure** | 📏 (or SVG ruler) | "Measure distance" | Always |
+| **Clear measurement** | ✕ (or X icon) | "Clear current measurement" | Only when measure mode is on AND a measurement exists |
+
+The Measure button:
+- Sits adjacent to the polygon-draw button
+- Active state visually distinct (filled background or border ring)
+
+The Clear button:
+- Appears next to the Measure button only when there's an active measurement to clear
+- Removes the current measurement layers but stays in measure mode (vs Esc which exits)
 
 If the existing toolbar structure doesn't have natural room, KK approves whether to add a new toolbar group or fold into an existing one during implementation review.
 
@@ -253,8 +333,20 @@ Run on the preview URL after deploy:
 4. Click on parcel C — measurement clears, new start point at C
 5. Click on an empty grass area — measurement clears, new start point at click location (no snap)
 6. Click on parcel D — line drawn, distance label visible
-7. Press Esc — measurement clears, measure mode exits
-8. Click measure-mode button again — re-enters measure mode
+7. Click the Clear button — measurement clears but measure mode stays on (cursor still crosshair, button still active)
+8. Click a parcel A again — fresh start point planted
+9. Press Esc — measurement clears, measure mode exits
+10. Click measure-mode button again — re-enters measure mode
+
+**Ruler tool — click suppression test (§5.7):**
+1. Enter measure mode
+2. Click each of the following surfaces, one per attempt:
+   - A parcel polygon in browse mode
+   - A parcel marker in analyze mode
+   - A saved-parcel marker (gold star)
+   - A Propelio comp marker (red/green dot)
+3. **Expected for every one:** NO parcel popup opens; only the measurement points get planted
+4. **If any click opens a popup or comp panel**: measure-mode central-gate is incomplete — spec violation, fix before merge
 
 ### 8.3 Distance-correctness check
 
@@ -279,15 +371,20 @@ Pick two parcels with known addresses about 1 mile apart on the map. Compare the
 - Walking/driving route distance
 - Server-side distance pre-computation for the parcel list (computed on render is fine for now)
 
-## 11. For Copilot's deep-dive review
+## 11. Copilot review — outcomes (2026-05-15)
 
-Focus areas:
+### Round 1 (v1 → v1.1)
 
-1. **§5.5 Snap behavior:** is "snap to parcel centroid when click is inside a polygon" the right default? Or should snapping be only on parcel-click via the parcel list / popup, not on map click?
-2. **§5.2 Third-click behavior:** is "third click starts new measurement" intuitive enough, or should there be an explicit "clear" button + Esc-only-clears?
-3. **§4.2 Sidebar row placement:** the sidebar parcel-list rows are dense already. Does adding a distance line make rows too tall? Should it be a compact inline icon + value like `⭐423` instead of full sentence?
-4. **§4.3 / §5.4 Star icon:** is `⭐` emoji acceptable, or should it be an inline SVG to match the existing gold-star marker styling on the map?
-5. **§5.6 Leaflet plumbing:** any existing leaflet-measure-style libraries that would save us implementing from primitives? (`leaflet-measure`, `leaflet-distance` — worth using or not given we already control the map config?)
-6. **Anything else** that looks fragile or non-obvious before code lands.
+Three IMPORTANTs and four nice-to-haves. No blockers. All addressed in v1.1.
 
-Format findings as `BLOCKER` / `IMPORTANT` / `NICE-TO-HAVE`. Same iteration pattern as previous specs.
+| # | Section | Severity | Resolution |
+|---|---|---|---|
+| 1 | §4.2 | IMPORTANT | Spec claimed "sidebar parcel list rows" but current sidebar doesn't render a parcel list — only count badges and sold-comp panel. Reworded to **popup-only for v1**; sidebar deferred to whenever a parcel-list surface gets built. |
+| 2 | §4.5 → §4.6 | IMPORTANT | Target identity is restored before lat/lng resolution (the star-render flow resolves coords later). Without explicit rule, distance row would silently hide during the resolution window. Added §4.6 with explicit resolution rule + UI behavior matrix. |
+| 3 | §5.7 (new) | IMPORTANT | Multiple click entry points (map.js:8205, 8248, 6092) means measure-mode click suppression can't live in one place. Added §5.7 with central-gate requirement + new validation case in §8.2 confirming no popup opens from any click path during measure mode. |
+| 4 | §5.2 | NICE-TO-HAVE | Added explicit Clear button next to the measure-mode button (visible only when there's an active measurement). Stays in measure mode (unlike Esc which exits). Addresses Esc-only discoverability concern. |
+| 5 | §5.5 | NICE-TO-HAVE | Noted Shift-click-for-no-snap as deferred enhancement so we don't re-derive the idea. |
+| 6 | §4.3 | NICE-TO-HAVE | Emoji `⭐` acceptable for v1 (fast to ship). Inline SVG migration deferred to follow-up if preview feedback shows OS-inconsistent rendering. |
+| 7 | §5.6 | (confirmed) | Stay with Leaflet primitives — no measurement plugin needed. Current map plumbing is custom and stable. |
+
+Copilot R1 verdict: with §4.2 / §4.6 / §5.7 addressed, **build-eligible**. No further review round needed for the spec — moves to implementation next.
