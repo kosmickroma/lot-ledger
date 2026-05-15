@@ -60,14 +60,10 @@ const CLICK_MODE_STORAGE_KEY = "lot_ledger_click_mode";
 const SIDEBAR_SECTION_STATE_STORAGE_KEY = "lot_ledger_sidebar_sections.v1";
 
 const DEFAULT_FILTERS = {
-  // R.F. Active stays opt-in (Legacy Filters card).
-  // `sold` drives include_sold on the analyze endpoint, which now feeds BOTH
-  // the Propelio direct-join (primary Comp_* columns) and the Redfin nearest
-  // (RF_Comp_* far-right block) in the CSV export. Defaulting it ON so the
-  // visible #toggle-sold checkbox (HTML checked by default) and the analyze
-  // request stay in sync — see the toggle-sold change handler below.
+  // Legacy R.F. filters (Redfin Listed + Redfin Sold) default OFF.
+  // They live in the collapsed Legacy Filters card and are opt-in only.
   active: false,
-  sold: true,
+  sold: false,
   off_market: true,
   vacant: true,
   multifamily: false,
@@ -617,6 +613,7 @@ async function _ensureCurrentTargetParcelCoords() {
       if (_sameParcelIdentity(_currentTargetParcel, { county, account })) {
         _currentTargetParcel.lat = lat;
         _currentTargetParcel.lng = lng;
+        _refreshOpenTargetDistanceSurfaces();
         return _currentTargetParcel;
       }
       return null;
@@ -629,6 +626,36 @@ async function _ensureCurrentTargetParcelCoords() {
   })();
 
   return _targetCoordsResolvePromise;
+}
+
+function _refreshOpenTargetDistanceSurfaces() {
+  const popup = map?._popup;
+  if (popup && map.hasLayer(popup)) {
+    let popupParcelProps = _activeParcelPopupState?.props || null;
+    const popupMeta = popup?._source?._lotLedgerPopupMeta;
+    if (!popupParcelProps && popupMeta?.type === "parcel") {
+      const popupAccount = String(popupMeta.accountNum || "").trim();
+      if (popupAccount && Array.isArray(allAnalysisFeatures)) {
+        const matched = allAnalysisFeatures.find(
+          (f) => String(f?.properties?.account_num || "").trim() === popupAccount,
+        );
+        popupParcelProps = matched?.properties || null;
+      }
+    }
+    if (popupParcelProps) {
+      popup.setContent(makePopupHtml(popupParcelProps));
+    }
+  }
+
+  const panel = document.getElementById("parcel-detail-panel");
+  if (panel && panel.classList.contains("is-open") && _activeParcelPopupState?.props) {
+    openParcelDetailPanel(_activeParcelPopupState.props, {
+      latlng: _activeParcelPopupState.latlng || null,
+      matchedComp: _activeParcelPopupState.matchedComp || null,
+      geometry: _activeParcelPopupState.geometry || null,
+      suppressFly: true,
+    });
+  }
 }
 
 function _haversineFeet(lat1, lng1, lat2, lng2) {
@@ -1178,16 +1205,6 @@ function saveFilters() {
 }
 
 function syncFilterInputs() {
-  // Mirror the visible #toggle-sold checkbox into filterState.sold on load,
-  // so users whose localStorage has stale sold:false from older sessions
-  // pick up the new default (the HTML #toggle-sold defaults to checked).
-  // After this sync, the analyze include_sold flag will match what the user
-  // actually sees in the UI.
-  const visibleSoldToggle = document.getElementById("toggle-sold");
-  if (visibleSoldToggle) {
-    filterState.sold = Boolean(visibleSoldToggle.checked);
-  }
-
   Object.entries(FILTER_INPUT_IDS).forEach(([key, id]) => {
     const input = document.getElementById(id);
     if (input) input.checked = Boolean(filterState[key]);
@@ -1982,6 +1999,8 @@ function _normalizeSessionRow(session) {
     county_coverage: Array.isArray(session.county_coverage) ? session.county_coverage : [],
     latlngs: Array.isArray(session.latlngs) ? session.latlngs : [],
     filter_state: session.filter_state && typeof session.filter_state === "object" ? session.filter_state : null,
+    originator_parcel_county: String(session.originator_parcel_county || "").trim().toLowerCase() || null,
+    originator_parcel_account_num: String(session.originator_parcel_account_num || "").trim() || null,
     savedAt: session.created_at || new Date().toISOString(),
   };
 }
@@ -3021,6 +3040,18 @@ async function restoreNamedSession(session, options = {}) {
   
   document.getElementById("btn-draw-clear")?.classList.remove("hidden");
   document.getElementById("btn-saved-area-clear")?.classList.remove("hidden");
+
+  if (session.originator_parcel_county && session.originator_parcel_account_num) {
+    _setCurrentTargetParcel({
+      county: session.originator_parcel_county,
+      account: session.originator_parcel_account_num,
+    });
+    void _renderOriginatorTargetStar(
+      session.originator_parcel_county,
+      session.originator_parcel_account_num,
+    );
+  }
+
   const polygon = session.latlngs.map(([lat, lng]) => [lng, lat]);
   lastDrawnLatLngs = session.latlngs;
   lastPolygon = polygon;
@@ -8433,13 +8464,6 @@ async function rerunWithSold() {
 
 document.getElementById("toggle-sold")?.addEventListener("change", async (e) => {
   soldLayerVisible = e.target.checked;
-
-  // Keep analyze filterState.sold in sync with the visible toggle — the
-  // hidden #filter-sold legacy checkbox is effectively unreachable for
-  // most users, so this one is the de-facto user-facing source of truth
-  // for whether subsequent analyze requests include sold comps.
-  filterState.sold = e.target.checked;
-  saveFilters();
 
   if (soldLayerVisible && !lastIncludedSold && lastPolygon) {
     await rerunWithSold();

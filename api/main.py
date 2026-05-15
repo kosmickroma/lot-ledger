@@ -3571,10 +3571,12 @@ async def list_sessions(user: dict[str, Any] = Depends(get_current_user)) -> dic
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT session_id, name, parcel_count, county_coverage, filter_state, polygon, created_at
-                FROM analysis_sessions
-                WHERE user_id = %s AND name IS NOT NULL
-                ORDER BY created_at DESC
+                SELECT s.session_id, s.name, s.parcel_count, s.county_coverage, s.filter_state, s.polygon, s.created_at,
+                       sa.originator_parcel_county, sa.originator_parcel_account_num
+                FROM analysis_sessions s
+                LEFT JOIN saved_areas sa ON sa.area_id = s.saved_area_id
+                WHERE s.user_id = %s AND s.name IS NOT NULL
+                ORDER BY s.created_at DESC
                 """,
                 (uid,),
             )
@@ -3589,6 +3591,8 @@ async def list_sessions(user: dict[str, Any] = Depends(get_current_user)) -> dic
                     "filter_state": row[4] if isinstance(row[4], dict) else None,
                     "latlngs": polygon_latlngs,
                     "created_at": row[6].isoformat() if row[6] else None,
+                    "originator_parcel_county": str(row[7] or "").strip().lower() or None,
+                    "originator_parcel_account_num": str(row[8] or "").strip() or None,
                 })
     finally:
         release_session_conn(conn)
@@ -3600,14 +3604,26 @@ async def get_session_data(session_id: str, user: dict[str, Any] = Depends(get_c
     """Return a named session's full parcel data from cached_jobs (same shape as /api/analyze)."""
     uid = int(user["id"])
     conn = get_session_conn()
+    session_name: str | None = None
+    originator_county: str | None = None
+    originator_account: str | None = None
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT name FROM analysis_sessions WHERE session_id = %s AND user_id = %s AND name IS NOT NULL",
+                """
+                SELECT s.name, sa.originator_parcel_county, sa.originator_parcel_account_num
+                FROM analysis_sessions s
+                LEFT JOIN saved_areas sa ON sa.area_id = s.saved_area_id
+                WHERE s.session_id = %s AND s.user_id = %s AND s.name IS NOT NULL
+                """,
                 (session_id, uid),
             )
-            if cur.fetchone() is None:
+            row = cur.fetchone()
+            if row is None:
                 raise HTTPException(status_code=404, detail="Named session not found")
+            session_name = str(row[0] or "").strip() or None
+            originator_county = str(row[1] or "").strip().lower() or None
+            originator_account = str(row[2] or "").strip() or None
     finally:
         release_session_conn(conn)
 
@@ -3621,6 +3637,10 @@ async def get_session_data(session_id: str, user: dict[str, Any] = Depends(get_c
     features, counts = _build_features_from_rows(rows)
     return {
         "type": "FeatureCollection",
+        "session_id": session_id,
+        "name": session_name,
+        "originator_parcel_county": originator_county,
+        "originator_parcel_account_num": originator_account,
         "features": features,
         "counts": counts,
         "sold_points": sold_points,
