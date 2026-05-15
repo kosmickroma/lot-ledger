@@ -6,9 +6,9 @@
 #       normalized rows ready for the CSV writer.
 #
 # Connects to:
-#   api/main.py        - CSV export calls query_propelio_sold_in_polygon()
-#   api.config         - get_session_conn() / release_session_conn()
-#   api.main           - _safe_float()
+#   api.main.py        - CSV export calls query_propelio_sold_in_polygon();
+#                        caller manages the session connection (see
+#                        _run_propelio_query_with_conn).
 
 from __future__ import annotations
 
@@ -18,9 +18,21 @@ from typing import Any
 
 from psycopg2.extras import RealDictCursor
 
-from api.main import _safe_float
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_float(value: Any) -> float | None:
+    """Reuse of _safe_float pattern from api/main.py:1264-1270 to avoid circular import.
+    
+    Safely coerce a value to float. Returns None if value is None or coercion fails.
+    """
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def query_propelio_sold_in_polygon(
@@ -181,23 +193,36 @@ def _validate_polygon(polygon: Any) -> tuple[str, int] | None:
 def _normalize_propelio_row(row: dict, distance_meters: float | None) -> dict:
     """Normalize a propelio_comps row into the shape the CSV writer consumes.
 
+    All numeric fields are coerced to float (propelio_comps stores them as
+    NUMERIC which psycopg2 returns as Decimal — not JSON-serializable). The
+    sold_date column comes back as datetime.date and is converted to an ISO
+    string for JSONB storage + CSV writer compatibility.
+
     Args:
-        row: Dict with keys matching the SELECT in _LATERAL_SQL.
+        row: Dict with keys matching the SELECT in the lateral query.
         distance_meters: Computed distance from parcel centroid to comp.
 
     Returns:
         Dict with keys: sold_price, sold_date, yr_built, lot_sqft, sqft, beds,
         baths, dom, listing_url, price_per_sqft, distance_feet.
     """
+    sold_date = row.get("sold_date")
+    if sold_date is not None and hasattr(sold_date, "isoformat"):
+        sold_date = sold_date.isoformat()
+
+    # Coerce every numeric field via _safe_float — propelio_comps schema mixes
+    # INTEGER and NUMERIC types, and NUMERIC values come back from psycopg2 as
+    # Decimal which is not JSON-serializable. Defensive coercion across the
+    # board avoids surprises if schema types are altered later.
     return {
-        "sold_price": row.get("price"),
-        "sold_date": row.get("sold_date"),
-        "yr_built": row.get("year_built"),
-        "lot_sqft": row.get("lot_size"),
-        "sqft": row.get("sqft"),
-        "beds": row.get("beds"),
-        "baths": row.get("baths"),
-        "dom": row.get("dom"),
+        "sold_price": _safe_float(row.get("price")),
+        "sold_date": sold_date,
+        "yr_built": _safe_float(row.get("year_built")),
+        "lot_sqft": _safe_float(row.get("lot_size")),
+        "sqft": _safe_float(row.get("sqft")),
+        "beds": _safe_float(row.get("beds")),
+        "baths": _safe_float(row.get("baths")),
+        "dom": _safe_float(row.get("dom")),
         "listing_url": "",  # v1: hard-coded blank per spec
         "price_per_sqft": _compute_price_per_sqft(row.get("price"), row.get("sqft")),
         "distance_feet": (distance_meters * 3.28084) if distance_meters is not None else None,

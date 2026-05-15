@@ -66,6 +66,7 @@ from api.counties.dcad import SPTD_LABELS, _estimate_front_depth, build_feature,
 from api.counties.denton import _classify_denton, _normalize_denton_row, query_denton_parcels
 from api.counties.tad import _normalize_tad_row, _classify_tad, query_tad_parcels
 from api.geo import polygon_bbox
+from api.propelio.csv_match import query_propelio_sold_in_polygon
 from api.propelio.routes import router as propelio_router
 from api.redfin import normalize_addr_key
 from api.sold import log_redfin_sold_row_count, query_active_listings, query_sold_parcels
@@ -1304,6 +1305,15 @@ def _safe_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _run_propelio_query_with_conn(parcel_input: list[tuple[str, str, float, float]], polygon: list[list[float]] | None) -> dict[tuple[str, str], dict]:
+    """Run propelio query with session connection management."""
+    conn = get_session_conn()
+    try:
+        return query_propelio_sold_in_polygon(conn, parcel_input, polygon)
+    finally:
+        release_session_conn(conn)
 
 
 def _google_maps_link(row: dict[str, Any]) -> str:
@@ -2651,9 +2661,14 @@ async def analyze(request: AnalyzeRequest, req: Request, user: dict[str, Any] = 
         )
 
     # Merge rows from all counties, deduplicating by (account_num, county).
+    # TAD/Collin/Denton tag their own county at row-build time; DCAD historically
+    # did not (Dallas was the implicit default), so we tag here to keep the
+    # downstream propelio_sold_points keying consistent across all four counties.
     all_rows: list[dict[str, Any]] = []
     exempt_set: set[str] = set()
     if dcad_result:
+        for row in dcad_result.parcels:
+            row.setdefault("county", "Dallas")
         all_rows.extend(dcad_result.parcels)
         exempt_set.update(dcad_result.exempt_accounts)
     if tad_result:
@@ -2662,6 +2677,38 @@ async def analyze(request: AnalyzeRequest, req: Request, user: dict[str, Any] = 
         all_rows.extend(collin_result.parcels)
     if denton_result:
         all_rows.extend(denton_result.parcels)
+
+    # Fetch Propelio sold comps (parallel to Redfin, after all_rows merge)
+    propelio_sold_points: list[dict[str, Any]] | None = None
+    if include_sold and all_rows:
+        parcel_input = [
+            (row["account_num"], row["county"], row["lat"], row["lng"])
+            for row in all_rows
+            if row.get("lat") is not None and row.get("lng") is not None
+        ]
+        if parcel_input:
+            try:
+                propelio_match_dict = await asyncio.to_thread(
+                    _run_propelio_query_with_conn, parcel_input, polygon
+                )
+                # Convert dict[(county, account)] -> dict to list-of-dicts for JSONB storage
+                propelio_sold_points = [
+                    {
+                        "account_num": account_num,
+                        "county": county,
+                        **comp_dict,
+                    }
+                    for (county, account_num), comp_dict in propelio_match_dict.items()
+                ]
+            except Exception as exc:
+                # Soft-fail per spec: log warning and continue without Propelio data
+                logger.warning(
+                    "propelio_sold: analyze-time query failed: %s: %s (parcel_count=%d)",
+                    type(exc).__name__,
+                    exc,
+                    len(parcel_input),
+                )
+                propelio_sold_points = None
 
     if not all_rows:
         _evict_stale_jobs()
@@ -2677,7 +2724,7 @@ async def analyze(request: AnalyzeRequest, req: Request, user: dict[str, Any] = 
             "last_accessed": time.monotonic(),
         }
         try:
-            await asyncio.to_thread(_persist_cached_job_sync, empty_job_id, user_id, [], sold_points, polygon, area_id)
+            await asyncio.to_thread(_persist_cached_job_sync, empty_job_id, user_id, [], sold_points, polygon, area_id, propelio_sold_points=None)
         except Exception as exc:
             logger.warning("Failed to persist job to cache (non-fatal): %s", exc)
         return {
@@ -2771,7 +2818,7 @@ async def analyze(request: AnalyzeRequest, req: Request, user: dict[str, Any] = 
         "last_accessed": time.monotonic(),
     }
     try:
-        await asyncio.to_thread(_persist_cached_job_sync, job_id, user_id, rows, sold_points, polygon, area_id)
+        await asyncio.to_thread(_persist_cached_job_sync, job_id, user_id, rows, sold_points, polygon, area_id, propelio_sold_points=propelio_sold_points)
     except Exception as exc:
         logger.warning("Failed to persist job to cache (non-fatal): %s", exc)
     asyncio.create_task(
@@ -2859,7 +2906,7 @@ async def merge_jobs(request: MergeJobsRequest, req: Request, user: dict[str, An
         "last_accessed": time.monotonic(),
     }
     try:
-        await asyncio.to_thread(_persist_cached_job_sync, new_job_id, user_id, merged_rows, merged_sold_points, [], area_id)
+        await asyncio.to_thread(_persist_cached_job_sync, new_job_id, user_id, merged_rows, merged_sold_points, [], area_id, propelio_sold_points=None)
     except Exception as exc:
         logger.warning("Failed to persist job to cache (non-fatal): %s", exc)
     return {"job_id": new_job_id}
