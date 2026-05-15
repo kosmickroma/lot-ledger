@@ -1,7 +1,7 @@
 ---
 title: CSV Export — Propelio Comp Source Refactor
-status: spec v1.3 — live-data verification of parsed_payload completed; URL emission locked to blank
-branch: feat/csv-export-propelio-source
+status: spec v2.0 — as-shipped (8 phases merged to develop, 2026-05-15)
+branch: feat/csv-export-propelio-source (merged via e6cba2a)
 created: 2026-05-15
 related:
   - "[[CSV_EXPORT_REFACTOR_BRAINSTORM_WIP]]"
@@ -11,6 +11,8 @@ related:
 ---
 
 # CSV Export — Propelio Comp Source Refactor
+
+> **v2.0 — what actually shipped.** v1.0-v1.3 designed a spatial nearest-neighbor match (PostGIS `LATERAL` + KNN). During implementation we discovered the semantic was wrong: each parcel row in the CSV should reflect that parcel's OWN last Propelio record, NOT a nearby market comparable. We pivoted mid-implementation to a **direct join on `(parcel_account_num, parcel_county)`**. The pre-pivot spatial discussion in §3.5 / §3.6 has been replaced with the actually-shipped logic. The §14 changelog captures the full evolution including two scope additions made after v1.3 lock (Phase 7: `Comp Status` column + pending/for_sale coverage; Phase 8: fix to a separate latent Redfin auto-on bug surfaced during verification).
 
 ## 1. Goal
 
@@ -29,34 +31,34 @@ Root cause is two compounding issues:
 
 ## 3. Design
 
-### 3.1 Column layout
+### 3.1 Column layout (as shipped)
 
-The current CSV has 94 columns. After this refactor it has approximately **105 columns**. The two trailing columns today are `Seed Target` and `share_id` (in that order) at `api/main.py:3191-3192`. **`share_id` must stay the last column** to protect any downstream consumer that reads positionally from the right edge. The RF_ block is inserted just before `Seed Target`.
+Pre-refactor CSV had 94 columns. As shipped: **105 columns** (94 + 1 status flag + 10 RF_Comp_*). The `Comp Distance (ft)` column originally proposed in v1.1 was dropped in the v2.0 pivot — the direct-join semantic doesn't have a "distance to nearby comp" concept. `share_id` remains the absolute last column to protect downstream positional readers.
 
 | Position (left → right) | Block | Source | Notes |
 |---|---|---|---|
 | Existing | Parcel data (county, address, lot dims, etc.) | Parcel DB | Untouched |
-| **Existing 10 `Comp_*` cols (repurposed)** | **Propelio (primary)** | `propelio_comps`, polygon-bounded, closest match | Was Redfin; now MLS truth |
-| **NEW: `Comp Distance (ft)`** | **Propelio match distance** | Computed via PostGIS `ST_Distance` from parcel centroid | Match-quality signal for analysts |
+| **Existing 10 `Comp_*` cols (repurposed)** | **Propelio (primary)** | `propelio_comps`, direct-join on (account_num, county), most-recent record wins regardless of status | Was Redfin nearest-comp; now per-parcel Propelio record |
+| **NEW: `Comp Status` (Phase 7)** | **Propelio record type** | The matched record's `status` field — `sold` / `for_sale` / `pending` / blank | Tells analyst which kind of price they're looking at. `sold_date` only populated for `sold` rows. |
 | Existing middle cols | unchanged | unchanged | unchanged |
-| **NEW block: 10 `RF_Comp_*` cols** | **Redfin (auxiliary)** | `query_sold_parcels` (unchanged code path) | Was the old `Comp_*` data, now relabeled. Strip in Excel if undesired. |
+| **NEW block: 10 `RF_Comp_*` cols** | **Redfin (auxiliary)** | `query_sold_parcels` (unchanged code path, Redfin nearest-comp within ~150m) | Auxiliary reference. Strip in Excel if undesired. |
 | `Seed Target` | unchanged | unchanged | Stays in original position |
 | `share_id` | unchanged | unchanged | **Must remain the final column** |
 
-**The `RF_` prefix** is plain underscore — `RF_Comp_Sold_Price`, `RF_Comp_Sold_Date`, etc. Avoids periods that occasionally trip Excel formula parsers.
+**The `RF_` prefix** is plain underscore — `RF_Comp Sold Price`, `RF_Comp Sold Date`, etc. Avoids periods that occasionally trip Excel formula parsers.
 
 **The `Redfin List Price` column** (active listings, not sold) is independent at `api/main.py:3109` and stays untouched — different data path.
 
-### 3.2 Match algorithm for the Propelio block
+### 3.2 Match algorithm (as shipped — direct join, NOT spatial)
 
 For each workspace:
 
-1. Query `propelio_comps` for rows where `status = 'sold'` AND `ST_Within(geom, workspace_polygon)`. Mirrors the gold-standard pattern at `api/propelio/archive.py:598-599`.
-2. For each parcel in the workspace, find the **closest** in-polygon Propelio sold comp via SQL lateral nearest using `ST_Distance` on geography. No radius cap — if it's in the polygon, it's eligible.
-3. Distance reference point is the **parcel centroid** (existing lat/lng we already store). Not polygon edge — keeps the math consistent with how the rest of the app measures distance (target-star, popup distance row, etc.).
-4. Fill the 10 `Comp_*` columns inline using a normalizer that maps Propelio row shape → existing CSV writer dict shape (see §3.4).
-5. Write the new `Comp Distance (ft)` column with the computed distance in feet.
-6. If a polygon has zero in-polygon Propelio sold comps → every parcel's Propelio Comp_* cells stay blank and `Comp Distance (ft)` stays blank. **No fallback to Redfin or anywhere else.** The `RF_*` block on the far right is independent and may or may not have data on the same row.
+1. Query `propelio_comps` filtered by `(parcel_account_num, parcel_county) IN ((acct, county), ...)` for the workspace's parcels. No spatial logic — the parcel set is already polygon-filtered upstream by the analyze pipeline.
+2. `DISTINCT ON (parcel_county, parcel_account_num)` picks one row per parcel. The `ORDER BY parcel_county, parcel_account_num, COALESCE(status_timestamp, sold_date::timestamp, last_seen_at, first_seen_at) DESC` means **most-recent record wins regardless of status** — sold, for_sale, or pending.
+3. The matched row's `status` flows into the new `Comp Status` column (Phase 7); `sold_date` is only populated when `status='sold'` so the column name stays accurate.
+4. `Comp Sold Price` carries the `price` field as-is — for `sold` records this is the closed price; for `for_sale` / `pending` this is the list price. The `Comp Status` flag disambiguates.
+5. Parcels with no matching `propelio_comps` row are absent from the result dict — the writer's `dict.get(...)` returns None and emits blank cells. No fallback to Redfin. The `RF_Comp_*` block (auxiliary, far right) is independent and may or may not have data on the same row.
+6. `Comp Distance (ft)` was dropped during the v2.0 pivot — direct-join semantic has no "distance" concept.
 
 ### 3.3 Cache architecture
 
@@ -74,14 +76,15 @@ Field mapping (verified against schema at `api/main.py:297-323` and `scripts/bac
 
 | CSV writer expects | Propelio column / derivation |
 |---|---|
-| `sold_price` | `price` |
-| `sold_date` | `sold_date` (already derived from `close` in existing ingest) |
-| `price_per_sqft` | computed: `_safe_float(price) / _safe_float(sqft)` when both present and `sqft > 0`, else NULL. **Use the existing `_safe_float` helper at `api/main.py:1264-1270`** — do NOT roll a new try/except. |
-| `yr_built` | `year_built` |
-| `lot_sqft` | `lot_size` |
-| `sqft` | `sqft` |
-| `beds` / `baths` / `dom` | direct mapping (same names) |
-| `listing_url` | **Always emit blank in v1.** Live-data verification (2026-05-15, 500 latest `propelio_comps` rows): **zero rows contain `link`, `url`, `detail_url`, or any URL-like top-level key in `parsed_payload`**. The only URLs that exist are inside `parsed_payload.extra.raw.photos[].url` and those point to image binaries, not listing detail pages. Propelio's per-comp listing-page deep link requires a `lead_id` that is **not in `propelio_comps`** data (see `[[project_propelio_listing_url]]`). Per-comp deep linking needs a backend resolver endpoint — v2 scope. For v1, normalizer sets `listing_url = ""` for every Propelio row. The `RF_Comp_Listing URL` (Redfin block, far right) continues to use Redfin's real `listing_url` which is populated in `redfin_sold`. |
+| `status` (NEW, Phase 7) | `status` — drives the Comp Status column. Values: `sold` / `for_sale` / `pending`. |
+| `sold_price` | `price` — for `sold` records this is closed price; for `for_sale`/`pending` it's the list price (Comp Status disambiguates). All numeric NUMERIC values are coerced via `_safe_float` since psycopg2 returns NUMERIC as Decimal (not JSON-serializable). |
+| `sold_date` | `sold_date.isoformat()` ONLY when `status='sold'`; blank otherwise. Keeps the column name accurate. |
+| `price_per_sqft` | computed: `_safe_float(price) / _safe_float(sqft)` when both present and `sqft > 0`, else NULL. |
+| `yr_built` | `year_built` (coerced via `_safe_float`) |
+| `lot_sqft` | `lot_size` (coerced) |
+| `sqft` | `sqft` (coerced) |
+| `beds` / `baths` / `dom` | direct mapping (all coerced via `_safe_float`) |
+| `listing_url` | **Always blank in v1.** Live-data verification (500 latest `propelio_comps`): zero rows contain `link`/`url`/`detail_url` keys in `parsed_payload`. Propelio's per-comp listing-page deep link requires a `lead_id` not in `propelio_comps` data. v2 enhancement needs a backend resolver endpoint (see `[[project_propelio_listing_url]]`). The `RF_Comp_Listing URL` block continues to populate from Redfin's real `listing_url`. |
 
 **Implementation notes.**
 1. `parsed_payload` can be NULL or non-dict on older rows — guard with `isinstance(parsed_payload, dict)` before any key probing for non-URL data.
@@ -89,74 +92,55 @@ Field mapping (verified against schema at `api/main.py:297-323` and `scripts/bac
 
 Anything missing in Propelio → emit empty cell in the CSV. Don't fabricate.
 
-### 3.5 SQL query shape
+### 3.5 SQL query shape (as shipped — direct join)
 
-**Parcel input contract** (explicit — Copilot R3 clarification). `query_sold_parcels` at `api/sold.py:88` is fed a `polygon`, not parcel rows. The new `query_propelio_sold_in_polygon` function takes BOTH parameters explicitly:
-
-- `parcel_input`: a list of tuples `(account_num: str, county: str, lat: float, lng: float)`, derived from the job's parcel rows already materialized in `cached_jobs.rows` JSONB for that `job_id`. The analyze pipeline already has these rows in scope at the point `query_sold_parcels` is called (`api/main.py:2618-2628` merges/dedupes the per-county query results into the unified `all_rows` list). The implementer pulls `(account_num, county, lat, lng)` from those rows.
-- `workspace_polygon_geojson`: the polygon string from `cached_jobs.polygon` (or the in-flight polygon at analyze time). See §3.6 for empty-polygon handling.
-
-**`propelio_comps` schema reminder** (from `api/main.py:297-323`, GIST index at `api/main.py:350`):
-- Coordinate columns are `lat` and `lng` (not `latitude`/`longitude`)
-- There is a materialized `geom` column with a GIST index — use it directly for both filtering and KNN ordering so the planner uses the index. Constructing `ST_MakePoint(lng, lat)` on the comp side bypasses the GIST index.
-
-**Query shape** (parcel list passed in as parameter tuples; LEFT JOIN LATERAL so parcels with no in-polygon match still appear with NULL comp columns):
-
-```sql
-WITH parcels_for_job(account_num, county, lat, lng) AS (
-    VALUES %s  -- psycopg2 mogrify many tuples, or equivalent
-)
-SELECT
-    p.account_num,
-    p.county,
-    p.lat AS parcel_lat,
-    p.lng AS parcel_lng,
-    c.*,
-    ST_Distance(
-        ST_SetSRID(ST_MakePoint(p.lng, p.lat), 4326)::geography,
-        c.geom::geography
-    ) AS distance_meters
-FROM parcels_for_job p
-LEFT JOIN LATERAL (
-    SELECT *
-    FROM propelio_comps pc
-    WHERE pc.status = 'sold'
-      AND ST_Within(pc.geom, ST_GeomFromGeoJSON(%(polygon_geojson)s))
-    ORDER BY pc.geom <-> ST_SetSRID(ST_MakePoint(p.lng, p.lat), 4326)
-    LIMIT 1
-) c ON true;
+**Function signature.**
+```python
+def query_propelio_sold_for_parcels(
+    session_conn,
+    parcel_input: list[tuple[str, str]],  # (account_num, county) tuples
+) -> dict[tuple[str, str], dict]
 ```
 
-Key correctness points:
-- `LEFT JOIN LATERAL ... ON true` is the right form — `CROSS JOIN LATERAL` does NOT take an `ON` clause. `LEFT JOIN LATERAL ... ON true` lets the lateral run for every parcel and yields NULL rows where no comp matched (preserves the "blank cells on empty polygon" promise).
-- `ST_Within(pc.geom, polygon)` filters using the GIST index on `pc.geom`.
-- `ORDER BY pc.geom <-> point LIMIT 1` is the PostGIS KNN pattern that uses the GIST index for ordering.
-- `LIMIT 1` enforces the 1:1 match — honors the no-M2M constraint.
-- Distance is computed once per row in PostGIS using `geography` for accuracy.
-- `distance_meters * 3.28084` → feet for the CSV column.
+No polygon parameter. The parcel set is the polygon set — analyze upstream already filtered.
 
-**Performance expectation.** `propelio_comps` is ~24,847 rows growing. GIST index already exists on `geom` at `api/main.py:350`. Capture `EXPLAIN ANALYZE` on a representative workspace during implementation and confirm both the `ST_Within` filter and the KNN order use the index. Add as release gate (see §7).
+**Parcel input.** A list of `(account_num, county)` tuples derived from the job's `all_rows` after the analyze merge step. County values MUST use Propelio's lowercase shortname convention (`dcad` / `tad` / `collin` / `denton`) — the caller in `api/main.py` enforces this at the merge step (Phase 3).
 
-### 3.6 Empty / invalid polygon handling (Copilot R3 BLOCKER fix)
+**SQL (as shipped in `api/propelio/csv_match.py`):**
 
-**The problem.** The merged-job export path stores `cached_jobs.polygon` as an empty list `[]` at `api/main.py:2819`. Other code paths may also produce NULL or otherwise-invalid polygon values. If the new `query_propelio_sold_in_polygon` or its CSV re-resolve trigger fails on empty/invalid polygons, existing merged-job exports would break — a worst-case silent regression.
+```sql
+SELECT DISTINCT ON (parcel_county, parcel_account_num)
+    parcel_county,
+    parcel_account_num,
+    status,
+    price,
+    sold_date,
+    year_built,
+    lot_size,
+    sqft,
+    beds,
+    baths,
+    dom
+FROM propelio_comps
+WHERE parcel_account_num IS NOT NULL
+  AND parcel_county IS NOT NULL
+  AND status IN ('sold', 'for_sale', 'pending')
+  AND (parcel_account_num, parcel_county) IN %s
+ORDER BY
+    parcel_county,
+    parcel_account_num,
+    COALESCE(status_timestamp, sold_date::timestamp, last_seen_at, first_seen_at) DESC NULLS LAST
+```
 
-**The rule.** `query_propelio_sold_in_polygon` MUST be defensive about polygon validity. The contract:
+**Correctness points:**
+- `(parcel_account_num, parcel_county) IN ((a, c), ...)` does a direct multi-column membership match against the index. Fast for thousands of parcels.
+- `DISTINCT ON (parcel_county, parcel_account_num)` enforces 1:1 — honors the no-M2M constraint.
+- The COALESCE'd ordering picks the most-recent record across status types: if a parcel has both an old sold record AND a current listing, the listing wins (most recent timestamp). User-confirmed design.
+- `parcel_account_num IS NOT NULL AND parcel_county IS NOT NULL` skips ~13% of propelio_comps that lack the join key (data quality issue, not a refactor concern).
 
-| Polygon state | Behavior |
-|---|---|
-| Valid GeoJSON polygon with ≥3 points | Run the lateral query normally. |
-| Empty list `[]` | Skip the SQL entirely. Return empty dict (no matches for any parcel). Log a single info-level message: `"propelio_sold: empty polygon for job_id={...}, skipping fetch"`. Do NOT raise. |
-| `None` / NULL | Same as empty list — skip + log + empty result. |
-| Malformed GeoJSON (e.g., 2-point list, non-list value) | Same as empty list — skip + log + empty result. Do NOT attempt to parse and crash; defensive `try/except (ValueError, TypeError)` around `ST_GeomFromGeoJSON` invocation. |
+**Empty / invalid input handling.** Trivially handled — if `parcel_input` is empty, the function short-circuits with empty result. No polygon-validity guard needed (the v1.2 §3.6 blocker is obsolete in v2.0 because the function no longer takes a polygon).
 
-**Downstream effect.** When the result is empty, the CSV export proceeds normally:
-- Every parcel's Propelio `Comp_*` cells stay blank
-- Every parcel's `Comp Distance (ft)` cell stays blank
-- The `RF_Comp_*` block on the same row is **completely independent** and fills normally from `sold_points` (which has its own behavior on empty polygons — unchanged, not our concern)
-- CSV export succeeds. No HTTP 500. No analyst-facing failure.
-
-**Why this is a blocker, not a warning.** Existing merged-job exports work today. If the new code path crashes or fails on empty polygons, we ship a regression at the moment Mike's data ship needs the CSV path stable. This rule MUST be implemented in the v1 cut.
+**Performance.** No spatial indexes involved. `(parcel_account_num, parcel_county)` lookup is fast even on the full ~30k-row table. South-Dallas test (2369 parcels) returns 78 matches in well under 1s.
 
 ## 4. Code changes (file by file)
 
@@ -309,4 +293,9 @@ Idempotent. Runs in `_ensure_session_schema` on app startup like all our other m
 - **v1.0** (commit `20385a8`): Initial formal spec. Folded Copilot R1 findings on the design summary (scope-creep avoidance, schema-shape drift call-out).
 - **v1.1** (commit `270d21b`): Folded Copilot R2 findings. Fixed broken `CROSS JOIN LATERAL ... ON true` syntax → `LEFT JOIN LATERAL`. Corrected `latitude`/`longitude` → `lat`/`lng`/`geom`. Pinned `sqft` (not `living_sqft`). Removed `lead_id` URL synthesis. Protected `share_id` positional contract (RF_ block before `Seed Target`). Resolved row-fill-untouched contradiction. Added 6 validation tests. Schema migration as own deploy gate.
 - **v1.2** (commit `13c770d`): Folded Copilot R3 + two subagent verification passes (schema verification + architecture history). **Added §3.6 empty-polygon handling (R3 BLOCKER fix)** — merged-job exports with `polygon = []` no longer break. Mandated **named extraction** at cached_jobs loader (was discretionary). Mandated **soft-fail** error handling on the new query (mirror Redfin pattern). Mandated **no top-level `propelio_sold_points`** in analyze response. Pinned **URL fallback probe order** (`link` → `url` → `detail_url`). Removed non-existent `unit`/`city`/`state`/`zip` from normalizer. Added live-data verification step (§7 step 14). Added baseline-CSV capture discipline. Documented absent automated tests as primary risk. Mandated reuse of `_safe_float` + no new abstractions (§10). Added historical commit anchors (§13). Added validation steps #6 (merged-job empty polygon — the blocker test) and #16 (soft-fail confirmation). Fixed validation trailing-column verification (was implicit, now explicit `tail -3` diff in steps 3 + 12).
-- **v1.3** (this commit): Live-data verification of `parsed_payload` URL keys completed. 500 latest `propelio_comps` rows show **zero** rows with `link`/`url`/`detail_url`/etc. — none of the probed keys exist. §3.4 normalizer updated to hard-code `listing_url = ""` for the Propelio block in v1; per-comp deep linking is deferred to v2 pending a backend resolver endpoint (`[[project_propelio_listing_url]]`). §7 step 14 marked complete. §9 risk row updated. §12 open-questions cleared. Spec is fully locked, ready for Phase 1 implementation.
+- **v1.3** (commit `11896f1`): Live-data verification of `parsed_payload` URL keys completed. 500 latest `propelio_comps` rows show **zero** rows with `link`/`url`/`detail_url`/etc. — none of the probed keys exist. §3.4 normalizer updated to hard-code `listing_url = ""` for the Propelio block in v1; per-comp deep linking is deferred to v2 pending a backend resolver endpoint (`[[project_propelio_listing_url]]`). §7 step 14 marked complete. §9 risk row updated. §12 open-questions cleared. Spec locked for implementation.
+- **v2.0** (this commit, merged to develop via `e6cba2a`): **PIVOTED** mid-implementation. v1.x specced a spatial nearest-neighbor match (PostGIS LATERAL + KNN). During Phase 5 verification with KK's real polygons it became clear the semantic was wrong — KK wants each parcel's OWN last Propelio record, not a nearby market comparable. Switched to **direct join on `(parcel_account_num, parcel_county)`**. Net code: simpler. Net spec: §3.2 + §3.5 rewritten, §3.6 empty-polygon guard obsolete (no polygon param anymore). Also folded:
+  - **Phase 7** (`44f1d37`): new `Comp Status` column added between `Comp Listing URL` and the RF_ block. Match expanded from `status='sold'` to `status IN ('sold', 'for_sale', 'pending')` — most-recent across statuses wins. ~15% coverage uplift. `sold_date` stays sold-only so the column name remains accurate. `Comp Distance (ft)` dropped (no longer meaningful under direct-join).
+  - **Phase 5 surprise fix** (`0c3518c`): discovered a long-standing date-not-JSON-serializable bug in `_persist_cached_job_sync` that caused `sold_points` to silently persist as empty for every job since the Redfin sold cache was added. The CSV Comp_* columns being empty was the original motivating "bug"; turned out to be this. Fixed via `_json_default` / `_json_safe` wrappers applied to all JSONB fields in the upsert.
+  - **Phase 6 + 6.1** (`c8c4322`, `8baaac7`): removed `filterState.sold = false` force-reset on page load + sync between visible `#toggle-sold` checkbox and `filterState.sold` so the analyze `include_sold` flag actually matches what the user sees.
+  - **Phase 8** (`2142ece`): unrelated latent bug discovered while diagnosing toggle behavior — three sites in `frontend/map.js` (2869, 7669, 7780) hardcoded `includeRedfin = true`, making the Redfin Active toggle non-functional for every primary analyze path. All read `Boolean(filterState.active)` now. Redfin Active is properly opt-in.
