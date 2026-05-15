@@ -744,7 +744,7 @@ function _setMeasureModeEnabled(enabled) {
   _updateMeasureModeUi();
 }
 
-function _buildDistanceToTargetPopupRow(p, row) {
+function _buildDistanceToTargetMeta(p) {
   const target = _currentTargetParcel;
   if (!target) return "";
 
@@ -753,7 +753,7 @@ function _buildDistanceToTargetPopupRow(p, row) {
   if (!parcelCounty || !parcelAccount) return "";
 
   if (_sameParcelIdentity(target, { county: parcelCounty, account: parcelAccount })) {
-    return row("Distance to Target", "Target parcel");
+    return '<span class="parcel-target-distance">⭐ Target parcel</span>';
   }
 
   const parcelLat = Number(p?.lat);
@@ -767,7 +767,7 @@ function _buildDistanceToTargetPopupRow(p, row) {
     return "";
   }
 
-  return row("Distance to Target", _formatDistanceLabel(_haversineFeet(targetLat, targetLng, parcelLat, parcelLng)));
+  return `<span class="parcel-target-distance">⭐ ${_propelioEscape(_formatDistanceLabel(_haversineFeet(targetLat, targetLng, parcelLat, parcelLng)))}</span>`;
 }
 
 function beginLatestAnalysisRequest() {
@@ -6189,6 +6189,7 @@ function _buildParcelDetailPanelHtml(p, matchedComp) {
         ${compDetails.schools.high ? `<span class="propelio-popup-school"><span class="label">HS</span> ${_propelioEscape(compDetails.schools.high)}</span>` : ""}
       </div>`
     : "";
+  const targetDistanceMeta = _buildDistanceToTargetMeta(p);
 
   const soldCompRows = p.sold_comp
     ? `
@@ -6228,6 +6229,7 @@ function _buildParcelDetailPanelHtml(p, matchedComp) {
             <span class="parcel-panel-status-pill" style="--status-color:${statusColor}">${_propelioEscape(statusText)}</span>
             ${matchedHeaderPrice || activeListingPrice || soldHeaderPrice ? `<span class="parcel-panel-header-price">${matchedHeaderPrice || activeListingPrice || soldHeaderPrice}</span>` : ""}
             ${headerDelta ? `<span class="parcel-panel-header-delta" style="color:${headerDelta.color}">${_propelioEscape(headerDelta.label)} ${_propelioEscape(headerDelta.text)}</span>` : ""}
+            ${targetDistanceMeta}
           </div>
         </div>
         <button type="button" class="parcel-panel-close" aria-label="Close parcel details">&times;</button>
@@ -6438,7 +6440,7 @@ function makePopupHtml(p) {
     verificationByAccount.get(p.account_num) || p.verified_vacant
   );
   const row = (label, val) => `<tr><td class="popup-label">${label}</td><td class="popup-val">${val || "N/A"}</td></tr>`;
-  const targetDistanceRow = _buildDistanceToTargetPopupRow(p, row);
+  const targetDistanceMeta = _buildDistanceToTargetMeta(p);
 
   // Helper — produce a colored over/under-CAD delta row for any price source.
   // dcadRaw is just `${p.tot_val}` (already a "$NNN,NNN" string); numeric is
@@ -6508,13 +6510,16 @@ function makePopupHtml(p) {
         <div class="popup-addr">${p.addr || "Unknown address"}</div>
         <div class="popup-status-row">
           <div class="popup-status" style="color:${statusColor};">${statusText}</div>
-          ${matchedHeaderPrice
-            ? `<div class="popup-sold-price" style="color:${statusColor};">${matchedHeaderPrice}</div>`
-            : activeListingPrice
-              ? `<div class="popup-list-price">${activeListingPrice}</div>`
-              : soldHeaderPrice
-                ? `<div class="popup-sold-price">${soldHeaderPrice}</div>`
-                : ""}
+          <div class="popup-status-meta">
+            ${matchedHeaderPrice
+              ? `<div class="popup-sold-price" style="color:${statusColor};">${matchedHeaderPrice}</div>`
+              : activeListingPrice
+                ? `<div class="popup-list-price">${activeListingPrice}</div>`
+                : soldHeaderPrice
+                  ? `<div class="popup-sold-price">${soldHeaderPrice}</div>`
+                  : ""}
+            ${targetDistanceMeta}
+          </div>
         </div>
         <table class="popup-table">
           ${row("Owner", p.owner)}
@@ -6532,7 +6537,6 @@ function makePopupHtml(p) {
           ${row("School District", p.school)}
           ${row("Year Built", p.yr_built)}
           ${row("Living Area", p.sqft && p.sqft !== "N/A" ? p.sqft + " sf" : "N/A")}
-          ${targetDistanceRow}
           ${redfinListingRow}
           ${soldCompRows}
         </table>

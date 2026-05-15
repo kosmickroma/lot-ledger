@@ -53,7 +53,7 @@ Rationale:
 - Showing both in the middle band avoids cognitive lookup ("how far is 0.24 mi?")
 - Comma-separating thousands (`2,270 ft`) for readability
 
-Implementation: one shared `formatDistanceLabel(meters)` helper in JS. Both features call it.
+Implementation: one shared `formatDistanceLabel(feet)` helper in JS. Both features call it.
 
 ## 4. Feature A — Distance-to-target row
 
@@ -66,25 +66,35 @@ A parcel's distance-to-target row appears **only when both conditions are met**:
 
 If either condition isn't met (no target, no centroid), the row is hidden (not "—" or "unknown" — just absent).
 
-### 4.2 Where the row appears
+### 4.2 Where the distance appears
 
-**v1 scope: parcel popups only.** The current sidebar (`frontend/map.js:6911` area) does NOT render parcel rows — it only updates count badges and the sold-comp panel. There's no parcel list surface to inject a distance row into.
+**v1 scope: parcel detail surfaces only.** The current sidebar does NOT render parcel list rows, but the app does have two parcel-detail surfaces that analysts actively use.
 
-| Surface | Existing location | New row position |
+| Surface | Existing location | New placement |
 |---|---|---|
-| **Parcel popup** (Leaflet popup on click) | `frontend/map.js` parcel popup builder | After address, before owner section |
+| **Parcel popup** (Leaflet popup on click) | `frontend/map.js` parcel popup builder | In the popup status row, right-aligned with status + price |
+| **Parcel side panel** (rich parcel details opened by click) | `frontend/map.js` parcel panel builder | In the header meta row, right-aligned with status + price + delta |
 | **Sidebar parcel list rows** | **DOES NOT EXIST in current UI** | Out of scope for v1 — defer to whenever a parcel-list surface gets built |
 | **CSV export** | Covered by separate CSV refactor spec | Out of scope for this spec |
 
-Use `formatDistanceLabel()` helper for the popup rendering. When a parcel-list sidebar surface is added in a future feature, the same helper can be reused there.
+Use one shared frontend helper so both detail surfaces render the same label and target logic.
 
-### 4.3 Row content
+### 4.3 Status-row placement and content
 
-Plain text in the existing styling, with target-star icon prefix to make it visually anchored:
+The distance is rendered as a compact inline chip in the same horizontal meta/status line as the parcel status and price.
+
+Examples:
 
 ```
-⭐ 423 ft from target
+⭐ 423 ft
+⭐ 1,247 ft (0.24 mi)
+⭐ Target parcel
 ```
+
+Placement rules:
+
+- **Popup:** second line (`popup-status-row`), right-aligned alongside the existing status + price
+- **Side panel:** header meta row (`parcel-panel-header-meta`), right-aligned as the last item in the row
 
 Where `⭐` is the same gold-star glyph already used for the intended-target visual indicator. Maintains visual continuity.
 
@@ -92,10 +102,10 @@ Where `⭐` is the same gold-star glyph already used for the intended-target vis
 
 ### 4.4 The target parcel itself
 
-The intended-target parcel shows a slightly different row:
+The intended-target parcel shows a slightly different label:
 
 ```
-⭐ This is the target parcel
+⭐ Target parcel
 ```
 
 (Distance 0 ft would be confusing — replace with explicit text.)
@@ -119,8 +129,8 @@ Without explicit handling, the distance row could stay hidden during the brief w
 
 1. On workspace load: if `originator_parcel_county` + `originator_parcel_account_num` are set but no lat/lng is yet known, trigger a one-time parcel-detail fetch to resolve the coordinates.
 2. Cache the resolved `target_lat` + `target_lng` into the current workspace state alongside the identity fields.
-3. Once cached, distance computation can proceed for all parcel popups.
-4. If a parcel popup is opened DURING resolution (before lat/lng arrives), show no distance row — same as the "no target set" case. Don't show a "loading…" state for v1 — keeps the popup quiet rather than noisy with transient text. The popup-reopen-after-resolve case is rare and the row will appear correctly on the next open.
+3. Once cached, distance computation can proceed for all parcel detail surfaces.
+4. If a parcel detail surface is opened DURING resolution (before lat/lng arrives), show no distance chip — same as the "no target set" case. Don't show a "loading…" state for v1 — keeps the UI quiet rather than noisy with transient text. The reopen-after-resolve case is rare and the chip will appear correctly on the next open.
 
 **UI behavior matrix:**
 
@@ -164,7 +174,7 @@ When measure mode is **on**:
 - Map cursor changes (CSS `cursor: crosshair`)
 - The measure-mode button is visually active (highlighted ring or filled background)
 - Parcel-click behavior is suppressed (clicks don't open parcel popups in measure mode)
-- Esc key exits measure mode and clears any in-progress measurement
+- Esc clears any in-progress measurement and keeps measure mode active
 
 When measure mode is **off** (default):
 - Standard map interaction (click parcels to open popups, etc.)

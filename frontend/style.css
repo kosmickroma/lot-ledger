@@ -938,6 +938,14 @@ body.is-not-power-user .power-user-only {
   font-weight: 600;
 }
 
+.parcel-target-distance {
+  margin-left: auto;
+  font-weight: 600;
+  color: #0b5394;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 .parcel-panel-close {
   width: 34px;
   height: 34px;
@@ -1544,8 +1552,16 @@ body.is-not-power-user .power-user-only {
   margin-bottom: 0;
 }
 
-.popup-list-price {
+.popup-status-meta {
   margin-left: auto;
+  display: flex;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.popup-list-price {
   font-size: 14px;
   font-weight: 700;
   color: #D92228;
