@@ -938,6 +938,14 @@ body.is-not-power-user .power-user-only {
   font-weight: 600;
 }
 
+.parcel-target-distance {
+  margin-left: auto;
+  font-weight: 600;
+  color: #0b5394;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 .parcel-panel-close {
   width: 34px;
   height: 34px;
@@ -1238,7 +1246,8 @@ body.is-not-power-user .power-user-only {
 
 #btn-county-toggle,
 #btn-zoom-toggle,
-#btn-outside-area-toggle {
+#btn-outside-area-toggle,
+#btn-measure-toggle {
   letter-spacing: 0.04em;
 }
 
@@ -1427,6 +1436,11 @@ body.is-not-power-user .power-user-only {
   pointer-events: none;
 }
 
+#map.measure-active,
+#map.measure-active .leaflet-interactive {
+  cursor: crosshair;
+}
+
 #btn-draw-cancel {
   color: #b94040 !important;
 }
@@ -1439,6 +1453,34 @@ body.is-not-power-user .power-user-only {
 #btn-draw-clear:hover {
   background: #f5f5f5 !important;
   color: #b94040 !important;
+}
+
+#btn-measure-toggle.active {
+  background: #0b5394;
+  color: #fff !important;
+}
+
+#btn-measure-toggle.active:hover {
+  background: #084178;
+}
+
+.measure-distance-label {
+  background: transparent;
+  border: 0;
+}
+
+.measure-distance-label span {
+  display: inline-block;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(11, 83, 148, 0.55);
+  background: rgba(255, 255, 255, 0.94);
+  color: #0b5394;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.22);
 }
 
 .basemap-btn.active {
@@ -1510,8 +1552,16 @@ body.is-not-power-user .power-user-only {
   margin-bottom: 0;
 }
 
-.popup-list-price {
+.popup-status-meta {
   margin-left: auto;
+  display: flex;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.popup-list-price {
   font-size: 14px;
   font-weight: 700;
   color: #D92228;

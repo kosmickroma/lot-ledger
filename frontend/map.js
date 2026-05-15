@@ -472,6 +472,7 @@ const savedParcelClickLayers = {};
 // selection clears the previous. Cleared by any map click. Sources:
 // saved-areas-list click + propelio-comp-list click.
 const selectedOutlineLayer = L.layerGroup().addTo(map);
+const measureLayer = L.layerGroup().addTo(map);
 // Propelio comps rendered from address/polygon pulls.
 // Parcel geometry is preferred (purple glowing footprints); missing geometry
 // falls back to compact purple dots.
@@ -539,6 +540,9 @@ let _currentSessionIsNamed = false;
 let _savedSessionsCache = [];
 let _currentLoadedAreaId = null;
 let _currentTargetParcel = null; // { county, account, lat?, lng? } | null
+let _targetCoordsResolvePromise = null;
+let _measureModeEnabled = false;
+let _measurePoints = [];
 // Tracks the most recent address the user searched or selected via typeahead.
 // Deep Pull uses this as the target address for the experimental run.
 let _lastSearchedAddress = null;
@@ -553,6 +557,218 @@ const _initialAreaShareId = (() => {
 let _pendingAreaShareId = _initialAreaShareId;
 
 const HOA_COLOR = "#b8860b";
+
+function _normalizeTargetParcel(parcel) {
+  if (!parcel || typeof parcel !== "object") return null;
+  const county = String(parcel.county || "").trim().toLowerCase();
+  const account = String(parcel.account || "").trim();
+  if (!county || !account) return null;
+  const lat = Number(parcel.lat);
+  const lng = Number(parcel.lng);
+  return {
+    county,
+    account,
+    lat: Number.isFinite(lat) ? lat : null,
+    lng: Number.isFinite(lng) ? lng : null,
+  };
+}
+
+function _sameParcelIdentity(a, b) {
+  if (!a || !b) return false;
+  return String(a.county || "").trim().toLowerCase() === String(b.county || "").trim().toLowerCase()
+    && String(a.account || "").trim() === String(b.account || "").trim();
+}
+
+function _setCurrentTargetParcel(parcel) {
+  const normalized = _normalizeTargetParcel(parcel);
+  _currentTargetParcel = normalized;
+  _targetCoordsResolvePromise = null;
+  if (
+    normalized
+    && (!Number.isFinite(normalized.lat) || !Number.isFinite(normalized.lng))
+  ) {
+    void _ensureCurrentTargetParcelCoords();
+  }
+}
+
+async function _ensureCurrentTargetParcelCoords() {
+  const target = _currentTargetParcel;
+  if (!target) return null;
+  if (Number.isFinite(target.lat) && Number.isFinite(target.lng)) return target;
+  if (_targetCoordsResolvePromise) return _targetCoordsResolvePromise;
+
+  const county = String(target.county || "").trim().toLowerCase();
+  const account = String(target.account || "").trim();
+  if (!county || !account) return null;
+
+  _targetCoordsResolvePromise = (async () => {
+    try {
+      const resp = await fetch(`/api/parcel/${encodeURIComponent(county)}/${encodeURIComponent(account)}`);
+      if (!resp.ok) return null;
+      const detail = await resp.json();
+      const props = detail.properties || detail;
+      const lat = Number(props.lat);
+      const lng = Number(props.lng);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+
+      if (_sameParcelIdentity(_currentTargetParcel, { county, account })) {
+        _currentTargetParcel.lat = lat;
+        _currentTargetParcel.lng = lng;
+        return _currentTargetParcel;
+      }
+      return null;
+    } catch (err) {
+      console.warn("[target-distance] coord resolve failed:", err);
+      return null;
+    } finally {
+      _targetCoordsResolvePromise = null;
+    }
+  })();
+
+  return _targetCoordsResolvePromise;
+}
+
+function _haversineFeet(lat1, lng1, lat2, lng2) {
+  const toRad = (deg) => (deg * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a = Math.sin(dLat / 2) ** 2
+    + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+  const c = 2 * Math.asin(Math.min(1, Math.sqrt(a)));
+  return 20902231.6 * c;
+}
+
+function _formatDistanceLabel(feet) {
+  if (!Number.isFinite(feet)) return "N/A";
+  const miles = feet / 5280;
+  const roundedFeet = Math.round(feet).toLocaleString("en-US");
+  if (feet < 500) {
+    return `${Math.round(feet)} ft`;
+  }
+  if (feet < 5280) {
+    return `${roundedFeet} ft (${miles.toFixed(2)} mi)`;
+  }
+  return `${miles.toFixed(2)} mi (${roundedFeet} ft)`;
+}
+
+function _updateMeasureModeUi() {
+  const btn = document.getElementById("btn-measure-toggle");
+  if (btn) btn.classList.toggle("active", _measureModeEnabled);
+  const mapContainer = map?.getContainer?.();
+  if (mapContainer) mapContainer.classList.toggle("measure-active", _measureModeEnabled);
+}
+
+function _clearMeasurement() {
+  _measurePoints = [];
+  measureLayer.clearLayers();
+}
+
+function _renderMeasurement() {
+  measureLayer.clearLayers();
+  if (!_measurePoints.length) return;
+
+  _measurePoints.forEach((point) => {
+    L.circleMarker(point, {
+      radius: 5,
+      color: "#0b5394",
+      weight: 2,
+      fillColor: "#e8f3ff",
+      fillOpacity: 1,
+      pane: "markerPane",
+      interactive: false,
+    }).addTo(measureLayer);
+  });
+
+  if (_measurePoints.length < 2) return;
+
+  const [a, b] = _measurePoints;
+  L.polyline([a, b], {
+    color: "#0b5394",
+    weight: 3,
+    opacity: 0.95,
+    dashArray: "6 6",
+    interactive: false,
+  }).addTo(measureLayer);
+
+  const feet = _haversineFeet(a.lat, a.lng, b.lat, b.lng);
+  const mid = L.latLng((a.lat + b.lat) / 2, (a.lng + b.lng) / 2);
+  L.marker(mid, {
+    interactive: false,
+    icon: L.divIcon({
+      className: "measure-distance-label",
+      html: `<span>${_formatDistanceLabel(feet)}</span>`,
+    }),
+  }).addTo(measureLayer);
+}
+
+function _measurementPointFromInteraction(latlng, parcelProps) {
+  const parcelLat = Number(parcelProps?.lat);
+  const parcelLng = Number(parcelProps?.lng);
+  if (Number.isFinite(parcelLat) && Number.isFinite(parcelLng)) {
+    return L.latLng(parcelLat, parcelLng);
+  }
+  if (!latlng) return null;
+  return Array.isArray(latlng) ? L.latLng(latlng[0], latlng[1]) : L.latLng(latlng);
+}
+
+function _handleMeasureInteraction(latlng, parcelProps = null) {
+  if (!_measureModeEnabled) return false;
+  const point = _measurementPointFromInteraction(latlng, parcelProps);
+  if (!point) return true;
+  if (_measurePoints.length >= 2) {
+    _clearMeasurement();
+  }
+  _measurePoints.push(point);
+  _renderMeasurement();
+  return true;
+}
+
+function _setMeasureModeEnabled(enabled) {
+  const next = Boolean(enabled);
+  if (_measureModeEnabled === next) return;
+
+  _measureModeEnabled = next;
+  if (_measureModeEnabled) {
+    const drawHandler = getPolygonDrawHandler();
+    if (drawHandler && drawHandler.enabled()) drawHandler.disable();
+    map.getContainer().classList.remove("drawing-active");
+    drawHelper.classList.add("hidden");
+    document.getElementById("btn-draw")?.classList.remove("active");
+    document.getElementById("btn-draw-cancel")?.classList.add("hidden");
+    closeParcelDetailPanel();
+    map.closePopup();
+    _clearMeasurement();
+  } else {
+    _clearMeasurement();
+  }
+  _updateMeasureModeUi();
+}
+
+function _buildDistanceToTargetMeta(p) {
+  const target = _currentTargetParcel;
+  if (!target) return "";
+
+  const parcelCounty = String(p?.source_county || "").trim().toLowerCase();
+  const parcelAccount = String(p?.account_num || "").trim();
+  if (!parcelCounty || !parcelAccount) return "";
+
+  if (_sameParcelIdentity(target, { county: parcelCounty, account: parcelAccount })) {
+    return '<span class="parcel-target-distance">⭐ Target parcel</span>';
+  }
+
+  const parcelLat = Number(p?.lat);
+  const parcelLng = Number(p?.lng);
+  if (!Number.isFinite(parcelLat) || !Number.isFinite(parcelLng)) return "";
+
+  const targetLat = Number(target.lat);
+  const targetLng = Number(target.lng);
+  if (!Number.isFinite(targetLat) || !Number.isFinite(targetLng)) {
+    void _ensureCurrentTargetParcelCoords();
+    return "";
+  }
+
+  return `<span class="parcel-target-distance">⭐ ${_propelioEscape(_formatDistanceLabel(_haversineFeet(targetLat, targetLng, parcelLat, parcelLng)))}</span>`;
+}
 
 function beginLatestAnalysisRequest() {
   if (_activeAnalysisAbortController) {
@@ -1869,7 +2085,7 @@ async function saveCurrentArea(name) {
   // Mark the just-saved area as the currently-loaded one so the Update button
   // becomes available the moment the user tweaks any filter after saving.
   _clearOriginatorStar();
-  _currentTargetParcel = null;
+  _setCurrentTargetParcel(null);
   _currentLoadedAreaId = normalized.id;
   _syncTabTitle();
   _selectedSavedItemId = normalized.id;
@@ -1877,12 +2093,12 @@ async function saveCurrentArea(name) {
   // Use lat/lng from origin (the pre-save _currentTargetParcel) to skip
   // the /api/parcel fetch round-trip since we already have coordinates.
   if (normalized.originator_parcel_county && normalized.originator_parcel_account_num) {
-    _currentTargetParcel = {
+    _setCurrentTargetParcel({
       county: normalized.originator_parcel_county,
       account: normalized.originator_parcel_account_num,
       lat: origin?.lat,
       lng: origin?.lng,
-    };
+    });
     void _renderOriginatorTargetStar(
       normalized.originator_parcel_county,
       normalized.originator_parcel_account_num,
@@ -1997,7 +2213,7 @@ async function deleteSavedArea(item) {
     _savedAreasCache = _savedAreasCache.filter((a) => a.id !== item.id);
     if (_currentLoadedAreaId === item.id) {
       _clearOriginatorStar();
-      _currentTargetParcel = null;
+      _setCurrentTargetParcel(null);
       _currentLoadedAreaId = null;
       _syncTabTitle();
     }
@@ -2147,6 +2363,11 @@ async function _renderOriginatorTargetStar(county, account, lat, lng) {
     }
   }
 
+  if (_sameParcelIdentity(_currentTargetParcel, { county: c, account: a })) {
+    _currentTargetParcel.lat = resolvedLat;
+    _currentTargetParcel.lng = resolvedLng;
+  }
+
   const icon = L.divIcon({
     className: "saved-target-star is-originator",
     html: `<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false">
@@ -2200,6 +2421,7 @@ function _renderSavedTargetStar(area) {
   const marker = L.marker([lat, lng], { icon: savedTargetStarIcon, pane: "savedTargetStarPane" });
   marker.on("click", async (ev) => {
     L.DomEvent.stopPropagation(ev);
+    if (_handleMeasureInteraction(ev.latlng, area)) return;
     const county = String(area.county || "dcad").trim().toLowerCase();
     const account = String(area.account_num || "").trim();
     if (!account) return;
@@ -2247,6 +2469,7 @@ function _renderSavedParcelOutline(area) {
   });
   clickLayer.on("click", async (ev) => {
     L.DomEvent.stopPropagation(ev);
+    if (_handleMeasureInteraction(ev.latlng, area)) return;
     try {
       const resp = await fetch(`/api/parcel/${county}/${accountNum}`);
       if (!resp.ok) return;
@@ -2320,7 +2543,7 @@ async function saveParcel(account_num, county, addr, lat, lng, geometry) {
   const targetCounty = String(county || "dcad").trim().toLowerCase();
   const targetAccount = String(account_num || "").trim();
   if (targetAccount) {
-    _currentTargetParcel = { county: targetCounty, account: targetAccount, lat, lng };
+    _setCurrentTargetParcel({ county: targetCounty, account: targetAccount, lat, lng });
     void _renderOriginatorTargetStar(targetCounty, targetAccount, lat, lng);
   }
   setActiveItem("Workspace", row.name);
@@ -2695,14 +2918,14 @@ async function restoreSavedArea(area, options = {}) {
     renderSidebar(data.counts, markers);
     applyResultTags(data);
     _clearOriginatorStar();
-    _currentTargetParcel = null;
+    _setCurrentTargetParcel(null);
     _currentLoadedAreaId = area.id;
     _syncTabTitle();
     if (area.originator_parcel_county && area.originator_parcel_account_num) {
-      _currentTargetParcel = {
+      _setCurrentTargetParcel({
         county: area.originator_parcel_county,
         account: area.originator_parcel_account_num,
-      };
+      });
       void _renderOriginatorTargetStar(
         area.originator_parcel_county,
         area.originator_parcel_account_num,
@@ -2751,7 +2974,7 @@ async function restoreNamedSession(session, options = {}) {
   }
   if (rowEl) rowEl.classList.add("row-shimmer");
   _clearOriginatorStar();
-  _currentTargetParcel = null;
+  _setCurrentTargetParcel(null);
   _currentLoadedAreaId = null;
   _syncTabTitle();
   renderSavedAreasList();
@@ -3013,16 +3236,16 @@ function _renderList(sectionId, listId, items) {
           const normalizedFork = _normalizeSavedAreaRow(cloned);
           _savedAreasCache.unshift(normalizedFork);
           _clearOriginatorStar();
-          _currentTargetParcel = null;
+          _setCurrentTargetParcel(null);
           _currentLoadedAreaId = cloned.area_id;
           _syncTabTitle();
           _selectedSavedItemId = cloned.area_id;
           // Carry the originator TARGET star through the fork.
           if (normalizedFork.originator_parcel_county && normalizedFork.originator_parcel_account_num) {
-            _currentTargetParcel = {
+            _setCurrentTargetParcel({
               county: normalizedFork.originator_parcel_county,
               account: normalizedFork.originator_parcel_account_num,
-            };
+            });
             void _renderOriginatorTargetStar(
               normalizedFork.originator_parcel_county,
               normalizedFork.originator_parcel_account_num,
@@ -3315,6 +3538,7 @@ const MapToolbar = L.Control.extend({
     L.DomEvent.on(drawBtn, "click", (e) => {
       L.DomEvent.preventDefault(e);
       if (!_navigationGuardForActiveDeepPull("draw a new area")) return;
+      _setMeasureModeEnabled(false);
       const handler = getPolygonDrawHandler();
       if (!handler) return;
       if (handler.enabled()) {
@@ -3349,6 +3573,16 @@ const MapToolbar = L.Control.extend({
       L.DomEvent.preventDefault(e);
       clearDrawResults();
       clearActiveItem();
+    });
+
+    const measureBtn = L.DomUtil.create("a", "", container);
+    measureBtn.id = "btn-measure-toggle";
+    measureBtn.href = "#";
+    measureBtn.title = "Toggle ruler mode";
+    measureBtn.textContent = "RULR";
+    L.DomEvent.on(measureBtn, "click", (e) => {
+      L.DomEvent.preventDefault(e);
+      _setMeasureModeEnabled(!_measureModeEnabled);
     });
 
     const hoaBtn = L.DomUtil.create("a", "", container);
@@ -4034,10 +4268,18 @@ const PROPELIO_POLYGON_MONTHS = 24;
 
 
 function _updatePropelioStatusCounts(_unusedFullList) {
-  // Compute counts independent of status/OAC toggles — answer "how many
-  // would render per category if this toggle were on, with all other
-  // filters as currently set." Other filters (price, sqft, year,
-  // sold-within, lot, year-built) still apply.
+  // Two-pass count calc per docs/propelio/STATUS_BADGE_OAC_AWARENESS_SPEC.md:
+  //
+  // Pass 1 (status badges): answer "if I turn this status ON with my
+  //   current settings, how many comps will I see?" — honors the user's
+  //   actual OAC (showOutsideArea) toggle state, so out-of-polygon comps
+  //   are excluded when OAC is off.
+  // Pass 2 (OAC badge): informational "how many comps are currently
+  //   out-of-view because OAC is off?" — forces showOutsideArea=true so
+  //   the OAC count reflects the full out-of-polygon population.
+  //
+  // Other filters (price, sqft, year, sold-within, lot, year-built) apply
+  // in both passes via propelioFilterState inheritance.
   if (!window._propelioLast || !Array.isArray(window._propelioLast.comps)) {
     const ids = [
       "prop-count-sold", "prop-count-active", "prop-count-pending",
@@ -4050,25 +4292,48 @@ function _updatePropelioStatusCounts(_unusedFullList) {
     });
     return;
   }
-  // Synthetic filter state: all status toggles + OAC simulated ON.
-  const baselineFilters = {
+  // Pass 1: status counts — honor the user's actual showOutsideArea state.
+  // Each status badge answers: "if I turn this status ON with my current
+  // settings, how many comps will I see right now?" When OAC is off, the
+  // out-of-polygon comps don't render, so they shouldn't be counted here.
+  // See docs/propelio/STATUS_BADGE_OAC_AWARENESS_SPEC.md.
+  const statusBaselineFilters = {
+    ...propelioFilterState,
+    statusSold: true,
+    statusActive: true,
+    statusPending: true,
+    // showOutsideArea NOT forced — inherits from propelioFilterState
+  };
+  const statusVisible = window._propelioLast.comps.filter(
+    (c) => compPassesPropelioFilters(c, statusBaselineFilters)
+  );
+  const statusWinners = _dedupCompsForRender(statusVisible);
+
+  let sold = 0, active = 0, pending = 0;
+  for (const c of statusWinners) {
+    const bucket = _propelioStatusBucket(c);
+    if (bucket === "sold") sold++;
+    else if (bucket === "pending") pending++;
+    else active++;
+  }
+
+  // Pass 2: OAC count — informational, always counts out-of-polygon comps
+  // regardless of toggle state. The OAC badge answers "how many comps are
+  // currently filtered out by OAC being off?"
+  const oacBaselineFilters = {
     ...propelioFilterState,
     statusSold: true,
     statusActive: true,
     statusPending: true,
     showOutsideArea: true,
   };
-  const baselineVisible = window._propelioLast.comps.filter(
-    (c) => compPassesPropelioFilters(c, baselineFilters)
+  const oacVisible = window._propelioLast.comps.filter(
+    (c) => compPassesPropelioFilters(c, oacBaselineFilters)
   );
-  const baselineWinners = _dedupCompsForRender(baselineVisible);
+  const oacWinners = _dedupCompsForRender(oacVisible);
 
-  let sold = 0, active = 0, pending = 0, oac = 0;
-  for (const c of baselineWinners) {
-    const bucket = _propelioStatusBucket(c);
-    if (bucket === "sold") sold++;
-    else if (bucket === "pending") pending++;
-    else active++;
+  let oac = 0;
+  for (const c of oacWinners) {
     if (c?.extra?.is_outside_polygon) oac++;
   }
 
@@ -4426,8 +4691,11 @@ function applyPropelioClientFilters() {
   _updatePropelioStatusCounts();
   // Render-only dedup: collapse multi-status records on the same parcel
   // to only the highest-priority status (good-rated wins tie-break).
-  // Status counts above use a baseline-on filter state so badges still
-  // show "what WOULD render if toggled on" — independent of toggle state.
+  // Status counts above use two-pass logic — status badges respect the
+  // user's actual OAC toggle state ("what would this status deliver right
+  // now?"), while the OAC badge stays informational ("how many comps are
+  // currently filtered out by OAC?"). See
+  // docs/propelio/STATUS_BADGE_OAC_AWARENESS_SPEC.md.
   const visibleOnMapForRender = _dedupCompsForRender(visibleOnMap);
   _renderPropelioComps({ ...window._propelioLast, comps: visibleOnMapForRender });
   if (window._propelioLast) propelioCmaChip.setData(window._propelioLast);
@@ -5921,6 +6189,7 @@ function _buildParcelDetailPanelHtml(p, matchedComp) {
         ${compDetails.schools.high ? `<span class="propelio-popup-school"><span class="label">HS</span> ${_propelioEscape(compDetails.schools.high)}</span>` : ""}
       </div>`
     : "";
+  const targetDistanceMeta = _buildDistanceToTargetMeta(p);
 
   const soldCompRows = p.sold_comp
     ? `
@@ -5960,6 +6229,7 @@ function _buildParcelDetailPanelHtml(p, matchedComp) {
             <span class="parcel-panel-status-pill" style="--status-color:${statusColor}">${_propelioEscape(statusText)}</span>
             ${matchedHeaderPrice || activeListingPrice || soldHeaderPrice ? `<span class="parcel-panel-header-price">${matchedHeaderPrice || activeListingPrice || soldHeaderPrice}</span>` : ""}
             ${headerDelta ? `<span class="parcel-panel-header-delta" style="color:${headerDelta.color}">${_propelioEscape(headerDelta.label)} ${_propelioEscape(headerDelta.text)}</span>` : ""}
+            ${targetDistanceMeta}
           </div>
         </div>
         <button type="button" class="parcel-panel-close" aria-label="Close parcel details">&times;</button>
@@ -6058,6 +6328,7 @@ function closeParcelDetailPanel() {
 function openParcelDetailPanel(parcelProps, opts = {}) {
   const panel = document.getElementById("parcel-detail-panel");
   if (!panel || !parcelProps) return;
+  if (_handleMeasureInteraction(opts.latlng || null, parcelProps)) return;
 
   const matchedComp = Object.prototype.hasOwnProperty.call(opts, "matchedComp")
     ? opts.matchedComp
@@ -6169,6 +6440,7 @@ function makePopupHtml(p) {
     verificationByAccount.get(p.account_num) || p.verified_vacant
   );
   const row = (label, val) => `<tr><td class="popup-label">${label}</td><td class="popup-val">${val || "N/A"}</td></tr>`;
+  const targetDistanceMeta = _buildDistanceToTargetMeta(p);
 
   // Helper — produce a colored over/under-CAD delta row for any price source.
   // dcadRaw is just `${p.tot_val}` (already a "$NNN,NNN" string); numeric is
@@ -6238,13 +6510,16 @@ function makePopupHtml(p) {
         <div class="popup-addr">${p.addr || "Unknown address"}</div>
         <div class="popup-status-row">
           <div class="popup-status" style="color:${statusColor};">${statusText}</div>
-          ${matchedHeaderPrice
-            ? `<div class="popup-sold-price" style="color:${statusColor};">${matchedHeaderPrice}</div>`
-            : activeListingPrice
-              ? `<div class="popup-list-price">${activeListingPrice}</div>`
-              : soldHeaderPrice
-                ? `<div class="popup-sold-price">${soldHeaderPrice}</div>`
-                : ""}
+          <div class="popup-status-meta">
+            ${matchedHeaderPrice
+              ? `<div class="popup-sold-price" style="color:${statusColor};">${matchedHeaderPrice}</div>`
+              : activeListingPrice
+                ? `<div class="popup-list-price">${activeListingPrice}</div>`
+                : soldHeaderPrice
+                  ? `<div class="popup-sold-price">${soldHeaderPrice}</div>`
+                  : ""}
+            ${targetDistanceMeta}
+          </div>
         </div>
         <table class="popup-table">
           ${row("Owner", p.owner)}
@@ -7634,7 +7909,7 @@ function clearDrawResults() {
   lastDrawnLatLngs = null;
   _currentSessionIsNamed = false;
   _clearOriginatorStar();
-  _currentTargetParcel = null;
+  _setCurrentTargetParcel(null);
   _currentLoadedAreaId = null;
   _syncTabTitle();
   _updateSaveSessionButtonState();
@@ -7673,6 +7948,7 @@ map.on("draw:drawstart", () => {
     if (handler && handler.enabled()) handler.disable();
     return;
   }
+  _setMeasureModeEnabled(false);
   bumpUndoPillVersion();
   drawHelper.classList.remove("hidden");
   document.getElementById("btn-draw")?.classList.add("active");
@@ -7733,6 +8009,13 @@ map.on("movestart", () => {
 
 document.addEventListener("keydown", (event) => {
   if (isDrawInputTarget(event.target)) return;
+
+  if (event.key === "Escape" && _measureModeEnabled) {
+    event.preventDefault();
+    _clearMeasurement();
+    return;
+  }
+
   const handler = getPolygonDrawHandler();
   if (!handler || !handler.enabled()) return;
 
@@ -8171,6 +8454,30 @@ map.on("mousemove", (ev) => {
 map.on("click", async (ev) => {
   const drawHandler = getPolygonDrawHandler();
   if (drawHandler && drawHandler._enabled) return;
+
+  if (_measureModeEnabled) {
+    window._clearSearchHighlight?.();
+    if (!lastAnalysisGeojson && browseLayer._map) {
+      const result = browseLayer.queryTileFeaturesDebug(ev.latlng.lng, ev.latlng.lat);
+      const allFeatures = result instanceof Map
+        ? [...result.values()].flat()
+        : (Array.isArray(result) ? result : []);
+      if (allFeatures.length) {
+        const parcel = allFeatures.find((f) => {
+          const props = (f.feature && f.feature.props) || f.props || {};
+          return props.source_county === "dcad" || props.source_county === "tad" || props.source_county === "collin" || props.source_county === "denton";
+        });
+        if (parcel) {
+          const pProps = (parcel.feature && parcel.feature.props) || parcel.props || {};
+          _handleMeasureInteraction(ev.latlng, pProps);
+          return;
+        }
+      }
+    }
+    _handleMeasureInteraction(ev.latlng, null);
+    return;
+  }
+
   // Don't fire browse popup when draw results are visible — let polygon clicks handle it.
   if (lastAnalysisGeojson) return;
 
@@ -8866,16 +9173,16 @@ async function _loadAreaFromShareId(shareId) {
         const normalized = _normalizeSavedAreaRow(cloned);
         _savedAreasCache.unshift(normalized);
         _clearOriginatorStar();
-        _currentTargetParcel = null;
+        _setCurrentTargetParcel(null);
         _currentLoadedAreaId = cloned.area_id;
         _syncTabTitle();
         _selectedSavedItemId = cloned.area_id;
         // Carry the originator TARGET star through the auto-fork.
         if (normalized.originator_parcel_county && normalized.originator_parcel_account_num) {
-          _currentTargetParcel = {
+          _setCurrentTargetParcel({
             county: normalized.originator_parcel_county,
             account: normalized.originator_parcel_account_num,
-          };
+          });
           void _renderOriginatorTargetStar(
             normalized.originator_parcel_county,
             normalized.originator_parcel_account_num,
