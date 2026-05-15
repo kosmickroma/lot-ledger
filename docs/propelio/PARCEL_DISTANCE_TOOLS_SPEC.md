@@ -1,15 +1,19 @@
-# Parcel Distance Tools — Design Spec v1.1
+# Parcel Distance Tools — Design Spec v1.2
 
-**Status:** Copilot deep-dive review folded in (2026-05-15). Build-eligible.
+**Status:** Copilot R1 + KK refinement folded in (2026-05-15). Build-eligible.
 **Branch:** `feat/preview-bundle-2026-05-14` (adds to the OAC fix already on this branch — both ship to preview together)
 **Author:** KK + Copilot (initial brainstorm) + Claude (refinement and spec, 2026-05-15)
+
+## Changes v1.1 → v1.2 (KK refinement)
+
+1. **§5.2 / §6 — dropped the dedicated Clear button.** Reverted Copilot's nice-to-have addition. Single toggle button is cleaner. Esc now clears (and stays in mode); clicking the toggle button exits (and clears anything in flight). Two-predictable-behaviors UX, one fewer button to maintain.
 
 ## Changes v1 → v1.1 (Copilot review folded in)
 
 1. **§4.2 surface scope (IMPORTANT):** removed "sidebar parcel list rows" — the current sidebar does not render parcel rows. v1 targets parcel popups only.
 2. **§4.5 target lat/lng resolution (IMPORTANT):** added explicit rule for resolving target coordinates once on workspace load + UI behavior during async resolution.
 3. **§5.7 measure-mode click suppression (IMPORTANT, new section):** added explicit central-gate enforcement requirement + validation case that no popup opens from any click path during measure mode.
-4. **§5.2 explicit Clear button (nice-to-have):** added small Clear affordance near the measure button alongside Esc.
+4. ~~§5.2 explicit Clear button (nice-to-have)~~ — reverted in v1.2 per KK.
 5. **§5.5 Shift-click non-snap modifier (nice-to-have):** noted as deferred behavior.
 6. **§4.3 star icon (nice-to-have):** emoji acceptable for v1; SVG migration noted as deferred polish if preview feedback shows OS inconsistency.
 
@@ -174,11 +178,14 @@ While measure mode is on:
 | First click on map | Plant **start point** marker. If click was inside a parcel polygon, snap to that parcel's centroid; otherwise use the click point. |
 | Second click on map | Plant **end point** marker (same parcel-snap behavior). Draw a line from start to end. Display distance label at the midpoint of the line. **Measurement complete.** |
 | Third click | Treat as start of a **new measurement**: clear the previous line/markers, plant new start point. |
-| Esc | Cancel any in-progress measurement, clear all measurement layers, exit measure mode. |
-| Click on the measure-mode button again | Same as Esc. |
-| Click on explicit **Clear** button (small "✕" icon next to the measure-mode button) | Clear the current measurement but **stay in measure mode** — useful when the user wants to take another measurement without exiting and re-entering. Discoverability win over Esc-only. |
+| **Esc** | **Clear the current measurement** (markers + line + label removed). **Stay in measure mode** — user can immediately take another measurement without re-entering. |
+| Click on the measure-mode button again | **Exit measure mode** AND clear any in-flight measurement. |
 
-The explicit Clear button addresses the "user doesn't discover Esc" problem (Copilot R1 finding). Third-click-clears stays the default fast path; Clear button is for users who don't think to click again.
+**Two predictable behaviors:**
+- **Esc = clear** (stay ready to measure again)
+- **Toggle button = exit** (out of measure mode entirely)
+
+No dedicated Clear button. Esc handles the "I want to start over but stay in measure mode" case. The toggle button handles the "I'm done measuring" case. Third-click-clears is still the fast inline path during continuous measurement.
 
 ### 5.3 Single-measurement mode
 
@@ -262,20 +269,18 @@ If any click path bypasses the gate, the spec is violated and needs a fix before
 
 ## 6. UI layout — where the button goes
 
-The map currently has a toolbar / floating-button area near the top-right or top-left of the map canvas (Leaflet's default control position). Two buttons get added:
+The map currently has a toolbar / floating-button area near the top-right or top-left of the map canvas (Leaflet's default control position). **One button** gets added:
 
-| Button | Icon | Title | Visible when |
+| Button | Icon | Title | Behavior |
 |---|---|---|---|
-| **Measure** | 📏 (or SVG ruler) | "Measure distance" | Always |
-| **Clear measurement** | ✕ (or X icon) | "Clear current measurement" | Only when measure mode is on AND a measurement exists |
+| **Measure** | 📏 (or SVG ruler) | "Measure distance (Esc to clear)" | Click to enter measure mode. Click again (or press the toolbar button while active) to exit measure mode + clear any in-flight measurement. |
 
-The Measure button:
+Behavior details:
 - Sits adjacent to the polygon-draw button
 - Active state visually distinct (filled background or border ring)
+- Title attribute hints at Esc shortcut so users discover it
 
-The Clear button:
-- Appears next to the Measure button only when there's an active measurement to clear
-- Removes the current measurement layers but stays in measure mode (vs Esc which exits)
+No dedicated Clear button per v1.2 — Esc handles the "clear, stay in mode" case directly.
 
 If the existing toolbar structure doesn't have natural room, KK approves whether to add a new toolbar group or fold into an existing one during implementation review.
 
@@ -330,13 +335,13 @@ Run on the preview URL after deploy:
 1. Click measure-mode button — cursor changes, button highlights
 2. Click on a parcel A — marker drops at A's centroid
 3. Click on a parcel B — marker drops at B's centroid, line drawn, distance label visible
-4. Click on parcel C — measurement clears, new start point at C
+4. Click on parcel C — measurement clears, new start point at C (third-click-clears)
 5. Click on an empty grass area — measurement clears, new start point at click location (no snap)
 6. Click on parcel D — line drawn, distance label visible
-7. Click the Clear button — measurement clears but measure mode stays on (cursor still crosshair, button still active)
-8. Click a parcel A again — fresh start point planted
-9. Press Esc — measurement clears, measure mode exits
-10. Click measure-mode button again — re-enters measure mode
+7. **Press Esc** — measurement clears (markers + line + label gone) but **measure mode stays on** (cursor still crosshair, button still highlighted)
+8. Click parcel A again — fresh start point planted (proves measure mode survived the Esc-clear)
+9. **Click measure-mode button** — measure mode exits + any in-flight measurement clears
+10. Click measure-mode button again — re-enters measure mode (clean state)
 
 **Ruler tool — click suppression test (§5.7):**
 1. Enter measure mode
@@ -388,3 +393,15 @@ Three IMPORTANTs and four nice-to-haves. No blockers. All addressed in v1.1.
 | 7 | §5.6 | (confirmed) | Stay with Leaflet primitives — no measurement plugin needed. Current map plumbing is custom and stable. |
 
 Copilot R1 verdict: with §4.2 / §4.6 / §5.7 addressed, **build-eligible**. No further review round needed for the spec — moves to implementation next.
+
+### Round 1.5 (KK refinement, v1.1 → v1.2)
+
+KK pushed back on Copilot's "add dedicated Clear button" nice-to-have:
+
+> "the x button near clear now could just do dual purpose and maybe esc button clears it instead of adding a whole new button for clear"
+
+| # | Section | Resolution |
+|---|---|---|
+| KK-1 | §5.2 + §6 | Removed dedicated Clear button. Esc now clears + stays in measure mode (was: clear + exit). Toggle button still exits. Two predictable behaviors, one fewer button. Better discoverability via the title attribute "Measure distance (Esc to clear)". |
+
+This is what shipped to implementation.
