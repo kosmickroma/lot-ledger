@@ -1,12 +1,13 @@
 ---
 title: CSV Export — Propelio Comp Source Refactor
-status: spec v1.2 — Copilot R3 blocker fix + architecture-history findings folded
+status: spec v1.3 — live-data verification of parsed_payload completed; URL emission locked to blank
 branch: feat/csv-export-propelio-source
 created: 2026-05-15
 related:
   - "[[CSV_EXPORT_REFACTOR_BRAINSTORM_WIP]]"
   - "[[mike_gcp_handoff_plan]]"
   - "[[PARCEL_DISTANCE_TOOLS_SPEC]]"
+  - "[[project_propelio_listing_url]]"
 ---
 
 # CSV Export — Propelio Comp Source Refactor
@@ -80,9 +81,11 @@ Field mapping (verified against schema at `api/main.py:297-323` and `scripts/bac
 | `lot_sqft` | `lot_size` |
 | `sqft` | `sqft` |
 | `beds` / `baths` / `dom` | direct mapping (same names) |
-| `listing_url` | **Pinned probe order** — try in sequence, take the first non-empty string: (1) `parsed_payload['link']`; (2) `parsed_payload['url']`; (3) `parsed_payload['detail_url']`. If all three absent or empty → emit blank. **Do NOT synthesize** a Propelio Genesis URL from `lead_id` or any other field. `parsed_payload['link']` itself is currently UNVERIFIED against live data — see §7 validation step 14. |
+| `listing_url` | **Always emit blank in v1.** Live-data verification (2026-05-15, 500 latest `propelio_comps` rows): **zero rows contain `link`, `url`, `detail_url`, or any URL-like top-level key in `parsed_payload`**. The only URLs that exist are inside `parsed_payload.extra.raw.photos[].url` and those point to image binaries, not listing detail pages. Propelio's per-comp listing-page deep link requires a `lead_id` that is **not in `propelio_comps`** data (see `[[project_propelio_listing_url]]`). Per-comp deep linking needs a backend resolver endpoint — v2 scope. For v1, normalizer sets `listing_url = ""` for every Propelio row. The `RF_Comp_Listing URL` (Redfin block, far right) continues to use Redfin's real `listing_url` which is populated in `redfin_sold`. |
 
-**Implementation note.** The `_parsed_payload` may also be NULL or non-dict (older rows). Guard with `isinstance(parsed_payload, dict)` before key probing.
+**Implementation notes.**
+1. `parsed_payload` can be NULL or non-dict on older rows — guard with `isinstance(parsed_payload, dict)` before any key probing for non-URL data.
+2. Even though `listing_url` is hard-coded blank, the normalizer MUST still emit the `"listing_url"` key (with empty string value) so the CSV writer's `comp.get("listing_url", "")` call is fed a known-clean shape.
 
 Anything missing in Propelio → emit empty cell in the CSV. Don't fabricate.
 
@@ -225,7 +228,7 @@ Idempotent. Runs in `_ensure_session_schema` on app startup like all our other m
 11. **Parcels missing `lat`/`lng`.** Construct or find a workspace with at least one parcel that has NULL or zero `lat`/`lng`. CSV export must not crash; the parcel's Propelio block and `Comp Distance (ft)` cell stay blank; the RF_ block behaves as it always has for that parcel.
 12. **Cross-county polygon.** Draw a workspace polygon that straddles two counties (e.g., Dallas + Tarrant border). Confirm `(county, account)` keying produces no collisions, both counties' parcels resolve correctly, AND the trailing-column check from step 3 still passes (last column remains `share_id`).
 13. **`include_sold=false` job export.** Run an analyze with `include_sold=false`. Confirm CSV export from that job leaves both the Propelio Comp_* block AND the RF_Comp_* block blank for every row, and does not crash.
-14. **Live `parsed_payload['link']` verification.** Before final spec lock, inspect 10+ representative `propelio_comps` rows in production: `SELECT id, address, parsed_payload FROM propelio_comps WHERE parsed_payload IS NOT NULL ORDER BY id DESC LIMIT 10;`. Confirm what URL-like keys actually appear. If `link` is consistently present, normalizer order in §3.4 stands. If a different key dominates (`url`, `detail_url`, `web_url`, etc.), update §3.4 probe order before implementation.
+14. **Live `parsed_payload` URL key verification.** ✅ **COMPLETED 2026-05-15.** Inspected 500 latest `propelio_comps.parsed_payload` rows: zero contain `link`/`url`/`detail_url`/`web_url`/`listing_url`/`property_url`/`href`/`permalink`. The only URLs in payloads point to photo binaries at `extra.raw.photos[].url`. Propelio per-comp deep link requires `lead_id` not in our schema. Result folded into §3.4: `listing_url` hard-coded blank for v1; v2 can add a backend resolver endpoint for per-comp deep linking (see `[[project_propelio_listing_url]]`).
 15. **`EXPLAIN ANALYZE` release gate.** Capture `EXPLAIN ANALYZE` output for the lateral query on a representative workspace (500+ parcels). Confirm the plan uses the GIST index on `propelio_comps.geom` for both the `ST_Within` filter and the `<->` KNN ordering. Attach output to the PR description.
 16. **Soft-fail confirmation.** Temporarily induce a failure in `query_propelio_sold_in_polygon` (e.g., pass a deliberately-bad SQL in a test branch, or kill the session DB connection mid-call). Confirm: (a) analyze response still returns 200 with empty Propelio data, (b) warning log line emitted, (c) CSV export from that cached job fills Propelio cells blank and RF_ cells normally. Revert the induced failure.
 
@@ -244,7 +247,7 @@ Idempotent. Runs in `_ensure_session_schema` on app startup like all our other m
 | **No automated tests for CSV export exist** — the 14-step manual validation is the only regression safety net | Capture baseline CSVs of 3 representative workspaces pre-deploy (per §7 preamble). Diff post-deploy. Document the gap; automated tests are a v2 enhancement, not a v1 blocker. |
 | GIST index on `propelio_comps.geom` — assumed but verify | **Confirmed by subagent at `api/main.py:350-352`.** No action needed. |
 | Propelio rows missing `sqft` → `price_per_sqft` always NULL for those | Emit blank cell, don't fabricate. Use `_safe_float` guard. Documented in normalizer §3.4. |
-| Propelio rows where no URL key is present in `parsed_payload` → `listing_url` blank | Accepted. Pinned probe order: `link` → `url` → `detail_url` → blank. Live data verification is §7 step 14 before final lock. |
+| Propelio per-comp data has no listing-URL key (verified 2026-05-15) | Accepted. `Comp Listing URL` is hard-coded blank for the Propelio block in v1. Per-comp deep linking is a v2 enhancement requiring a backend resolver endpoint (`[[project_propelio_listing_url]]`). RF_Comp_Listing URL (Redfin block) remains populated. |
 | Loader at `api/main.py:646` is positional unpack → adding `propelio_sold_points` to SELECT could misalign tuple unpacking | **Mandated named extraction** (separate `SELECT` or `RealDictCursor`). No discretion. |
 | `share_id` moves off the rightmost column → silently breaks any downstream consumer reading positionally from the right edge | Insert RF_ block BEFORE `Seed Target`. `share_id` stays last. Validation steps #3 and #12 explicitly verify trailing-column shape (`tail -3` head-row check). |
 | Workspace polygon stored as something other than GeoJSON in `cached_jobs` | Confirmed: `_persist_cached_job` stores polygon via `Json(polygon)` (`api/main.py:633`). Mirror the GeoJSON-string translation that `archive.py:598-599` uses. The §3.6 guard handles all non-conforming shapes (empty list, NULL, malformed) safely. |
@@ -277,9 +280,7 @@ Idempotent. Runs in `_ensure_session_schema` on app startup like all our other m
 
 ## 12. Open questions
 
-None at spec lock. All Copilot R1, R2, R3 findings + two subagent verification passes folded in (v1.2). Ready for implementation planning via the writing-plans skill.
-
-**One pre-implementation live-data inspection** (§7 step 14): inspect 10+ live `propelio_comps.parsed_payload` rows to confirm `link` key dominance. If a different URL key wins, update §3.4 probe order before commit 2. This is a one-query, two-minute check — not a spec-blocker.
+**None.** Spec is fully locked at v1.3. All Copilot R1/R2/R3 findings + two subagent verification passes + live-data verification of `parsed_payload` URL keys folded in. The §7 step 14 live-data inspection completed 2026-05-15 (folded into §3.4 and §9). Ready for phased implementation per §11.
 
 ## 13. Code anchors (for the implementer)
 
@@ -307,4 +308,5 @@ None at spec lock. All Copilot R1, R2, R3 findings + two subagent verification p
 
 - **v1.0** (commit `20385a8`): Initial formal spec. Folded Copilot R1 findings on the design summary (scope-creep avoidance, schema-shape drift call-out).
 - **v1.1** (commit `270d21b`): Folded Copilot R2 findings. Fixed broken `CROSS JOIN LATERAL ... ON true` syntax → `LEFT JOIN LATERAL`. Corrected `latitude`/`longitude` → `lat`/`lng`/`geom`. Pinned `sqft` (not `living_sqft`). Removed `lead_id` URL synthesis. Protected `share_id` positional contract (RF_ block before `Seed Target`). Resolved row-fill-untouched contradiction. Added 6 validation tests. Schema migration as own deploy gate.
-- **v1.2** (this commit): Folded Copilot R3 + two subagent verification passes (schema verification + architecture history). **Added §3.6 empty-polygon handling (R3 BLOCKER fix)** — merged-job exports with `polygon = []` no longer break. Mandated **named extraction** at cached_jobs loader (was discretionary). Mandated **soft-fail** error handling on the new query (mirror Redfin pattern). Mandated **no top-level `propelio_sold_points`** in analyze response. Pinned **URL fallback probe order** (`link` → `url` → `detail_url`). Removed non-existent `unit`/`city`/`state`/`zip` from normalizer. Added live-data verification step (§7 step 14). Added baseline-CSV capture discipline. Documented absent automated tests as primary risk. Mandated reuse of `_safe_float` + no new abstractions (§10). Added historical commit anchors (§13). Added validation steps #6 (merged-job empty polygon — the blocker test) and #16 (soft-fail confirmation). Fixed validation trailing-column verification (was implicit, now explicit `tail -3` diff in steps 3 + 12).
+- **v1.2** (commit `13c770d`): Folded Copilot R3 + two subagent verification passes (schema verification + architecture history). **Added §3.6 empty-polygon handling (R3 BLOCKER fix)** — merged-job exports with `polygon = []` no longer break. Mandated **named extraction** at cached_jobs loader (was discretionary). Mandated **soft-fail** error handling on the new query (mirror Redfin pattern). Mandated **no top-level `propelio_sold_points`** in analyze response. Pinned **URL fallback probe order** (`link` → `url` → `detail_url`). Removed non-existent `unit`/`city`/`state`/`zip` from normalizer. Added live-data verification step (§7 step 14). Added baseline-CSV capture discipline. Documented absent automated tests as primary risk. Mandated reuse of `_safe_float` + no new abstractions (§10). Added historical commit anchors (§13). Added validation steps #6 (merged-job empty polygon — the blocker test) and #16 (soft-fail confirmation). Fixed validation trailing-column verification (was implicit, now explicit `tail -3` diff in steps 3 + 12).
+- **v1.3** (this commit): Live-data verification of `parsed_payload` URL keys completed. 500 latest `propelio_comps` rows show **zero** rows with `link`/`url`/`detail_url`/etc. — none of the probed keys exist. §3.4 normalizer updated to hard-code `listing_url = ""` for the Propelio block in v1; per-comp deep linking is deferred to v2 pending a backend resolver endpoint (`[[project_propelio_listing_url]]`). §7 step 14 marked complete. §9 risk row updated. §12 open-questions cleared. Spec is fully locked, ready for Phase 1 implementation.
