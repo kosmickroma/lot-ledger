@@ -253,6 +253,7 @@ def _normalize_collin_row(raw: dict[str, Any]) -> dict[str, Any]:
         "division_cd": "COLLIN",
         "sptd_code": sptd_code,
         "nbhd_cd": _clean_text(raw.get("subdivision")) or _clean_text(raw.get("city_code")),
+        "subdivision": _clean_text(raw.get("subdivision")) or "",
         "legal1": _clean_text(raw.get("legal_descr")),
         "legal2": "",
         "legal3": "",

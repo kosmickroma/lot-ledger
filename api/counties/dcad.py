@@ -481,6 +481,7 @@ def build_feature(row: dict[str, Any], prop_type: str, on_redfin: bool, redfin_l
         "state_code": _clean_text(row.get("state_code")) or "N/A",
         "zoning": _clean_text(row.get("zoning")) or "N/A",
         "school": _clean_text(row.get("isd_desc")) or "N/A",
+        "subdivision": _clean_text(row.get("subdivision")) or "",
         "yr_built": str(row.get("yr_built")) if row.get("yr_built") else "N/A",
         "sqft": f"{int(float(row['tot_living_area'])):,}" if _safe_float(row.get("tot_living_area")) not in (None, 0.0) else "N/A",
         "verified_vacant": _clean_text(row.get("verified_vacant")),

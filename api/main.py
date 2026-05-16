@@ -2079,7 +2079,7 @@ def _fetch_dcad_parcel_by_account(account_num: str) -> tuple[dict[str, Any] | No
                        p.owner_zip, p.street_num, p.full_street_name,
                        p.property_address, p.property_zip, p.division_cd,
                        COALESCE(a.sptd_code, p.sptd_code) AS sptd_code,
-                       p.nbhd_cd, p.legal1, p.legal2, p.legal3, p.legal4, p.legal5,
+                       p.nbhd_cd, p.subdivision, p.legal1, p.legal2, p.legal3, p.legal4, p.legal5,
                        p.polygon_geojson,
                        ST_Y(p.centroid) AS lat,
                        ST_X(p.centroid) AS lng,

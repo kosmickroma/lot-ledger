@@ -2416,6 +2416,18 @@ async function _renderOriginatorTargetStar(county, account, lat, lng) {
     icon,
     pane: "savedTargetStarPane",
   }).addTo(_ORIGINATOR_STAR_LAYER);
+  _originatorStarMarker.on("click", async (ev) => {
+    L.DomEvent.stopPropagation(ev);
+    if (_handleMeasureInteraction(ev.latlng, { county: c, account_num: a })) return;
+    try {
+      const resp = await fetch(`/api/parcel/${encodeURIComponent(c)}/${encodeURIComponent(a)}`);
+      if (!resp.ok) return;
+      const detail = await resp.json();
+      openParcelDetailPanel(detail.properties || detail, { latlng: ev.latlng, geometry: detail.geometry });
+    } catch (err) {
+      console.error("[originator-star] popup open failed:", err);
+    }
+  });
 }
 
 function _updateSavedTargetStarVisibility() {
@@ -4896,8 +4908,6 @@ function _findPropelioCompByKey(key) {
 async function flyToAndOpenPropelioComp(compKey) {
   const layer = propelioCompLayerByKey.get(String(compKey || "").trim());
   if (!layer) return;
-  const comp = layer._lotLedgerComp
-    || (typeof layer.getLayers === "function" ? layer.getLayers()[0]?._lotLedgerComp : null);
 
   // Show a crisp purple outline on the map for the clicked comp. If the
   // comp rendered as a footprint, outline its polygon; if it's a fallback
@@ -4948,14 +4958,6 @@ async function flyToAndOpenPropelioComp(compKey) {
       if (bounds) map.fitBounds(bounds, { padding: [40, 40], maxZoom: map.getZoom() });
       else map.panTo(center);
     }
-  }
-
-  // Open via the unified async resolver so spillover comps (outside the
-  // drawn polygon) get the unified CAD+MLS popup, not just the standalone
-  // Propelio-only popup. layer._lotLedgerComp is stashed at render time
-  // in _renderPropelioComps.
-  if (comp && center) {
-    await _openUnifiedPropelioPopup(comp, center);
   }
 }
 
@@ -6531,6 +6533,7 @@ function makePopupHtml(p) {
   const verifiedVacant = normalizeVerificationValue(
     verificationByAccount.get(p.account_num) || p.verified_vacant
   );
+  const subdivision = String(p.subdivision || "").trim();
   const row = (label, val) => `<tr><td class="popup-label">${label}</td><td class="popup-val">${val || "N/A"}</td></tr>`;
   const targetDistanceMeta = _buildDistanceToTargetMeta(p);
 
@@ -6614,6 +6617,7 @@ function makePopupHtml(p) {
           </div>
         </div>
         <table class="popup-table">
+          ${subdivision ? row("Neighborhood", subdivision) : ""}
           ${row("Owner", p.owner)}
           ${row("Land Value", p.land_val)}
           ${row("Total Value", p.tot_val)}
