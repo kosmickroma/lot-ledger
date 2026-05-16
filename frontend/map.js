@@ -4375,7 +4375,6 @@ function _updatePropelioStatusCounts(_unusedFullList) {
   if (!window._propelioLast || !Array.isArray(window._propelioLast.comps)) {
     const ids = [
       "prop-count-sold", "prop-count-active", "prop-count-pending",
-      "cf-count-sold", "cf-count-active", "cf-count-pending",
       "prop-count-oac",
     ];
     ids.forEach((id) => {
@@ -4436,9 +4435,6 @@ function _updatePropelioStatusCounts(_unusedFullList) {
   setText("prop-count-sold", sold);
   setText("prop-count-active", active);
   setText("prop-count-pending", pending);
-  setText("cf-count-sold", sold);
-  setText("cf-count-active", active);
-  setText("cf-count-pending", pending);
   setText("prop-count-oac", oac);
 }
 
