@@ -137,6 +137,32 @@ def _extract_centroid(point_value: Any) -> tuple[float | None, float | None]:
     return None, None
 
 
+def _dcad_subdivision_from_legal(legal_descr: str | None) -> str:
+    """Best-effort subdivision name extractor from DCAD legal description.
+
+    DCAD legal1 text follows the same convention as TAD ParcelView: the
+    subdivision name appears at the front, followed by BLK / LOT / ACS
+    qualifiers. e.g., "BRYAN PLACE PHASE V SEC 1 & 2 BLK 1/287 PT LT 1C
+    ACS 0.9432" → "BRYAN PLACE PHASE V SEC 1 & 2". Mirrors
+    api/counties/tad.py:_tad_subdivision_from_legal — kept local instead
+    of factoring to a shared helper module per project convention.
+    """
+    text = _clean_text(legal_descr)
+    if not text:
+        return ""
+    upper = text.upper()
+    cut_tokens = [" LOT", " BLK", " BLOCK", " TRACT", " ACRES", " AC", " ACS"]
+    cut_idx = len(text)
+    for token in cut_tokens:
+        idx = upper.find(token)
+        if idx != -1:
+            cut_idx = min(cut_idx, idx)
+    candidate = text[:cut_idx].strip(" ,.-")
+    if not candidate:
+        return ""
+    return candidate[:64]
+
+
 def _estimate_front_depth(raw: dict[str, Any]) -> tuple[float | None, float | None]:
     ratio = _safe_float(raw.get("envelope_ratio")) or 999.0
     perim = _safe_float(raw.get("envelope_perim_ft")) or 0.0
@@ -382,6 +408,7 @@ def query_parcels(polygon: list[list[float]]) -> ParcelQueryResult:
                 "division_cd": _clean_text(row.get("division_cd")),
                 "sptd_code": sptd_code,
                 "nbhd_cd": _clean_text(row.get("nbhd_cd")),
+                "subdivision": _dcad_subdivision_from_legal(row.get("legal1")),
                 "legal1": _clean_text(row.get("legal1")),
                 "legal2": _clean_text(row.get("legal2")),
                 "legal3": _clean_text(row.get("legal3")),
@@ -481,7 +508,7 @@ def build_feature(row: dict[str, Any], prop_type: str, on_redfin: bool, redfin_l
         "state_code": _clean_text(row.get("state_code")) or "N/A",
         "zoning": _clean_text(row.get("zoning")) or "N/A",
         "school": _clean_text(row.get("isd_desc")) or "N/A",
-        "subdivision": _clean_text(row.get("subdivision")) or "",
+        "subdivision": _clean_text(row.get("subdivision")) or _dcad_subdivision_from_legal(row.get("legal1")),
         "yr_built": str(row.get("yr_built")) if row.get("yr_built") else "N/A",
         "sqft": f"{int(float(row['tot_living_area'])):,}" if _safe_float(row.get("tot_living_area")) not in (None, 0.0) else "N/A",
         "verified_vacant": _clean_text(row.get("verified_vacant")),
