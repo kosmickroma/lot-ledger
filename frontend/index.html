@@ -68,23 +68,39 @@
           <div class="propelio-status-section">
             <p class="propelio-section-label">Status</p>
             <div class="filter-list">
+              <!-- Propelio comp-status toggles — dots (.is-dot) to distinguish
+                   from parcel-type squares in the Map Filters card. Swatch
+                   colors match the footprint-glow / fallback-dot palette
+                   (sold=red, active=green, pending=blue two-tone). These IDs
+                   are the live handlers; the previous duplicate set in Map
+                   Filters was removed in the comp-filter-consolidation
+                   hotfix. -->
               <label class="filter-row">
                 <span class="filter-swatch is-dot" style="--sw:#dc2626"></span>
                 <span class="filter-name">Sold</span>
-                <span class="filter-count" id="cf-count-sold">0</span>
-                <input type="checkbox" id="cf-status-sold" checked>
+                <span class="filter-count" id="prop-count-sold">0</span>
+                <input type="checkbox" id="prop-status-sold" checked>
               </label>
               <label class="filter-row">
                 <span class="filter-swatch is-dot" style="--sw:#22c55e"></span>
                 <span class="filter-name">Active</span>
-                <span class="filter-count" id="cf-count-active">0</span>
-                <input type="checkbox" id="cf-status-active" checked>
+                <span class="filter-count" id="prop-count-active">0</span>
+                <input type="checkbox" id="prop-status-active" checked>
               </label>
               <label class="filter-row">
                 <span class="filter-swatch is-dot" style="background: radial-gradient(circle, #0284c7 0%, #0284c7 35%, #7dd3fc 100%);"></span>
                 <span class="filter-name">Pending</span>
-                <span class="filter-count" id="cf-count-pending">0</span>
-                <input type="checkbox" id="cf-status-pending" checked>
+                <span class="filter-count" id="prop-count-pending">0</span>
+                <input type="checkbox" id="prop-status-pending" checked>
+              </label>
+              <!-- Outside Area Comps — meta-toggle; no swatch, hidden
+                   placeholder keeps the grid columns aligned with the
+                   rows above. -->
+              <label class="filter-row" title="Show comps Propelio returned that fall outside your drawn polygon">
+                <span class="filter-swatch" style="visibility:hidden"></span>
+                <span class="filter-name">Outside Area Comps</span>
+                <span class="filter-count" id="prop-count-oac">0</span>
+                <input type="checkbox" id="prop-outside-area">
               </label>
             </div>
           </div>
@@ -182,36 +198,6 @@
               <span class="filter-name">Exempt</span>
               <span class="filter-count" id="filter-count-exempt">0</span>
               <input type="checkbox" id="filter-exempt">
-            </label>
-            <!-- Propelio comp-status toggles — dots (.is-dot) to distinguish
-                 from parcel-type squares above. Swatch colors match the
-                 footprint-glow / fallback-dot palette (sold=red, active=green,
-                 pending=blue two-tone). -->
-            <label class="filter-row">
-              <span class="filter-swatch is-dot" style="--sw:#dc2626"></span>
-              <span class="filter-name">Sold</span>
-              <span class="filter-count" id="prop-count-sold">0</span>
-              <input type="checkbox" id="prop-status-sold" checked>
-            </label>
-            <label class="filter-row">
-              <span class="filter-swatch is-dot" style="--sw:#22c55e"></span>
-              <span class="filter-name">Active</span>
-              <span class="filter-count" id="prop-count-active">0</span>
-              <input type="checkbox" id="prop-status-active" checked>
-            </label>
-            <label class="filter-row">
-              <span class="filter-swatch is-dot" style="background: radial-gradient(circle, #0284c7 0%, #0284c7 35%, #7dd3fc 100%);"></span>
-              <span class="filter-name">Pending</span>
-              <span class="filter-count" id="prop-count-pending">0</span>
-              <input type="checkbox" id="prop-status-pending" checked>
-            </label>
-            <!-- Outside Area Comps — meta-toggle; no swatch, hidden placeholder
-                 keeps the grid columns aligned with the rows above. -->
-            <label class="filter-row" title="Show comps Propelio returned that fall outside your drawn polygon">
-              <span class="filter-swatch" style="visibility:hidden"></span>
-              <span class="filter-name">Outside Area Comps</span>
-              <span class="filter-count" id="prop-count-oac">0</span>
-              <input type="checkbox" id="prop-outside-area">
             </label>
           </div>
           <p id="sold-toggle-status" class="sidebar-note"></p>
