@@ -6333,6 +6333,7 @@ function _buildParcelDetailPanelHtml(p, matchedComp) {
           <section class="parcel-panel-cad">
             <div class="parcel-panel-section-title">CAD</div>
             <table class="popup-table">
+              ${p.subdivision ? _buildParcelDetailTableRow("Neighborhood", _propelioEscape(p.subdivision)) : ""}
               ${_buildParcelDetailTableRow("Owner", _panelDisplayValue(p.owner))}
               ${_buildParcelDetailTableRow("Land Value", _panelDisplayValue(p.land_val))}
               ${_buildParcelDetailTableRow("Total Value", _panelDisplayValue(p.tot_val))}
