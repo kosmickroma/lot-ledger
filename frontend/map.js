@@ -60,9 +60,8 @@ const CLICK_MODE_STORAGE_KEY = "lot_ledger_click_mode";
 const SIDEBAR_SECTION_STATE_STORAGE_KEY = "lot_ledger_sidebar_sections.v1";
 
 const DEFAULT_FILTERS = {
-  // R.F. Listings + R.F. Sold default OFF — those are the legacy Redfin
-  // overlays. Propelio is the primary comps surface now; legacy stays
-  // around as opt-in for sanity-check or deprecation review.
+  // Legacy R.F. filters (Redfin Listed + Redfin Sold) default OFF.
+  // They live in the collapsed Legacy Filters card and are opt-in only.
   active: false,
   sold: false,
   off_market: true,
@@ -614,6 +613,7 @@ async function _ensureCurrentTargetParcelCoords() {
       if (_sameParcelIdentity(_currentTargetParcel, { county, account })) {
         _currentTargetParcel.lat = lat;
         _currentTargetParcel.lng = lng;
+        _refreshOpenTargetDistanceSurfaces();
         return _currentTargetParcel;
       }
       return null;
@@ -626,6 +626,36 @@ async function _ensureCurrentTargetParcelCoords() {
   })();
 
   return _targetCoordsResolvePromise;
+}
+
+function _refreshOpenTargetDistanceSurfaces() {
+  const popup = map?._popup;
+  if (popup && map.hasLayer(popup)) {
+    let popupParcelProps = _activeParcelPopupState?.props || null;
+    const popupMeta = popup?._source?._lotLedgerPopupMeta;
+    if (!popupParcelProps && popupMeta?.type === "parcel") {
+      const popupAccount = String(popupMeta.accountNum || "").trim();
+      if (popupAccount && Array.isArray(allAnalysisFeatures)) {
+        const matched = allAnalysisFeatures.find(
+          (f) => String(f?.properties?.account_num || "").trim() === popupAccount,
+        );
+        popupParcelProps = matched?.properties || null;
+      }
+    }
+    if (popupParcelProps) {
+      popup.setContent(makePopupHtml(popupParcelProps));
+    }
+  }
+
+  const panel = document.getElementById("parcel-detail-panel");
+  if (panel && panel.classList.contains("is-open") && _activeParcelPopupState?.props) {
+    openParcelDetailPanel(_activeParcelPopupState.props, {
+      latlng: _activeParcelPopupState.latlng || null,
+      matchedComp: _activeParcelPopupState.matchedComp || null,
+      geometry: _activeParcelPopupState.geometry || null,
+      suppressFly: true,
+    });
+  }
 }
 
 function _haversineFeet(lat1, lng1, lat2, lng2) {
@@ -1088,11 +1118,14 @@ function restoreFilterState(state) {
   }
   if (Number(state.v || 0) !== 1) return;
   if (state.checkboxes && typeof state.checkboxes === "object") Object.assign(filterState, state.checkboxes);
-  // Legacy R.F. filters never auto-enable from saved state — mirrors the
-  // localStorage-restore guard above. Old saved areas baked R.F. on when
-  // those filters lived in Map Filters; chunk 2 made them opt-in only.
+  // Legacy R.F. Active filter never auto-enables from saved state — mirrors the
+  // localStorage-restore guard above. Old saved areas baked R.F. Active on when
+  // it lived in Map Filters; chunk 2 made it opt-in only. The Sold filter is
+  // no longer force-reset here — Phase 6 of the CSV export refactor enabled
+  // sold-comp inclusion in analyze by default when the user opts in via the
+  // filter checkbox, and forcing it off on every load prevented include_sold
+  // from ever firing on the analyze endpoint.
   filterState.active = false;
-  filterState.sold = false;
   if (state.numeric && typeof state.numeric === "object") Object.assign(numericFilters, state.numeric);
   if (state.comp && typeof state.comp === "object") Object.assign(compNumericFilters, state.comp);
   if (state.sold && typeof state.sold === "object") {
@@ -1155,14 +1188,14 @@ function loadFilters() {
   } catch (_) {
     filterState = { ...DEFAULT_FILTERS };
   }
-  // Legacy R.F. filters (active = R.F. Listings, sold = R.F. Sold) are
-  // tucked away in the collapsed "Legacy Filters" card and should ONLY
-  // turn on when the user opts in by clicking them. localStorage might
-  // hold stale `true` values from before the 2026-05-10 restructure when
-  // these lived in Map Filters and defaulted on — force them off on
-  // every load so they never fire on a search without explicit opt-in.
+  // Legacy R.F. Active filter is tucked away in the collapsed "Legacy Filters"
+  // card and should ONLY turn on when the user opts in by clicking it.
+  // localStorage might hold a stale `true` from before the 2026-05-10
+  // restructure when it lived in Map Filters and defaulted on — force off on
+  // every load so it never fires on a search without explicit opt-in.
+  // The Sold filter is no longer force-reset here — see the matching guard
+  // above for the rationale (CSV export refactor Phase 6).
   filterState.active = false;
-  filterState.sold = false;
 }
 
 function saveFilters() {
@@ -1966,6 +1999,8 @@ function _normalizeSessionRow(session) {
     county_coverage: Array.isArray(session.county_coverage) ? session.county_coverage : [],
     latlngs: Array.isArray(session.latlngs) ? session.latlngs : [],
     filter_state: session.filter_state && typeof session.filter_state === "object" ? session.filter_state : null,
+    originator_parcel_county: String(session.originator_parcel_county || "").trim().toLowerCase() || null,
+    originator_parcel_account_num: String(session.originator_parcel_account_num || "").trim() || null,
     savedAt: session.created_at || new Date().toISOString(),
   };
 }
@@ -2381,6 +2416,18 @@ async function _renderOriginatorTargetStar(county, account, lat, lng) {
     icon,
     pane: "savedTargetStarPane",
   }).addTo(_ORIGINATOR_STAR_LAYER);
+  _originatorStarMarker.on("click", async (ev) => {
+    L.DomEvent.stopPropagation(ev);
+    if (_handleMeasureInteraction(ev.latlng, { county: c, account_num: a })) return;
+    try {
+      const resp = await fetch(`/api/parcel/${encodeURIComponent(c)}/${encodeURIComponent(a)}`);
+      if (!resp.ok) return;
+      const detail = await resp.json();
+      openParcelDetailPanel(detail.properties || detail, { latlng: ev.latlng, geometry: detail.geometry });
+    } catch (err) {
+      console.error("[originator-star] popup open failed:", err);
+    }
+  });
 }
 
 function _updateSavedTargetStarVisibility() {
@@ -2439,48 +2486,93 @@ function _renderSavedTargetStar(area) {
 }
 
 function _renderSavedParcelOutline(area) {
-  if (savedParcelLayers[area.account_num]) return; // already on map
-  if (!area.geometry || !["Polygon", "MultiPolygon"].includes(area.geometry.type)) return;
-  const layer = L.geoJSON({ type: "Feature", geometry: area.geometry, properties: {} }, {
-    pane: "savedParcelPane",
-    className: "saved-parcel-glow",
-    style: {
-      color: SAVED_PARCEL_COLOR,
-      weight: 4,
-      fill: true,
-      fillColor: SAVED_PARCEL_COLOR,
-      fillOpacity: 0.16,
-      interactive: false,
-    },
-    interactive: false,
-  }).addTo(savedParcelLayer);
-  savedParcelLayers[area.account_num] = layer;
+  // Dedup against BOTH layer buckets: the polygon path populates both
+  // savedParcelLayers + savedParcelClickLayers; the point-fallback path only
+  // populates savedParcelClickLayers, so a check on savedParcelLayers alone
+  // would let the fallback add duplicate circle-markers on re-render.
+  if (savedParcelLayers[area.account_num] || savedParcelClickLayers[area.account_num]) return;
 
-  // Sibling click-catcher on the default overlay pane. Transparent fill, no
-  // stroke — exists only to make the gold target reliably clickable even when
-  // an active draw has set lastAnalysisGeojson (which makes the browse-layer
-  // click handler bail), or when the target sits outside the draw polygon and
-  // therefore has no entry in parcelTypeLayers.
+  const hasPolygonGeometry = area.geometry
+    && ["Polygon", "MultiPolygon"].includes(area.geometry.type);
+
+  if (hasPolygonGeometry) {
+    // === existing path: render cyan halo + invisible polygon click-catcher ===
+    const layer = L.geoJSON({ type: "Feature", geometry: area.geometry, properties: {} }, {
+      pane: "savedParcelPane",
+      className: "saved-parcel-glow",
+      style: {
+        color: SAVED_PARCEL_COLOR,
+        weight: 4,
+        fill: true,
+        fillColor: SAVED_PARCEL_COLOR,
+        fillOpacity: 0.16,
+        interactive: false,
+      },
+      interactive: false,
+    }).addTo(savedParcelLayer);
+    savedParcelLayers[area.account_num] = layer;
+
+    // Sibling click-catcher on the default overlay pane. Transparent fill, no
+    // stroke — exists only to make the gold target reliably clickable even when
+    // an active draw has set lastAnalysisGeojson (which makes the browse-layer
+    // click handler bail), or when the target sits outside the draw polygon and
+    // therefore has no entry in parcelTypeLayers.
+    const county = area.county || "dcad";
+    const accountNum = area.account_num;
+    const clickLayer = L.geoJSON({ type: "Feature", geometry: area.geometry, properties: {} }, {
+      style: { stroke: false, fill: true, fillOpacity: 0, fillColor: SAVED_PARCEL_COLOR },
+      interactive: true,
+    });
+    clickLayer.on("click", async (ev) => {
+      L.DomEvent.stopPropagation(ev);
+      if (_handleMeasureInteraction(ev.latlng, area)) return;
+      try {
+        const resp = await fetch(`/api/parcel/${county}/${accountNum}`);
+        if (!resp.ok) return;
+        const detail = await resp.json();
+        openParcelDetailPanel(detail.properties || detail, { latlng: ev.latlng, geometry: detail.geometry });
+      } catch (e) {
+        console.error("Saved-target popup failed", e);
+      }
+    });
+    clickLayer.addTo(savedParcelClickLayer);
+    savedParcelClickLayers[accountNum] = clickLayer;
+    return;
+  }
+
+  // === NEW: point-based fallback for location-only saved parcels ===
+  // No parcel polygon stored, so render an invisible circle-marker click-catcher
+  // at the saved lat/lng. Same savedParcelClickLayer + savedParcelClickLayers
+  // bookkeeping so cleanup paths stay consistent.
+  const lat = Number(area.lat);
+  const lng = Number(area.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+
   const county = area.county || "dcad";
   const accountNum = area.account_num;
-  const clickLayer = L.geoJSON({ type: "Feature", geometry: area.geometry, properties: {} }, {
-    style: { stroke: false, fill: true, fillOpacity: 0, fillColor: SAVED_PARCEL_COLOR },
+
+  const pointClickLayer = L.circleMarker([lat, lng], {
+    radius: 24,         // pixel-based; stays clickable at any zoom
+    stroke: false,
+    fill: true,
+    fillOpacity: 0,     // invisible
     interactive: true,
+    bubblingMouseEvents: false,
   });
-  clickLayer.on("click", async (ev) => {
+  pointClickLayer.on("click", async (ev) => {
     L.DomEvent.stopPropagation(ev);
     if (_handleMeasureInteraction(ev.latlng, area)) return;
     try {
-      const resp = await fetch(`/api/parcel/${county}/${accountNum}`);
+      const resp = await fetch(`/api/parcel/${encodeURIComponent(county)}/${encodeURIComponent(accountNum)}`);
       if (!resp.ok) return;
       const detail = await resp.json();
       openParcelDetailPanel(detail.properties || detail, { latlng: ev.latlng, geometry: detail.geometry });
     } catch (e) {
-      console.error("Saved-target popup failed", e);
+      console.error("Saved-target (point fallback) popup failed", e);
     }
   });
-  clickLayer.addTo(savedParcelClickLayer);
-  savedParcelClickLayers[accountNum] = clickLayer;
+  pointClickLayer.addTo(savedParcelClickLayer);
+  savedParcelClickLayers[accountNum] = pointClickLayer;
 }
 
 function _clearSelectedOutline() {
@@ -2850,7 +2942,7 @@ async function restoreSavedArea(area, options = {}) {
 
   if (map.hasLayer(browseLayer)) browseLayer.remove();
 
-  const includeRedfin = true;
+  const includeRedfin = Boolean(filterState.active);
   const includeSold = Boolean(filterState.sold);
   document.getElementById("sidebar-results")?.classList.add("hidden");
   document.getElementById("sidebar-loading")?.classList.remove("hidden");
@@ -3005,6 +3097,18 @@ async function restoreNamedSession(session, options = {}) {
   
   document.getElementById("btn-draw-clear")?.classList.remove("hidden");
   document.getElementById("btn-saved-area-clear")?.classList.remove("hidden");
+
+  if (session.originator_parcel_county && session.originator_parcel_account_num) {
+    _setCurrentTargetParcel({
+      county: session.originator_parcel_county,
+      account: session.originator_parcel_account_num,
+    });
+    void _renderOriginatorTargetStar(
+      session.originator_parcel_county,
+      session.originator_parcel_account_num,
+    );
+  }
+
   const polygon = session.latlngs.map(([lat, lng]) => [lng, lat]);
   lastDrawnLatLngs = session.latlngs;
   lastPolygon = polygon;
@@ -4283,7 +4387,6 @@ function _updatePropelioStatusCounts(_unusedFullList) {
   if (!window._propelioLast || !Array.isArray(window._propelioLast.comps)) {
     const ids = [
       "prop-count-sold", "prop-count-active", "prop-count-pending",
-      "cf-count-sold", "cf-count-active", "cf-count-pending",
       "prop-count-oac",
     ];
     ids.forEach((id) => {
@@ -4344,9 +4447,6 @@ function _updatePropelioStatusCounts(_unusedFullList) {
   setText("prop-count-sold", sold);
   setText("prop-count-active", active);
   setText("prop-count-pending", pending);
-  setText("cf-count-sold", sold);
-  setText("cf-count-active", active);
-  setText("cf-count-pending", pending);
   setText("prop-count-oac", oac);
 }
 
@@ -4804,8 +4904,6 @@ function _findPropelioCompByKey(key) {
 async function flyToAndOpenPropelioComp(compKey) {
   const layer = propelioCompLayerByKey.get(String(compKey || "").trim());
   if (!layer) return;
-  const comp = layer._lotLedgerComp
-    || (typeof layer.getLayers === "function" ? layer.getLayers()[0]?._lotLedgerComp : null);
 
   // Show a crisp purple outline on the map for the clicked comp. If the
   // comp rendered as a footprint, outline its polygon; if it's a fallback
@@ -4856,14 +4954,6 @@ async function flyToAndOpenPropelioComp(compKey) {
       if (bounds) map.fitBounds(bounds, { padding: [40, 40], maxZoom: map.getZoom() });
       else map.panTo(center);
     }
-  }
-
-  // Open via the unified async resolver so spillover comps (outside the
-  // drawn polygon) get the unified CAD+MLS popup, not just the standalone
-  // Propelio-only popup. layer._lotLedgerComp is stashed at render time
-  // in _renderPropelioComps.
-  if (comp && center) {
-    await _openUnifiedPropelioPopup(comp, center);
   }
 }
 
@@ -5098,6 +5188,24 @@ function _setPropStatusFilter(status, checked, options = {}) {
     const key = btn.getAttribute("data-comp-key");
     const rating = btn.getAttribute("data-rating");
     if (!key) return;
+    // Optimistically toggle is-active classes on sibling buttons so the
+    // popup/panel shows the new rating's highlight immediately. The async
+    // ratePropelioComp call below persists + propagates to the in-memory
+    // comp, but the popup HTML isn't re-rendered until next open — without
+    // this optimistic update the user would have to close + reopen the
+    // popup to see their click registered.
+    const container = btn.parentElement;
+    if (container) {
+      container.querySelectorAll(".propelio-rate-btn").forEach((b) => {
+        if (rating === "good") {
+          b.classList.toggle("is-active", b.classList.contains("good"));
+        } else if (rating === "bad") {
+          b.classList.toggle("is-active", b.classList.contains("bad"));
+        } else {
+          b.classList.remove("is-active");
+        }
+      });
+    }
     void ratePropelioComp(key, rating === "clear" ? null : rating);
   });
 })();
@@ -6254,6 +6362,7 @@ function _buildParcelDetailPanelHtml(p, matchedComp) {
               ${_buildParcelDetailTableRow("School District", _panelDisplayValue(p.school))}
               ${_buildParcelDetailTableRow("Year Built", _panelDisplayValue(p.yr_built))}
               ${_buildParcelDetailTableRow("Living Area", p.sqft && p.sqft !== "N/A" ? `${p.sqft} sf` : "N/A")}
+              ${p.subdivision ? _buildParcelDetailTableRow("Neighborhood", _propelioEscape(p.subdivision)) : ""}
               ${p.on_redfin && p.redfin_url ? _buildParcelDetailTableRow("Listing", `<a href="${p.redfin_url}" target="_blank" rel="noopener noreferrer">View listing</a>`) : ""}
               ${soldCompRows}
             </table>
@@ -6439,6 +6548,7 @@ function makePopupHtml(p) {
   const verifiedVacant = normalizeVerificationValue(
     verificationByAccount.get(p.account_num) || p.verified_vacant
   );
+  const subdivision = String(p.subdivision || "").trim();
   const row = (label, val) => `<tr><td class="popup-label">${label}</td><td class="popup-val">${val || "N/A"}</td></tr>`;
   const targetDistanceMeta = _buildDistanceToTargetMeta(p);
 
@@ -6537,6 +6647,7 @@ function makePopupHtml(p) {
           ${row("School District", p.school)}
           ${row("Year Built", p.yr_built)}
           ${row("Living Area", p.sqft && p.sqft !== "N/A" ? p.sqft + " sf" : "N/A")}
+          ${subdivision ? row("Neighborhood", subdivision) : ""}
           ${redfinListingRow}
           ${soldCompRows}
         </table>
@@ -7650,7 +7761,7 @@ async function runAnalysis(polygon, includeRedfin, includeSold, options = {}) {
 
 async function refreshExpiredJob() {
   if (!lastPolygon || lastPolygon.length < 3) return false;
-  const includeRedfin = true;
+  const includeRedfin = Boolean(filterState.active);
   const includeSold = Boolean(filterState.sold);
   try {
     const data = await runAnalysis(lastPolygon, includeRedfin, includeSold);
@@ -7761,7 +7872,7 @@ map.on("draw:created", async (e) => {
   // Instructions section removed; results manage visibility
   document.getElementById("sidebar-results").classList.add("hidden");
   document.getElementById("sidebar-loading").classList.remove("hidden");
-  const includeRedfin = true;
+  const includeRedfin = Boolean(filterState.active);
   const includeSold = Boolean(filterState.sold);
   document.getElementById("redfin-status").textContent = "Running analysis...";
   drawLayer.addLayer(e.layer);

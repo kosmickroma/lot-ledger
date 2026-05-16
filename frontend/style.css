@@ -3200,9 +3200,18 @@ body.is-not-power-user .power-user-only {
   background: rgba(0, 0, 0, 0.06);
 }
 
-.propelio-rate-btn.is-active {
-  background: rgba(0, 0, 0, 0.08);
-  border-color: rgba(0, 0, 0, 0.3);
+.propelio-rate-btn.good.is-active {
+  background: rgba(34, 197, 94, 0.28);
+  color: #14532d;
+  border-color: #22c55e;
+  box-shadow: 0 0 0 1px #22c55e inset;
+}
+
+.propelio-rate-btn.bad.is-active {
+  background: rgba(220, 38, 38, 0.28);
+  color: #7f1d1d;
+  border-color: #dc2626;
+  box-shadow: 0 0 0 1px #dc2626 inset;
 }
 
 .propelio-rate-btn[disabled] {

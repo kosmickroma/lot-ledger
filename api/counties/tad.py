@@ -249,6 +249,7 @@ def _normalize_tad_row(raw: dict[str, Any]) -> dict[str, Any]:
         "division_cd": "TAD",
         "sptd_code": property_class,       # detailed code used for classify + label
         "nbhd_cd": subdivision,
+        "subdivision": subdivision,
         "legal1": legal_descr,
         "legal2": "", "legal3": "", "legal4": "", "legal5": "",
         # spatial
