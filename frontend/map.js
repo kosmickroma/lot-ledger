@@ -5188,6 +5188,24 @@ function _setPropStatusFilter(status, checked, options = {}) {
     const key = btn.getAttribute("data-comp-key");
     const rating = btn.getAttribute("data-rating");
     if (!key) return;
+    // Optimistically toggle is-active classes on sibling buttons so the
+    // popup/panel shows the new rating's highlight immediately. The async
+    // ratePropelioComp call below persists + propagates to the in-memory
+    // comp, but the popup HTML isn't re-rendered until next open — without
+    // this optimistic update the user would have to close + reopen the
+    // popup to see their click registered.
+    const container = btn.parentElement;
+    if (container) {
+      container.querySelectorAll(".propelio-rate-btn").forEach((b) => {
+        if (rating === "good") {
+          b.classList.toggle("is-active", b.classList.contains("good"));
+        } else if (rating === "bad") {
+          b.classList.toggle("is-active", b.classList.contains("bad"));
+        } else {
+          b.classList.remove("is-active");
+        }
+      });
+    }
     void ratePropelioComp(key, rating === "clear" ? null : rating);
   });
 })();
