@@ -2474,48 +2474,93 @@ function _renderSavedTargetStar(area) {
 }
 
 function _renderSavedParcelOutline(area) {
-  if (savedParcelLayers[area.account_num]) return; // already on map
-  if (!area.geometry || !["Polygon", "MultiPolygon"].includes(area.geometry.type)) return;
-  const layer = L.geoJSON({ type: "Feature", geometry: area.geometry, properties: {} }, {
-    pane: "savedParcelPane",
-    className: "saved-parcel-glow",
-    style: {
-      color: SAVED_PARCEL_COLOR,
-      weight: 4,
-      fill: true,
-      fillColor: SAVED_PARCEL_COLOR,
-      fillOpacity: 0.16,
-      interactive: false,
-    },
-    interactive: false,
-  }).addTo(savedParcelLayer);
-  savedParcelLayers[area.account_num] = layer;
+  // Dedup against BOTH layer buckets: the polygon path populates both
+  // savedParcelLayers + savedParcelClickLayers; the point-fallback path only
+  // populates savedParcelClickLayers, so a check on savedParcelLayers alone
+  // would let the fallback add duplicate circle-markers on re-render.
+  if (savedParcelLayers[area.account_num] || savedParcelClickLayers[area.account_num]) return;
 
-  // Sibling click-catcher on the default overlay pane. Transparent fill, no
-  // stroke — exists only to make the gold target reliably clickable even when
-  // an active draw has set lastAnalysisGeojson (which makes the browse-layer
-  // click handler bail), or when the target sits outside the draw polygon and
-  // therefore has no entry in parcelTypeLayers.
+  const hasPolygonGeometry = area.geometry
+    && ["Polygon", "MultiPolygon"].includes(area.geometry.type);
+
+  if (hasPolygonGeometry) {
+    // === existing path: render cyan halo + invisible polygon click-catcher ===
+    const layer = L.geoJSON({ type: "Feature", geometry: area.geometry, properties: {} }, {
+      pane: "savedParcelPane",
+      className: "saved-parcel-glow",
+      style: {
+        color: SAVED_PARCEL_COLOR,
+        weight: 4,
+        fill: true,
+        fillColor: SAVED_PARCEL_COLOR,
+        fillOpacity: 0.16,
+        interactive: false,
+      },
+      interactive: false,
+    }).addTo(savedParcelLayer);
+    savedParcelLayers[area.account_num] = layer;
+
+    // Sibling click-catcher on the default overlay pane. Transparent fill, no
+    // stroke — exists only to make the gold target reliably clickable even when
+    // an active draw has set lastAnalysisGeojson (which makes the browse-layer
+    // click handler bail), or when the target sits outside the draw polygon and
+    // therefore has no entry in parcelTypeLayers.
+    const county = area.county || "dcad";
+    const accountNum = area.account_num;
+    const clickLayer = L.geoJSON({ type: "Feature", geometry: area.geometry, properties: {} }, {
+      style: { stroke: false, fill: true, fillOpacity: 0, fillColor: SAVED_PARCEL_COLOR },
+      interactive: true,
+    });
+    clickLayer.on("click", async (ev) => {
+      L.DomEvent.stopPropagation(ev);
+      if (_handleMeasureInteraction(ev.latlng, area)) return;
+      try {
+        const resp = await fetch(`/api/parcel/${county}/${accountNum}`);
+        if (!resp.ok) return;
+        const detail = await resp.json();
+        openParcelDetailPanel(detail.properties || detail, { latlng: ev.latlng, geometry: detail.geometry });
+      } catch (e) {
+        console.error("Saved-target popup failed", e);
+      }
+    });
+    clickLayer.addTo(savedParcelClickLayer);
+    savedParcelClickLayers[accountNum] = clickLayer;
+    return;
+  }
+
+  // === NEW: point-based fallback for location-only saved parcels ===
+  // No parcel polygon stored, so render an invisible circle-marker click-catcher
+  // at the saved lat/lng. Same savedParcelClickLayer + savedParcelClickLayers
+  // bookkeeping so cleanup paths stay consistent.
+  const lat = Number(area.lat);
+  const lng = Number(area.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+
   const county = area.county || "dcad";
   const accountNum = area.account_num;
-  const clickLayer = L.geoJSON({ type: "Feature", geometry: area.geometry, properties: {} }, {
-    style: { stroke: false, fill: true, fillOpacity: 0, fillColor: SAVED_PARCEL_COLOR },
+
+  const pointClickLayer = L.circleMarker([lat, lng], {
+    radius: 24,         // pixel-based; stays clickable at any zoom
+    stroke: false,
+    fill: true,
+    fillOpacity: 0,     // invisible
     interactive: true,
+    bubblingMouseEvents: false,
   });
-  clickLayer.on("click", async (ev) => {
+  pointClickLayer.on("click", async (ev) => {
     L.DomEvent.stopPropagation(ev);
     if (_handleMeasureInteraction(ev.latlng, area)) return;
     try {
-      const resp = await fetch(`/api/parcel/${county}/${accountNum}`);
+      const resp = await fetch(`/api/parcel/${encodeURIComponent(county)}/${encodeURIComponent(accountNum)}`);
       if (!resp.ok) return;
       const detail = await resp.json();
       openParcelDetailPanel(detail.properties || detail, { latlng: ev.latlng, geometry: detail.geometry });
     } catch (e) {
-      console.error("Saved-target popup failed", e);
+      console.error("Saved-target (point fallback) popup failed", e);
     }
   });
-  clickLayer.addTo(savedParcelClickLayer);
-  savedParcelClickLayers[accountNum] = clickLayer;
+  pointClickLayer.addTo(savedParcelClickLayer);
+  savedParcelClickLayers[accountNum] = pointClickLayer;
 }
 
 function _clearSelectedOutline() {
