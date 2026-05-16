@@ -6333,7 +6333,6 @@ function _buildParcelDetailPanelHtml(p, matchedComp) {
           <section class="parcel-panel-cad">
             <div class="parcel-panel-section-title">CAD</div>
             <table class="popup-table">
-              ${p.subdivision ? _buildParcelDetailTableRow("Neighborhood", _propelioEscape(p.subdivision)) : ""}
               ${_buildParcelDetailTableRow("Owner", _panelDisplayValue(p.owner))}
               ${_buildParcelDetailTableRow("Land Value", _panelDisplayValue(p.land_val))}
               ${_buildParcelDetailTableRow("Total Value", _panelDisplayValue(p.tot_val))}
@@ -6349,6 +6348,7 @@ function _buildParcelDetailPanelHtml(p, matchedComp) {
               ${_buildParcelDetailTableRow("School District", _panelDisplayValue(p.school))}
               ${_buildParcelDetailTableRow("Year Built", _panelDisplayValue(p.yr_built))}
               ${_buildParcelDetailTableRow("Living Area", p.sqft && p.sqft !== "N/A" ? `${p.sqft} sf` : "N/A")}
+              ${p.subdivision ? _buildParcelDetailTableRow("Neighborhood", _propelioEscape(p.subdivision)) : ""}
               ${p.on_redfin && p.redfin_url ? _buildParcelDetailTableRow("Listing", `<a href="${p.redfin_url}" target="_blank" rel="noopener noreferrer">View listing</a>`) : ""}
               ${soldCompRows}
             </table>
@@ -6618,7 +6618,6 @@ function makePopupHtml(p) {
           </div>
         </div>
         <table class="popup-table">
-          ${subdivision ? row("Neighborhood", subdivision) : ""}
           ${row("Owner", p.owner)}
           ${row("Land Value", p.land_val)}
           ${row("Total Value", p.tot_val)}
@@ -6634,6 +6633,7 @@ function makePopupHtml(p) {
           ${row("School District", p.school)}
           ${row("Year Built", p.yr_built)}
           ${row("Living Area", p.sqft && p.sqft !== "N/A" ? p.sqft + " sf" : "N/A")}
+          ${subdivision ? row("Neighborhood", subdivision) : ""}
           ${redfinListingRow}
           ${soldCompRows}
         </table>
