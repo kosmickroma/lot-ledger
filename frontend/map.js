@@ -3272,6 +3272,9 @@ function _renderList(sectionId, listId, items) {
   list.innerHTML = items.map((area) => {
     const date = new Date(area.savedAt).toLocaleDateString(undefined, { month: "short", day: "numeric" });
     const icon = area.type === "parcel" ? "📌" : area.type === "location" ? "📍" : "▭";
+    const displayName = area.type === "parcel" || area.type === "location"
+      ? String(area.name || "").replace(/,\s*/g, " ")
+      : area.name;
     const chip = _formatFilterDiffChip(area);
     const canRename = area.type !== "parcel";
     const canShare = area.type === "area" && Boolean(String(area.share_id || "").trim());
@@ -3289,7 +3292,7 @@ function _renderList(sectionId, listId, items) {
       <div class="saved-area-row${activeClass}" tabindex="0" data-id="${area.id}" data-type="${area.type}">
         <div class="saved-area-main">
           <span class="saved-area-icon">${icon}</span>
-          <span class="saved-area-name">${area.name}</span>
+          <span class="saved-area-name">${displayName}</span>
           ${showFullControls ? `<button type="button" class="saved-area-quick-delete-btn" data-action="delete" title="Delete">🗑</button>` : ""}
           ${canShare ? `<button type="button" class="saved-area-action-btn saved-area-share-btn" data-action="share" data-share-id="${_esc(area.share_id)}" title="Share">🔗</button>` : ""}
         </div>

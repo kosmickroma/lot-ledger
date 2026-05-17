@@ -56,6 +56,122 @@
         <p class="sidebar-copy">Loading parcels...</p>
         <p id="redfin-status" class="sidebar-note">Pulling Redfin listings...</p>
       </div>
+      <div id="saved-areas" class="sidebar-section hidden collapsible-section">
+        <div class="section-header">
+          <button class="section-toggle" type="button" data-target="saved-areas-body" aria-expanded="false">
+            <span class="sidebar-label">Saved Areas</span>
+          </button>
+          <!-- click-mode-toggle (Zoom/Keep View) moved to the map control
+               toolbar as the ZOOM button — easier to discover, no scrolling
+               required (2026-05-11 relocation per KK). -->
+        </div>
+        <div id="saved-areas-body" class="collapsible-body hidden">
+          <div id="saved-areas-list"></div>
+          <button id="btn-saved-area-clear" class="hidden" onclick="clearDrawResults()" style="margin-top:8px;width:100%;padding:5px 0;background:transparent;border:1px solid #555;border-radius:4px;color:#aaa;font-size:11px;cursor:pointer;">← Back to Browse</button>
+        </div>
+      </div>
+      <div id="saved-parcels" class="sidebar-section hidden collapsible-section">
+        <div class="section-header">
+          <button class="section-toggle" type="button" data-target="saved-parcels-body" aria-expanded="false">
+            <span class="sidebar-label">Targets</span>
+          </button>
+        </div>
+        <div id="saved-parcels-body" class="collapsible-body hidden">
+          <div id="saved-parcels-list"></div>
+        </div>
+      </div>
+      <div id="map-filters" class="filter-card collapsible-section">
+        <button class="section-toggle" type="button" data-target="map-filters-body" aria-expanded="true">
+          <span class="sidebar-label">Map Filters</span>
+        </button>
+        <div id="map-filters-body" class="collapsible-body">
+          <div class="filter-card-head">
+            <button id="btn-filters-reset" class="filter-reset-btn" type="button">Reset</button>
+          </div>
+          <div class="filter-list" id="filter-list">
+            <label class="filter-row">
+              <span class="filter-swatch" style="--sw:#2980b9"></span>
+              <span class="filter-name">Off Market</span>
+              <span class="filter-count" id="filter-count-off_market">0</span>
+              <input type="checkbox" id="filter-off-market" checked>
+            </label>
+            <label class="filter-row">
+              <span class="filter-swatch" style="--sw:#27ae60"></span>
+              <span class="filter-name">Vacant</span>
+              <span class="filter-count" id="filter-count-vacant">0</span>
+              <input type="checkbox" id="filter-vacant" checked>
+            </label>
+            <label class="filter-row">
+              <span class="filter-swatch swatch-multifamily"></span>
+              <span class="filter-name">Multifamily</span>
+              <span class="filter-count" id="filter-count-multifamily">0</span>
+              <input type="checkbox" id="filter-multifamily">
+            </label>
+            <label class="filter-row">
+              <span class="filter-swatch" style="--sw:#8B7355"></span>
+              <span class="filter-name">Commercial</span>
+              <span class="filter-count" id="filter-count-commercial">0</span>
+              <input type="checkbox" id="filter-commercial">
+            </label>
+            <label class="filter-row">
+              <span class="filter-swatch" style="--sw:#95a5a6"></span>
+              <span class="filter-name">Exempt</span>
+              <span class="filter-count" id="filter-count-exempt">0</span>
+              <input type="checkbox" id="filter-exempt">
+            </label>
+          </div>
+          <p id="sold-toggle-status" class="sidebar-note"></p>
+        </div>
+      </div>
+      <div class="hidden" aria-hidden="true">
+        <input type="checkbox" id="toggle-redfin">
+        <p id="redfin-toggle-status"></p>
+        <input type="checkbox" id="toggle-sold" checked>
+      </div>
+      <div id="numeric-filters" class="filter-card collapsible-section power-user-only">
+        <button class="section-toggle" type="button" data-target="numeric-filters-body" aria-expanded="true">
+          <span class="sidebar-label">Property Filters</span>
+        </button>
+        <div id="numeric-filters-body" class="collapsible-body">
+          <div class="filter-card-head">
+            <button id="btn-numeric-reset" class="filter-reset-btn" type="button">Reset</button>
+          </div>
+          <div class="numeric-filter-list">
+            <div class="numeric-filter-row">
+              <span class="numeric-filter-label">Lot Size (acres)</span>
+              <div class="numeric-filter-inputs">
+                <input type="text" id="nf-lot-min" placeholder="Min" class="nf-input" inputmode="decimal">
+                <span class="nf-sep">–</span>
+                <input type="text" id="nf-lot-max" placeholder="Max" class="nf-input" inputmode="decimal">
+              </div>
+            </div>
+            <div class="numeric-filter-row">
+              <span class="numeric-filter-label">Appraised Value</span>
+              <div class="numeric-filter-inputs">
+                <input type="text" id="nf-val-min" placeholder="Min (500k)" class="nf-input" inputmode="decimal">
+                <span class="nf-sep">–</span>
+                <input type="text" id="nf-val-max" placeholder="Max (1m)" class="nf-input" inputmode="decimal">
+              </div>
+            </div>
+            <div class="numeric-filter-row">
+              <span class="numeric-filter-label">Year Built</span>
+              <div class="numeric-filter-inputs">
+                <input type="number" id="nf-yr-min" placeholder="Min" class="nf-input" min="1800" max="2030">
+                <span class="nf-sep">–</span>
+                <input type="number" id="nf-yr-max" placeholder="Max" class="nf-input" min="1800" max="2030">
+              </div>
+            </div>
+            <div class="numeric-filter-row">
+              <span class="numeric-filter-label">Building Sqft</span>
+              <div class="numeric-filter-inputs">
+                <input type="number" id="nf-sqft-min" placeholder="Min" class="nf-input" min="0">
+                <span class="nf-sep">–</span>
+                <input type="number" id="nf-sqft-max" placeholder="Max" class="nf-input" min="0">
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
       <div id="propelio-filters" class="filter-card collapsible-section">
         <button class="section-toggle" type="button" data-target="propelio-filters-body" aria-expanded="true">
           <span class="sidebar-label">Sold Comps + Listings</span>
@@ -145,6 +261,13 @@
               </div>
             </div>
           </div>
+        </div>
+      </div>
+      <div id="comps-list-block" class="filter-card collapsible-section">
+        <button class="section-toggle" type="button" data-target="comps-list-block-body" aria-expanded="true">
+          <span class="sidebar-label">Comps List</span>
+        </button>
+        <div id="comps-list-block-body" class="collapsible-body">
           <div class="propelio-comp-list-section">
             <div class="propelio-comp-list-head">
               <span class="propelio-section-label">Comps list</span>
@@ -157,132 +280,6 @@
               </select>
             </div>
             <div id="propelio-comp-list" class="propelio-comp-list"></div>
-          </div>
-        </div>
-      </div>
-      <div id="map-filters" class="filter-card collapsible-section">
-        <button class="section-toggle" type="button" data-target="map-filters-body" aria-expanded="true">
-          <span class="sidebar-label">Map Filters</span>
-        </button>
-        <div id="map-filters-body" class="collapsible-body">
-          <div class="filter-card-head">
-            <button id="btn-filters-reset" class="filter-reset-btn" type="button">Reset</button>
-          </div>
-          <div class="filter-list" id="filter-list">
-            <label class="filter-row">
-              <span class="filter-swatch" style="--sw:#2980b9"></span>
-              <span class="filter-name">Off Market</span>
-              <span class="filter-count" id="filter-count-off_market">0</span>
-              <input type="checkbox" id="filter-off-market" checked>
-            </label>
-            <label class="filter-row">
-              <span class="filter-swatch" style="--sw:#27ae60"></span>
-              <span class="filter-name">Vacant</span>
-              <span class="filter-count" id="filter-count-vacant">0</span>
-              <input type="checkbox" id="filter-vacant" checked>
-            </label>
-            <label class="filter-row">
-              <span class="filter-swatch swatch-multifamily"></span>
-              <span class="filter-name">Multifamily</span>
-              <span class="filter-count" id="filter-count-multifamily">0</span>
-              <input type="checkbox" id="filter-multifamily">
-            </label>
-            <label class="filter-row">
-              <span class="filter-swatch" style="--sw:#8B7355"></span>
-              <span class="filter-name">Commercial</span>
-              <span class="filter-count" id="filter-count-commercial">0</span>
-              <input type="checkbox" id="filter-commercial">
-            </label>
-            <label class="filter-row">
-              <span class="filter-swatch" style="--sw:#95a5a6"></span>
-              <span class="filter-name">Exempt</span>
-              <span class="filter-count" id="filter-count-exempt">0</span>
-              <input type="checkbox" id="filter-exempt">
-            </label>
-          </div>
-          <p id="sold-toggle-status" class="sidebar-note"></p>
-        </div>
-      </div>
-      <div class="hidden" aria-hidden="true">
-        <input type="checkbox" id="toggle-redfin">
-        <p id="redfin-toggle-status"></p>
-        <input type="checkbox" id="toggle-sold" checked>
-      </div>
-      <div id="saved-areas" class="sidebar-section hidden collapsible-section">
-        <div class="section-header">
-          <button class="section-toggle" type="button" data-target="saved-areas-body" aria-expanded="false">
-            <span class="sidebar-label">Saved Areas</span>
-          </button>
-          <!-- click-mode-toggle (Zoom/Keep View) moved to the map control
-               toolbar as the ZOOM button — easier to discover, no scrolling
-               required (2026-05-11 relocation per KK). -->
-        </div>
-        <div id="saved-areas-body" class="collapsible-body hidden">
-          <div id="saved-areas-list"></div>
-          <button id="btn-saved-area-clear" class="hidden" onclick="clearDrawResults()" style="margin-top:8px;width:100%;padding:5px 0;background:transparent;border:1px solid #555;border-radius:4px;color:#aaa;font-size:11px;cursor:pointer;">← Back to Browse</button>
-        </div>
-      </div>
-      <div id="saved-parcels" class="sidebar-section hidden collapsible-section">
-        <div class="section-header">
-          <button class="section-toggle" type="button" data-target="saved-parcels-body" aria-expanded="false">
-            <span class="sidebar-label">Targets</span>
-          </button>
-        </div>
-        <div id="saved-parcels-body" class="collapsible-body hidden">
-          <div id="saved-parcels-list"></div>
-        </div>
-      </div>
-      <div id="saved-sessions" class="sidebar-section hidden collapsible-section">
-        <div class="section-header">
-          <button class="section-toggle" type="button" data-target="saved-sessions-body" aria-expanded="false">
-            <span class="sidebar-label">Saved Snapshots</span>
-          </button>
-        </div>
-        <div id="saved-sessions-body" class="collapsible-body hidden">
-          <div id="saved-sessions-list"></div>
-        </div>
-      </div>
-      <div id="numeric-filters" class="filter-card collapsible-section power-user-only">
-        <button class="section-toggle" type="button" data-target="numeric-filters-body" aria-expanded="true">
-          <span class="sidebar-label">Property Filters</span>
-        </button>
-        <div id="numeric-filters-body" class="collapsible-body">
-          <div class="filter-card-head">
-            <button id="btn-numeric-reset" class="filter-reset-btn" type="button">Reset</button>
-          </div>
-          <div class="numeric-filter-list">
-            <div class="numeric-filter-row">
-              <span class="numeric-filter-label">Lot Size (acres)</span>
-              <div class="numeric-filter-inputs">
-                <input type="text" id="nf-lot-min" placeholder="Min" class="nf-input" inputmode="decimal">
-                <span class="nf-sep">–</span>
-                <input type="text" id="nf-lot-max" placeholder="Max" class="nf-input" inputmode="decimal">
-              </div>
-            </div>
-            <div class="numeric-filter-row">
-              <span class="numeric-filter-label">Appraised Value</span>
-              <div class="numeric-filter-inputs">
-                <input type="text" id="nf-val-min" placeholder="Min (500k)" class="nf-input" inputmode="decimal">
-                <span class="nf-sep">–</span>
-                <input type="text" id="nf-val-max" placeholder="Max (1m)" class="nf-input" inputmode="decimal">
-              </div>
-            </div>
-            <div class="numeric-filter-row">
-              <span class="numeric-filter-label">Year Built</span>
-              <div class="numeric-filter-inputs">
-                <input type="number" id="nf-yr-min" placeholder="Min" class="nf-input" min="1800" max="2030">
-                <span class="nf-sep">–</span>
-                <input type="number" id="nf-yr-max" placeholder="Max" class="nf-input" min="1800" max="2030">
-              </div>
-            </div>
-            <div class="numeric-filter-row">
-              <span class="numeric-filter-label">Building Sqft</span>
-              <div class="numeric-filter-inputs">
-                <input type="number" id="nf-sqft-min" placeholder="Min" class="nf-input" min="0">
-                <span class="nf-sep">–</span>
-                <input type="number" id="nf-sqft-max" placeholder="Max" class="nf-input" min="0">
-              </div>
-            </div>
           </div>
         </div>
       </div>
@@ -315,6 +312,16 @@
               <button id="btn-deep-pull-stop" class="btn-tertiary" type="button">Stop</button>
             </div>
           </div>
+        </div>
+      </div>
+      <div id="saved-sessions" class="sidebar-section hidden collapsible-section">
+        <div class="section-header">
+          <button class="section-toggle" type="button" data-target="saved-sessions-body" aria-expanded="false">
+            <span class="sidebar-label">Saved Snapshots</span>
+          </button>
+        </div>
+        <div id="saved-sessions-body" class="collapsible-body hidden">
+          <div id="saved-sessions-list"></div>
         </div>
       </div>
       <!-- Legacy Filters — Redfin Listings + Sold rows live here, hidden by default
