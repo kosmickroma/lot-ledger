@@ -2676,6 +2676,19 @@ async function _rightClickSaveParcel(p, knownGeometry) {
         const detail = await resp.json();
         const props = detail.properties || detail;
         addr = addr || String(props.addr || "");
+        const propsCity = String(props.city || "").trim();
+        if (propsCity && addr) {
+          // Tighter "already has city" guard than includes(): tokenize addr by
+          // whitespace and check whether the last token already matches the city
+          // case-insensitively. This avoids false-matching things like "Plano"
+          // appearing inside "Esplanade Dr" (which includes() would mishandle).
+          const addrTokens = addr.trim().split(/\s+/);
+          const lastToken = (addrTokens[addrTokens.length - 1] || "").toLowerCase();
+          const cityLower = propsCity.toLowerCase();
+          if (lastToken !== cityLower) {
+            addr = `${addr.trim()} ${propsCity}`.trim();
+          }
+        }
         if (!Number.isFinite(lat) && Number.isFinite(Number(props.lat))) lat = Number(props.lat);
         if (!Number.isFinite(lng) && Number.isFinite(Number(props.lng))) lng = Number(props.lng);
         if (!geometry && (detail.geometry?.type === "Polygon" || detail.geometry?.type === "MultiPolygon")) {
@@ -6316,7 +6329,7 @@ function _buildParcelDetailPanelHtml(p, matchedComp) {
     ? `<a class="propelio-popup-realtor-link" href="https://www.realtor.com/realestateandhomes-search/MLSID-${encodeURIComponent(compDetails.mls)}" target="_blank" rel="noopener noreferrer">Look up MLS# ${_propelioEscape(compDetails.mls)} on Realtor.com</a>`
     : "";
   const saveLinkHtml = p.account_num
-    ? `<a href="#" class="parcel-panel-save-link parcel-save-link" data-account="${_propelioEscape(p.account_num)}" data-county="${_propelioEscape(p.source_county || "dcad")}" data-addr="${_propelioEscape(p.addr || "")}" data-lat="${_propelioEscape(p.lat || "")}" data-lng="${_propelioEscape(p.lng || "")}">📌 Save parcel</a>`
+    ? `<a href="#" class="parcel-panel-save-link parcel-save-link" data-account="${_propelioEscape(p.account_num)}" data-county="${_propelioEscape(p.source_county || "dcad")}" data-addr="${_propelioEscape(p.addr || "")}" data-city="${_propelioEscape(p.city || "")}" data-lat="${_propelioEscape(p.lat || "")}" data-lng="${_propelioEscape(p.lng || "")}">📌 Save parcel</a>`
     : `<span class="parcel-panel-action-muted">Parcel save unavailable</span>`;
   const photoHeroHtml = compDetails
     ? (compDetails.photos.length
@@ -6697,6 +6710,7 @@ function makePopupHtml(p) {
             data-account="${p.account_num}"
             data-county="${p.source_county || "dcad"}"
             data-addr="${(p.addr || "").replace(/"/g, "&quot;")}"
+            data-city="${(p.city || "").replace(/"/g, "&quot;")}"
             data-lat="${p.lat || ""}"
             data-lng="${p.lng || ""}"
             style="color:#e67e22;text-decoration:none;">📌 Save parcel</a>
@@ -8680,7 +8694,8 @@ function _wireParcelInteractiveUi(root, options = {}) {
   if (saveLink) {
     saveLink.addEventListener("click", async (ev) => {
       ev.preventDefault();
-      const { account, county, addr, lat, lng } = saveLink.dataset;
+      const { account, county, addr, city, lat, lng } = saveLink.dataset;
+      const fullName = city ? `${(addr || "").trim()} ${city.trim()}`.trim() : (addr || "").trim();
       let geometry = null;
       try {
         const resp = await fetch(`/api/parcel/${county}/${account}`);
@@ -8692,7 +8707,7 @@ function _wireParcelInteractiveUi(root, options = {}) {
         }
       } catch {}
       try {
-        await saveParcel(account, county, addr, parseFloat(lat), parseFloat(lng), geometry);
+        await saveParcel(account, county, fullName, parseFloat(lat), parseFloat(lng), geometry);
         saveLink.textContent = "✓ Saved";
         saveLink.style.color = "#888";
         saveLink.style.pointerEvents = "none";
