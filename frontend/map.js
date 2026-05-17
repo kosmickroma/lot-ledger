@@ -534,6 +534,11 @@ let _activeUndoSnapshot = null;
 let _undoPillTimer = null;
 let _savedAreasCache = [];
 let _savedParcelsCache = [];
+// Saved-list filter state for the search bars added in Mike bundle 4.
+// Updated by the input event listeners wired below; consumed by
+// renderSavedAreasList() to scope the items passed to _renderList.
+let _savedAreasSearchQuery = "";
+let _savedTargetsSearchQuery = "";
 let _currentSessionIsNamed = false;
 let _savedSessionsCache = [];
 let _currentLoadedAreaId = null;
@@ -3402,8 +3407,23 @@ function _renderList(sectionId, listId, items) {
 }
 
 function renderSavedAreasList() {
-  _renderList("saved-areas", "saved-areas-list", _savedAreasCache.filter((a) => a.type === "area"));
-  _renderList("saved-parcels", "saved-parcels-list", [..._savedAreasCache.filter((a) => a.type === "location"), ..._savedParcelsCache]);
+  const areasTokens = _savedAreasSearchQuery.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const targetsTokens = _savedTargetsSearchQuery.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const areas = _savedAreasCache
+    .filter((a) => a.type === "area")
+    .filter((a) => {
+      if (areasTokens.length === 0) return true;
+      const name = String(a.name || "").toLowerCase();
+      return areasTokens.every((t) => name.includes(t));
+    });
+  const targets = [..._savedAreasCache.filter((a) => a.type === "location"), ..._savedParcelsCache]
+    .filter((a) => {
+      if (targetsTokens.length === 0) return true;
+      const name = String(a.name || "").toLowerCase();
+      return targetsTokens.every((t) => name.includes(t));
+    });
+  _renderList("saved-areas", "saved-areas-list", areas);
+  _renderList("saved-parcels", "saved-parcels-list", targets);
   _updateUpdateAreaButtonVisibility();
 }
 
@@ -5843,6 +5863,23 @@ sidebarToggleBtn.addEventListener("click", () => {
 initSidebarCollapsibles();
 initClickModeToggle();
 initOACToggleSync();
+
+(function _initSavedListSearchInputs() {
+  const areasInput = document.getElementById("saved-areas-search");
+  const targetsInput = document.getElementById("saved-parcels-search");
+  if (areasInput) {
+    areasInput.addEventListener("input", () => {
+      _savedAreasSearchQuery = areasInput.value;
+      renderSavedAreasList();
+    });
+  }
+  if (targetsInput) {
+    targetsInput.addEventListener("input", () => {
+      _savedTargetsSearchQuery = targetsInput.value;
+      renderSavedAreasList();
+    });
+  }
+})();
 
 function applyMapVisibilityFilters() {
   const previousSoldLayerVisible = soldLayerVisible;
