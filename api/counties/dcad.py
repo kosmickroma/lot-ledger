@@ -497,6 +497,7 @@ def build_feature(row: dict[str, Any], prop_type: str, on_redfin: bool, redfin_l
         "prop_type": prop_type,
         "account_num": _clean_text(row.get("account_num")),
         "addr": _clean_text(row.get("property_address")),
+        "city": _clean_text(row.get("property_city")),
         "owner": _clean_text(row.get("owner_name")),
         "land_val": "Ag-exempt" if ag_zero else (f"${row['land_val']:,.0f}" if _safe_float(row.get("land_val")) is not None else "N/A"),
         "tot_val": "Ag-exempt" if ag_zero else (f"${row['tot_val']:,.0f}" if _safe_float(row.get("tot_val")) is not None else "N/A"),
