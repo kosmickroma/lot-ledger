@@ -534,6 +534,11 @@ let _activeUndoSnapshot = null;
 let _undoPillTimer = null;
 let _savedAreasCache = [];
 let _savedParcelsCache = [];
+// Saved-list filter state for the search bars added in Mike bundle 4.
+// Updated by the input event listeners wired below; consumed by
+// renderSavedAreasList() to scope the items passed to _renderList.
+let _savedAreasSearchQuery = "";
+let _savedTargetsSearchQuery = "";
 let _currentSessionIsNamed = false;
 let _savedSessionsCache = [];
 let _currentLoadedAreaId = null;
@@ -2671,6 +2676,19 @@ async function _rightClickSaveParcel(p, knownGeometry) {
         const detail = await resp.json();
         const props = detail.properties || detail;
         addr = addr || String(props.addr || "");
+        const propsCity = String(props.city || "").trim();
+        if (propsCity && addr) {
+          // Tighter "already has city" guard than includes(): tokenize addr by
+          // whitespace and check whether the last token already matches the city
+          // case-insensitively. This avoids false-matching things like "Plano"
+          // appearing inside "Esplanade Dr" (which includes() would mishandle).
+          const addrTokens = addr.trim().split(/\s+/);
+          const lastToken = (addrTokens[addrTokens.length - 1] || "").toLowerCase();
+          const cityLower = propsCity.toLowerCase();
+          if (lastToken !== cityLower) {
+            addr = `${addr.trim()} ${propsCity}`.trim();
+          }
+        }
         if (!Number.isFinite(lat) && Number.isFinite(Number(props.lat))) lat = Number(props.lat);
         if (!Number.isFinite(lng) && Number.isFinite(Number(props.lng))) lng = Number(props.lng);
         if (!geometry && (detail.geometry?.type === "Polygon" || detail.geometry?.type === "MultiPolygon")) {
@@ -3402,8 +3420,23 @@ function _renderList(sectionId, listId, items) {
 }
 
 function renderSavedAreasList() {
-  _renderList("saved-areas", "saved-areas-list", _savedAreasCache.filter((a) => a.type === "area"));
-  _renderList("saved-parcels", "saved-parcels-list", [..._savedAreasCache.filter((a) => a.type === "location"), ..._savedParcelsCache]);
+  const areasTokens = _savedAreasSearchQuery.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const targetsTokens = _savedTargetsSearchQuery.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const areas = _savedAreasCache
+    .filter((a) => a.type === "area")
+    .filter((a) => {
+      if (areasTokens.length === 0) return true;
+      const name = String(a.name || "").toLowerCase();
+      return areasTokens.every((t) => name.includes(t));
+    });
+  const targets = [..._savedAreasCache.filter((a) => a.type === "location"), ..._savedParcelsCache]
+    .filter((a) => {
+      if (targetsTokens.length === 0) return true;
+      const name = String(a.name || "").toLowerCase();
+      return targetsTokens.every((t) => name.includes(t));
+    });
+  _renderList("saved-areas", "saved-areas-list", areas);
+  _renderList("saved-parcels", "saved-parcels-list", targets);
   _updateUpdateAreaButtonVisibility();
 }
 
@@ -5616,6 +5649,34 @@ const AddressSearch = L.Control.extend({
       if (!item) return;
       _lastSearchedAddress = item.address;
       highlightSearchResult([Number(item.lat), Number(item.lng)]);
+      // Mike bundle 5a: auto-save the picked target. saveParcel is idempotent
+      // (backend ON CONFLICT DO UPDATE), so this is safe even if the parcel
+      // was already saved on a previous pick. Wrapped in an async IIFE with
+      // try/catch so saveParcel rejections (signed-out, CSRF, transient network)
+      // can never bubble up as unhandled promise rejections — silent on failure
+      // because there's no UI signal for an auto-save attempt anyway.
+      void (async () => {
+        try {
+          const addr = String(item.address || "").trim();
+          const city = String(item.city || "").trim();
+          const addrTokens = addr.split(/\s+/);
+          const lastToken = (addrTokens[addrTokens.length - 1] || "").toLowerCase();
+          const fullName = city && lastToken !== city.toLowerCase()
+            ? `${addr} ${city}`.trim()
+            : addr;
+          const finalName = fullName || String(item.account_num || "");
+          await saveParcel(
+            String(item.account_num || ""),
+            String(item.county || "dcad").trim().toLowerCase() || "dcad",
+            finalName,
+            Number(item.lat),
+            Number(item.lng),
+            null,
+          );
+        } catch {
+          // Silent: auto-save shouldn't disrupt the search flow.
+        }
+      })();
     };
 
     const fetchSuggestions = async () => {
@@ -5704,6 +5765,35 @@ const AddressSearch = L.Control.extend({
         const { lat, lon } = results[0];
         const latlng = [parseFloat(lat), parseFloat(lon)];
         highlightSearchResult(latlng);
+        // Mike bundle 5a: auto-save the resolved parcel if /api/parcel/near finds
+        // one at the Nominatim coordinates. Silent on miss (e.g., highway addresses)
+        // and silent on failure — the search flow already completed via
+        // highlightSearchResult; the save is best-effort.
+        void (async () => {
+          try {
+            const nearResp = await fetch(`/api/parcel/near?lat=${parseFloat(lat)}&lng=${parseFloat(lon)}`);
+            if (!nearResp.ok) return;
+            const detail = await nearResp.json();
+            const props = detail.properties || detail;
+            const acct = String(props.account_num || "").trim();
+            if (!acct) return;
+            const addr = String(props.addr || "").trim();
+            const city = String(props.city || "").trim();
+            const addrTokens = addr.split(/\s+/);
+            const lastToken = (addrTokens[addrTokens.length - 1] || "").toLowerCase();
+            const fullName = city && lastToken !== city.toLowerCase()
+              ? `${addr} ${city}`.trim()
+              : addr;
+            const finalName = fullName || acct;
+            const county = String(props.source_county || "dcad").trim().toLowerCase() || "dcad";
+            const geometry = (detail.geometry && (detail.geometry.type === "Polygon" || detail.geometry.type === "MultiPolygon"))
+              ? detail.geometry
+              : null;
+            await saveParcel(acct, county, finalName, parseFloat(lat), parseFloat(lon), geometry);
+          } catch {
+            // Silent: auto-save shouldn't spam console or disrupt the search flow.
+          }
+        })();
       } catch {
         btn.textContent = "Error";
         setTimeout(() => { btn.textContent = "Go"; btn.disabled = false; }, 2000);
@@ -5843,6 +5933,23 @@ sidebarToggleBtn.addEventListener("click", () => {
 initSidebarCollapsibles();
 initClickModeToggle();
 initOACToggleSync();
+
+(function _initSavedListSearchInputs() {
+  const areasInput = document.getElementById("saved-areas-search");
+  const targetsInput = document.getElementById("saved-parcels-search");
+  if (areasInput) {
+    areasInput.addEventListener("input", () => {
+      _savedAreasSearchQuery = areasInput.value;
+      renderSavedAreasList();
+    });
+  }
+  if (targetsInput) {
+    targetsInput.addEventListener("input", () => {
+      _savedTargetsSearchQuery = targetsInput.value;
+      renderSavedAreasList();
+    });
+  }
+})();
 
 function applyMapVisibilityFilters() {
   const previousSoldLayerVisible = soldLayerVisible;
@@ -6279,7 +6386,7 @@ function _buildParcelDetailPanelHtml(p, matchedComp) {
     ? `<a class="propelio-popup-realtor-link" href="https://www.realtor.com/realestateandhomes-search/MLSID-${encodeURIComponent(compDetails.mls)}" target="_blank" rel="noopener noreferrer">Look up MLS# ${_propelioEscape(compDetails.mls)} on Realtor.com</a>`
     : "";
   const saveLinkHtml = p.account_num
-    ? `<a href="#" class="parcel-panel-save-link parcel-save-link" data-account="${_propelioEscape(p.account_num)}" data-county="${_propelioEscape(p.source_county || "dcad")}" data-addr="${_propelioEscape(p.addr || "")}" data-lat="${_propelioEscape(p.lat || "")}" data-lng="${_propelioEscape(p.lng || "")}">📌 Save parcel</a>`
+    ? `<a href="#" class="parcel-panel-save-link parcel-save-link" data-account="${_propelioEscape(p.account_num)}" data-county="${_propelioEscape(p.source_county || "dcad")}" data-addr="${_propelioEscape(p.addr || "")}" data-city="${_propelioEscape(p.city || "")}" data-lat="${_propelioEscape(p.lat || "")}" data-lng="${_propelioEscape(p.lng || "")}">📌 Save parcel</a>`
     : `<span class="parcel-panel-action-muted">Parcel save unavailable</span>`;
   const photoHeroHtml = compDetails
     ? (compDetails.photos.length
@@ -6660,6 +6767,7 @@ function makePopupHtml(p) {
             data-account="${p.account_num}"
             data-county="${p.source_county || "dcad"}"
             data-addr="${(p.addr || "").replace(/"/g, "&quot;")}"
+            data-city="${(p.city || "").replace(/"/g, "&quot;")}"
             data-lat="${p.lat || ""}"
             data-lng="${p.lng || ""}"
             style="color:#e67e22;text-decoration:none;">📌 Save parcel</a>
@@ -8643,7 +8751,8 @@ function _wireParcelInteractiveUi(root, options = {}) {
   if (saveLink) {
     saveLink.addEventListener("click", async (ev) => {
       ev.preventDefault();
-      const { account, county, addr, lat, lng } = saveLink.dataset;
+      const { account, county, addr, city, lat, lng } = saveLink.dataset;
+      const fullName = city ? `${(addr || "").trim()} ${city.trim()}`.trim() : (addr || "").trim();
       let geometry = null;
       try {
         const resp = await fetch(`/api/parcel/${county}/${account}`);
@@ -8655,7 +8764,7 @@ function _wireParcelInteractiveUi(root, options = {}) {
         }
       } catch {}
       try {
-        await saveParcel(account, county, addr, parseFloat(lat), parseFloat(lng), geometry);
+        await saveParcel(account, county, fullName, parseFloat(lat), parseFloat(lng), geometry);
         saveLink.textContent = "✓ Saved";
         saveLink.style.color = "#888";
         saveLink.style.pointerEvents = "none";

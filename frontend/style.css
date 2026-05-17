@@ -1817,6 +1817,18 @@ body.is-not-power-user .power-user-only {
   padding: 4px 7px;
 }
 
+.saved-list-search-input {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0 0 8px;
+  padding: 5px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.22);
+  color: var(--text-main);
+  font-size: 12px;
+}
+
 .row-shimmer::before {
   content: "";
   position: absolute;
