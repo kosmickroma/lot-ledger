@@ -56,7 +56,6 @@ const SOLD_OUTLINE_COLOR = "#5C2D91";
 const SOLD_FALLBACK_DOT_COLOR = "#004225";
 const SOLD_FALLBACK_DOT_BORDER = "#5C2D91";
 const FILTER_STORAGE_KEY = "lotledger.map.filters.v1";
-const CLICK_MODE_STORAGE_KEY = "lot_ledger_click_mode";
 const SIDEBAR_SECTION_STATE_STORAGE_KEY = "lot_ledger_sidebar_sections.v1";
 
 const DEFAULT_FILTERS = {
@@ -237,7 +236,6 @@ function getClickMode() {
 function setClickMode(mode) {
   if (mode !== "stay" && mode !== "jump") mode = "jump";
   currentClickMode = mode;
-  localStorage.setItem(CLICK_MODE_STORAGE_KEY, mode);
   updateClickModeButtonState();
 }
 
@@ -285,6 +283,7 @@ let lastAnalysisGeojson = null;
 const map = L.map("map", { zoomControl: true }).setView(DALLAS_CENTER, DEFAULT_ZOOM);
 const MAP_CANVAS_RENDERER = L.canvas();
 const MAP_SVG_RENDERER = L.svg();
+L.control.scale({ position: "bottomright", metric: false, imperial: true }).addTo(map);
 
 const streetLayer = L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
   attribution: "&copy; OpenStreetMap contributors &copy; CARTO",
@@ -3292,7 +3291,7 @@ function _renderList(sectionId, listId, items) {
           <span class="saved-area-icon">${icon}</span>
           <span class="saved-area-name">${area.name}</span>
           ${showFullControls ? `<button type="button" class="saved-area-quick-delete-btn" data-action="delete" title="Delete">🗑</button>` : ""}
-          ${canShare ? `<button type="button" class="saved-area-action-btn saved-area-share-btn" data-action="share" data-share-id="${_esc(area.share_id)}" title="Share">🔗 Share</button>` : ""}
+          ${canShare ? `<button type="button" class="saved-area-action-btn saved-area-share-btn" data-action="share" data-share-id="${_esc(area.share_id)}" title="Share">🔗</button>` : ""}
         </div>
         <div class="saved-area-secondary-line">${secondaryLine}</div>
         <div class="saved-area-row-secondary-actions">
@@ -4027,7 +4026,7 @@ function _buildPropelioCompSectionHtml(c) {
       ${bbLine.length ? `<div class="propelio-popup-meta">${_propelioEscape(bbLine.join(" · "))}</div>` : ""}
       ${subLine.length ? `<div class="propelio-popup-meta">${_propelioEscape(subLine.join(" · "))}</div>` : ""}
       ${idLine.length ? `<div class="propelio-popup-meta">${_propelioEscape(idLine.join(" · "))}${source ? ` <span class="propelio-popup-source">(${_propelioEscape(source)})</span>` : ""}</div>` : ""}
-      ${modifiedTs ? `<div class="popup-propelio-meta-mute">MLS updated ${_propelioEscape(modifiedTs)}</div>` : ""}
+      ${modifiedTs ? `<div class="popup-propelio-meta-mute">Last Pulled from MLS ${_propelioEscape(modifiedTs)}</div>` : ""}
       ${schoolsHtml}
       ${listingAgentHtml}
       ${buyerAgentHtml}
@@ -4235,7 +4234,7 @@ function _propelioBuildPopup(c) {
       ${bbLine.length ? `<div class="propelio-popup-meta">${_propelioEscape(bbLine.join(" · "))}</div>` : ""}
       ${subLine.length ? `<div class="propelio-popup-meta">${_propelioEscape(subLine.join(" · "))}</div>` : ""}
       ${idLine.length ? `<div class="propelio-popup-meta">${_propelioEscape(idLine.join(" · "))}${source ? ` <span class="propelio-popup-source">(${_propelioEscape(source)})</span>` : ""}</div>` : ""}
-      ${modifiedTs ? `<div class="propelio-popup-meta-mute">MLS updated ${_propelioEscape(modifiedTs)}</div>` : ""}
+      ${modifiedTs ? `<div class="propelio-popup-meta-mute">Last Pulled from MLS ${_propelioEscape(modifiedTs)}</div>` : ""}
       ${remarksHtml}
       ${ratingHtml}
     </div>
@@ -5791,9 +5790,9 @@ function initSidebarCollapsibles() {
 }
 
 function initClickModeToggle() {
-  // Restore saved mode from localStorage
-  const saved = localStorage.getItem(CLICK_MODE_STORAGE_KEY);
-  currentClickMode = (saved === "stay" || saved === "jump") ? saved : "jump";
+  // Per Mike's feedback: always start in "jump" (zoom) mode at page load.
+  // Mid-session toggles work via currentClickMode but do not persist across refreshes.
+  currentClickMode = "jump";
 
   // Set up button click handlers (legacy saved-areas-section toggle —
   // markup may have been removed in the 2026-05-11 toolbar relocation,
@@ -6318,7 +6317,7 @@ function _buildParcelDetailPanelHtml(p, matchedComp) {
       ${compDetails.dimsText ? `<div class="propelio-popup-meta">${_propelioEscape(compDetails.dimsText)}</div>` : ""}
       ${compDetails.bbText ? `<div class="propelio-popup-meta">${_propelioEscape(compDetails.bbText)}</div>` : ""}
       ${compDetails.idText ? `<div class="propelio-popup-meta">${_propelioEscape(compDetails.idText)}${compDetails.source ? ` <span class="propelio-popup-source">(${_propelioEscape(compDetails.source)})</span>` : ""}</div>` : ""}
-      ${compDetails.modifiedTs ? `<div class="popup-propelio-meta-mute">MLS updated ${_propelioEscape(compDetails.modifiedTs)}</div>` : ""}
+      ${compDetails.modifiedTs ? `<div class="popup-propelio-meta-mute">Last Pulled from MLS ${_propelioEscape(compDetails.modifiedTs)}</div>` : ""}
       ${schoolsHtml}
       ${compDetails.photoCount > 0 ? `<div class="propelio-popup-meta-mute">${compDetails.photoCount} listing photo${compDetails.photoCount === 1 ? "" : "s"} (Propelio-hosted)</div>` : ""}
     `
