@@ -5649,6 +5649,34 @@ const AddressSearch = L.Control.extend({
       if (!item) return;
       _lastSearchedAddress = item.address;
       highlightSearchResult([Number(item.lat), Number(item.lng)]);
+      // Mike bundle 5a: auto-save the picked target. saveParcel is idempotent
+      // (backend ON CONFLICT DO UPDATE), so this is safe even if the parcel
+      // was already saved on a previous pick. Wrapped in an async IIFE with
+      // try/catch so saveParcel rejections (signed-out, CSRF, transient network)
+      // can never bubble up as unhandled promise rejections — silent on failure
+      // because there's no UI signal for an auto-save attempt anyway.
+      void (async () => {
+        try {
+          const addr = String(item.address || "").trim();
+          const city = String(item.city || "").trim();
+          const addrTokens = addr.split(/\s+/);
+          const lastToken = (addrTokens[addrTokens.length - 1] || "").toLowerCase();
+          const fullName = city && lastToken !== city.toLowerCase()
+            ? `${addr} ${city}`.trim()
+            : addr;
+          const finalName = fullName || String(item.account_num || "");
+          await saveParcel(
+            String(item.account_num || ""),
+            String(item.county || "dcad").trim().toLowerCase() || "dcad",
+            finalName,
+            Number(item.lat),
+            Number(item.lng),
+            null,
+          );
+        } catch {
+          // Silent: auto-save shouldn't disrupt the search flow.
+        }
+      })();
     };
 
     const fetchSuggestions = async () => {
@@ -5737,6 +5765,35 @@ const AddressSearch = L.Control.extend({
         const { lat, lon } = results[0];
         const latlng = [parseFloat(lat), parseFloat(lon)];
         highlightSearchResult(latlng);
+        // Mike bundle 5a: auto-save the resolved parcel if /api/parcel/near finds
+        // one at the Nominatim coordinates. Silent on miss (e.g., highway addresses)
+        // and silent on failure — the search flow already completed via
+        // highlightSearchResult; the save is best-effort.
+        void (async () => {
+          try {
+            const nearResp = await fetch(`/api/parcel/near?lat=${parseFloat(lat)}&lng=${parseFloat(lon)}`);
+            if (!nearResp.ok) return;
+            const detail = await nearResp.json();
+            const props = detail.properties || detail;
+            const acct = String(props.account_num || "").trim();
+            if (!acct) return;
+            const addr = String(props.addr || "").trim();
+            const city = String(props.city || "").trim();
+            const addrTokens = addr.split(/\s+/);
+            const lastToken = (addrTokens[addrTokens.length - 1] || "").toLowerCase();
+            const fullName = city && lastToken !== city.toLowerCase()
+              ? `${addr} ${city}`.trim()
+              : addr;
+            const finalName = fullName || acct;
+            const county = String(props.source_county || "dcad").trim().toLowerCase() || "dcad";
+            const geometry = (detail.geometry && (detail.geometry.type === "Polygon" || detail.geometry.type === "MultiPolygon"))
+              ? detail.geometry
+              : null;
+            await saveParcel(acct, county, finalName, parseFloat(lat), parseFloat(lon), geometry);
+          } catch {
+            // Silent: auto-save shouldn't spam console or disrupt the search flow.
+          }
+        })();
       } catch {
         btn.textContent = "Error";
         setTimeout(() => { btn.textContent = "Go"; btn.disabled = false; }, 2000);
