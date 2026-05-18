@@ -3769,7 +3769,7 @@ const MapToolbar = L.Control.extend({
     const oacBtn = L.DomUtil.create("a", "", container);
     oacBtn.id = "btn-outside-area-toggle";
     oacBtn.href = "#";
-    oacBtn.title = "Toggle Outside Area Comps (also in Map Filters)";
+    oacBtn.title = "Toggle Outside Area Comps (also in Property Type Filters)";
     oacBtn.textContent = "OAC";
     L.DomEvent.on(oacBtn, "click", (e) => {
       L.DomEvent.preventDefault(e);
