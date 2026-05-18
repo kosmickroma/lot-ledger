@@ -1,0 +1,65 @@
+# gcloud builds submit / gcloud run deploy --source upload filter.
+# Mirrors .dockerignore but adds patterns gcloud needs to exclude that
+# the Dockerfile build context wouldn't see anyway (.git, .venv, etc.).
+
+# Environment
+.env
+*.env
+!.env.example
+
+# Python
+.venv/
+venv/
+env/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data files — regenerated from DB / GCS, not needed at runtime
+data/
+assets/
+ingest/
+*.pmtiles
+*.mbtiles
+*.geojsonl
+*.geojson
+!frontend/*.geojson
+
+# Build artifacts
+.build_checkpoint.json
+.render/
+
+# Docs / scripts — not needed at runtime
+docs/
+scripts/
+
+# Credentials
+service-account*.json
+gcp-key*.json
+cors.json
+
+# Logs
+*.log
+
+# Frontend deps
+frontend/node_modules/
+
+# Backup files
+*.bak
+*.swp
+*.tmp

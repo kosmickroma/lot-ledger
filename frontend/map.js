@@ -37,7 +37,11 @@ const BORDER_COLORS = {
 };
 
 // Browse layer — renders all county parcels from PMTiles file on GCS.
-const PMTILES_URL = "https://storage.googleapis.com/lot-ledger-tiles/parcels.pmtiles";
+// URL is injected by the backend (TILES_BASE_URL env var) so each deployment
+// can point at its own tiles bucket. Falls back to KK's public bucket.
+const PMTILES_URL = (window.LL_CONFIG && window.LL_CONFIG.tilesUrl && window.LL_CONFIG.tilesUrl !== "__TILES_URL__")
+  ? window.LL_CONFIG.tilesUrl
+  : "https://storage.googleapis.com/lot-ledger-tiles/parcels.pmtiles";
 
 const TYPE_LABELS = {
   single_family: "Off-Market SFR",
