@@ -31,7 +31,7 @@ from typing import Any, Literal
 from urllib.parse import quote_plus
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Path as FastAPIPath, Request, Response
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from psycopg2.errors import UniqueViolation
 from psycopg2.extras import Json, RealDictCursor, execute_values
@@ -74,6 +74,13 @@ from api.sold import log_redfin_sold_row_count, query_active_listings, query_sol
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 FRONTEND_DIR = BASE_DIR / "frontend"
+
+TILES_BASE_URL = os.environ.get(
+    "TILES_BASE_URL",
+    "https://storage.googleapis.com/lot-ledger-tiles/parcels.pmtiles",
+).strip()
+_INDEX_HTML_CACHE: str | None = None
+
 _job_store: dict[str, dict[str, Any]] = {}
 _JOB_TTL_SECONDS = 7200    # 2-hour sliding-window TTL per session
 _JOB_MAX = 50              # max jobs held in memory at once
@@ -4533,8 +4540,12 @@ async def delete_saved_parcel(county: str, account_num: str, req: Request, user:
 
 
 @app.get("/", include_in_schema=False)
-async def index() -> FileResponse:
-    return FileResponse(FRONTEND_DIR / "index.html")
+async def index() -> HTMLResponse:
+    global _INDEX_HTML_CACHE
+    if _INDEX_HTML_CACHE is None:
+        html = (FRONTEND_DIR / "index.html").read_text()
+        _INDEX_HTML_CACHE = html.replace("__TILES_URL__", TILES_BASE_URL)
+    return HTMLResponse(_INDEX_HTML_CACHE)
 
 
 app.mount("/", StaticFiles(directory=FRONTEND_DIR), name="frontend")

@@ -1,0 +1,52 @@
+# cloudbuild-prod.yaml
+# Used by Cloud Build trigger on Mike's GCP project (real-estate-map-tool).
+# Watches kosmickroma/lot-ledger#main and auto-deploys to the `lot-ledger`
+# Cloud Run service.
+#
+# Initial deploy (one-time) was done via `gcloud run deploy --source=.` to
+# set up env vars, secret bindings, Cloud SQL connection, and runtime SA.
+# This config only re-builds + re-deploys the image — env config persists
+# across revisions on the service.
+#
+# To run this manually from a local checkout:
+#   gcloud builds submit --config=cloudbuild-prod.yaml --project=real-estate-map-tool
+
+steps:
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: bash
+    args:
+      - '-c'
+      - 'gcloud auth configure-docker us-central1-docker.pkg.dev --quiet'
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - build
+      - '-t'
+      - 'us-central1-docker.pkg.dev/real-estate-map-tool/lot-ledger-api/api:$COMMIT_SHA'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/real-estate-map-tool/lot-ledger-api/api:main'
+      - '.'
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - push
+      - '--all-tags'
+      - 'us-central1-docker.pkg.dev/real-estate-map-tool/lot-ledger-api/api'
+
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - lot-ledger
+      - '--image=us-central1-docker.pkg.dev/real-estate-map-tool/lot-ledger-api/api:$COMMIT_SHA'
+      - '--region=us-central1'
+      - '--platform=managed'
+      - '--project=real-estate-map-tool'
+      - '--timeout=3600'
+      - '--memory=1Gi'
+      - '--update-env-vars=DEEP_PULL_EXPERIMENT=true,PHASE_2_CACHE_READ=true'
+      - '--quiet'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
