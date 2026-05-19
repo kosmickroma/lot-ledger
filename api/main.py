@@ -3764,6 +3764,18 @@ async def _run_download_csv(
                 _cad.get("hoa_name", "")
                 or ("N/A (Tarrant HOA not loaded)" if _cad.get("division_cd") == "TAD" else "")
             ) if _cad else ""
+
+            # Legal Description is a join of legal1..legal5 in the parcel writerow.
+            # Mirror that exactly so comp rows show the same concatenated value.
+            _legal_desc = " ".join(
+                [
+                    str(_cad.get("legal1", "") or "").strip(),
+                    str(_cad.get("legal2", "") or "").strip(),
+                    str(_cad.get("legal3", "") or "").strip(),
+                    str(_cad.get("legal4", "") or "").strip(),
+                    str(_cad.get("legal5", "") or "").strip(),
+                ]
+            ).strip() if _cad else ""
             writer.writerow(
                 [
                     "Comp",                                                                                     # 1
@@ -3794,7 +3806,7 @@ async def _run_download_csv(
                     _cad.get("isd_desc", "") or "",                                                              # 26 School District
                     _cad.get("nbhd_cd", "") or "",                                                               # 27 Neighborhood
                     _cad.get("legal1", "") or "",                                                                # 28 Subdivision
-                    _cad.get("legal_desc", "") or _cad.get("legal", "") or "",                                   # 29 Legal Description
+                    _legal_desc,                                                                                 # 29 Legal Description (legal1..legal5 joined)
                     _row_lat if _row_lat is not None else "",                                                    # 30 Latitude
                     _row_lng if _row_lng is not None else "",                                                    # 31 Longitude
                     _row_maps_link,                                                                              # 32 Maps Link
