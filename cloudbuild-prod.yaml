@@ -22,7 +22,7 @@ steps:
     args:
       - build
       - '-t'
-      - 'us-central1-docker.pkg.dev/real-estate-map-tool/lot-ledger-api/api:$COMMIT_SHA'
+      - 'us-central1-docker.pkg.dev/real-estate-map-tool/lot-ledger-api/api:$BUILD_ID'
       - '-t'
       - 'us-central1-docker.pkg.dev/real-estate-map-tool/lot-ledger-api/api:main'
       - '.'
@@ -39,7 +39,7 @@ steps:
       - run
       - deploy
       - lot-ledger
-      - '--image=us-central1-docker.pkg.dev/real-estate-map-tool/lot-ledger-api/api:$COMMIT_SHA'
+      - '--image=us-central1-docker.pkg.dev/real-estate-map-tool/lot-ledger-api/api:$BUILD_ID'
       - '--region=us-central1'
       - '--platform=managed'
       - '--project=real-estate-map-tool'
