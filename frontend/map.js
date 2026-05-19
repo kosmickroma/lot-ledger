@@ -6090,6 +6090,7 @@ Object.entries(FILTER_INPUT_IDS).forEach(([key, id]) => {
     filterState[key] = Boolean(input.checked);
     saveFilters();
     applyMapVisibilityFilters();
+    applyPropelioClientFilters();
     _refreshLoadedAreaUi();
   });
 });
@@ -6100,6 +6101,7 @@ document.getElementById("btn-filters-reset")?.addEventListener("click", () => {
   saveFilters();
   syncFilterInputs();
   applyMapVisibilityFilters();
+  applyPropelioClientFilters();
   _refreshLoadedAreaUi();
 });
 
