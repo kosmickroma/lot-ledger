@@ -5274,10 +5274,10 @@ function _showCacheEmptyChip() {
 
 function _setPropelioGetCompsLabel(main, subtitle = "Deep Pull · ~3 min") {
   if (!propelioStickyBtn) return;
-  propelioStickyBtn.innerHTML = `
-    <span class="get-comps-main">${_esc(main || "Get Comps")}</span>
-    <span class="get-comps-subtitle">${_esc(subtitle)}</span>
-  `;
+  const mainEl = propelioStickyBtn.querySelector(".propelio-refresh-main");
+  const subtitleEl = propelioStickyBtn.querySelector(".propelio-refresh-subtitle");
+  if (mainEl) mainEl.textContent = main || "Get Comps";
+  if (subtitleEl) subtitleEl.textContent = subtitle;
 }
 
 async function _fetchPolygonCacheOnly() {
@@ -5343,24 +5343,16 @@ function _deriveDeepPullTargetAddress() {
 
 function _ensureStickyPropelioButton() {
   if (propelioStickyBtn) return propelioStickyBtn;
-  propelioStickyAnchor = L.DomUtil.create("div", "propelio-get-comps-anchor");
-  const controlsWrap = document.createElement("div");
-  controlsWrap.className = "propelio-action-row";
-  propelioStickyBtn = document.createElement("button");
-  propelioStickyBtn.type = "button";
-  propelioStickyBtn.className = "propelio-get-comps-btn";
-  propelioStickyBtn.classList.add("power-user-only");
-  _setPropelioGetCompsLabel("Get Comps");
-  controlsWrap.appendChild(propelioStickyBtn);
-
-  propelioStickyAnchor.appendChild(controlsWrap);
-  L.DomEvent.disableClickPropagation(propelioStickyAnchor);
-  L.DomEvent.disableScrollPropagation(propelioStickyAnchor);
+  propelioStickyBtn = document.getElementById("btn-propelio-get-comps");
+  if (!propelioStickyBtn) return null;
   L.DomEvent.on(propelioStickyBtn, "click", (evt) => {
     L.DomEvent.stopPropagation(evt);
+    if (!lastAnalysisGeojson) {
+      _showToast("Draw a polygon first", "error");
+      return;
+    }
     void _refreshRecentByPolygon();
   });
-  map.getContainer().appendChild(propelioStickyAnchor);
   return propelioStickyBtn;
 }
 
