@@ -3499,33 +3499,3 @@ body.is-not-power-user .power-user-only {
   background: rgba(0, 0, 0, 0.26);
 }
 
-.sv-gap-chip {
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  padding: 2px 8px;
-  border-radius: 999px;
-  font-weight: 600;
-  display: none;
-}
-
-.sv-gap-chip[data-state="room"] {
-  display: inline-block;
-  background: #143d28;
-  color: #b8f1c9;
-  border: 1px solid rgba(120, 200, 140, 0.55);
-}
-
-.sv-gap-chip[data-state="tight"] {
-  display: inline-block;
-  background: #4a3814;
-  color: #ffd98a;
-  border: 1px solid rgba(212, 175, 55, 0.7);
-}
-
-.sv-gap-chip[data-state="over"] {
-  display: inline-block;
-  background: #5a1a1a;
-  color: #ffe2e2;
-  border: 1px solid rgba(220, 90, 90, 0.7);
-}

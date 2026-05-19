@@ -9686,7 +9686,6 @@ const _STORED_VALUE_CALC_FIELDS = ["mao_arv", "tdpp_minus_mao_arv"];
 const _STORED_VALUE_MULTIPLIER = 0.75;
 const _STORED_VALUE_NUMERIC_MAX = 999_999_999;
 const _STORED_VALUE_DEBOUNCE_MS = 600;
-const _STORED_VALUE_GAP_TIGHT_THRESHOLD = 5000;
 
 let _storedValueAreaId = null;
 let _storedValueState = null;
@@ -9749,28 +9748,6 @@ function _storedValueApplyState(state) {
     if (comment && comment !== active) {
       comment.value = state[key].comment_text || "";
     }
-  }
-  _storedValueUpdateGapChip(state);
-}
-
-function _storedValueUpdateGapChip(state) {
-  const chip = document.getElementById("sv-gap-chip");
-  if (!chip) return;
-  const gap = state.tdpp_minus_mao_arv.numeric_value;
-  if (gap == null) {
-    chip.removeAttribute("data-state");
-    chip.textContent = "";
-    return;
-  }
-  if (gap < 0) {
-    chip.setAttribute("data-state", "over");
-    chip.textContent = "Over";
-  } else if (gap <= _STORED_VALUE_GAP_TIGHT_THRESHOLD) {
-    chip.setAttribute("data-state", "tight");
-    chip.textContent = "Tight";
-  } else {
-    chip.setAttribute("data-state", "room");
-    chip.textContent = "Room";
   }
 }
 
@@ -9993,7 +9970,6 @@ function _storedValueOnNumericInput(fieldKey, raw) {
     const input = document.getElementById(`sv-input-${calcKey}`);
     if (input) input.value = _storedValueFormatDisplay(_storedValueState[calcKey].numeric_value);
   }
-  _storedValueUpdateGapChip(_storedValueState);
   _storedValueQueueSave(fieldKey);
 }
 
