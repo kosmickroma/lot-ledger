@@ -84,6 +84,37 @@ const FILTER_INPUT_IDS = {
   exempt: "filter-exempt",
 };
 
+// Propelio comp → parcel-type bucket map (granular category preferred,
+// coarse property_type as fallback). Used by compPassesPropelioFilters to
+// gate visible comps the same way Property Type Filters gate parcels.
+const PROPELIO_CATEGORY_TO_BUCKET = {
+  SingleFamilyResidence: "single_family",
+  Townhouse: "single_family",
+  Ranch: "single_family",
+  MobileHome: "single_family",
+  ManufacturedHome: "single_family",
+  Duplex: "multifamily",
+  Triplex: "multifamily",
+  Quadruplex: "multifamily",
+  MultiFamily: "multifamily",
+  Apartment: "multifamily",
+  Condominium: "multifamily",
+  Business: "commercial",
+  Office: "commercial",
+  Retail: "commercial",
+  Industrial: "commercial",
+  Warehouse: "commercial",
+  MixedUse: "commercial",
+  UnimprovedLand: "vacant",
+};
+const PROPELIO_TYPE_FALLBACK = {
+  Residential: "single_family",
+  ResidentialIncome: "multifamily",
+  CommercialSale: "commercial",
+  Land: "vacant",
+  // Farm + anything blank → undefined → default visible
+};
+
 const NUMERIC_FILTER_INPUTS = [
   { id: "nf-lot-min",  key: "lot_sqft_min" },
   { id: "nf-lot-max",  key: "lot_sqft_max" },
@@ -4755,7 +4786,37 @@ function readPropelioFiltersFromUI() {
     yearMax: _propIntIn("prop-year-max"),
     priceMin: _propPriceIn("prop-price-min"),
     priceMax: _propPriceIn("prop-price-max"),
+    // Property Type Filter toggles — read from the parcel-side filterState
+    // so the same toggles gate both parcels and comps.
+    parcelTypeMultifamily: filterState.multifamily,
+    parcelTypeCommercial:  filterState.commercial,
+    parcelTypeVacant:      filterState.vacant,
+    parcelTypeExempt:      filterState.exempt,
+    parcelTypeOffMarket:   filterState.off_market,
   };
+}
+
+// Resolve a comp's parcel-type bucket. Matched-parcel lookup wins (we trust
+// our own classification over Propelio's MLS taxonomy). Falls back to
+// Propelio's property_category then property_type. Unknown → null → comp
+// defaults to visible (no parcel-type gate fires).
+function _compPropertyTypeBucket(comp) {
+  const acct = String(comp?.parcel_account_num || "").trim();
+  const county = String(comp?.parcel_county || "").trim().toLowerCase();
+  if (acct && county && lastAnalysisGeojson && Array.isArray(lastAnalysisGeojson.features)) {
+    for (const f of lastAnalysisGeojson.features) {
+      const p = f?.properties || {};
+      if (String(p.account_num || "").trim() === acct
+        && String(p.source_county || "").trim().toLowerCase() === county) {
+        return p.prop_type || null;
+      }
+    }
+  }
+  const cat = String(comp?.property_category || "").trim();
+  if (cat && PROPELIO_CATEGORY_TO_BUCKET[cat]) return PROPELIO_CATEGORY_TO_BUCKET[cat];
+  const t = String(comp?.property_type || "").trim();
+  if (t && PROPELIO_TYPE_FALLBACK[t]) return PROPELIO_TYPE_FALLBACK[t];
+  return null;
 }
 
 function compPassesPropelioFilters(comp, filters) {
@@ -4807,6 +4868,16 @@ function compPassesPropelioFilters(comp, filters) {
   const price = Number(comp?.price);
   if (filters.priceMin != null && (!Number.isFinite(price) || price < filters.priceMin)) return false;
   if (filters.priceMax != null && (!Number.isFinite(price) || price > filters.priceMax)) return false;
+
+  // Parcel-type gate: hide comp if its bucket is toggled off in Property Type
+  // Filters. single_family is never gated (no SFR toggle in UI). Unknown
+  // bucket → null → falls through (default visible).
+  const bucket = _compPropertyTypeBucket(comp);
+  if (bucket === "multifamily" && filters.parcelTypeMultifamily === false) return false;
+  if (bucket === "commercial"  && filters.parcelTypeCommercial  === false) return false;
+  if (bucket === "vacant"      && filters.parcelTypeVacant      === false) return false;
+  if (bucket === "exempt"      && filters.parcelTypeExempt      === false) return false;
+  if (bucket === "off_market"  && filters.parcelTypeOffMarket   === false) return false;
 
   return true;
 }
