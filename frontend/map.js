@@ -1262,10 +1262,21 @@ function classifyFeatureForFilter(feature) {
 }
 
 function isFeatureVisible(feature) {
+  // The workspace's bonded originator parcel is the anchor of the analysis;
+  // hiding it breaks the "compare everything else to this" mental model.
+  // Always surface it through the filter — it shows up in counts, CSV export,
+  // and any other consumer of isFeatureVisible. (The gold star marker on
+  // _ORIGINATOR_STAR_LAYER is already independent of the bucket-type layers,
+  // so the star stays visible on the map regardless of parcel-type toggles.)
+  const p = feature?.properties || {};
+  if (_currentTargetParcel
+    && String(p.account_num || "").trim() === String(_currentTargetParcel.account || "").trim()
+    && String(p.source_county || "").trim().toLowerCase() === String(_currentTargetParcel.county || "").trim().toLowerCase()) {
+    return true;
+  }
   const bucket = classifyFeatureForFilter(feature);
   if (!filterState[bucket]) return false;
   if (!passesNumericFilters(feature)) return false;
-  const p = feature?.properties || {};
   const isListingOrSold = Boolean(p.on_redfin || p.sold_comp);
   if (isListingOrSold && !passesCompFilters(feature)) return false;
   return true;
