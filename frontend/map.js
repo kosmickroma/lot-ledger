@@ -9791,7 +9791,11 @@ function _storedValueBlankState() {
 
 function _storedValueParseNumber(raw) {
   if (raw == null) return null;
-  const str = String(raw).trim();
+  // Defensive: explicit lowercase here in addition to parseShorthand's internal
+  // .toLowerCase(). Some browser/extension combos appear to behave differently
+  // for "1m" vs "1M" in numeric inputmode fields; normalizing at the boundary
+  // removes any path-dependency.
+  const str = String(raw).trim().toLowerCase();
   if (str === "") return null;
   // Support k/m shorthand: "300k" → 300000, "1.5m" → 1500000.
   const parsed = parseShorthand(str);
