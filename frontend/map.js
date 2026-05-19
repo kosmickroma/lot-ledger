@@ -1262,10 +1262,21 @@ function classifyFeatureForFilter(feature) {
 }
 
 function isFeatureVisible(feature) {
+  // The workspace's bonded originator parcel is the anchor of the analysis;
+  // hiding it breaks the "compare everything else to this" mental model.
+  // Always surface it through the filter — it shows up in counts, CSV export,
+  // and any other consumer of isFeatureVisible. (The gold star marker on
+  // _ORIGINATOR_STAR_LAYER is already independent of the bucket-type layers,
+  // so the star stays visible on the map regardless of parcel-type toggles.)
+  const p = feature?.properties || {};
+  if (_currentTargetParcel
+    && String(p.account_num || "").trim() === String(_currentTargetParcel.account || "").trim()
+    && String(p.source_county || "").trim().toLowerCase() === String(_currentTargetParcel.county || "").trim().toLowerCase()) {
+    return true;
+  }
   const bucket = classifyFeatureForFilter(feature);
   if (!filterState[bucket]) return false;
   if (!passesNumericFilters(feature)) return false;
-  const p = feature?.properties || {};
   const isListingOrSold = Boolean(p.on_redfin || p.sold_comp);
   if (isListingOrSold && !passesCompFilters(feature)) return false;
   return true;
@@ -8250,7 +8261,7 @@ document.getElementById("btn-download").addEventListener("click", async () => {
   if (!currentJobId) return;
 
   _downloadInFlight = true;
-  let downloadTriggered = false;
+  let blobUrl = null;
   try {
     _setDownloadButtonState("Preparing CSV…", true);
 
@@ -8258,7 +8269,6 @@ document.getElementById("btn-download").addEventListener("click", async () => {
       _setDownloadButtonState(statusText, true);
     });
     if (!persisted) {
-      _resetDownloadButtonState();
       alert("Your analysis session expired. Please re-run the draw/analyze step, then export again.");
       return;
     }
@@ -8266,24 +8276,67 @@ document.getElementById("btn-download").addEventListener("click", async () => {
     _setDownloadButtonState("Name export…", true);
     const suggested = makeDefaultCsvName();
     const entered = window.prompt("Name this CSV export:", suggested);
-    if (entered === null) {
-      _resetDownloadButtonState();
+    if (entered === null) return;
+    const filename = normalizeCsvFilename(entered);
+
+    // Compute visible parcels + visible Propelio comps. Null-guard: when
+    // there's no analysis loaded (e.g. saved area without geometry), send
+    // filter_ids:null so the backend falls back to the full-export path.
+    _setDownloadButtonState("Computing visible parcels…", true);
+    let filterIds = null;
+    if (lastAnalysisGeojson && Array.isArray(lastAnalysisGeojson.features) && lastAnalysisGeojson.features.length > 0) {
+      const visibleParcels = lastAnalysisGeojson.features
+        .filter(isFeatureVisible)
+        .map((f) => {
+          const p = f?.properties || {};
+          return {
+            source_county: String(p.source_county || "").trim(),
+            account_num: String(p.account_num || "").trim(),
+          };
+        })
+        .filter((p) => p.source_county && p.account_num);
+      const currentPropelioFilters = readPropelioFiltersFromUI();
+      const visibleCompKeys = (window._propelioLast && Array.isArray(window._propelioLast.comps))
+        ? window._propelioLast.comps
+            .filter((c) => compPassesPropelioFilters(c, currentPropelioFilters))
+            .map((c) => String(c?.comp_address_key || "").trim())
+            .filter((k) => k.length > 0)
+        : [];
+      filterIds = { parcels: visibleParcels, comps: visibleCompKeys };
+    }
+
+    _setDownloadButtonState("Starting download…", true);
+    const resp = await fetch(`/api/download/${currentJobId}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify({ filter_ids: filterIds, filename }),
+    });
+    if (!resp.ok) {
+      const errText = await resp.text().catch(() => "");
+      console.error("[csv-download] non-OK response", resp.status, errText);
+      _showToast("Download failed", "error");
       return;
     }
 
-    const filename = normalizeCsvFilename(entered);
-    _setDownloadButtonState("Starting download…", true);
-    window.location.href = `/api/download/${currentJobId}?filename=${encodeURIComponent(filename)}`;
-    downloadTriggered = true;
-    setTimeout(() => {
-      _downloadInFlight = false;
-      _resetDownloadButtonState();
-    }, 4000);
+    const blob = await resp.blob();
+    blobUrl = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = blobUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  } catch (err) {
+    console.error("[csv-download] failed", err);
+    _showToast("Download failed", "error");
   } finally {
-    if (!downloadTriggered) {
-      _downloadInFlight = false;
-      _resetDownloadButtonState();
+    if (blobUrl) {
+      // Defer revoke until after the browser kicks off the download (next
+      // animation frame is more robust across browsers than a fixed timeout).
+      requestAnimationFrame(() => URL.revokeObjectURL(blobUrl));
     }
+    _downloadInFlight = false;
+    _resetDownloadButtonState();
   }
 });
 
