@@ -3395,8 +3395,8 @@ async def _run_download_csv(
     if job_saved_area_id:
         _conn = get_session_conn()
         try:
-            rows = _stored_value_get_rows(_conn, job_saved_area_id)
-            payload = _stored_value_serialize_payload(rows)
+            sv_rows = _stored_value_get_rows(_conn, job_saved_area_id)
+            payload = _stored_value_serialize_payload(sv_rows)
             stored_value_export_cells = _stored_value_csv_cells(payload)
         finally:
             release_session_conn(_conn)
