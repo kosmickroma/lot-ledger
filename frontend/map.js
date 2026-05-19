@@ -4428,19 +4428,24 @@ const propelioCmaChip = new PropelioCmaChip().addTo(map);
 const PROPELIO_STATUS_PRIORITY = { sold: 3, pending: 2, active: 1 };
 
 function _dedupCompsForRender(comps) {
-  // Layered dedup, strongest signal first:
-  //   1. parcel_account_num + parcel_county — canonical parcel ID. 99% of
-  //      comps carry this after the backfill scripts ran on Mike's GCP,
-  //      so it's the dominant path. Same parcel, same county = same
-  //      property, no ambiguity.
-  //   2. Rounded lat/lng (4-decimal, ~10m) — fallback for orphan comps
-  //      with no parcel match. Coordinates are nested under comp.extra,
-  //      so _propelioCompLatLng is the canonical reader.
-  //   3. comp_address_key — last-resort string fallback.
+  // "One comp per footprint" — multiple condo units share a single
+  // parcel_geom (the building outline) but each unit has its own
+  // parcel_account_num. Dedup-by-account_num leaves units stacked on
+  // top of each other → green active footprint over red sold footprint
+  // produces incoherent visuals. The parcel-render side handles this
+  // via condoOutlineSeen + geometryKey() (see renderFeatures line ~7219);
+  // mirror the same approach here for comp footprints.
   //
-  // (Earlier 4-decimal-only strategy missed pairs where Propelio's
-  // geocoder placed the same property >10m apart — listing centroid
-  // vs sold centroid drift. parcel_account_num catches those.)
+  // Layered dedup, strongest signal first:
+  //   1. parcel_geom shape (geometryKey) — one comp per footprint,
+  //      regardless of how many units share that footprint
+  //   2. parcel_account_num + parcel_county — for non-shared-footprint
+  //      cases (single-family, etc.)
+  //   3. Rounded lat/lng (4-decimal, ~10m) — geocode-drift fallback
+  //   4. comp_address_key — last-resort string fallback
+  //
+  // Winner-resolution tie-break: good-rating > status priority
+  // (sold > pending > active per PROPELIO_STATUS_PRIORITY).
   const winners = new Map();
   const noKey = [];
   const round4 = (n) => {
@@ -4448,17 +4453,24 @@ function _dedupCompsForRender(comps) {
     return Number.isFinite(x) ? x.toFixed(4) : null;
   };
   for (const c of comps) {
-    const acct = String(c?.parcel_account_num || "").trim();
-    const county = String(c?.parcel_county || "").trim().toLowerCase();
     let key = "";
-    if (acct && county) {
-      key = `acct:${county}|${acct}`;
-    } else {
+    const geom = c?.parcel_geom;
+    if (geom && (geom.type === "Polygon" || geom.type === "MultiPolygon")) {
+      const gkey = geometryKey(geom);
+      if (gkey) key = `geom:${gkey}`;
+    }
+    if (!key) {
+      const acct = String(c?.parcel_account_num || "").trim();
+      const county = String(c?.parcel_county || "").trim().toLowerCase();
+      if (acct && county) key = `acct:${county}|${acct}`;
+    }
+    if (!key) {
       const latlng = _propelioCompLatLng(c);
       const lat = latlng ? round4(latlng[0]) : null;
       const lng = latlng ? round4(latlng[1]) : null;
-      key = lat && lng ? `ll:${lat},${lng}` : String(c?.comp_address_key || "").trim();
+      if (lat && lng) key = `ll:${lat},${lng}`;
     }
+    if (!key) key = String(c?.comp_address_key || "").trim();
     if (!key) {
       noKey.push(c);
       continue;
