@@ -2175,6 +2175,7 @@ async function saveCurrentArea(name) {
   _setCurrentTargetParcel(null);
   _currentLoadedAreaId = normalized.id;
   _syncTabTitle();
+  _storedValueOnAreaChange(_currentLoadedAreaId);
   _selectedSavedItemId = normalized.id;
   // Render the originator star immediately if captured at save time.
   // Use lat/lng from origin (the pre-save _currentTargetParcel) to skip
@@ -2303,6 +2304,7 @@ async function deleteSavedArea(item) {
       _setCurrentTargetParcel(null);
       _currentLoadedAreaId = null;
       _syncTabTitle();
+      _storedValueOnAreaChange(null);
     }
   }
   if (_selectedSavedItemId === item.id) _selectedSavedItemId = null;
@@ -3078,6 +3080,7 @@ async function restoreSavedArea(area, options = {}) {
     _setCurrentTargetParcel(null);
     _currentLoadedAreaId = area.id;
     _syncTabTitle();
+    _storedValueOnAreaChange(_currentLoadedAreaId);
     if (area.originator_parcel_county && area.originator_parcel_account_num) {
       _setCurrentTargetParcel({
         county: area.originator_parcel_county,
@@ -3134,6 +3137,7 @@ async function restoreNamedSession(session, options = {}) {
   _setCurrentTargetParcel(null);
   _currentLoadedAreaId = null;
   _syncTabTitle();
+  _storedValueOnAreaChange(null);
   renderSavedAreasList();
   const savedFilterState = session.filter_state && typeof session.filter_state === "object"
     ? session.filter_state
@@ -3411,6 +3415,7 @@ function _renderList(sectionId, listId, items) {
           _setCurrentTargetParcel(null);
           _currentLoadedAreaId = cloned.area_id;
           _syncTabTitle();
+          _storedValueOnAreaChange(_currentLoadedAreaId);
           _selectedSavedItemId = cloned.area_id;
           // Carry the originator TARGET star through the fork.
           if (normalizedFork.originator_parcel_county && normalizedFork.originator_parcel_account_num) {
@@ -7998,6 +8003,7 @@ map.on("draw:created", async (e) => {
   // after the area is persisted.
   _currentLoadedAreaId = null;
   _syncTabTitle();
+  _storedValueOnAreaChange(null);
   _selectedSavedItemId = null;
   _setSessionCacheNote("");
   renderSavedAreasList();
@@ -8165,6 +8171,7 @@ function clearDrawResults() {
   _setCurrentTargetParcel(null);
   _currentLoadedAreaId = null;
   _syncTabTitle();
+  _storedValueOnAreaChange(null);
   _updateSaveSessionButtonState();
   _setSessionCacheNote("");
   lastAnalysisGeojson = null;
@@ -8213,6 +8220,7 @@ map.on("draw:drawstart", () => {
   _currentSessionIsNamed = false;
   _currentLoadedAreaId = null;
   _syncTabTitle();
+  _storedValueOnAreaChange(null);
   _selectedSavedItemId = null;
   _setSessionCacheNote("");
   renderSavedAreasList();
@@ -9664,3 +9672,384 @@ async function stopDeepPull() {
 }
 
 document.getElementById("btn-deep-pull-stop")?.addEventListener("click", stopDeepPull);
+
+// ─── Stored Value sidebar block (Phase 3 wiring) ─────────────────────────
+// Workspace-scoped per-saved-area value tracking. Backed by
+// stored_value_entries. Manual fields: arv, tdpp, rehab_needed.
+// Calc fields (computed locally + server-side):
+//   mao_arv             = arv * 0.75 - rehab_needed
+//   tdpp_minus_mao_arv  = tdpp - mao_arv
+
+const _STORED_VALUE_FIELDS = ["arv", "tdpp", "rehab_needed", "mao_arv", "tdpp_minus_mao_arv"];
+const _STORED_VALUE_MANUAL_FIELDS = ["arv", "tdpp", "rehab_needed"];
+const _STORED_VALUE_CALC_FIELDS = ["mao_arv", "tdpp_minus_mao_arv"];
+const _STORED_VALUE_MULTIPLIER = 0.75;
+const _STORED_VALUE_NUMERIC_MAX = 999_999_999;
+const _STORED_VALUE_DEBOUNCE_MS = 600;
+const _STORED_VALUE_GAP_TIGHT_THRESHOLD = 5000;
+
+let _storedValueAreaId = null;
+let _storedValueState = null;
+let _storedValueClientSeq = 1;
+let _storedValueAbortController = null;
+let _storedValueDebounceTimer = null;
+let _storedValuePendingFields = new Set();
+let _storedValueInflightField = null;
+
+function _storedValueBlankState() {
+  const state = {};
+  for (const key of _STORED_VALUE_FIELDS) {
+    state[key] = {
+      numeric_value: null,
+      comment_text: "",
+      value_source: _STORED_VALUE_CALC_FIELDS.includes(key) ? "calculated" : "manual",
+      client_seq: 0,
+    };
+  }
+  return state;
+}
+
+function _storedValueParseNumber(raw) {
+  if (raw == null) return null;
+  const digits = String(raw).replace(/[^0-9]/g, "");
+  if (digits === "") return null;
+  const n = parseInt(digits, 10);
+  if (!Number.isFinite(n)) return null;
+  if (n < 0) return 0;
+  if (n > _STORED_VALUE_NUMERIC_MAX) return _STORED_VALUE_NUMERIC_MAX;
+  return n;
+}
+
+function _storedValueFormatDisplay(value) {
+  if (value == null) return "";
+  return formatNumberWithCommas(value);
+}
+
+function _storedValueComputeCalc(state) {
+  const arv = state.arv.numeric_value;
+  const tdpp = state.tdpp.numeric_value;
+  const rehab = state.rehab_needed.numeric_value;
+  const mao = (arv != null && rehab != null)
+    ? Math.round(arv * _STORED_VALUE_MULTIPLIER - rehab)
+    : null;
+  const tdppMinusMao = (tdpp != null && mao != null)
+    ? Math.round(tdpp - mao)
+    : null;
+  return { mao_arv: mao, tdpp_minus_mao_arv: tdppMinusMao };
+}
+
+function _storedValueApplyState(state) {
+  const active = document.activeElement;
+  for (const key of _STORED_VALUE_FIELDS) {
+    const input = document.getElementById(`sv-input-${key}`);
+    const comment = document.getElementById(`sv-comment-${key}`);
+    if (input && input !== active) {
+      input.value = _storedValueFormatDisplay(state[key].numeric_value);
+    }
+    if (comment && comment !== active) {
+      comment.value = state[key].comment_text || "";
+    }
+  }
+  _storedValueUpdateGapChip(state);
+}
+
+function _storedValueUpdateGapChip(state) {
+  const chip = document.getElementById("sv-gap-chip");
+  if (!chip) return;
+  const gap = state.tdpp_minus_mao_arv.numeric_value;
+  if (gap == null) {
+    chip.removeAttribute("data-state");
+    chip.textContent = "";
+    return;
+  }
+  if (gap < 0) {
+    chip.setAttribute("data-state", "over");
+    chip.textContent = "Over";
+  } else if (gap <= _STORED_VALUE_GAP_TIGHT_THRESHOLD) {
+    chip.setAttribute("data-state", "tight");
+    chip.textContent = "Tight";
+  } else {
+    chip.setAttribute("data-state", "room");
+    chip.textContent = "Room";
+  }
+}
+
+function _storedValueSetStatus(state, label) {
+  const chip = document.getElementById("stored-value-status");
+  if (!chip) return;
+  chip.setAttribute("data-state", state);
+  const defaults = { idle: "Saved", saving: "Saving…", error: "Retry" };
+  chip.textContent = label || defaults[state] || state;
+}
+
+function _storedValueRecalcAndRender() {
+  if (!_storedValueState) return;
+  const calc = _storedValueComputeCalc(_storedValueState);
+  _storedValueState.mao_arv.numeric_value = calc.mao_arv;
+  _storedValueState.tdpp_minus_mao_arv.numeric_value = calc.tdpp_minus_mao_arv;
+  _storedValueApplyState(_storedValueState);
+}
+
+async function _storedValueLoadFromServer(areaId, signal) {
+  try {
+    const resp = await fetch(`/api/areas/${encodeURIComponent(areaId)}/stored-value`, {
+      credentials: "same-origin",
+      signal,
+    });
+    if (!resp.ok) {
+      if (resp.status === 404) return _storedValueBlankState();
+      throw new Error(`stored-value load failed: ${resp.status}`);
+    }
+    const data = await resp.json();
+    const state = _storedValueBlankState();
+    for (const key of _STORED_VALUE_FIELDS) {
+      if (data[key] && typeof data[key] === "object") {
+        state[key].numeric_value = data[key].numeric_value ?? null;
+        state[key].comment_text = String(data[key].comment_text || "");
+        state[key].value_source = data[key].value_source || state[key].value_source;
+        state[key].client_seq = Number(data[key].client_seq || 0);
+      }
+    }
+    return state;
+  } catch (err) {
+    if (err.name === "AbortError") return null;
+    console.error("[stored-value] load failed:", err);
+    return _storedValueBlankState();
+  }
+}
+
+async function _storedValueOnAreaChange(newAreaId) {
+  const targetAreaId = newAreaId || null;
+  if (_storedValueAreaId === targetAreaId && _storedValueState) return;
+
+  if (_storedValueAbortController) {
+    try { _storedValueAbortController.abort(); } catch (_) {}
+    _storedValueAbortController = null;
+  }
+  if (_storedValuePendingFields.size && _storedValueAreaId) {
+    try { await _storedValueFlushPending(); } catch (_) {}
+  }
+
+  if (_storedValueDebounceTimer) {
+    clearTimeout(_storedValueDebounceTimer);
+    _storedValueDebounceTimer = null;
+  }
+  _storedValuePendingFields = new Set();
+  _storedValueInflightField = null;
+  _storedValueAreaId = targetAreaId;
+
+  const block = document.getElementById("stored-value-block");
+  if (!targetAreaId) {
+    _storedValueState = null;
+    if (block) block.classList.add("hidden");
+    _storedValueSetStatus("idle", "Saved");
+    return;
+  }
+
+  _storedValueAbortController = new AbortController();
+  if (block) block.classList.remove("hidden");
+  _storedValueSetStatus("saving", "Loading…");
+
+  const state = await _storedValueLoadFromServer(targetAreaId, _storedValueAbortController.signal);
+  if (_storedValueAreaId !== targetAreaId) return;
+  if (state == null) return;
+
+  _storedValueState = state;
+  _storedValueClientSeq = Math.max(
+    _storedValueClientSeq,
+    ..._STORED_VALUE_FIELDS.map((k) => state[k].client_seq),
+  );
+  _storedValueRecalcAndRender();
+  _storedValueSetStatus("idle", "Saved");
+}
+
+async function _storedValueSaveField(fieldKey) {
+  if (!_storedValueState || !_storedValueAreaId) return;
+  const areaIdAtCall = _storedValueAreaId;
+  const fieldData = _storedValueState[fieldKey];
+  if (!fieldData) return;
+
+  const isCalc = _STORED_VALUE_CALC_FIELDS.includes(fieldKey);
+  const seq = ++_storedValueClientSeq;
+  fieldData.client_seq = seq;
+
+  const body = {
+    field_key: fieldKey,
+    numeric_value: isCalc ? null : fieldData.numeric_value,
+    comment_text: fieldData.comment_text || "",
+    client_seq: seq,
+  };
+
+  _storedValueSetStatus("saving", "Saving…");
+
+  try {
+    const resp = await fetch(`/api/areas/${encodeURIComponent(areaIdAtCall)}/stored-value`, {
+      method: "PUT",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify(body),
+    });
+
+    if (_storedValueAreaId !== areaIdAtCall) return;
+
+    if (resp.status === 409) {
+      const data = await resp.json().catch(() => ({}));
+      const current = data?.detail?.current;
+      if (current && current.field_key === fieldKey && _storedValueState) {
+        fieldData.client_seq = Math.max(fieldData.client_seq, Number(current.client_seq || 0));
+        fieldData.numeric_value = current.numeric_value ?? fieldData.numeric_value;
+        fieldData.comment_text = String(current.comment_text || "");
+        _storedValueClientSeq = Math.max(_storedValueClientSeq, fieldData.client_seq);
+        _storedValueRecalcAndRender();
+      }
+      _storedValueSetStatus("idle", "Saved");
+      return;
+    }
+
+    if (!resp.ok) throw new Error(`stored-value save failed: ${resp.status}`);
+
+    const data = await resp.json();
+    if (_storedValueAreaId === areaIdAtCall && _storedValueState) {
+      for (const key of _STORED_VALUE_FIELDS) {
+        if (data[key] && typeof data[key] === "object") {
+          _storedValueState[key].numeric_value = data[key].numeric_value ?? null;
+          if (key === fieldKey) {
+            _storedValueState[key].comment_text = String(data[key].comment_text || "");
+          }
+          _storedValueState[key].client_seq = Math.max(
+            _storedValueState[key].client_seq,
+            Number(data[key].client_seq || 0),
+          );
+        }
+      }
+      _storedValueClientSeq = Math.max(
+        _storedValueClientSeq,
+        ..._STORED_VALUE_FIELDS.map((k) => _storedValueState[k].client_seq),
+      );
+      _storedValueRecalcAndRender();
+    }
+    _storedValueSetStatus("idle", "Saved");
+  } catch (err) {
+    if (err.name === "AbortError") return;
+    console.error("[stored-value] save failed:", err);
+    _storedValueSetStatus("error", "Retry");
+  }
+}
+
+async function _storedValueProcessQueue() {
+  if (_storedValueInflightField) return;
+  while (_storedValuePendingFields.size > 0) {
+    const fieldKey = _storedValuePendingFields.values().next().value;
+    _storedValuePendingFields.delete(fieldKey);
+    _storedValueInflightField = fieldKey;
+    try {
+      await _storedValueSaveField(fieldKey);
+    } finally {
+      _storedValueInflightField = null;
+    }
+  }
+}
+
+function _storedValueQueueSave(fieldKey) {
+  _storedValuePendingFields.add(fieldKey);
+  if (_storedValueDebounceTimer) clearTimeout(_storedValueDebounceTimer);
+  _storedValueDebounceTimer = setTimeout(() => {
+    _storedValueDebounceTimer = null;
+    void _storedValueProcessQueue();
+  }, _STORED_VALUE_DEBOUNCE_MS);
+}
+
+async function _storedValueFlushPending() {
+  if (_storedValueDebounceTimer) {
+    clearTimeout(_storedValueDebounceTimer);
+    _storedValueDebounceTimer = null;
+  }
+  await _storedValueProcessQueue();
+}
+
+function _storedValueOnNumericInput(fieldKey, raw) {
+  if (!_storedValueState) return;
+  const parsed = _storedValueParseNumber(raw);
+  _storedValueState[fieldKey].numeric_value = parsed;
+  const calc = _storedValueComputeCalc(_storedValueState);
+  _storedValueState.mao_arv.numeric_value = calc.mao_arv;
+  _storedValueState.tdpp_minus_mao_arv.numeric_value = calc.tdpp_minus_mao_arv;
+  for (const calcKey of _STORED_VALUE_CALC_FIELDS) {
+    const input = document.getElementById(`sv-input-${calcKey}`);
+    if (input) input.value = _storedValueFormatDisplay(_storedValueState[calcKey].numeric_value);
+  }
+  _storedValueUpdateGapChip(_storedValueState);
+  _storedValueQueueSave(fieldKey);
+}
+
+function _storedValueOnCommentInput(fieldKey, raw) {
+  if (!_storedValueState) return;
+  _storedValueState[fieldKey].comment_text = String(raw || "");
+  _storedValueQueueSave(fieldKey);
+}
+
+function _storedValueOnNumericBlur(fieldKey, el) {
+  if (!_storedValueState) return;
+  el.value = _storedValueFormatDisplay(_storedValueState[fieldKey].numeric_value);
+  _storedValuePendingFields.add(fieldKey);
+  if (_storedValueDebounceTimer) {
+    clearTimeout(_storedValueDebounceTimer);
+    _storedValueDebounceTimer = null;
+  }
+  void _storedValueProcessQueue();
+}
+
+function _storedValueOnCommentBlur(fieldKey) {
+  _storedValuePendingFields.add(fieldKey);
+  if (_storedValueDebounceTimer) {
+    clearTimeout(_storedValueDebounceTimer);
+    _storedValueDebounceTimer = null;
+  }
+  void _storedValueProcessQueue();
+}
+
+function _storedValueOnNumericFocus(fieldKey, el) {
+  if (!_storedValueState) return;
+  const v = _storedValueState[fieldKey].numeric_value;
+  el.value = v == null ? "" : String(v);
+}
+
+function _storedValueWireListeners() {
+  for (const key of _STORED_VALUE_MANUAL_FIELDS) {
+    const input = document.getElementById(`sv-input-${key}`);
+    if (input) {
+      input.addEventListener("input", (e) => _storedValueOnNumericInput(key, e.target.value));
+      input.addEventListener("focus", (e) => _storedValueOnNumericFocus(key, e.target));
+      input.addEventListener("blur", (e) => _storedValueOnNumericBlur(key, e.target));
+    }
+  }
+  for (const key of _STORED_VALUE_FIELDS) {
+    const comment = document.getElementById(`sv-comment-${key}`);
+    if (comment) {
+      comment.addEventListener("input", (e) => _storedValueOnCommentInput(key, e.target.value));
+      comment.addEventListener("blur", () => _storedValueOnCommentBlur(key));
+    }
+  }
+  const status = document.getElementById("stored-value-status");
+  if (status) {
+    status.addEventListener("click", () => {
+      if (status.getAttribute("data-state") !== "error") return;
+      _storedValueSetStatus("saving", "Saving…");
+      if (_storedValuePendingFields.size === 0) {
+        for (const key of _STORED_VALUE_MANUAL_FIELDS) {
+          _storedValuePendingFields.add(key);
+        }
+      }
+      void _storedValueProcessQueue();
+    });
+  }
+  window.addEventListener("beforeunload", () => {
+    if (_storedValuePendingFields.size > 0) void _storedValueProcessQueue();
+  });
+}
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", _storedValueWireListeners, { once: true });
+} else {
+  _storedValueWireListeners();
+}
