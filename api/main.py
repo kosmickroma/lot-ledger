@@ -3252,6 +3252,20 @@ async def _run_download_csv(
     # already in this set is represented by its parent parcel row inline).
     visible_parcel_keys: set[tuple[str, str]] = parcel_ids_filter or set()
 
+    # CAD-by-parcel-key lookup over ALL cached parcel rows (not just visible
+    # ones). When a comp's parent parcel is in the polygon but filtered out
+    # (e.g. multifamily parcel hidden), the comp row still gets full CAD data
+    # from this lookup. Comps with no matching parcel in cached_jobs.rows
+    # (true OAC / spillover) fall through to empty-dict — CAD cells blank.
+    cad_by_parcel_key: dict[tuple[str, str], dict[str, Any]] = {}
+    for _pr in rows:
+        _key = (
+            str(_pr.get("county", "") or "").strip().lower(),
+            str(_pr.get("account_num", "") or "").strip(),
+        )
+        if _key[0] and _key[1]:
+            cad_by_parcel_key[_key] = _pr
+
     # Pre-fetch orphan comps for the export. Only kicks in when the POST path
     # supplied a comps filter list. Each row that lacks a visible parent
     # parcel will emit its own comp row at the end of generate_csv.
@@ -3654,23 +3668,76 @@ async def _run_download_csv(
             # Target) + 80 parcel/comp cols + share_id. Most parcel-specific
             # cells are "" on a comp row; the inline "Comp *" columns hold the
             # comp's own data.
-            _yr = _safe_float(_c.get("year_built"))
-            _yr_csv = int(_yr) if _yr not in (None, 0.0) else ""
-            _sqft_csv = int(_comp_sqft) if _comp_sqft not in (None, 0.0) else ""
-            _lot_sf_csv = (
-                int(_safe_float(_c.get("lot_size")))
-                if _safe_float(_c.get("lot_size")) not in (None, 0.0)
+            _cad_key = (
+                str(_c.get("parcel_county") or "").strip().lower(),
+                str(_c.get("parcel_account_num") or "").strip(),
+            )
+            _cad: dict[str, Any] = cad_by_parcel_key.get(_cad_key, {}) if _cad_key[0] and _cad_key[1] else {}
+
+            # Property-level values: prefer CAD when available, fall back to comp data.
+            _yr_parcel = _safe_float(_cad.get("yr_built")) if _cad else None
+            _yr_comp = _safe_float(_c.get("year_built"))
+            _yr_pref = _yr_parcel if _yr_parcel not in (None, 0.0) else _yr_comp
+            _yr_csv = int(_yr_pref) if _yr_pref not in (None, 0.0) else ""
+
+            _living_parcel = _safe_float(_cad.get("living_area")) if _cad else None
+            _living_pref = _living_parcel if _living_parcel not in (None, 0.0) else _comp_sqft
+            _sqft_csv = int(_living_pref) if _living_pref not in (None, 0.0) else ""
+
+            _main_area_csv = (
+                int(_safe_float(_cad.get("main_area")))
+                if _cad and _safe_float(_cad.get("main_area")) not in (None, 0.0)
                 else ""
             )
-            _lot_ac_csv = (
-                round(_safe_float(_c.get("lot_size")) / 43560, 3)
-                if _safe_float(_c.get("lot_size")) is not None
+
+            _area_size_cad = _safe_float(_cad.get("area_size")) if _cad else None
+            _area_estimated_cad = bool(_cad.get("area_estimated")) if _cad else False
+            if _area_size_cad is not None and _area_size_cad > 0:
+                _area_sf = round(_area_size_cad, 0)
+                _area_ac = round(_area_size_cad / 43560, 3)
+            else:
+                _lot_comp = _safe_float(_c.get("lot_size"))
+                _area_sf = round(_lot_comp, 0) if _lot_comp is not None else ""
+                _area_ac = round(_lot_comp / 43560, 3) if _lot_comp is not None else ""
+            _lot_sf_csv = "" if _area_estimated_cad else _area_sf
+            _lot_ac_csv = "" if _area_estimated_cad else _area_ac
+            _est_lot_sf_csv = _area_sf if _area_estimated_cad else ""
+            _est_lot_ac_csv = _area_ac if _area_estimated_cad else ""
+
+            _dims_estimated_cad = bool(_cad.get("dims_estimated")) if _cad else False
+            _front_dim_val = _safe_float(_cad.get("front_dim")) if _cad else None
+            _depth_dim_val = _safe_float(_cad.get("depth_dim")) if _cad else None
+            _frontage_csv = (
+                int(_front_dim_val)
+                if (not _dims_estimated_cad and _front_dim_val not in (None, 0.0))
                 else ""
             )
-            _beds_raw = _safe_float(_c.get("beds"))
-            _beds_csv = round(_beds_raw, 1) if _beds_raw is not None else ""
-            _baths_raw = _safe_float(_c.get("baths"))
-            _baths_csv = round(_baths_raw, 1) if _baths_raw is not None else ""
+            _depth_csv = (
+                int(_depth_dim_val)
+                if (not _dims_estimated_cad and _depth_dim_val not in (None, 0.0))
+                else ""
+            )
+            _est_frontage_csv = (
+                int(_front_dim_val)
+                if (_dims_estimated_cad and _front_dim_val not in (None, 0.0))
+                else ""
+            )
+            _est_depth_csv = (
+                int(_depth_dim_val)
+                if (_dims_estimated_cad and _depth_dim_val not in (None, 0.0))
+                else ""
+            )
+
+            _beds_parcel = _safe_float(_cad.get("beds")) if _cad else None
+            _beds_comp = _safe_float(_c.get("beds"))
+            _beds_pref = _beds_parcel if _beds_parcel is not None else _beds_comp
+            _beds_csv = round(_beds_pref, 1) if _beds_pref is not None else ""
+
+            _baths_parcel = _safe_float(_cad.get("baths")) if _cad else None
+            _baths_comp = _safe_float(_c.get("baths"))
+            _baths_pref = _baths_parcel if _baths_parcel is not None else _baths_comp
+            _baths_csv = round(_baths_pref, 1) if _baths_pref is not None else ""
+
             _dom_csv = (
                 int(_safe_float(_c.get("dom")))
                 if _safe_float(_c.get("dom")) not in (None, 0.0)
@@ -3678,115 +3745,134 @@ async def _run_download_csv(
             )
             _price_csv = round(_comp_price, 0) if _comp_price is not None else ""
             _comp_status_titled = _comp_status_raw.title() or ""
+
+            # Prefer parcel address if CAD has one (more standardized), else comp's address.
+            _row_address = (
+                _cad.get("property_address") or _c.get("address") or ""
+            )
+
+            # Prefer parcel lat/lng if available — comp's coords get used only on OAC.
+            _row_lat = _safe_float(_cad.get("lat")) if _cad else None
+            if _row_lat is None:
+                _row_lat = _comp_lat
+            _row_lng = _safe_float(_cad.get("lng")) if _cad else None
+            if _row_lng is None:
+                _row_lng = _comp_lng
+            _row_maps_link = _google_maps_link(_cad) if _cad else _comp_maps_link
+
+            _hoa_text = (
+                _cad.get("hoa_name", "")
+                or ("N/A (Tarrant HOA not loaded)" if _cad.get("division_cd") == "TAD" else "")
+            ) if _cad else ""
             writer.writerow(
                 [
-                    "Comp",                              # 1  Row Type
-                    "",                                   # 2  Intended Target
-                    _c.get("address", "") or "",          # 3  Property Address
-                    _comp_status_titled,                  # 4  MLS Status
-                    "",                                   # 5  Owner Name
-                    "",                                   # 6  Owner Mailing Address
-                    "",                                   # 7  Owner City
-                    "",                                   # 8  Owner State
-                    "",                                   # 9  Owner Zip
-                    "",                                   # 10 Land Value
-                    "",                                   # 11 Improvement Value
-                    "",                                   # 12 Total Value
-                    "",                                   # 13 Redfin List Price
-                    "",                                   # 14 Land % of Total
-                    _yr_csv,                              # 15 Year Built
-                    _sqft_csv,                            # 16 Living Area (sq ft)
-                    "",                                   # 17 Total Structure Area
-                    "",                                   # 18 State Code
-                    "",                                   # 19 Zoning
-                    _lot_sf_csv,                          # 20 Lot Size (sq ft)
-                    _lot_ac_csv,                          # 21 Lot Size (acres)
-                    "",                                   # 22 Frontage (ft)
-                    "",                                   # 23 Depth (ft)
-                    "",                                   # 24 Est Frontage (ft)
-                    "",                                   # 25 Est Depth (ft)
-                    "",                                   # 26 School District
-                    "",                                   # 27 Neighborhood Code
-                    "",                                   # 28 Subdivision
-                    "",                                   # 29 Legal Description
-                    _comp_lat if _comp_lat is not None else "",  # 30 Latitude
-                    _comp_lng if _comp_lng is not None else "",  # 31 Longitude
-                    _comp_maps_link,                      # 32 Google Maps Link
-                    "",                                   # 33 Verified Vacant
-                    "",                                   # 34 Potential Target
-                    "",                                   # 35 HOA
-                    "",                                   # 36 HOA URL
-                    "",                                   # 37 Estimated Lot Size (sq ft)
-                    "",                                   # 38 Estimated Lot Size (acres)
-                    "",                                   # 39 Tax Agent Name
-                    "",                                   # 40 Tax Agent ID
-                    "",                                   # 41 Tax Agent Auth Protest
-                    "",                                   # 42 Tax Agent Auth Resolve
-                    "",                                   # 43 Tax Agent Mailings
-                    "",                                   # 44 Permit Count
-                    "",                                   # 45 Latest Permit Date
-                    "",                                   # 46 Latest Permit Type
-                    "",                                   # 47 Latest Permit Value
-                    "",                                   # 48 Protest Case Count
-                    "",                                   # 49 Latest Protest Year
-                    "",                                   # 50 Latest Protest Status
-                    "",                                   # 51 Latest Protest Final Market Value
-                    "",                                   # 52 Protest Active
-                    "",                                   # 53 Ag Type
-                    "",                                   # 54 Ag Acres
-                    "",                                   # 55 Ag Use Value
-                    "",                                   # 56 Ag Market Value
-                    "",                                   # 57 Deed Number
-                    "",                                   # 58 Deed Type
-                    "",                                   # 59 Deed Date
-                    "",                                   # 60 Land Type Code
-                    "",                                   # 61 Land Type Name
-                    "",                                   # 62 Property Use Code
-                    "",                                   # 63 Property Use Name
-                    "",                                   # 64 Class Code
-                    "",                                   # 65 Entity Codes
-                    "",                                   # 66 Commercial Flag
-                    "",                                   # 67 Pool Flag
-                    _beds_csv,                            # 68 Beds
-                    _baths_csv,                           # 69 Baths
-                    "",                                   # 70 Stories
-                    "",                                   # 71 Units
-                    "",                                   # 72 Current Market Value
-                    "",                                   # 73 Current Assessed Value
-                    "",                                   # 74 Current Ag Use Value
-                    "",                                   # 75 Current Ag Market Value
-                    "",                                   # 76 Current Ag Loss Value
-                    "",                                   # 77 Certified Total Value
-                    "",                                   # 78 Denton - Exemptions
-                    "",                                   # 79 Denton - Homestead (HS)
-                    "",                                   # 80 Denton - School District
-                    "",                                   # 81 Denton - Entity Codes
-                    "",                                   # 82 Denton - Deed Number
-                    "",                                   # 83 Denton - Deed Date
-                    "",                                   # 84 Denton - Subdivision
-                    _price_csv,                           # 85 Comp Sold Price
-                    str(_comp_sold_date) if _comp_sold_date else "",  # 86 Comp Sold Date
-                    _comp_ppsf,                           # 87 Comp $/sqft
-                    _yr_csv,                              # 88 Comp Year Built
-                    _sqft_csv,                            # 89 Comp Living Area (sqft)
-                    _lot_sf_csv,                          # 90 Comp Lot Size (sqft)
-                    int(_beds_raw) if _beds_raw is not None else "",  # 91 Comp Beds
-                    int(_baths_raw) if _baths_raw is not None else "",  # 92 Comp Baths
-                    _dom_csv,                             # 93 Comp Days on Market
-                    "",                                   # 94 Comp Listing URL
-                    _comp_status_titled,                  # 95 Comp Status
-                    "",                                   # 96 RF_Comp Sold Price
-                    "",                                   # 97 RF_Comp Sold Date
-                    "",                                   # 98 RF_Comp $/sqft
-                    "",                                   # 99 RF_Comp Year Built
-                    "",                                   # 100 RF_Comp Living Area
-                    "",                                   # 101 RF_Comp Lot Size
-                    "",                                   # 102 RF_Comp Beds
-                    "",                                   # 103 RF_Comp Baths
-                    "",                                   # 104 RF_Comp Days on Market
-                    "",                                   # 105 RF_Comp Listing URL
-                    "",                                   # 106 Seed Target
-                    csv_share_id,                         # 107 share_id
+                    "Comp",                                                                                     # 1
+                    "",                                                                                          # 2 Intended Target
+                    _row_address,                                                                                # 3 Property Address
+                    _comp_status_titled,                                                                         # 4 MLS Status (comp's own status)
+                    _cad.get("owner_name", "") or "",                                                            # 5
+                    _cad.get("owner_address", "") or "",                                                         # 6
+                    _cad.get("owner_city", "") or "",                                                            # 7
+                    _cad.get("owner_state", "") or "",                                                           # 8
+                    _cad.get("owner_zip", "") or "",                                                             # 9
+                    round(_safe_float(_cad.get("land_val")), 0) if _safe_float(_cad.get("land_val")) is not None else "",      # 10
+                    round(_safe_float(_cad.get("impr_val")), 0) if _safe_float(_cad.get("impr_val")) is not None else "",      # 11
+                    round(_safe_float(_cad.get("tot_val")), 0) if _safe_float(_cad.get("tot_val")) is not None else "",        # 12
+                    "",                                                                                          # 13 Redfin List Price (parcel-only)
+                    round(_safe_float(_cad.get("land_pct")), 1) if _safe_float(_cad.get("land_pct")) is not None else "",      # 14
+                    _yr_csv,                                                                                     # 15 Year Built
+                    _sqft_csv,                                                                                   # 16 Living Area
+                    _main_area_csv,                                                                              # 17 Total Structure Area
+                    _cad.get("state_code", "") or _cad.get("sptd_code", "") or "",                               # 18
+                    _cad.get("zoning", "") or "",                                                                # 19
+                    _lot_sf_csv,                                                                                 # 20 Lot Size (sf)
+                    _lot_ac_csv,                                                                                 # 21 Lot Size (ac)
+                    _frontage_csv,                                                                               # 22
+                    _depth_csv,                                                                                  # 23
+                    _est_frontage_csv,                                                                           # 24
+                    _est_depth_csv,                                                                              # 25
+                    _cad.get("isd_desc", "") or "",                                                              # 26 School District
+                    _cad.get("nbhd_cd", "") or "",                                                               # 27 Neighborhood
+                    _cad.get("legal1", "") or "",                                                                # 28 Subdivision
+                    _cad.get("legal_desc", "") or _cad.get("legal", "") or "",                                   # 29 Legal Description
+                    _row_lat if _row_lat is not None else "",                                                    # 30 Latitude
+                    _row_lng if _row_lng is not None else "",                                                    # 31 Longitude
+                    _row_maps_link,                                                                              # 32 Maps Link
+                    _cad.get("verified_vacant", "") or "",                                                       # 33
+                    _cad.get("potential_target", "") or "",                                                      # 34
+                    _hoa_text,                                                                                   # 35
+                    _cad.get("hoa_url", "") or "",                                                               # 36
+                    _est_lot_sf_csv,                                                                             # 37
+                    _est_lot_ac_csv,                                                                             # 38
+                    _cad.get("tax_agent_name", "") or "",                                                        # 39
+                    _cad.get("tax_agent_id", "") or "",                                                          # 40
+                    _cad.get("tax_agent_auth_protest", "") or "",                                                # 41
+                    _cad.get("tax_agent_auth_resolve", "") or "",                                                # 42
+                    _cad.get("tax_agent_mailings", "") or "",                                                    # 43
+                    int(_safe_float(_cad.get("permit_count"))) if _safe_float(_cad.get("permit_count")) not in (None, 0.0) else "",  # 44
+                    _cad.get("latest_permit_date", "") or "",                                                    # 45
+                    _cad.get("latest_permit_type", "") or "",                                                    # 46
+                    round(_safe_float(_cad.get("latest_permit_value")), 0) if _safe_float(_cad.get("latest_permit_value")) is not None else "",  # 47
+                    int(_safe_float(_cad.get("protest_case_count"))) if _safe_float(_cad.get("protest_case_count")) not in (None, 0.0) else "",  # 48
+                    int(_safe_float(_cad.get("latest_protest_year"))) if _safe_float(_cad.get("latest_protest_year")) not in (None, 0.0) else "",  # 49
+                    _cad.get("latest_protest_status", "") or "",                                                 # 50
+                    round(_safe_float(_cad.get("latest_protest_final_market")), 0) if _safe_float(_cad.get("latest_protest_final_market")) is not None else "",  # 51
+                    _cad.get("protest_active", "") or "",                                                        # 52
+                    _cad.get("ag_type", "") or "",                                                               # 53
+                    round(_safe_float(_cad.get("ag_acres")), 4) if _safe_float(_cad.get("ag_acres")) is not None else "",  # 54
+                    round(_safe_float(_cad.get("ag_value")), 0) if _safe_float(_cad.get("ag_value")) is not None else "",  # 55
+                    round(_safe_float(_cad.get("ag_market_value")), 0) if _safe_float(_cad.get("ag_market_value")) is not None else "",  # 56
+                    _cad.get("deed_num", "") or "",                                                              # 57
+                    _cad.get("deed_type", "") or "",                                                             # 58
+                    _cad.get("deed_date", "") or "",                                                             # 59
+                    _cad.get("land_type_code", "") or "",                                                        # 60
+                    _cad.get("land_type_name", "") or "",                                                        # 61
+                    _cad.get("prop_use_code", "") or "",                                                         # 62
+                    _cad.get("prop_use_name", "") or "",                                                         # 63
+                    _cad.get("class_cd", "") or "",                                                              # 64
+                    _cad.get("entity_codes", "") or "",                                                          # 65
+                    _cad.get("commercial_flag", "") or "",                                                       # 66
+                    _cad.get("pool_flag", "") or "",                                                             # 67
+                    _beds_csv,                                                                                   # 68
+                    _baths_csv,                                                                                  # 69
+                    round(_safe_float(_cad.get("stories")), 1) if _safe_float(_cad.get("stories")) is not None else "",  # 70
+                    round(_safe_float(_cad.get("units")), 0) if _safe_float(_cad.get("units")) is not None else "",      # 71
+                    round(_safe_float(_cad.get("curr_market_value")), 0) if _safe_float(_cad.get("curr_market_value")) is not None else "",      # 72
+                    round(_safe_float(_cad.get("curr_assessed_value")), 0) if _safe_float(_cad.get("curr_assessed_value")) is not None else "",  # 73
+                    round(_safe_float(_cad.get("curr_ag_use_value")), 0) if _safe_float(_cad.get("curr_ag_use_value")) is not None else "",      # 74
+                    round(_safe_float(_cad.get("curr_ag_market_value")), 0) if _safe_float(_cad.get("curr_ag_market_value")) is not None else "",  # 75
+                    round(_safe_float(_cad.get("curr_ag_loss_value")), 0) if _safe_float(_cad.get("curr_ag_loss_value")) is not None else "",    # 76
+                    round(_safe_float(_cad.get("cert_total_value")), 0) if _safe_float(_cad.get("cert_total_value")) is not None else "",        # 77
+                    _cad.get("exemptions", "") or "",                                                            # 78 Denton - Exemptions
+                    _cad.get("exempt_homestead", "") or "",                                                      # 79 Denton - Homestead
+                    _cad.get("isd_desc", "") or "",                                                              # 80 Denton - School District
+                    _cad.get("entity_codes", "") or "",                                                          # 81 Denton - Entity Codes
+                    _cad.get("deed_number", "") or "",                                                           # 82 Denton - Deed Number
+                    _cad.get("deed_date", "") or "",                                                             # 83 Denton - Deed Date
+                    _cad.get("subdivision", "") or "",                                                           # 84 Denton - Subdivision
+                    _price_csv,                                                                                  # 85 Comp Sold Price
+                    str(_comp_sold_date) if _comp_sold_date else "",                                             # 86 Comp Sold Date
+                    _comp_ppsf,                                                                                  # 87 Comp $/sqft
+                    int(_yr_comp) if _yr_comp not in (None, 0.0) else "",                                        # 88 Comp Year Built (MLS source)
+                    int(_comp_sqft) if _comp_sqft not in (None, 0.0) else "",                                    # 89 Comp Living Area
+                    int(_safe_float(_c.get("lot_size"))) if _safe_float(_c.get("lot_size")) not in (None, 0.0) else "",  # 90 Comp Lot Size
+                    int(_beds_comp) if _beds_comp is not None else "",                                           # 91 Comp Beds (MLS source)
+                    int(_baths_comp) if _baths_comp is not None else "",                                         # 92 Comp Baths (MLS source)
+                    _dom_csv,                                                                                    # 93 Comp DOM
+                    "",                                                                                          # 94 Comp Listing URL
+                    _comp_status_titled,                                                                         # 95 Comp Status
+                    "",                                                                                          # 96 RF_Comp Sold Price
+                    "",                                                                                          # 97 RF_Comp Sold Date
+                    "",                                                                                          # 98 RF_Comp $/sqft
+                    "",                                                                                          # 99 RF_Comp Year Built
+                    "",                                                                                          # 100 RF_Comp Living Area
+                    "",                                                                                          # 101 RF_Comp Lot Size
+                    "",                                                                                          # 102 RF_Comp Beds
+                    "",                                                                                          # 103 RF_Comp Baths
+                    "",                                                                                          # 104 RF_Comp DOM
+                    "",                                                                                          # 105 RF_Comp Listing URL
+                    "",                                                                                          # 106 Seed Target
+                    csv_share_id,                                                                                # 107 share_id
                 ]
             )
             buffer.seek(0)
