@@ -4435,6 +4435,12 @@ function _dedupCompsForRender(comps) {
   // comp_address_key was too strict and let these stack on the map;
   // 4-decimal rounding collapses near-duplicates while keeping adjacent
   // properties distinct (typical urban lot is 20-30m).
+  //
+  // Coordinates are nested under comp.extra (extra.lat / extra.lon) — NOT
+  // at the top level. _propelioCompLatLng is the canonical reader.
+  // Previous code read c.lat / c.lng directly, which were always null,
+  // so every comp fell through to the comp_address_key fallback —
+  // letting near-duplicates stack and produce muddied colors.
   const winners = new Map();
   const noKey = [];
   const round4 = (n) => {
@@ -4442,8 +4448,9 @@ function _dedupCompsForRender(comps) {
     return Number.isFinite(x) ? x.toFixed(4) : null;
   };
   for (const c of comps) {
-    const lat = round4(c?.lat);
-    const lng = round4(c?.lng);
+    const latlng = _propelioCompLatLng(c);
+    const lat = latlng ? round4(latlng[0]) : null;
+    const lng = latlng ? round4(latlng[1]) : null;
     const key = lat && lng ? `${lat},${lng}` : String(c?.comp_address_key || "").trim();
     if (!key) {
       noKey.push(c);
