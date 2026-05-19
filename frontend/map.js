@@ -4428,19 +4428,19 @@ const propelioCmaChip = new PropelioCmaChip().addTo(map);
 const PROPELIO_STATUS_PRIORITY = { sold: 3, pending: 2, active: 1 };
 
 function _dedupCompsForRender(comps) {
-  // Dedup by lat/lng rounded to 4 decimals (~10m precision). Propelio
-  // sometimes returns the same physical property with slightly different
-  // geocodes across MLS records (e.g., listing geocoded to parcel
-  // centroid, sold record geocoded to building centroid). 6-decimal
-  // comp_address_key was too strict and let these stack on the map;
-  // 4-decimal rounding collapses near-duplicates while keeping adjacent
-  // properties distinct (typical urban lot is 20-30m).
+  // Layered dedup, strongest signal first:
+  //   1. parcel_account_num + parcel_county — canonical parcel ID. 99% of
+  //      comps carry this after the backfill scripts ran on Mike's GCP,
+  //      so it's the dominant path. Same parcel, same county = same
+  //      property, no ambiguity.
+  //   2. Rounded lat/lng (4-decimal, ~10m) — fallback for orphan comps
+  //      with no parcel match. Coordinates are nested under comp.extra,
+  //      so _propelioCompLatLng is the canonical reader.
+  //   3. comp_address_key — last-resort string fallback.
   //
-  // Coordinates are nested under comp.extra (extra.lat / extra.lon) — NOT
-  // at the top level. _propelioCompLatLng is the canonical reader.
-  // Previous code read c.lat / c.lng directly, which were always null,
-  // so every comp fell through to the comp_address_key fallback —
-  // letting near-duplicates stack and produce muddied colors.
+  // (Earlier 4-decimal-only strategy missed pairs where Propelio's
+  // geocoder placed the same property >10m apart — listing centroid
+  // vs sold centroid drift. parcel_account_num catches those.)
   const winners = new Map();
   const noKey = [];
   const round4 = (n) => {
@@ -4448,10 +4448,17 @@ function _dedupCompsForRender(comps) {
     return Number.isFinite(x) ? x.toFixed(4) : null;
   };
   for (const c of comps) {
-    const latlng = _propelioCompLatLng(c);
-    const lat = latlng ? round4(latlng[0]) : null;
-    const lng = latlng ? round4(latlng[1]) : null;
-    const key = lat && lng ? `${lat},${lng}` : String(c?.comp_address_key || "").trim();
+    const acct = String(c?.parcel_account_num || "").trim();
+    const county = String(c?.parcel_county || "").trim().toLowerCase();
+    let key = "";
+    if (acct && county) {
+      key = `acct:${county}|${acct}`;
+    } else {
+      const latlng = _propelioCompLatLng(c);
+      const lat = latlng ? round4(latlng[0]) : null;
+      const lng = latlng ? round4(latlng[1]) : null;
+      key = lat && lng ? `ll:${lat},${lng}` : String(c?.comp_address_key || "").trim();
+    }
     if (!key) {
       noKey.push(c);
       continue;
