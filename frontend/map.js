@@ -450,6 +450,20 @@ browseLayer.addTo(map);
 const _browseContainer = browseLayer.getContainer && browseLayer.getContainer();
 if (_browseContainer) _browseContainer.style.pointerEvents = "none";
 
+// Hard cutoff: hide the browseLayer canvas at any zoom below 14.0. The layer's
+// own `minZoom: 14` interacts with Leaflet's `Math.round(zoom)` tile-zoom
+// calculation, which rounds 13.5 → 14, so half-steps would otherwise render
+// the parcel layer at zoom 13.5 — producing flicker on pan as new tiles
+// repaint from blank canvas. CSS display:none sidesteps that without touching
+// Leaflet's add/remove lifecycle (which is coordinated with analysis mode).
+function _updateBrowseLayerVisibility() {
+  const container = browseLayer.getContainer && browseLayer.getContainer();
+  if (!container) return;
+  container.style.display = map.getZoom() >= 14 ? "" : "none";
+}
+map.on("zoomend", _updateBrowseLayerVisibility);
+_updateBrowseLayerVisibility();
+
 // Nudge chip: visible below zoom 13 when not in draw-results mode.
 const _zoomNudge = document.getElementById("zoom-nudge");
 function _updateZoomNudge() {
@@ -2175,6 +2189,7 @@ async function saveCurrentArea(name) {
   _setCurrentTargetParcel(null);
   _currentLoadedAreaId = normalized.id;
   _syncTabTitle();
+  _storedValueOnAreaChange(_currentLoadedAreaId);
   _selectedSavedItemId = normalized.id;
   // Render the originator star immediately if captured at save time.
   // Use lat/lng from origin (the pre-save _currentTargetParcel) to skip
@@ -2303,6 +2318,7 @@ async function deleteSavedArea(item) {
       _setCurrentTargetParcel(null);
       _currentLoadedAreaId = null;
       _syncTabTitle();
+      _storedValueOnAreaChange(null);
     }
   }
   if (_selectedSavedItemId === item.id) _selectedSavedItemId = null;
@@ -3078,6 +3094,7 @@ async function restoreSavedArea(area, options = {}) {
     _setCurrentTargetParcel(null);
     _currentLoadedAreaId = area.id;
     _syncTabTitle();
+    _storedValueOnAreaChange(_currentLoadedAreaId);
     if (area.originator_parcel_county && area.originator_parcel_account_num) {
       _setCurrentTargetParcel({
         county: area.originator_parcel_county,
@@ -3134,6 +3151,7 @@ async function restoreNamedSession(session, options = {}) {
   _setCurrentTargetParcel(null);
   _currentLoadedAreaId = null;
   _syncTabTitle();
+  _storedValueOnAreaChange(null);
   renderSavedAreasList();
   const savedFilterState = session.filter_state && typeof session.filter_state === "object"
     ? session.filter_state
@@ -3411,6 +3429,7 @@ function _renderList(sectionId, listId, items) {
           _setCurrentTargetParcel(null);
           _currentLoadedAreaId = cloned.area_id;
           _syncTabTitle();
+          _storedValueOnAreaChange(_currentLoadedAreaId);
           _selectedSavedItemId = cloned.area_id;
           // Carry the originator TARGET star through the fork.
           if (normalizedFork.originator_parcel_county && normalizedFork.originator_parcel_account_num) {
@@ -4409,13 +4428,24 @@ const propelioCmaChip = new PropelioCmaChip().addTo(map);
 const PROPELIO_STATUS_PRIORITY = { sold: 3, pending: 2, active: 1 };
 
 function _dedupCompsForRender(comps) {
-  // Dedup by lat/lng rounded to 4 decimals (~10m precision). Propelio
-  // sometimes returns the same physical property with slightly different
-  // geocodes across MLS records (e.g., listing geocoded to parcel
-  // centroid, sold record geocoded to building centroid). 6-decimal
-  // comp_address_key was too strict and let these stack on the map;
-  // 4-decimal rounding collapses near-duplicates while keeping adjacent
-  // properties distinct (typical urban lot is 20-30m).
+  // "One comp per footprint" — multiple condo units share a single
+  // parcel_geom (the building outline) but each unit has its own
+  // parcel_account_num. Dedup-by-account_num leaves units stacked on
+  // top of each other → green active footprint over red sold footprint
+  // produces incoherent visuals. The parcel-render side handles this
+  // via condoOutlineSeen + geometryKey() (see renderFeatures line ~7219);
+  // mirror the same approach here for comp footprints.
+  //
+  // Layered dedup, strongest signal first:
+  //   1. parcel_geom shape (geometryKey) — one comp per footprint,
+  //      regardless of how many units share that footprint
+  //   2. parcel_account_num + parcel_county — for non-shared-footprint
+  //      cases (single-family, etc.)
+  //   3. Rounded lat/lng (4-decimal, ~10m) — geocode-drift fallback
+  //   4. comp_address_key — last-resort string fallback
+  //
+  // Winner-resolution tie-break: good-rating > status priority
+  // (sold > pending > active per PROPELIO_STATUS_PRIORITY).
   const winners = new Map();
   const noKey = [];
   const round4 = (n) => {
@@ -4423,9 +4453,24 @@ function _dedupCompsForRender(comps) {
     return Number.isFinite(x) ? x.toFixed(4) : null;
   };
   for (const c of comps) {
-    const lat = round4(c?.lat);
-    const lng = round4(c?.lng);
-    const key = lat && lng ? `${lat},${lng}` : String(c?.comp_address_key || "").trim();
+    let key = "";
+    const geom = c?.parcel_geom;
+    if (geom && (geom.type === "Polygon" || geom.type === "MultiPolygon")) {
+      const gkey = geometryKey(geom);
+      if (gkey) key = `geom:${gkey}`;
+    }
+    if (!key) {
+      const acct = String(c?.parcel_account_num || "").trim();
+      const county = String(c?.parcel_county || "").trim().toLowerCase();
+      if (acct && county) key = `acct:${county}|${acct}`;
+    }
+    if (!key) {
+      const latlng = _propelioCompLatLng(c);
+      const lat = latlng ? round4(latlng[0]) : null;
+      const lng = latlng ? round4(latlng[1]) : null;
+      if (lat && lng) key = `ll:${lat},${lng}`;
+    }
+    if (!key) key = String(c?.comp_address_key || "").trim();
     if (!key) {
       noKey.push(c);
       continue;
@@ -4540,6 +4585,32 @@ function _propelioCompLatLng(comp) {
   const lng = Number(comp?.extra?.lon ?? comp?.extra?.lng);
   if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
   return [lat, lng];
+}
+
+// Returns [lng, lat] of where the comp will actually render on the map.
+// Prefers the parcel_geom ring centroid (matches the visible footprint)
+// over the MLS lat/lng (which can be street-address-geocoded and diverge
+// from the parcel boundary, especially for condos and large complexes).
+function _compRenderPointLngLat(comp) {
+  const geom = comp?.parcel_geom;
+  let ring = null;
+  if (geom?.type === "Polygon") {
+    ring = Array.isArray(geom.coordinates) ? geom.coordinates[0] : null;
+  } else if (geom?.type === "MultiPolygon") {
+    ring = Array.isArray(geom.coordinates?.[0]) ? geom.coordinates[0][0] : null;
+  }
+  if (Array.isArray(ring) && ring.length > 0) {
+    let sx = 0, sy = 0, n = 0;
+    for (const pt of ring) {
+      const x = Number(pt?.[0]);
+      const y = Number(pt?.[1]);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      sx += x; sy += y; n += 1;
+    }
+    if (n > 0) return [sx / n, sy / n];
+  }
+  const latlng = _propelioCompLatLng(comp);
+  return latlng ? [latlng[1], latlng[0]] : null;
 }
 
 function _propelioStatusBucket(comp) {
@@ -4723,6 +4794,38 @@ function _renderPropelioComps(data) {
   });
   refreshPropelioPriceLabels();
 
+  // Cross-layer mute: when a parcel polygon has a matching Propelio comp
+  // footprint, set the parcel's fill opacity to 0 so the comp color is the
+  // sole visible signal. Without this, the parcel layer (multifamily=gray,
+  // commercial=brown, on_redfin=red) blends with the translucent comp
+  // footprint and produces a muddy/brown stack. The existing code at the
+  // parcel render path zeros fill for CAD-side sold_comp matches only —
+  // this extends it to live Propelio matches.
+  //
+  // Restores fill on parcels that LOST their Propelio comp in the latest
+  // filter pass, so toggling filters cleanly repaints. Each parcel layer
+  // caches its original fill opacity on first encounter so restoration
+  // works after multiple re-renders.
+  const accountsWithComps = new Set();
+  for (const comp of (data?.comps || [])) {
+    const acct = String(comp?.parcel_account_num || "").trim();
+    if (acct) accountsWithComps.add(acct);
+  }
+  _renderedParcelPopupLayers.forEach((layer, acct) => {
+    if (!layer || typeof layer.setStyle !== "function") return;
+    if (typeof layer._lotLedgerOriginalFillOpacity !== "number") {
+      let captured = null;
+      layer.eachLayer((child) => {
+        if (captured === null && typeof child?.options?.fillOpacity === "number") {
+          captured = child.options.fillOpacity;
+        }
+      });
+      layer._lotLedgerOriginalFillOpacity = (typeof captured === "number") ? captured : 0.12;
+    }
+    const targetOpacity = accountsWithComps.has(acct) ? 0 : layer._lotLedgerOriginalFillOpacity;
+    layer.setStyle({ fillOpacity: targetOpacity });
+  });
+
   if (data?.polygon_meta) {
     const total = data.comps.length;
     data.polygon_meta.comps_in_polygon = insideCount;
@@ -4832,9 +4935,14 @@ function _compPropertyTypeBucket(comp) {
       }
     }
   }
-  const cat = String(comp?.property_category || "").trim();
+  // Propelio nests the MLS classification under `extra`; the top-level
+  // property_category / property_type fields are not populated in the
+  // current API shape (verified empirically against propelio_cache, 2026-05-19).
+  // Defensive: fall back to top-level in case the shape ever changes.
+  const extra = (comp && typeof comp.extra === "object" && comp.extra) || {};
+  const cat = String(extra.property_category || comp?.property_category || "").trim();
   if (cat && PROPELIO_CATEGORY_TO_BUCKET[cat]) return PROPELIO_CATEGORY_TO_BUCKET[cat];
-  const t = String(comp?.property_type || "").trim();
+  const t = String(extra.property_type || comp?.property_type || "").trim();
   if (t && PROPELIO_TYPE_FALLBACK[t]) return PROPELIO_TYPE_FALLBACK[t];
   return null;
 }
@@ -4851,9 +4959,16 @@ function compPassesPropelioFilters(comp, filters) {
   // pass. Toggle on → also let through Propelio's spillover comps from
   // its circumradius search. Falls open when there is no polygon yet
   // (e.g. by-address pulls), so that path is unaffected.
+  //
+  // Test point priority: parcel_geom centroid (where the comp actually
+  // RENDERS) > _propelioCompLatLng. Condos in particular often have an
+  // MLS-geocoded lat/lng pointing to a building entrance inside the
+  // polygon while parcel_geom from CAD points to a specific unit
+  // boundary outside — checking lat/lng would let the comp through and
+  // it would render visibly far outside the drawn area.
   if (!filters.showOutsideArea && Array.isArray(lastPolygon) && lastPolygon.length >= 3) {
-    const latlng = _propelioCompLatLng(comp);
-    if (!latlng || !_pointInPolygonLngLat(latlng[1], latlng[0], lastPolygon)) {
+    const testPoint = _compRenderPointLngLat(comp);  // [lng, lat] or null
+    if (!testPoint || !_pointInPolygonLngLat(testPoint[0], testPoint[1], lastPolygon)) {
       return false;
     }
   }
@@ -4890,14 +5005,29 @@ function compPassesPropelioFilters(comp, filters) {
   if (filters.priceMax != null && (!Number.isFinite(price) || price > filters.priceMax)) return false;
 
   // Parcel-type gate: hide comp if its bucket is toggled off in Property Type
-  // Filters. single_family is never gated (no SFR toggle in UI). Unknown
-  // bucket → null → falls through (default visible).
+  // Filters. CAD is the source of truth — when a comp matches a parcel, the
+  // parcel's prop_type wins. When CAD has nothing to say, Propelio's coarse
+  // category fills in.
+  //
+  // Three buckets route through Off Market because they all represent
+  // "residential without an active listing or with no other classification":
+  //   - "active"        — single_family parcel that's on Redfin (the same
+  //                       toggle that hides off_market parcels should hide
+  //                       these comps; the active/off_market distinction
+  //                       matters for parcel rendering, not comp filtering)
+  //   - "single_family" — Propelio fallback for Residential (~92.5% of comps
+  //                       without a CAD parcel match)
+  //   - null            — neither CAD nor Propelio could classify; treat as
+  //                       residential-default
   const bucket = _compPropertyTypeBucket(comp);
-  if (bucket === "multifamily" && filters.parcelTypeMultifamily === false) return false;
-  if (bucket === "commercial"  && filters.parcelTypeCommercial  === false) return false;
-  if (bucket === "vacant"      && filters.parcelTypeVacant      === false) return false;
-  if (bucket === "exempt"      && filters.parcelTypeExempt      === false) return false;
-  if (bucket === "off_market"  && filters.parcelTypeOffMarket   === false) return false;
+  if (bucket === "multifamily"   && filters.parcelTypeMultifamily === false) return false;
+  if (bucket === "commercial"    && filters.parcelTypeCommercial  === false) return false;
+  if (bucket === "vacant"        && filters.parcelTypeVacant      === false) return false;
+  if (bucket === "exempt"        && filters.parcelTypeExempt      === false) return false;
+  if (bucket === "off_market"    && filters.parcelTypeOffMarket   === false) return false;
+  if (bucket === "active"        && filters.parcelTypeOffMarket   === false) return false;
+  if (bucket === "single_family" && filters.parcelTypeOffMarket   === false) return false;
+  if (bucket === null            && filters.parcelTypeOffMarket   === false) return false;
 
   return true;
 }
@@ -7998,6 +8128,7 @@ map.on("draw:created", async (e) => {
   // after the area is persisted.
   _currentLoadedAreaId = null;
   _syncTabTitle();
+  _storedValueOnAreaChange(null);
   _selectedSavedItemId = null;
   _setSessionCacheNote("");
   renderSavedAreasList();
@@ -8165,6 +8296,7 @@ function clearDrawResults() {
   _setCurrentTargetParcel(null);
   _currentLoadedAreaId = null;
   _syncTabTitle();
+  _storedValueOnAreaChange(null);
   _updateSaveSessionButtonState();
   _setSessionCacheNote("");
   lastAnalysisGeojson = null;
@@ -8213,6 +8345,7 @@ map.on("draw:drawstart", () => {
   _currentSessionIsNamed = false;
   _currentLoadedAreaId = null;
   _syncTabTitle();
+  _storedValueOnAreaChange(null);
   _selectedSavedItemId = null;
   _setSessionCacheNote("");
   renderSavedAreasList();
@@ -9664,3 +9797,381 @@ async function stopDeepPull() {
 }
 
 document.getElementById("btn-deep-pull-stop")?.addEventListener("click", stopDeepPull);
+
+// ─── Stored Value sidebar block (Phase 3 wiring) ─────────────────────────
+// Workspace-scoped per-saved-area value tracking. Backed by
+// stored_value_entries. Manual fields: arv, tdpp, rehab_needed.
+// Calc fields (computed locally + server-side):
+//   mao_arv             = arv * 0.75 - rehab_needed
+//   tdpp_minus_mao_arv  = tdpp - mao_arv
+
+const _STORED_VALUE_FIELDS = ["arv", "tdpp", "rehab_needed", "mao_arv", "tdpp_minus_mao_arv"];
+const _STORED_VALUE_MANUAL_FIELDS = ["arv", "tdpp", "rehab_needed"];
+const _STORED_VALUE_CALC_FIELDS = ["mao_arv", "tdpp_minus_mao_arv"];
+const _STORED_VALUE_MULTIPLIER = 0.75;
+const _STORED_VALUE_NUMERIC_MAX = 999_999_999;
+const _STORED_VALUE_DEBOUNCE_MS = 600;
+
+let _storedValueAreaId = null;
+let _storedValueState = null;
+let _storedValueClientSeq = 1;
+let _storedValueAbortController = null;
+let _storedValueDebounceTimer = null;
+let _storedValuePendingFields = new Set();
+let _storedValueInflightField = null;
+
+function _storedValueBlankState() {
+  const state = {};
+  for (const key of _STORED_VALUE_FIELDS) {
+    state[key] = {
+      numeric_value: null,
+      comment_text: "",
+      value_source: _STORED_VALUE_CALC_FIELDS.includes(key) ? "calculated" : "manual",
+      client_seq: 0,
+    };
+  }
+  return state;
+}
+
+function _storedValueParseNumber(raw) {
+  if (raw == null) return null;
+  // Defensive: explicit lowercase here in addition to parseShorthand's internal
+  // .toLowerCase(). Some browser/extension combos appear to behave differently
+  // for "1m" vs "1M" in numeric inputmode fields; normalizing at the boundary
+  // removes any path-dependency.
+  const str = String(raw).trim().toLowerCase();
+  if (str === "") return null;
+  // Support k/m shorthand: "300k" → 300000, "1.5m" → 1500000.
+  const parsed = parseShorthand(str);
+  if (parsed == null || !Number.isFinite(parsed)) return null;
+  const n = Math.round(parsed);
+  if (n < 0) return 0;
+  if (n > _STORED_VALUE_NUMERIC_MAX) return _STORED_VALUE_NUMERIC_MAX;
+  return n;
+}
+
+function _storedValueFormatDisplay(value) {
+  if (value == null) return "";
+  return formatNumberWithCommas(value);
+}
+
+function _storedValueComputeCalc(state) {
+  const arv = state.arv.numeric_value;
+  const tdpp = state.tdpp.numeric_value;
+  const rehab = state.rehab_needed.numeric_value;
+  const mao = (arv != null && rehab != null)
+    ? Math.round(arv * _STORED_VALUE_MULTIPLIER - rehab)
+    : null;
+  const tdppMinusMao = (tdpp != null && mao != null)
+    ? Math.round(tdpp - mao)
+    : null;
+  return { mao_arv: mao, tdpp_minus_mao_arv: tdppMinusMao };
+}
+
+function _storedValueApplyState(state) {
+  const active = document.activeElement;
+  for (const key of _STORED_VALUE_FIELDS) {
+    const input = document.getElementById(`sv-input-${key}`);
+    const comment = document.getElementById(`sv-comment-${key}`);
+    if (input && input !== active) {
+      input.value = _storedValueFormatDisplay(state[key].numeric_value);
+    }
+    if (comment && comment !== active) {
+      comment.value = state[key].comment_text || "";
+    }
+  }
+}
+
+let _storedValueFlashTimer = null;
+function _storedValueSetStatus(state, label) {
+  const chip = document.getElementById("stored-value-status");
+  if (!chip) return;
+  if (_storedValueFlashTimer) {
+    clearTimeout(_storedValueFlashTimer);
+    _storedValueFlashTimer = null;
+  }
+  chip.setAttribute("data-state", state);
+  const defaults = { idle: "", saving: "Saving…", flash: "Saved ✓", error: "Retry" };
+  chip.textContent = label || defaults[state] || state;
+  if (state === "flash") {
+    _storedValueFlashTimer = setTimeout(() => {
+      _storedValueFlashTimer = null;
+      const c = document.getElementById("stored-value-status");
+      if (c && c.getAttribute("data-state") === "flash") {
+        c.setAttribute("data-state", "idle");
+        c.textContent = "";
+      }
+    }, 1200);
+  }
+}
+
+function _storedValueRecalcAndRender() {
+  if (!_storedValueState) return;
+  const calc = _storedValueComputeCalc(_storedValueState);
+  _storedValueState.mao_arv.numeric_value = calc.mao_arv;
+  _storedValueState.tdpp_minus_mao_arv.numeric_value = calc.tdpp_minus_mao_arv;
+  _storedValueApplyState(_storedValueState);
+}
+
+async function _storedValueLoadFromServer(areaId, signal) {
+  try {
+    const resp = await fetch(`/api/areas/${encodeURIComponent(areaId)}/stored-value`, {
+      credentials: "same-origin",
+      signal,
+    });
+    if (!resp.ok) {
+      if (resp.status === 404) return _storedValueBlankState();
+      throw new Error(`stored-value load failed: ${resp.status}`);
+    }
+    const data = await resp.json();
+    const state = _storedValueBlankState();
+    for (const key of _STORED_VALUE_FIELDS) {
+      if (data[key] && typeof data[key] === "object") {
+        state[key].numeric_value = data[key].numeric_value ?? null;
+        state[key].comment_text = String(data[key].comment_text || "");
+        state[key].value_source = data[key].value_source || state[key].value_source;
+        state[key].client_seq = Number(data[key].client_seq || 0);
+      }
+    }
+    return state;
+  } catch (err) {
+    if (err.name === "AbortError") return null;
+    console.error("[stored-value] load failed:", err);
+    return _storedValueBlankState();
+  }
+}
+
+async function _storedValueOnAreaChange(newAreaId) {
+  const targetAreaId = newAreaId || null;
+  if (_storedValueAreaId === targetAreaId && _storedValueState) return;
+
+  if (_storedValueAbortController) {
+    try { _storedValueAbortController.abort(); } catch (_) {}
+    _storedValueAbortController = null;
+  }
+  if (_storedValuePendingFields.size && _storedValueAreaId) {
+    try { await _storedValueFlushPending(); } catch (_) {}
+  }
+
+  if (_storedValueDebounceTimer) {
+    clearTimeout(_storedValueDebounceTimer);
+    _storedValueDebounceTimer = null;
+  }
+  _storedValuePendingFields = new Set();
+  _storedValueInflightField = null;
+  _storedValueAreaId = targetAreaId;
+
+  const block = document.getElementById("stored-value-block");
+  if (!targetAreaId) {
+    _storedValueState = null;
+    if (block) block.classList.add("hidden");
+    _storedValueSetStatus("idle");
+    return;
+  }
+
+  _storedValueAbortController = new AbortController();
+  if (block) block.classList.remove("hidden");
+  _storedValueSetStatus("saving", "Loading…");
+
+  const state = await _storedValueLoadFromServer(targetAreaId, _storedValueAbortController.signal);
+  if (_storedValueAreaId !== targetAreaId) return;
+  if (state == null) return;
+
+  _storedValueState = state;
+  _storedValueClientSeq = Math.max(
+    _storedValueClientSeq,
+    ..._STORED_VALUE_FIELDS.map((k) => state[k].client_seq),
+  );
+  _storedValueRecalcAndRender();
+  _storedValueSetStatus("idle");
+}
+
+async function _storedValueSaveField(fieldKey) {
+  if (!_storedValueState || !_storedValueAreaId) return;
+  const areaIdAtCall = _storedValueAreaId;
+  const fieldData = _storedValueState[fieldKey];
+  if (!fieldData) return;
+
+  const isCalc = _STORED_VALUE_CALC_FIELDS.includes(fieldKey);
+  const seq = ++_storedValueClientSeq;
+  fieldData.client_seq = seq;
+
+  const body = {
+    field_key: fieldKey,
+    numeric_value: isCalc ? null : fieldData.numeric_value,
+    comment_text: fieldData.comment_text || "",
+    client_seq: seq,
+  };
+
+  _storedValueSetStatus("saving", "Saving…");
+
+  try {
+    const resp = await fetch(`/api/areas/${encodeURIComponent(areaIdAtCall)}/stored-value`, {
+      method: "PUT",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify(body),
+    });
+
+    if (_storedValueAreaId !== areaIdAtCall) return;
+
+    if (resp.status === 409) {
+      const data = await resp.json().catch(() => ({}));
+      const current = data?.detail?.current;
+      if (current && current.field_key === fieldKey && _storedValueState) {
+        fieldData.client_seq = Math.max(fieldData.client_seq, Number(current.client_seq || 0));
+        fieldData.numeric_value = current.numeric_value ?? fieldData.numeric_value;
+        fieldData.comment_text = String(current.comment_text || "");
+        _storedValueClientSeq = Math.max(_storedValueClientSeq, fieldData.client_seq);
+        _storedValueRecalcAndRender();
+      }
+      _storedValueSetStatus("flash");
+      return;
+    }
+
+    if (!resp.ok) throw new Error(`stored-value save failed: ${resp.status}`);
+
+    const data = await resp.json();
+    if (_storedValueAreaId === areaIdAtCall && _storedValueState) {
+      for (const key of _STORED_VALUE_FIELDS) {
+        if (data[key] && typeof data[key] === "object") {
+          _storedValueState[key].numeric_value = data[key].numeric_value ?? null;
+          if (key === fieldKey) {
+            _storedValueState[key].comment_text = String(data[key].comment_text || "");
+          }
+          _storedValueState[key].client_seq = Math.max(
+            _storedValueState[key].client_seq,
+            Number(data[key].client_seq || 0),
+          );
+        }
+      }
+      _storedValueClientSeq = Math.max(
+        _storedValueClientSeq,
+        ..._STORED_VALUE_FIELDS.map((k) => _storedValueState[k].client_seq),
+      );
+      _storedValueRecalcAndRender();
+    }
+    _storedValueSetStatus("flash");
+  } catch (err) {
+    if (err.name === "AbortError") return;
+    console.error("[stored-value] save failed:", err);
+    _storedValueSetStatus("error", "Retry");
+  }
+}
+
+async function _storedValueProcessQueue() {
+  if (_storedValueInflightField) return;
+  while (_storedValuePendingFields.size > 0) {
+    const fieldKey = _storedValuePendingFields.values().next().value;
+    _storedValuePendingFields.delete(fieldKey);
+    _storedValueInflightField = fieldKey;
+    try {
+      await _storedValueSaveField(fieldKey);
+    } finally {
+      _storedValueInflightField = null;
+    }
+  }
+}
+
+function _storedValueQueueSave(fieldKey) {
+  _storedValuePendingFields.add(fieldKey);
+  if (_storedValueDebounceTimer) clearTimeout(_storedValueDebounceTimer);
+  _storedValueDebounceTimer = setTimeout(() => {
+    _storedValueDebounceTimer = null;
+    void _storedValueProcessQueue();
+  }, _STORED_VALUE_DEBOUNCE_MS);
+}
+
+async function _storedValueFlushPending() {
+  if (_storedValueDebounceTimer) {
+    clearTimeout(_storedValueDebounceTimer);
+    _storedValueDebounceTimer = null;
+  }
+  await _storedValueProcessQueue();
+}
+
+function _storedValueOnNumericInput(fieldKey, raw) {
+  if (!_storedValueState) return;
+  const parsed = _storedValueParseNumber(raw);
+  _storedValueState[fieldKey].numeric_value = parsed;
+  const calc = _storedValueComputeCalc(_storedValueState);
+  _storedValueState.mao_arv.numeric_value = calc.mao_arv;
+  _storedValueState.tdpp_minus_mao_arv.numeric_value = calc.tdpp_minus_mao_arv;
+  for (const calcKey of _STORED_VALUE_CALC_FIELDS) {
+    const input = document.getElementById(`sv-input-${calcKey}`);
+    if (input) input.value = _storedValueFormatDisplay(_storedValueState[calcKey].numeric_value);
+  }
+  _storedValueQueueSave(fieldKey);
+}
+
+function _storedValueOnCommentInput(fieldKey, raw) {
+  if (!_storedValueState) return;
+  _storedValueState[fieldKey].comment_text = String(raw || "");
+  _storedValueQueueSave(fieldKey);
+}
+
+function _storedValueOnNumericBlur(fieldKey, el) {
+  if (!_storedValueState) return;
+  el.value = _storedValueFormatDisplay(_storedValueState[fieldKey].numeric_value);
+  _storedValuePendingFields.add(fieldKey);
+  if (_storedValueDebounceTimer) {
+    clearTimeout(_storedValueDebounceTimer);
+    _storedValueDebounceTimer = null;
+  }
+  void _storedValueProcessQueue();
+}
+
+function _storedValueOnCommentBlur(fieldKey) {
+  _storedValuePendingFields.add(fieldKey);
+  if (_storedValueDebounceTimer) {
+    clearTimeout(_storedValueDebounceTimer);
+    _storedValueDebounceTimer = null;
+  }
+  void _storedValueProcessQueue();
+}
+
+function _storedValueOnNumericFocus(fieldKey, el) {
+  if (!_storedValueState) return;
+  const v = _storedValueState[fieldKey].numeric_value;
+  el.value = v == null ? "" : String(v);
+}
+
+function _storedValueWireListeners() {
+  for (const key of _STORED_VALUE_MANUAL_FIELDS) {
+    const input = document.getElementById(`sv-input-${key}`);
+    if (input) {
+      input.addEventListener("input", (e) => _storedValueOnNumericInput(key, e.target.value));
+      input.addEventListener("focus", (e) => _storedValueOnNumericFocus(key, e.target));
+      input.addEventListener("blur", (e) => _storedValueOnNumericBlur(key, e.target));
+    }
+  }
+  for (const key of _STORED_VALUE_FIELDS) {
+    const comment = document.getElementById(`sv-comment-${key}`);
+    if (comment) {
+      comment.addEventListener("input", (e) => _storedValueOnCommentInput(key, e.target.value));
+      comment.addEventListener("blur", () => _storedValueOnCommentBlur(key));
+    }
+  }
+  const status = document.getElementById("stored-value-status");
+  if (status) {
+    status.addEventListener("click", () => {
+      if (status.getAttribute("data-state") !== "error") return;
+      _storedValueSetStatus("saving", "Saving…");
+      if (_storedValuePendingFields.size === 0) {
+        for (const key of _STORED_VALUE_MANUAL_FIELDS) {
+          _storedValuePendingFields.add(key);
+        }
+      }
+      void _storedValueProcessQueue();
+    });
+  }
+  window.addEventListener("beforeunload", () => {
+    if (_storedValuePendingFields.size > 0) void _storedValueProcessQueue();
+  });
+}
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", _storedValueWireListeners, { once: true });
+} else {
+  _storedValueWireListeners();
+}
