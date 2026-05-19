@@ -3301,13 +3301,15 @@ body.is-not-power-user .power-user-only {
 }
 
 #stored-value-block .section-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  position: relative;
 }
 
 .stored-value-status {
+  position: absolute;
+  right: 28px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: none;
   font-size: 11px;
   line-height: 1;
   padding: 3px 9px;
@@ -3317,20 +3319,32 @@ body.is-not-power-user .power-user-only {
   color: var(--text-muted);
   letter-spacing: 0.02em;
   white-space: nowrap;
+  pointer-events: none;
 }
 
 .stored-value-status[data-state="saving"] {
+  display: inline-block;
   color: #cfe5ff;
   border-color: rgba(120, 170, 230, 0.55);
   background: rgba(38, 96, 160, 0.32);
   animation: stored-value-pulse 1.1s ease-in-out infinite;
 }
 
+.stored-value-status[data-state="flash"] {
+  display: inline-block;
+  color: #cfeccf;
+  border-color: rgba(120, 200, 140, 0.55);
+  background: rgba(40, 96, 50, 0.32);
+  transition: opacity 0.4s ease;
+}
+
 .stored-value-status[data-state="error"] {
+  display: inline-block;
   color: #ffe1e1;
   border-color: rgba(220, 90, 90, 0.65);
   background: rgba(140, 40, 40, 0.38);
   cursor: pointer;
+  pointer-events: auto;
 }
 
 @keyframes stored-value-pulse {

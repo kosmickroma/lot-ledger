@@ -9774,12 +9774,27 @@ function _storedValueUpdateGapChip(state) {
   }
 }
 
+let _storedValueFlashTimer = null;
 function _storedValueSetStatus(state, label) {
   const chip = document.getElementById("stored-value-status");
   if (!chip) return;
+  if (_storedValueFlashTimer) {
+    clearTimeout(_storedValueFlashTimer);
+    _storedValueFlashTimer = null;
+  }
   chip.setAttribute("data-state", state);
-  const defaults = { idle: "Saved", saving: "Saving…", error: "Retry" };
+  const defaults = { idle: "", saving: "Saving…", flash: "Saved ✓", error: "Retry" };
   chip.textContent = label || defaults[state] || state;
+  if (state === "flash") {
+    _storedValueFlashTimer = setTimeout(() => {
+      _storedValueFlashTimer = null;
+      const c = document.getElementById("stored-value-status");
+      if (c && c.getAttribute("data-state") === "flash") {
+        c.setAttribute("data-state", "idle");
+        c.textContent = "";
+      }
+    }, 1200);
+  }
 }
 
 function _storedValueRecalcAndRender() {
@@ -9842,7 +9857,7 @@ async function _storedValueOnAreaChange(newAreaId) {
   if (!targetAreaId) {
     _storedValueState = null;
     if (block) block.classList.add("hidden");
-    _storedValueSetStatus("idle", "Saved");
+    _storedValueSetStatus("idle");
     return;
   }
 
@@ -9860,7 +9875,7 @@ async function _storedValueOnAreaChange(newAreaId) {
     ..._STORED_VALUE_FIELDS.map((k) => state[k].client_seq),
   );
   _storedValueRecalcAndRender();
-  _storedValueSetStatus("idle", "Saved");
+  _storedValueSetStatus("idle");
 }
 
 async function _storedValueSaveField(fieldKey) {
@@ -9902,7 +9917,7 @@ async function _storedValueSaveField(fieldKey) {
         _storedValueClientSeq = Math.max(_storedValueClientSeq, fieldData.client_seq);
         _storedValueRecalcAndRender();
       }
-      _storedValueSetStatus("idle", "Saved");
+      _storedValueSetStatus("flash");
       return;
     }
 
@@ -9928,7 +9943,7 @@ async function _storedValueSaveField(fieldKey) {
       );
       _storedValueRecalcAndRender();
     }
-    _storedValueSetStatus("idle", "Saved");
+    _storedValueSetStatus("flash");
   } catch (err) {
     if (err.name === "AbortError") return;
     console.error("[stored-value] save failed:", err);
