@@ -450,6 +450,20 @@ browseLayer.addTo(map);
 const _browseContainer = browseLayer.getContainer && browseLayer.getContainer();
 if (_browseContainer) _browseContainer.style.pointerEvents = "none";
 
+// Hard cutoff: hide the browseLayer canvas at any zoom below 14.0. The layer's
+// own `minZoom: 14` interacts with Leaflet's `Math.round(zoom)` tile-zoom
+// calculation, which rounds 13.5 → 14, so half-steps would otherwise render
+// the parcel layer at zoom 13.5 — producing flicker on pan as new tiles
+// repaint from blank canvas. CSS display:none sidesteps that without touching
+// Leaflet's add/remove lifecycle (which is coordinated with analysis mode).
+function _updateBrowseLayerVisibility() {
+  const container = browseLayer.getContainer && browseLayer.getContainer();
+  if (!container) return;
+  container.style.display = map.getZoom() >= 14 ? "" : "none";
+}
+map.on("zoomend", _updateBrowseLayerVisibility);
+_updateBrowseLayerVisibility();
+
 // Nudge chip: visible below zoom 13 when not in draw-results mode.
 const _zoomNudge = document.getElementById("zoom-nudge");
 function _updateZoomNudge() {
