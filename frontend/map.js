@@ -4782,6 +4782,38 @@ function _renderPropelioComps(data) {
   });
   refreshPropelioPriceLabels();
 
+  // Cross-layer mute: when a parcel polygon has a matching Propelio comp
+  // footprint, set the parcel's fill opacity to 0 so the comp color is the
+  // sole visible signal. Without this, the parcel layer (multifamily=gray,
+  // commercial=brown, on_redfin=red) blends with the translucent comp
+  // footprint and produces a muddy/brown stack. The existing code at the
+  // parcel render path zeros fill for CAD-side sold_comp matches only —
+  // this extends it to live Propelio matches.
+  //
+  // Restores fill on parcels that LOST their Propelio comp in the latest
+  // filter pass, so toggling filters cleanly repaints. Each parcel layer
+  // caches its original fill opacity on first encounter so restoration
+  // works after multiple re-renders.
+  const accountsWithComps = new Set();
+  for (const comp of (data?.comps || [])) {
+    const acct = String(comp?.parcel_account_num || "").trim();
+    if (acct) accountsWithComps.add(acct);
+  }
+  _renderedParcelPopupLayers.forEach((layer, acct) => {
+    if (!layer || typeof layer.setStyle !== "function") return;
+    if (typeof layer._lotLedgerOriginalFillOpacity !== "number") {
+      let captured = null;
+      layer.eachLayer((child) => {
+        if (captured === null && typeof child?.options?.fillOpacity === "number") {
+          captured = child.options.fillOpacity;
+        }
+      });
+      layer._lotLedgerOriginalFillOpacity = (typeof captured === "number") ? captured : 0.12;
+    }
+    const targetOpacity = accountsWithComps.has(acct) ? 0 : layer._lotLedgerOriginalFillOpacity;
+    layer.setStyle({ fillOpacity: targetOpacity });
+  });
+
   if (data?.polygon_meta) {
     const total = data.comps.length;
     data.polygon_meta.comps_in_polygon = insideCount;
