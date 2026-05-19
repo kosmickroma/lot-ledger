@@ -4851,9 +4851,14 @@ function _compPropertyTypeBucket(comp) {
       }
     }
   }
-  const cat = String(comp?.property_category || "").trim();
+  // Propelio nests the MLS classification under `extra`; the top-level
+  // property_category / property_type fields are not populated in the
+  // current API shape (verified empirically against propelio_cache, 2026-05-19).
+  // Defensive: fall back to top-level in case the shape ever changes.
+  const extra = (comp && typeof comp.extra === "object" && comp.extra) || {};
+  const cat = String(extra.property_category || comp?.property_category || "").trim();
   if (cat && PROPELIO_CATEGORY_TO_BUCKET[cat]) return PROPELIO_CATEGORY_TO_BUCKET[cat];
-  const t = String(comp?.property_type || "").trim();
+  const t = String(extra.property_type || comp?.property_type || "").trim();
   if (t && PROPELIO_TYPE_FALLBACK[t]) return PROPELIO_TYPE_FALLBACK[t];
   return null;
 }
@@ -4909,14 +4914,29 @@ function compPassesPropelioFilters(comp, filters) {
   if (filters.priceMax != null && (!Number.isFinite(price) || price > filters.priceMax)) return false;
 
   // Parcel-type gate: hide comp if its bucket is toggled off in Property Type
-  // Filters. single_family is never gated (no SFR toggle in UI). Unknown
-  // bucket → null → falls through (default visible).
+  // Filters. CAD is the source of truth — when a comp matches a parcel, the
+  // parcel's prop_type wins. When CAD has nothing to say, Propelio's coarse
+  // category fills in.
+  //
+  // Three buckets route through Off Market because they all represent
+  // "residential without an active listing or with no other classification":
+  //   - "active"        — single_family parcel that's on Redfin (the same
+  //                       toggle that hides off_market parcels should hide
+  //                       these comps; the active/off_market distinction
+  //                       matters for parcel rendering, not comp filtering)
+  //   - "single_family" — Propelio fallback for Residential (~92.5% of comps
+  //                       without a CAD parcel match)
+  //   - null            — neither CAD nor Propelio could classify; treat as
+  //                       residential-default
   const bucket = _compPropertyTypeBucket(comp);
-  if (bucket === "multifamily" && filters.parcelTypeMultifamily === false) return false;
-  if (bucket === "commercial"  && filters.parcelTypeCommercial  === false) return false;
-  if (bucket === "vacant"      && filters.parcelTypeVacant      === false) return false;
-  if (bucket === "exempt"      && filters.parcelTypeExempt      === false) return false;
-  if (bucket === "off_market"  && filters.parcelTypeOffMarket   === false) return false;
+  if (bucket === "multifamily"   && filters.parcelTypeMultifamily === false) return false;
+  if (bucket === "commercial"    && filters.parcelTypeCommercial  === false) return false;
+  if (bucket === "vacant"        && filters.parcelTypeVacant      === false) return false;
+  if (bucket === "exempt"        && filters.parcelTypeExempt      === false) return false;
+  if (bucket === "off_market"    && filters.parcelTypeOffMarket   === false) return false;
+  if (bucket === "active"        && filters.parcelTypeOffMarket   === false) return false;
+  if (bucket === "single_family" && filters.parcelTypeOffMarket   === false) return false;
+  if (bucket === null            && filters.parcelTypeOffMarket   === false) return false;
 
   return true;
 }
