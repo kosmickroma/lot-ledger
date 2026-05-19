@@ -5188,7 +5188,6 @@ function _setPropStatusFilter(status, checked, options = {}) {
   });
   const refreshBtn = document.getElementById("btn-propelio-refresh");
   if (refreshBtn) refreshBtn.addEventListener("click", () => void pullPropelioRefresh());
-  _ensureStickyPropelioButton();
   const resetBtn = document.getElementById("btn-propelio-reset");
   if (resetBtn) resetBtn.addEventListener("click", resetPropelioFilters);
 
