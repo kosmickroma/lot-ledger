@@ -8268,9 +8268,9 @@ document.getElementById("btn-download").addEventListener("click", async () => {
     if (entered === null) return;
     const filename = normalizeCsvFilename(entered);
 
-    // Compute visible parcels. Null-guard: when there's no analysis loaded
-    // (e.g. saved area without geometry), send filter_ids:null so the backend
-    // falls back to the full-export path instead of returning zero rows.
+    // Compute visible parcels + visible Propelio comps. Null-guard: when
+    // there's no analysis loaded (e.g. saved area without geometry), send
+    // filter_ids:null so the backend falls back to the full-export path.
     _setDownloadButtonState("Computing visible parcels…", true);
     let filterIds = null;
     if (lastAnalysisGeojson && Array.isArray(lastAnalysisGeojson.features) && lastAnalysisGeojson.features.length > 0) {
@@ -8284,7 +8284,14 @@ document.getElementById("btn-download").addEventListener("click", async () => {
           };
         })
         .filter((p) => p.source_county && p.account_num);
-      filterIds = { parcels: visibleParcels };
+      const currentPropelioFilters = readPropelioFiltersFromUI();
+      const visibleCompKeys = (window._propelioLast && Array.isArray(window._propelioLast.comps))
+        ? window._propelioLast.comps
+            .filter((c) => compPassesPropelioFilters(c, currentPropelioFilters))
+            .map((c) => String(c?.comp_address_key || "").trim())
+            .filter((k) => k.length > 0)
+        : [];
+      filterIds = { parcels: visibleParcels, comps: visibleCompKeys };
     }
 
     _setDownloadButtonState("Starting download…", true);

@@ -3164,10 +3164,12 @@ async def download_filtered(
     request: Request,
     user: dict[str, Any] = Depends(get_current_user),
 ) -> StreamingResponse:
-    """Filtered export: frontend POSTs visible parcel keys + (Phase C2) filter state + bad-comp set."""
+    """Filtered export: frontend POSTs visible parcel keys + visible comp keys + filter state."""
     require_csrf(request)
     parcel_ids_filter: set[tuple[str, str]] | None = None
-    parcels_list = (body.filter_ids or {}).get("parcels") if body.filter_ids else None
+    comp_ids_filter: set[str] | None = None
+    filter_ids = body.filter_ids or {}
+    parcels_list = filter_ids.get("parcels") if isinstance(filter_ids, dict) else None
     if isinstance(parcels_list, list):
         parcel_ids_filter = {
             (
@@ -3177,13 +3179,16 @@ async def download_filtered(
             for p in parcels_list
             if isinstance(p, dict) and p.get("source_county") and p.get("account_num")
         }
+    comps_list = filter_ids.get("comps") if isinstance(filter_ids, dict) else None
+    if isinstance(comps_list, list):
+        comp_ids_filter = {str(k).strip() for k in comps_list if str(k or "").strip()}
     return await _run_download_csv(
         job_id,
         body.filename,
         user,
         parcel_ids_filter=parcel_ids_filter,
-        # filter_state and bad_comp_ids params reserved for Phase C2 — pass through now
-        # so adding them later doesn't churn the call sites.
+        comp_ids_filter=comp_ids_filter,
+        # filter_state and bad_comp_ids params reserved for Phase C2.
         filter_state=body.filter_state,
     )
 
@@ -3193,6 +3198,7 @@ async def _run_download_csv(
     filename: str | None,
     user: dict[str, Any],
     parcel_ids_filter: set[tuple[str, str]] | None = None,
+    comp_ids_filter: set[str] | None = None,
     filter_state: dict[str, Any] | None = None,
     bad_comp_ids: set[int] | None = None,
 ) -> StreamingResponse:
@@ -3215,6 +3221,9 @@ async def _run_download_csv(
     # CSV can mark each row with whether it was a seed of this workspace.
     # Empty set when the job has no saved_area_id (analysis-only, not yet saved).
     seed_account_nums: set[str] = set()
+    # Originator parcel (bonded gold-star target for the workspace) drives the
+    # "Intended Target" column. None when there's no saved_area_id.
+    originator_key: tuple[str, str] | None = None
     if job_saved_area_id:
         _conn = get_session_conn()
         try:
@@ -3224,6 +3233,49 @@ async def _run_download_csv(
                     (job_saved_area_id,),
                 )
                 seed_account_nums = {str(r[0]) for r in _cur.fetchall() if r and r[0]}
+                _cur.execute(
+                    "SELECT originator_parcel_county, originator_parcel_account_num"
+                    " FROM saved_areas WHERE area_id = %s",
+                    (job_saved_area_id,),
+                )
+                _orow = _cur.fetchone()
+                if _orow and _orow[0] and _orow[1]:
+                    originator_key = (
+                        str(_orow[0]).strip().lower(),
+                        str(_orow[1]).strip(),
+                    )
+        finally:
+            release_session_conn(_conn)
+
+    # Visible parcel keys set — used both for parcel-row filtering AND for
+    # deduping comp rows (a comp whose (parcel_county, parcel_account_num) is
+    # already in this set is represented by its parent parcel row inline).
+    visible_parcel_keys: set[tuple[str, str]] = parcel_ids_filter or set()
+
+    # Pre-fetch orphan comps for the export. Only kicks in when the POST path
+    # supplied a comps filter list. Each row that lacks a visible parent
+    # parcel will emit its own comp row at the end of generate_csv.
+    orphan_comps: list[dict[str, Any]] = []
+    if comp_ids_filter:
+        _conn = get_session_conn()
+        try:
+            with _conn.cursor(cursor_factory=RealDictCursor) as _cur:
+                _cur.execute(
+                    "SELECT comp_address_key, address, lat, lng, status, last_status,"
+                    " price, last_price, sold_date, close_date, dom, beds, baths,"
+                    " sqft, lot_size, year_built, parcel_county, parcel_account_num"
+                    " FROM propelio_comps WHERE comp_address_key = ANY(%s)",
+                    (list(comp_ids_filter),),
+                )
+                for _crow in _cur.fetchall():
+                    _ck = (
+                        str(_crow.get("parcel_county") or "").strip().lower(),
+                        str(_crow.get("parcel_account_num") or "").strip(),
+                    )
+                    # Skip comps already represented by a visible parcel row.
+                    if _ck[0] and _ck[1] and _ck in visible_parcel_keys:
+                        continue
+                    orphan_comps.append(dict(_crow))
         finally:
             release_session_conn(_conn)
 
@@ -3265,6 +3317,8 @@ async def _run_download_csv(
         writer = csv.writer(buffer)
         writer.writerow(
             [
+                "Row Type",
+                "Intended Target",
                 "Property Address",
                 "MLS Status",
                 "Owner Name",
@@ -3450,8 +3504,17 @@ async def _run_download_csv(
             propelio_comp = propelio_comp_by_parcel_key.get(row_key)
             rf_comp = comp_by_parcel_key.get(str(row.get("account_num", "") or ""))
 
+            _is_intended_target = (
+                originator_key is not None
+                and (
+                    str(row.get("county", "") or "").strip().lower(),
+                    str(row.get("account_num", "") or "").strip(),
+                ) == originator_key
+            )
             writer.writerow(
                 [
+                    "Parcel",
+                    "yes" if _is_intended_target else "",
                     display_address,
                     "Active" if on_redfin else "Off Market",
                     row.get("owner_name", ""),
@@ -3560,6 +3623,170 @@ async def _run_download_csv(
                     (rf_comp.get("listing_url", "") or "") if rf_comp else "",
                     "yes" if str(row.get("account_num", "") or "") in seed_account_nums else "",
                     csv_share_id,
+                ]
+            )
+            buffer.seek(0)
+            yield buffer.getvalue()
+            buffer.truncate(0)
+            buffer.seek(0)
+
+        # Emit a row per orphan visible comp (comps not already represented by
+        # a visible parent parcel row). Same column shape as parcel rows; the
+        # parcel-specific cells are left blank.
+        for _c in orphan_comps:
+            _comp_price = _safe_float(_c.get("price")) or _safe_float(_c.get("last_price"))
+            _comp_sqft = _safe_float(_c.get("sqft"))
+            _comp_sold_date = _c.get("sold_date") or _c.get("close_date") or ""
+            _comp_status_raw = (_c.get("status") or _c.get("last_status") or "").strip()
+            _comp_lat = _safe_float(_c.get("lat"))
+            _comp_lng = _safe_float(_c.get("lng"))
+            _comp_ppsf = (
+                round(_comp_price / _comp_sqft, 2)
+                if (_comp_price is not None and _comp_sqft is not None and _comp_sqft > 0)
+                else ""
+            )
+            _comp_maps_link = (
+                f"https://www.google.com/maps?q={_comp_lat},{_comp_lng}"
+                if _comp_lat is not None and _comp_lng is not None
+                else ""
+            )
+            # Row shape mirrors parcel rows: 2 prefix cols (Row Type, Intended
+            # Target) + 80 parcel/comp cols + share_id. Most parcel-specific
+            # cells are "" on a comp row; the inline "Comp *" columns hold the
+            # comp's own data.
+            _yr = _safe_float(_c.get("year_built"))
+            _yr_csv = int(_yr) if _yr not in (None, 0.0) else ""
+            _sqft_csv = int(_comp_sqft) if _comp_sqft not in (None, 0.0) else ""
+            _lot_sf_csv = (
+                int(_safe_float(_c.get("lot_size")))
+                if _safe_float(_c.get("lot_size")) not in (None, 0.0)
+                else ""
+            )
+            _lot_ac_csv = (
+                round(_safe_float(_c.get("lot_size")) / 43560, 3)
+                if _safe_float(_c.get("lot_size")) is not None
+                else ""
+            )
+            _beds_raw = _safe_float(_c.get("beds"))
+            _beds_csv = round(_beds_raw, 1) if _beds_raw is not None else ""
+            _baths_raw = _safe_float(_c.get("baths"))
+            _baths_csv = round(_baths_raw, 1) if _baths_raw is not None else ""
+            _dom_csv = (
+                int(_safe_float(_c.get("dom")))
+                if _safe_float(_c.get("dom")) not in (None, 0.0)
+                else ""
+            )
+            _price_csv = round(_comp_price, 0) if _comp_price is not None else ""
+            _comp_status_titled = _comp_status_raw.title() or ""
+            writer.writerow(
+                [
+                    "Comp",                              # 1  Row Type
+                    "",                                   # 2  Intended Target
+                    _c.get("address", "") or "",          # 3  Property Address
+                    _comp_status_titled,                  # 4  MLS Status
+                    "",                                   # 5  Owner Name
+                    "",                                   # 6  Owner Mailing Address
+                    "",                                   # 7  Owner City
+                    "",                                   # 8  Owner State
+                    "",                                   # 9  Owner Zip
+                    "",                                   # 10 Land Value
+                    "",                                   # 11 Improvement Value
+                    "",                                   # 12 Total Value
+                    "",                                   # 13 Redfin List Price
+                    "",                                   # 14 Land % of Total
+                    _yr_csv,                              # 15 Year Built
+                    _sqft_csv,                            # 16 Living Area (sq ft)
+                    "",                                   # 17 Total Structure Area
+                    "",                                   # 18 State Code
+                    "",                                   # 19 Zoning
+                    _lot_sf_csv,                          # 20 Lot Size (sq ft)
+                    _lot_ac_csv,                          # 21 Lot Size (acres)
+                    "",                                   # 22 Frontage (ft)
+                    "",                                   # 23 Depth (ft)
+                    "",                                   # 24 Est Frontage (ft)
+                    "",                                   # 25 Est Depth (ft)
+                    "",                                   # 26 School District
+                    "",                                   # 27 Neighborhood Code
+                    "",                                   # 28 Subdivision
+                    "",                                   # 29 Legal Description
+                    _comp_lat if _comp_lat is not None else "",  # 30 Latitude
+                    _comp_lng if _comp_lng is not None else "",  # 31 Longitude
+                    _comp_maps_link,                      # 32 Google Maps Link
+                    "",                                   # 33 Verified Vacant
+                    "",                                   # 34 Potential Target
+                    "",                                   # 35 HOA
+                    "",                                   # 36 HOA URL
+                    "",                                   # 37 Estimated Lot Size (sq ft)
+                    "",                                   # 38 Estimated Lot Size (acres)
+                    "",                                   # 39 Tax Agent Name
+                    "",                                   # 40 Tax Agent ID
+                    "",                                   # 41 Tax Agent Auth Protest
+                    "",                                   # 42 Tax Agent Auth Resolve
+                    "",                                   # 43 Tax Agent Mailings
+                    "",                                   # 44 Permit Count
+                    "",                                   # 45 Latest Permit Date
+                    "",                                   # 46 Latest Permit Type
+                    "",                                   # 47 Latest Permit Value
+                    "",                                   # 48 Protest Case Count
+                    "",                                   # 49 Latest Protest Year
+                    "",                                   # 50 Latest Protest Status
+                    "",                                   # 51 Latest Protest Final Market Value
+                    "",                                   # 52 Protest Active
+                    "",                                   # 53 Ag Type
+                    "",                                   # 54 Ag Acres
+                    "",                                   # 55 Ag Use Value
+                    "",                                   # 56 Ag Market Value
+                    "",                                   # 57 Deed Number
+                    "",                                   # 58 Deed Type
+                    "",                                   # 59 Deed Date
+                    "",                                   # 60 Land Type Code
+                    "",                                   # 61 Land Type Name
+                    "",                                   # 62 Property Use Code
+                    "",                                   # 63 Property Use Name
+                    "",                                   # 64 Class Code
+                    "",                                   # 65 Entity Codes
+                    "",                                   # 66 Commercial Flag
+                    "",                                   # 67 Pool Flag
+                    _beds_csv,                            # 68 Beds
+                    _baths_csv,                           # 69 Baths
+                    "",                                   # 70 Stories
+                    "",                                   # 71 Units
+                    "",                                   # 72 Current Market Value
+                    "",                                   # 73 Current Assessed Value
+                    "",                                   # 74 Current Ag Use Value
+                    "",                                   # 75 Current Ag Market Value
+                    "",                                   # 76 Current Ag Loss Value
+                    "",                                   # 77 Certified Total Value
+                    "",                                   # 78 Denton - Exemptions
+                    "",                                   # 79 Denton - Homestead (HS)
+                    "",                                   # 80 Denton - School District
+                    "",                                   # 81 Denton - Entity Codes
+                    "",                                   # 82 Denton - Deed Number
+                    "",                                   # 83 Denton - Deed Date
+                    "",                                   # 84 Denton - Subdivision
+                    _price_csv,                           # 85 Comp Sold Price
+                    str(_comp_sold_date) if _comp_sold_date else "",  # 86 Comp Sold Date
+                    _comp_ppsf,                           # 87 Comp $/sqft
+                    _yr_csv,                              # 88 Comp Year Built
+                    _sqft_csv,                            # 89 Comp Living Area (sqft)
+                    _lot_sf_csv,                          # 90 Comp Lot Size (sqft)
+                    int(_beds_raw) if _beds_raw is not None else "",  # 91 Comp Beds
+                    int(_baths_raw) if _baths_raw is not None else "",  # 92 Comp Baths
+                    _dom_csv,                             # 93 Comp Days on Market
+                    "",                                   # 94 Comp Listing URL
+                    _comp_status_titled,                  # 95 Comp Status
+                    "",                                   # 96 RF_Comp Sold Price
+                    "",                                   # 97 RF_Comp Sold Date
+                    "",                                   # 98 RF_Comp $/sqft
+                    "",                                   # 99 RF_Comp Year Built
+                    "",                                   # 100 RF_Comp Living Area
+                    "",                                   # 101 RF_Comp Lot Size
+                    "",                                   # 102 RF_Comp Beds
+                    "",                                   # 103 RF_Comp Baths
+                    "",                                   # 104 RF_Comp Days on Market
+                    "",                                   # 105 RF_Comp Listing URL
+                    "",                                   # 106 Seed Target
+                    csv_share_id,                         # 107 share_id
                 ]
             )
             buffer.seek(0)
