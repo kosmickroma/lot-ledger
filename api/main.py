@@ -3141,8 +3141,61 @@ async def set_tag(req: Request, payload: dict[str, Any] = Body(...), user: dict[
     return {"ok": True}
 
 
+class DownloadFilterRequest(BaseModel):
+    filter_ids: dict[str, Any] | None = None
+    filter_state: dict[str, Any] | None = None
+    filename: str | None = None
+
+
 @app.get("/api/download/{job_id}")
-async def download(job_id: str, filename: str | None = None, user: dict[str, Any] = Depends(get_current_user)) -> StreamingResponse:
+async def download(
+    job_id: str,
+    filename: str | None = None,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> StreamingResponse:
+    """Backward-compat GET path: full export, no visibility filter, no filter state cols."""
+    return await _run_download_csv(job_id, filename, user)
+
+
+@app.post("/api/download/{job_id}")
+async def download_filtered(
+    job_id: str,
+    body: DownloadFilterRequest,
+    request: Request,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> StreamingResponse:
+    """Filtered export: frontend POSTs visible parcel keys + (Phase C2) filter state + bad-comp set."""
+    require_csrf(request)
+    parcel_ids_filter: set[tuple[str, str]] | None = None
+    parcels_list = (body.filter_ids or {}).get("parcels") if body.filter_ids else None
+    if isinstance(parcels_list, list):
+        parcel_ids_filter = {
+            (
+                str(p.get("source_county", "") or "").strip().lower(),
+                str(p.get("account_num", "") or "").strip(),
+            )
+            for p in parcels_list
+            if isinstance(p, dict) and p.get("source_county") and p.get("account_num")
+        }
+    return await _run_download_csv(
+        job_id,
+        body.filename,
+        user,
+        parcel_ids_filter=parcel_ids_filter,
+        # filter_state and bad_comp_ids params reserved for Phase C2 — pass through now
+        # so adding them later doesn't churn the call sites.
+        filter_state=body.filter_state,
+    )
+
+
+async def _run_download_csv(
+    job_id: str,
+    filename: str | None,
+    user: dict[str, Any],
+    parcel_ids_filter: set[tuple[str, str]] | None = None,
+    filter_state: dict[str, Any] | None = None,
+    bad_comp_ids: set[int] | None = None,
+) -> StreamingResponse:
     if str(user.get("role") or "").strip().lower() == "user":
         raise HTTPException(status_code=403, detail="CSV export not available for this role")
 
@@ -3335,6 +3388,16 @@ async def download(job_id: str, filename: str | None = None, user: dict[str, Any
             ),
         )
         for row in sorted_rows:
+            # Phase C1: skip parcels not in the visibility filter (empty filter set
+            # is treated as no filter — frontend null-guards before sending).
+            if parcel_ids_filter is not None:
+                _row_key = (
+                    str(row.get("county", "") or "").strip().lower(),
+                    str(row.get("account_num", "") or "").strip(),
+                )
+                if not _row_key[0] or not _row_key[1] or _row_key not in parcel_ids_filter:
+                    continue
+
             parcel_key = str(row.get("parcel_key", "") or "")
             account_num = str(row.get("account_num", "") or "")
             direct_match = (not parcel_key) or (parcel_key == account_num) or parcel_key.startswith(account_num + ":")
