@@ -26,6 +26,7 @@ import string
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import quote_plus
@@ -35,7 +36,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Streamin
 from fastapi.staticfiles import StaticFiles
 from psycopg2.errors import UniqueViolation
 from psycopg2.extras import Json, RealDictCursor, execute_values
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from api.auth import (
     AuthError,
@@ -579,6 +580,20 @@ def _ensure_session_schema() -> None:
                                 ADD COLUMN IF NOT EXISTS net_new_comps INTEGER NOT NULL DEFAULT 0;
                             END IF;
                         END$$;
+                        """,
+                    ),
+                    (
+                        "stored_value_entries_table",
+                        """
+                        CREATE TABLE IF NOT EXISTS stored_value_entries (
+                          area_id       TEXT NOT NULL REFERENCES saved_areas(area_id) ON DELETE CASCADE,
+                          field_key     TEXT NOT NULL CHECK (field_key IN ('arv','tdpp','rehab_needed','mao_arv','tdpp_minus_mao_arv')),
+                          numeric_value NUMERIC(14,0),
+                          comment_text  TEXT,
+                          client_seq    BIGINT NOT NULL DEFAULT 0,
+                          updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+                          PRIMARY KEY (area_id, field_key)
+                        )
                         """,
                     ),
                 ],
@@ -1133,6 +1148,21 @@ class SavedAreaCreateRequest(BaseModel):
     originator_parcel_account_num: str | None = None
 
 
+class StoredValueGetResponse(BaseModel):
+    arv: dict[str, Any]
+    tdpp: dict[str, Any]
+    rehab_needed: dict[str, Any]
+    mao_arv: dict[str, Any]
+    tdpp_minus_mao_arv: dict[str, Any]
+
+
+class StoredValuePutRequest(BaseModel):
+    field_key: Literal["arv", "tdpp", "rehab_needed", "mao_arv", "tdpp_minus_mao_arv"]
+    numeric_value: int | None = Field(default=None, ge=0, le=999_999_999)
+    comment_text: str | None = None
+    client_seq: int
+
+
 class SavedAreaUpdateRequest(BaseModel):
     name: str | None = None
     filter_state: dict[str, Any] | None = None
@@ -1256,6 +1286,120 @@ def _normalize_saved_area_payload(request: SavedAreaCreateRequest | SavedAreaUpd
         lng = None
 
     return area_type, polygon_geojson, lat, lng
+
+
+_STORED_VALUE_FIELD_KEYS: tuple[str, ...] = (
+    "arv",
+    "tdpp",
+    "rehab_needed",
+    "mao_arv",
+    "tdpp_minus_mao_arv",
+)
+_STORED_VALUE_MANUAL_FIELD_KEYS: tuple[str, ...] = ("arv", "tdpp", "rehab_needed")
+_STORED_VALUE_CALC_FIELD_KEYS: tuple[str, ...] = ("mao_arv", "tdpp_minus_mao_arv")
+
+
+def compute_calc_fields(manual_map: dict[str, int | None]) -> dict[str, int | None]:
+    arv_raw = manual_map.get("arv")
+    tdpp_raw = manual_map.get("tdpp")
+    rehab_raw = manual_map.get("rehab_needed")
+
+    arv = Decimal(arv_raw) if arv_raw is not None else None
+    tdpp = Decimal(tdpp_raw) if tdpp_raw is not None else None
+    rehab = Decimal(rehab_raw) if rehab_raw is not None else None
+
+    mao = (arv * Decimal("0.75") - rehab) if arv is not None and rehab is not None else None
+    tdpp_minus_mao = (tdpp - mao) if tdpp is not None and mao is not None else None
+
+    def _to_int(value: Decimal | None) -> int | None:
+        if value is None:
+            return None
+        return int(value.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+    return {
+        "mao_arv": _to_int(mao),
+        "tdpp_minus_mao_arv": _to_int(tdpp_minus_mao),
+    }
+
+
+def _stored_value_serialize_payload(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    payload: dict[str, dict[str, Any]] = {
+        key: {
+            "numeric_value": None,
+            "comment_text": "",
+            "value_source": "manual" if key in _STORED_VALUE_MANUAL_FIELD_KEYS else "calculated",
+            "client_seq": 0,
+        }
+        for key in _STORED_VALUE_FIELD_KEYS
+    }
+
+    for row in rows:
+        field_key = str(row.get("field_key") or "").strip().lower()
+        if field_key not in payload:
+            continue
+        numeric_raw = row.get("numeric_value")
+        numeric_value = int(numeric_raw) if numeric_raw is not None else None
+        comment_text = str(row.get("comment_text") or "")
+        client_seq = int(row.get("client_seq") or 0)
+        payload[field_key] = {
+            "numeric_value": numeric_value,
+            "comment_text": comment_text,
+            "value_source": "manual" if field_key in _STORED_VALUE_MANUAL_FIELD_KEYS else "calculated",
+            "client_seq": client_seq,
+        }
+
+    manual_map = {
+        "arv": payload["arv"]["numeric_value"],
+        "tdpp": payload["tdpp"]["numeric_value"],
+        "rehab_needed": payload["rehab_needed"]["numeric_value"],
+    }
+    calc_fields = compute_calc_fields(manual_map)
+    for calc_key in _STORED_VALUE_CALC_FIELD_KEYS:
+        payload[calc_key]["numeric_value"] = calc_fields.get(calc_key)
+        payload[calc_key]["value_source"] = "calculated"
+
+    return payload
+
+
+def _stored_value_get_rows(conn: Any, area_id: str) -> list[dict[str, Any]]:
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT field_key, numeric_value, comment_text, client_seq
+            FROM stored_value_entries
+            WHERE area_id = %s
+            """,
+            (area_id,),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+
+def _stored_value_build_response(conn: Any, area_id: str) -> StoredValueGetResponse:
+    rows = _stored_value_get_rows(conn, area_id)
+    payload = _stored_value_serialize_payload(rows)
+    return StoredValueGetResponse(**payload)
+
+
+def _stored_value_csv_cells(payload: dict[str, dict[str, Any]]) -> list[str]:
+    def _num_str(field_key: str) -> str:
+        value = payload.get(field_key, {}).get("numeric_value")
+        return "" if value is None else str(int(value))
+
+    def _comment_str(field_key: str) -> str:
+        return str(payload.get(field_key, {}).get("comment_text") or "")
+
+    return [
+        _num_str("arv"),
+        _comment_str("arv"),
+        _num_str("tdpp"),
+        _comment_str("tdpp"),
+        _num_str("rehab_needed"),
+        _comment_str("rehab_needed"),
+        _num_str("mao_arv"),
+        _comment_str("mao_arv"),
+        _num_str("tdpp_minus_mao_arv"),
+        _comment_str("tdpp_minus_mao_arv"),
+    ]
 
 
 def _require_target_user(cur, target_user_id: int) -> dict[str, Any]:
@@ -3247,6 +3391,16 @@ async def _run_download_csv(
         finally:
             release_session_conn(_conn)
 
+    stored_value_export_cells = [""] * 10
+    if job_saved_area_id:
+        _conn = get_session_conn()
+        try:
+            rows = _stored_value_get_rows(_conn, job_saved_area_id)
+            payload = _stored_value_serialize_payload(rows)
+            stored_value_export_cells = _stored_value_csv_cells(payload)
+        finally:
+            release_session_conn(_conn)
+
     # Visible parcel keys set — used both for parcel-row filtering AND for
     # deduping comp rows (a comp whose (parcel_county, parcel_account_num) is
     # already in this set is represented by its parent parcel row inline).
@@ -3438,6 +3592,16 @@ async def _run_download_csv(
                 "RF_Comp Listing URL",
                 "Seed Target",
                 "share_id",
+                "Stored ARV",
+                "Stored ARV Comment",
+                "Stored TDPP",
+                "Stored TDPP Comment",
+                "Stored Rehab Needed",
+                "Stored Rehab Needed Comment",
+                "Stored MAO (ARV)",
+                "Stored MAO (ARV) Comment",
+                "Stored TDPP-MAO (ARV)",
+                "Stored TDPP-MAO (ARV) Comment",
             ]
         )
         buffer.seek(0)
@@ -3637,6 +3801,7 @@ async def _run_download_csv(
                     (rf_comp.get("listing_url", "") or "") if rf_comp else "",
                     "yes" if str(row.get("account_num", "") or "") in seed_account_nums else "",
                     csv_share_id,
+                    *stored_value_export_cells,
                 ]
             )
             buffer.seek(0)
@@ -3885,6 +4050,7 @@ async def _run_download_csv(
                     "",                                                                                          # 105 RF_Comp Listing URL
                     "",                                                                                          # 106 Seed Target
                     csv_share_id,                                                                                # 107 share_id
+                    *stored_value_export_cells,                                                                   # 108-117 stored value snapshot
                 ]
             )
             buffer.seek(0)
@@ -4483,6 +4649,116 @@ async def get_saved_area(area_id: str, user: dict[str, Any] = Depends(get_curren
         "updated_at": row[10].isoformat() if row[10] else None,
         "seed_parcels": seed_parcels,
     }
+
+
+@app.get("/api/areas/{area_id}/stored-value")
+async def get_area_stored_value(
+    area_id: str,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> StoredValueGetResponse:
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 1
+                FROM saved_areas
+                WHERE area_id = %s AND user_id = %s
+                LIMIT 1
+                """,
+                (area_id, int(user["id"])),
+            )
+            if cur.fetchone() is None:
+                raise HTTPException(status_code=404, detail="Saved area not found")
+        return _stored_value_build_response(conn, area_id)
+    finally:
+        release_session_conn(conn)
+
+
+@app.put("/api/areas/{area_id}/stored-value")
+async def put_area_stored_value(
+    area_id: str,
+    body: StoredValuePutRequest,
+    request: Request,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> StoredValueGetResponse:
+    require_csrf(request)
+
+    field_key = str(body.field_key or "").strip().lower()
+    if field_key in _STORED_VALUE_CALC_FIELD_KEYS and body.numeric_value is not None:
+        raise HTTPException(status_code=400, detail="calc fields are read-only for numeric_value")
+
+    conn = get_session_conn()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT 1
+                FROM saved_areas
+                WHERE area_id = %s AND user_id = %s
+                LIMIT 1
+                """,
+                (area_id, int(user["id"])),
+            )
+            if cur.fetchone() is None:
+                raise HTTPException(status_code=404, detail="Saved area not found")
+
+            cur.execute(
+                """
+                INSERT INTO stored_value_entries
+                  (area_id, field_key, numeric_value, comment_text, client_seq)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (area_id, field_key) DO UPDATE SET
+                  numeric_value = EXCLUDED.numeric_value,
+                  comment_text  = EXCLUDED.comment_text,
+                  client_seq    = EXCLUDED.client_seq,
+                  updated_at    = now()
+                WHERE stored_value_entries.client_seq < EXCLUDED.client_seq
+                RETURNING client_seq, numeric_value, comment_text
+                """,
+                (
+                    area_id,
+                    field_key,
+                    body.numeric_value,
+                    body.comment_text,
+                    int(body.client_seq),
+                ),
+            )
+            updated = cur.fetchone()
+            if updated is None:
+                cur.execute(
+                    """
+                    SELECT client_seq, numeric_value, comment_text
+                    FROM stored_value_entries
+                    WHERE area_id = %s AND field_key = %s
+                    LIMIT 1
+                    """,
+                    (area_id, field_key),
+                )
+                current = cur.fetchone()
+                conn.rollback()
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "message": "stale write rejected",
+                        "current": {
+                            "field_key": field_key,
+                            "client_seq": int(current.get("client_seq") or 0) if current else 0,
+                            "numeric_value": int(current.get("numeric_value")) if current and current.get("numeric_value") is not None else None,
+                            "comment_text": str(current.get("comment_text") or "") if current else "",
+                        },
+                    },
+                )
+
+        conn.commit()
+        return _stored_value_build_response(conn, area_id)
+    except HTTPException:
+        raise
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        release_session_conn(conn)
 
 
 @app.get("/api/area/by-share-id/{share_id}")

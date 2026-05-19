@@ -57,6 +57,78 @@
         <p class="sidebar-copy">Loading parcels...</p>
         <p id="redfin-status" class="sidebar-note">Pulling Redfin listings...</p>
       </div>
+      <div id="stored-value-block" class="filter-card collapsible-section hidden">
+        <div class="section-header">
+          <button class="section-toggle" type="button" data-target="stored-value-body" aria-expanded="true">
+            <span class="sidebar-label">Stored Value</span>
+          </button>
+          <span id="stored-value-status" class="stored-value-status" aria-live="polite" data-state="idle">Saved</span>
+        </div>
+        <div id="stored-value-body" class="collapsible-body">
+
+          <div class="sv-row" data-field-key="arv">
+            <div class="sv-row-head">
+              <label class="sv-label" for="sv-input-arv">ARV</label>
+              <button type="button" class="sv-tooltip-trigger" aria-describedby="sv-tooltip-arv" aria-label="What is ARV?">?</button>
+              <span id="sv-tooltip-arv" role="tooltip" class="sv-tooltip">After Repair Value</span>
+            </div>
+            <div class="sv-input-wrap">
+              <span class="sv-input-prefix">$</span>
+              <input id="sv-input-arv" class="sv-numeric-input" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="0">
+            </div>
+            <textarea id="sv-comment-arv" class="sv-comment" rows="2" placeholder="Comment (optional)"></textarea>
+          </div>
+
+          <div class="sv-row" data-field-key="tdpp">
+            <div class="sv-row-head">
+              <label class="sv-label" for="sv-input-tdpp">TDPP</label>
+              <button type="button" class="sv-tooltip-trigger" aria-describedby="sv-tooltip-tdpp" aria-label="What is TDPP?">?</button>
+              <span id="sv-tooltip-tdpp" role="tooltip" class="sv-tooltip">Tear Down Purchase Price</span>
+            </div>
+            <div class="sv-input-wrap">
+              <span class="sv-input-prefix">$</span>
+              <input id="sv-input-tdpp" class="sv-numeric-input" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="0">
+            </div>
+            <textarea id="sv-comment-tdpp" class="sv-comment" rows="2" placeholder="Comment (optional)"></textarea>
+          </div>
+
+          <div class="sv-row" data-field-key="rehab_needed">
+            <div class="sv-row-head">
+              <label class="sv-label" for="sv-input-rehab_needed">Rehab Needed</label>
+            </div>
+            <div class="sv-input-wrap">
+              <span class="sv-input-prefix">$</span>
+              <input id="sv-input-rehab_needed" class="sv-numeric-input" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="0">
+            </div>
+            <textarea id="sv-comment-rehab_needed" class="sv-comment" rows="2" placeholder="Comment (optional)"></textarea>
+          </div>
+
+          <div class="sv-row sv-row-calc" data-field-key="mao_arv">
+            <div class="sv-row-head">
+              <label class="sv-label" for="sv-input-mao_arv">MAO (ARV)</label>
+              <span class="sv-calc-badge">calc</span>
+            </div>
+            <div class="sv-input-wrap">
+              <span class="sv-input-prefix">$</span>
+              <input id="sv-input-mao_arv" class="sv-numeric-input sv-numeric-readonly" type="text" readonly tabindex="-1" placeholder="—">
+            </div>
+            <textarea id="sv-comment-mao_arv" class="sv-comment" rows="2" placeholder="Comment (optional)"></textarea>
+          </div>
+
+          <div class="sv-row sv-row-calc" data-field-key="tdpp_minus_mao_arv">
+            <div class="sv-row-head">
+              <label class="sv-label" for="sv-input-tdpp_minus_mao_arv">TDPP-MAO (ARV)</label>
+              <span class="sv-calc-badge">calc</span>
+            </div>
+            <div class="sv-input-wrap">
+              <span class="sv-input-prefix">$</span>
+              <input id="sv-input-tdpp_minus_mao_arv" class="sv-numeric-input sv-numeric-readonly" type="text" readonly tabindex="-1" placeholder="—">
+            </div>
+            <textarea id="sv-comment-tdpp_minus_mao_arv" class="sv-comment" rows="2" placeholder="Comment (optional)"></textarea>
+          </div>
+
+        </div>
+      </div>
       <div id="saved-areas" class="sidebar-section hidden collapsible-section">
         <div class="section-header">
           <button class="section-toggle" type="button" data-target="saved-areas-body" aria-expanded="false">
