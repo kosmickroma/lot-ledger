@@ -3435,13 +3435,33 @@ async def _run_download_csv(
                     " FROM propelio_comps WHERE comp_address_key = ANY(%s)",
                     (list(comp_ids_filter),),
                 )
+                # Build set of (county, account_num) keys that WILL be
+                # inline-emitted via propelio_sold_points. Only those should
+                # be skipped from orphan emission. Comps whose parcel is
+                # visible but who are NOT in propelio_sold_points (e.g. pulled
+                # via the frontend's per-address comp fetch) would otherwise
+                # fall through both paths and be lost from the CSV entirely.
+                _inlined_keys: set[tuple[str, str]] = set()
+                for _sp in propelio_sold_points:
+                    _ic = (
+                        str(_sp.get("county", "") or "").strip().lower(),
+                        str(_sp.get("account_num", "") or "").strip(),
+                    )
+                    if _ic[0] and _ic[1]:
+                        _inlined_keys.add(_ic)
                 for _crow in _cur.fetchall():
                     _ck = (
                         str(_crow.get("parcel_county") or "").strip().lower(),
                         str(_crow.get("parcel_account_num") or "").strip(),
                     )
-                    # Skip comps already represented by a visible parcel row.
-                    if _ck[0] and _ck[1] and _ck in visible_parcel_keys:
+                    # Skip ONLY if comp will be represented inline in its
+                    # parcel row (parcel visible AND comp in propelio_sold_points).
+                    if (
+                        _ck[0]
+                        and _ck[1]
+                        and _ck in visible_parcel_keys
+                        and _ck in _inlined_keys
+                    ):
                         continue
                     orphan_comps.append(dict(_crow))
         finally:
