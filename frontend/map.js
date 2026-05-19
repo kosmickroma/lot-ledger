@@ -9710,10 +9710,12 @@ function _storedValueBlankState() {
 
 function _storedValueParseNumber(raw) {
   if (raw == null) return null;
-  const digits = String(raw).replace(/[^0-9]/g, "");
-  if (digits === "") return null;
-  const n = parseInt(digits, 10);
-  if (!Number.isFinite(n)) return null;
+  const str = String(raw).trim();
+  if (str === "") return null;
+  // Support k/m shorthand: "300k" → 300000, "1.5m" → 1500000.
+  const parsed = parseShorthand(str);
+  if (parsed == null || !Number.isFinite(parsed)) return null;
+  const n = Math.round(parsed);
   if (n < 0) return 0;
   if (n > _STORED_VALUE_NUMERIC_MAX) return _STORED_VALUE_NUMERIC_MAX;
   return n;
