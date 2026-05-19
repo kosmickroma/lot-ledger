@@ -7094,12 +7094,6 @@ function renderFeatures(geojson) {
         L.DomEvent.stopPropagation(ev);
         openParcelDetailPanel(p, { latlng: ev.latlng, geometry: feature.geometry });
       });
-      layer.on("contextmenu", (ev) => {
-        if (!_isPowerUserOrAbove()) return;
-        ev.originalEvent?.preventDefault();
-        L.DomEvent.stopPropagation(ev);
-        void _rightClickSaveParcel(p, feature.geometry || null);
-      });
       // L.geoJSON returns a FeatureGroup wrapper; click events fire on inner child layers,
       // so popup._source is the child, not the wrapper. Propagate metadata to children
       // so the popupopen handler can find it for suspend/restore protection.
@@ -7136,12 +7130,6 @@ function renderFeatures(geojson) {
       layer.on("click", (ev) => {
         L.DomEvent.stopPropagation(ev);
         openParcelDetailPanel(p, { latlng: ev.latlng, geometry: feature.geometry });
-      });
-      layer.on("contextmenu", (ev) => {
-        if (!_isPowerUserOrAbove()) return;
-        ev.originalEvent?.preventDefault();
-        L.DomEvent.stopPropagation(ev);
-        void _rightClickSaveParcel(p, feature.geometry || null);
       });
       layer._lotLedgerPopupMeta = { type: "parcel", accountNum: String(p.account_num || "") };
       layer.addTo(circleLayer);
@@ -8147,27 +8135,6 @@ map.on("contextmenu", async (ev) => {
     drawHandler.completeShape();
     return;
   }
-
-  if (!_isPowerUserOrAbove()) return;
-
-  if (!browseLayer || !browseLayer._map) return;
-  if (lastAnalysisGeojson) return;
-  ev.originalEvent?.preventDefault();
-
-  const result = browseLayer.queryTileFeaturesDebug(ev.latlng.lng, ev.latlng.lat);
-  const allFeatures = result instanceof Map
-    ? [...result.values()].flat()
-    : (Array.isArray(result) ? result : []);
-  if (allFeatures.length === 0) return;
-
-  const parcel = allFeatures.find((f) => {
-    const props = (f.feature && f.feature.props) || f.props || {};
-    return props.source_county === "dcad" || props.source_county === "tad" || props.source_county === "collin" || props.source_county === "denton";
-  });
-  if (!parcel) return;
-
-  const pProps = (parcel.feature && parcel.feature.props) || parcel.props || {};
-  void _rightClickSaveParcel(pProps, null);
 });
 
 // Sidebar-triggered sold popups should dismiss once the map is moved away.
