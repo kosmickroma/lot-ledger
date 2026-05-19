@@ -69,7 +69,6 @@
         <div id="saved-areas-body" class="collapsible-body hidden">
           <input type="text" id="saved-areas-search" class="saved-list-search-input" placeholder="Search areas..." autocomplete="off">
           <div id="saved-areas-list"></div>
-          <button id="btn-saved-area-clear" class="hidden" onclick="clearDrawResults()" style="margin-top:8px;width:100%;padding:5px 0;background:transparent;border:1px solid #555;border-radius:4px;color:#aaa;font-size:11px;cursor:pointer;">← Back to Browse</button>
         </div>
       </div>
       <div id="saved-parcels" class="sidebar-section hidden collapsible-section">
@@ -288,7 +287,7 @@
       </div>
       <div id="custom-search-block" class="filter-card collapsible-section power-user-only">
         <button class="section-toggle" type="button" data-target="custom-search-block-body" aria-expanded="true">
-          <span class="sidebar-label">Custom Search</span>
+          <span class="sidebar-label">Refresh Comps</span>
         </button>
         <div id="custom-search-block-body" class="collapsible-body">
           <div class="propelio-api-section">
@@ -306,8 +305,12 @@
               </div>
             </div>
             <button id="btn-propelio-refresh" class="propelio-refresh-btn" type="button">
-              <span class="propelio-refresh-main">Custom Search</span>
+              <span class="propelio-refresh-main">Refresh Comps</span>
               <span class="propelio-refresh-subtitle">Uses the filters above</span>
+            </button>
+            <button id="btn-propelio-get-comps" class="propelio-refresh-btn propelio-deep-pull-btn power-user-only" type="button">
+              <span class="propelio-refresh-main">Deep Pull</span>
+              <span class="propelio-refresh-subtitle">~3 min</span>
             </button>
             <div id="deep-pull-banner" class="deep-pull-banner hidden">
               <span class="deep-pull-banner-icon">⟳</span>

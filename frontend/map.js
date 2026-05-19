@@ -5052,6 +5052,10 @@ async function pullPropelioRefresh() {
     setTimeout(_hideDeepPullBanner, 4000);
     return;
   }
+  if (!lastAnalysisGeojson) {
+    _showToast("Draw a polygon first", "error");
+    return;
+  }
   const filters = readPropelioFiltersFromUI();
   propelioFilterState = filters;
   const targetAddress = _deriveDeepPullTargetAddress();
@@ -5184,6 +5188,7 @@ function _setPropStatusFilter(status, checked, options = {}) {
   });
   const refreshBtn = document.getElementById("btn-propelio-refresh");
   if (refreshBtn) refreshBtn.addEventListener("click", () => void pullPropelioRefresh());
+  _ensureStickyPropelioButton();
   const resetBtn = document.getElementById("btn-propelio-reset");
   if (resetBtn) resetBtn.addEventListener("click", resetPropelioFilters);
 
@@ -5265,19 +5270,19 @@ function _showCacheEmptyChip() {
   if (!propelioCacheEmptyChip) {
     propelioCacheEmptyChip = document.createElement("div");
     propelioCacheEmptyChip.className = "propelio-cache-empty-chip hidden";
-    propelioCacheEmptyChip.textContent = "Cache empty - click Get Comps for fresh data";
+    propelioCacheEmptyChip.textContent = "Cache empty - click Deep Pull for fresh data";
     propelioStickyAnchor.appendChild(propelioCacheEmptyChip);
   }
   propelioCacheEmptyChip.classList.remove("hidden");
   setTimeout(_hideCacheEmptyChip, 6000);
 }
 
-function _setPropelioGetCompsLabel(main, subtitle = "Deep Pull · ~3 min") {
+function _setPropelioGetCompsLabel(main, subtitle = "~3 min") {
   if (!propelioStickyBtn) return;
-  propelioStickyBtn.innerHTML = `
-    <span class="get-comps-main">${_esc(main || "Get Comps")}</span>
-    <span class="get-comps-subtitle">${_esc(subtitle)}</span>
-  `;
+  const mainEl = propelioStickyBtn.querySelector(".propelio-refresh-main");
+  const subtitleEl = propelioStickyBtn.querySelector(".propelio-refresh-subtitle");
+  if (mainEl) mainEl.textContent = main || "Deep Pull";
+  if (subtitleEl) subtitleEl.textContent = subtitle;
 }
 
 async function _fetchPolygonCacheOnly() {
@@ -5343,24 +5348,16 @@ function _deriveDeepPullTargetAddress() {
 
 function _ensureStickyPropelioButton() {
   if (propelioStickyBtn) return propelioStickyBtn;
-  propelioStickyAnchor = L.DomUtil.create("div", "propelio-get-comps-anchor");
-  const controlsWrap = document.createElement("div");
-  controlsWrap.className = "propelio-action-row";
-  propelioStickyBtn = document.createElement("button");
-  propelioStickyBtn.type = "button";
-  propelioStickyBtn.className = "propelio-get-comps-btn";
-  propelioStickyBtn.classList.add("power-user-only");
-  _setPropelioGetCompsLabel("Get Comps");
-  controlsWrap.appendChild(propelioStickyBtn);
-
-  propelioStickyAnchor.appendChild(controlsWrap);
-  L.DomEvent.disableClickPropagation(propelioStickyAnchor);
-  L.DomEvent.disableScrollPropagation(propelioStickyAnchor);
+  propelioStickyBtn = document.getElementById("btn-propelio-get-comps");
+  if (!propelioStickyBtn) return null;
   L.DomEvent.on(propelioStickyBtn, "click", (evt) => {
     L.DomEvent.stopPropagation(evt);
+    if (!lastAnalysisGeojson) {
+      _showToast("Draw a polygon first", "error");
+      return;
+    }
     void _refreshRecentByPolygon();
   });
-  map.getContainer().appendChild(propelioStickyAnchor);
   return propelioStickyBtn;
 }
 
@@ -5372,7 +5369,7 @@ function _removePropelioPolygonButton() {
 
 function _setPropelioPolygonButtonState({ text, disabled }) {
   if (!propelioStickyBtn) return;
-  if (typeof text === "string") _setPropelioGetCompsLabel(text, "Deep Pull · ~3 min");
+  if (typeof text === "string") _setPropelioGetCompsLabel(text, "~3 min");
   if (typeof disabled === "boolean") propelioStickyBtn.disabled = disabled;
   propelioStickyBtn.classList.toggle("is-running", Boolean(disabled));
 }
@@ -5417,7 +5414,7 @@ async function _pullPropelioByPolygon() {
   }
 
   propelioPolygonPullInFlight = true;
-  _setPropelioPolygonButtonState({ text: "Get Comps", disabled: true });
+  _setPropelioPolygonButtonState({ text: "Deep Pull", disabled: true });
   _showDeepPullBanner("Pass 0/6, queued - don't refresh, comps are saving in the background...");
   try {
     const resp = await _apiJson("/api/propelio/deep-pull/start", {
@@ -5438,7 +5435,7 @@ async function _pullPropelioByPolygon() {
   } finally {
     propelioPolygonPullInFlight = false;
     if (!_activeDeepPullJobId) {
-      _setPropelioPolygonButtonState({ text: "Get Comps", disabled: false });
+      _setPropelioPolygonButtonState({ text: "Deep Pull", disabled: false });
     }
   }
 }
@@ -5459,7 +5456,7 @@ async function _refreshRecentByPolygon() {
   }
 
   propelioPolygonPullInFlight = true;
-  _setPropelioPolygonButtonState({ text: "Get Comps", disabled: true });
+  _setPropelioPolygonButtonState({ text: "Deep Pull", disabled: true });
   _showDeepPullBanner("Quick sweep · queued - 3 passes (1mo, 2mo, 3mo), ~2-3 min");
   try {
     const resp = await _apiJson("/api/propelio/refresh-recent/start", {
@@ -5480,7 +5477,7 @@ async function _refreshRecentByPolygon() {
   } finally {
     propelioPolygonPullInFlight = false;
     if (!_activeDeepPullJobId) {
-      _setPropelioPolygonButtonState({ text: "Get Comps", disabled: false });
+      _setPropelioPolygonButtonState({ text: "Deep Pull", disabled: false });
     }
   }
 }
@@ -5491,7 +5488,7 @@ function _showPropelioPolygonButton(_latlngs) {
   // sites don't have to change.
   _ensureStickyPropelioButton();
   if (!propelioStickyBtn) return;
-  _setPropelioGetCompsLabel("Get Comps");
+  _setPropelioGetCompsLabel("Deep Pull");
   propelioStickyBtn.disabled = false;
   propelioStickyBtn.classList.remove("is-running");
   if (propelioStickyAnchor) {
@@ -9460,7 +9457,7 @@ async function startDeepPull() {
     });
     _activeDeepPullJobId = resp.job_id;
     console.log("[deep-pull] job started:", resp);
-    _setPropelioPolygonButtonState({ text: "Get Comps", disabled: true });
+    _setPropelioPolygonButtonState({ text: "Deep Pull", disabled: true });
     _showDeepPullBanner("Pass 0/6, queued - warming up... Don't refresh.");
     if (_deepPullPollTimer) clearInterval(_deepPullPollTimer);
     _deepPullPollTimer = setInterval(_pollDeepPullStatus, 5000);
@@ -9503,7 +9500,7 @@ async function _pollDeepPullStatus() {
       } catch (err) {
         console.warn("[deep-pull] post-complete cache refresh failed:", err);
       }
-      _setPropelioPolygonButtonState({ text: "Get Comps", disabled: false });
+      _setPropelioPolygonButtonState({ text: "Deep Pull", disabled: false });
       setTimeout(_hideDeepPullBanner, 6000);
     }
   } catch (err) {
