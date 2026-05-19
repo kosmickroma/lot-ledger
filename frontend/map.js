@@ -4568,6 +4568,32 @@ function _propelioCompLatLng(comp) {
   return [lat, lng];
 }
 
+// Returns [lng, lat] of where the comp will actually render on the map.
+// Prefers the parcel_geom ring centroid (matches the visible footprint)
+// over the MLS lat/lng (which can be street-address-geocoded and diverge
+// from the parcel boundary, especially for condos and large complexes).
+function _compRenderPointLngLat(comp) {
+  const geom = comp?.parcel_geom;
+  let ring = null;
+  if (geom?.type === "Polygon") {
+    ring = Array.isArray(geom.coordinates) ? geom.coordinates[0] : null;
+  } else if (geom?.type === "MultiPolygon") {
+    ring = Array.isArray(geom.coordinates?.[0]) ? geom.coordinates[0][0] : null;
+  }
+  if (Array.isArray(ring) && ring.length > 0) {
+    let sx = 0, sy = 0, n = 0;
+    for (const pt of ring) {
+      const x = Number(pt?.[0]);
+      const y = Number(pt?.[1]);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      sx += x; sy += y; n += 1;
+    }
+    if (n > 0) return [sx / n, sy / n];
+  }
+  const latlng = _propelioCompLatLng(comp);
+  return latlng ? [latlng[1], latlng[0]] : null;
+}
+
 function _propelioStatusBucket(comp) {
   const raw = String(comp?.status || "").trim().toLowerCase();
   if (raw === "sold") return "sold";
@@ -4882,9 +4908,16 @@ function compPassesPropelioFilters(comp, filters) {
   // pass. Toggle on → also let through Propelio's spillover comps from
   // its circumradius search. Falls open when there is no polygon yet
   // (e.g. by-address pulls), so that path is unaffected.
+  //
+  // Test point priority: parcel_geom centroid (where the comp actually
+  // RENDERS) > _propelioCompLatLng. Condos in particular often have an
+  // MLS-geocoded lat/lng pointing to a building entrance inside the
+  // polygon while parcel_geom from CAD points to a specific unit
+  // boundary outside — checking lat/lng would let the comp through and
+  // it would render visibly far outside the drawn area.
   if (!filters.showOutsideArea && Array.isArray(lastPolygon) && lastPolygon.length >= 3) {
-    const latlng = _propelioCompLatLng(comp);
-    if (!latlng || !_pointInPolygonLngLat(latlng[1], latlng[0], lastPolygon)) {
+    const testPoint = _compRenderPointLngLat(comp);  // [lng, lat] or null
+    if (!testPoint || !_pointInPolygonLngLat(testPoint[0], testPoint[1], lastPolygon)) {
       return false;
     }
   }
