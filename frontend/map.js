@@ -4808,7 +4808,14 @@ function _compPropertyTypeBucket(comp) {
       const p = f?.properties || {};
       if (String(p.account_num || "").trim() === acct
         && String(p.source_county || "").trim().toLowerCase() === county) {
-        return p.prop_type || null;
+        const baseType = p.prop_type || null;
+        // Single-family parcels split into "off_market" (default) or "active"
+        // (Redfin listing live) — same derivation the parcel layer uses, so
+        // Property Type Filter "Off Market" toggle gates SFR comps too.
+        if (baseType === "single_family") {
+          return p.on_redfin ? "active" : "off_market";
+        }
+        return baseType;
       }
     }
   }
