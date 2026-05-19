@@ -315,7 +315,9 @@ function areaBoundsInViewport(bounds) {
 // during startup before the rest of the module wiring runs.
 let lastAnalysisGeojson = null;
 
-const map = L.map("map", { zoomControl: true }).setView(DALLAS_CENTER, DEFAULT_ZOOM);
+// zoomSnap/zoomDelta=0.5 — Mike's +/- buttons now move in half-steps so the
+// jump per click is less drastic. Mouse-wheel zoom is unaffected.
+const map = L.map("map", { zoomControl: true, zoomSnap: 0.5, zoomDelta: 0.5 }).setView(DALLAS_CENTER, DEFAULT_ZOOM);
 const MAP_CANVAS_RENDERER = L.canvas();
 const MAP_SVG_RENDERER = L.svg();
 L.control.scale({ position: "bottomright", metric: false, imperial: true }).addTo(map);
@@ -1368,7 +1370,7 @@ function formatSoldDateLabel(value) {
 
 function refreshSoldPriceLabels() {
   soldMarkers.forEach(({ marker }) => marker.unbindTooltip());
-  if (!soldLayerVisible || map.getZoom() < 16) return;
+  if (!soldLayerVisible || map.getZoom() < 15) return;
 
   const maxLabels = map.getZoom() >= 18 ? 220 : map.getZoom() >= 17 ? 140 : 80;
   const cellPx = map.getZoom() >= 18 ? 20 : map.getZoom() >= 17 ? 26 : 34;
@@ -1396,7 +1398,7 @@ function refreshSoldPriceLabels() {
 
 function refreshRedfinPriceLabels() {
   redfinMarkers.forEach(({ marker }) => marker.unbindTooltip());
-  if (!filterState.active || map.getZoom() < 16) return;
+  if (!filterState.active || map.getZoom() < 15) return;
 
   const maxLabels = map.getZoom() >= 18 ? 220 : map.getZoom() >= 17 ? 140 : 80;
   const cellPx = map.getZoom() >= 18 ? 20 : map.getZoom() >= 17 ? 26 : 34;
@@ -1428,7 +1430,7 @@ function refreshRedfinPriceLabels() {
 // comps are excluded at marker-build time so they never get a balloon.
 function refreshPropelioPriceLabels() {
   propelioPriceMarkers.forEach(({ marker }) => marker.unbindTooltip());
-  if (map.getZoom() < 16) return;
+  if (map.getZoom() < 15) return;
   if (!propelioPriceMarkers.length) return;
 
   const maxLabels = map.getZoom() >= 18 ? 220 : map.getZoom() >= 17 ? 140 : 80;
@@ -2552,7 +2554,7 @@ function _renderSavedParcelOutline(area) {
       className: "saved-parcel-glow",
       style: {
         color: SAVED_PARCEL_COLOR,
-        weight: 4,
+        weight: 6,
         fill: true,
         fillColor: SAVED_PARCEL_COLOR,
         fillOpacity: 0.16,
@@ -2640,7 +2642,7 @@ function _renderSelectedOutline(geometry) {
   L.geoJSON({ type: "Feature", geometry, properties: {} }, {
     pane: "selectedOutlinePane",
     className: "selected-outline-glow",
-    style: { color: "#a855f7", weight: 3, fill: false, interactive: false },
+    style: { color: "#a855f7", weight: 5, fill: false, interactive: false },
     interactive: false,
   }).addTo(selectedOutlineLayer);
 }
@@ -5250,6 +5252,12 @@ function _setPropStatusFilter(status, checked, options = {}) {
   if (apply) applyPropelioClientFilters();
 }
 
+// Deep Pull sidebar button state. Declared BEFORE the IIFE below so that
+// _ensureStickyPropelioButton() can be safely called from inside the IIFE
+// (without hitting a TDZ ReferenceError as the original J3 init did).
+let propelioStickyAnchor = null;
+let propelioStickyBtn = null;
+
 (function _initPropelioFilterListeners() {
   const liveIds = [
     "prop-outside-area",
@@ -5277,6 +5285,10 @@ function _setPropStatusFilter(status, checked, options = {}) {
   });
   const refreshBtn = document.getElementById("btn-propelio-refresh");
   if (refreshBtn) refreshBtn.addEventListener("click", () => void pullPropelioRefresh());
+  // Wire the Deep Pull sidebar button's click handler at init time so it
+  // fires the "Draw a polygon first" toast even before any polygon has been
+  // drawn. Now safe because propelioStickyBtn is declared above this IIFE.
+  _ensureStickyPropelioButton();
   const resetBtn = document.getElementById("btn-propelio-reset");
   if (resetBtn) resetBtn.addEventListener("click", resetPropelioFilters);
 
@@ -5342,11 +5354,9 @@ function _setPropStatusFilter(status, checked, options = {}) {
   });
 })();
 
-// Sticky bottom-center button (DOM-anchored, not map-pinned). Lives inside
-// the Leaflet map container so it's automatically right of the sidebar
-// and recenters when the sidebar collapses/expands.
-let propelioStickyAnchor = null;
-let propelioStickyBtn = null;
+// Sticky button state — declarations moved above the
+// _initPropelioFilterListeners IIFE so that IIFE can safely call
+// _ensureStickyPropelioButton() at init time (TDZ-free).
 let propelioCacheEmptyChip = null;
 
 function _hideCacheEmptyChip() {
@@ -5704,7 +5714,7 @@ const AddressSearch = L.Control.extend({
               const geom = detail.geometry;
               if (geom && (geom.type === "Polygon" || geom.type === "MultiPolygon")) {
                 highlightLayer = L.geoJSON(detail, {
-                  style: { color: "#f1c40f", weight: 3, fill: false, interactive: false },
+                  style: { color: "#f1c40f", weight: 5, fill: false, interactive: false },
                   interactive: false,
                 }).addTo(map);
               }
