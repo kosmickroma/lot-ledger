@@ -225,12 +225,7 @@ function passesNumericFilters(feature) {
 
   if (numericFilters.lot_sqft_min != null && (lot == null || lot < numericFilters.lot_sqft_min)) return false;
   if (numericFilters.lot_sqft_max != null && (lot == null || lot > numericFilters.lot_sqft_max)) return false;
-  if (numericFilters.appr_val_min != null && (val == null || val < numericFilters.appr_val_min)) {
-    if ((p.addr || "").toUpperCase().includes("HEALEY")) {
-      console.debug("[debug-appr-filter] REJECT HEALEY parcel", { addr: p.addr, account: p.account_num, raw_tot_val: p.tot_val, parsed_val: val, filter_min: numericFilters.appr_val_min });
-    }
-    return false;
-  }
+  if (numericFilters.appr_val_min != null && (val == null || val < numericFilters.appr_val_min)) return false;
   if (numericFilters.appr_val_max != null && (val == null || val > numericFilters.appr_val_max)) return false;
   if (numericFilters.yr_built_min != null && (yr == null || yr < numericFilters.yr_built_min)) return false;
   if (numericFilters.yr_built_max != null && (yr == null || yr > numericFilters.yr_built_max)) return false;
