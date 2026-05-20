@@ -6544,6 +6544,22 @@ function _panelDisplayValue(value) {
   return value && value !== "N/A" ? value : "N/A";
 }
 
+// Total Value display with prior-year provenance tag. When build_feature
+// (api/counties/dcad.py) emits a non-empty total_value_source flag on the
+// parcel properties — currently Collin-only via _normalize_collin_row's
+// cert_total_value fallback — append " (prior year YYYY)" to the displayed
+// value so analysts know the number is from last certification, not this
+// year's roll. Keeps p.tot_val itself numeric-clean for passesNumericFilters.
+function _totalValueDisplay(p) {
+  const raw = p?.tot_val;
+  if (!raw || raw === "N/A") return "N/A";
+  const source = String(p?.total_value_source || "").trim();
+  if (!source) return raw;
+  const yearMatch = source.startsWith("prior_year_cert_") ? source.slice("prior_year_cert_".length) : "";
+  const suffix = yearMatch ? `(prior year ${yearMatch})` : "(prior year)";
+  return `${raw} <span class="prior-year-tag" style="opacity:0.7;font-style:italic;font-size:11px;">${suffix}</span>`;
+}
+
 function _buildParcelDetailTableRow(label, value) {
   return `<tr><td class="popup-label">${label}</td><td class="popup-val">${value || "N/A"}</td></tr>`;
 }
@@ -6806,7 +6822,7 @@ function _buildParcelDetailPanelHtml(p, matchedComp) {
             <table class="popup-table">
               ${_buildParcelDetailTableRow("Owner", _panelDisplayValue(p.owner))}
               ${_buildParcelDetailTableRow("Land Value", _panelDisplayValue(p.land_val))}
-              ${_buildParcelDetailTableRow("Total Value", _panelDisplayValue(p.tot_val))}
+              ${_buildParcelDetailTableRow("Total Value", _totalValueDisplay(p))}
               ${listingDelta ? _buildParcelDetailTableRow(listingDelta.label, `<span style="color:${listingDelta.color}">${_propelioEscape(listingDelta.text)}</span>`) : ""}
               ${compDelta ? _buildParcelDetailTableRow(compDelta.label, `<span style="color:${compDelta.color}">${_propelioEscape(compDelta.text)}</span>`) : ""}
               ${_buildParcelDetailTableRow("Land % of Total", _panelDisplayValue(p.land_pct))}
@@ -7091,7 +7107,7 @@ function makePopupHtml(p) {
         <table class="popup-table">
           ${row("Owner", p.owner)}
           ${row("Land Value", p.land_val)}
-          ${row("Total Value", p.tot_val)}
+          ${row("Total Value", _totalValueDisplay(p))}
           ${listingDeltaRow}
           ${propelioDeltaRow}
           ${row("Land % of Total", p.land_pct)}
