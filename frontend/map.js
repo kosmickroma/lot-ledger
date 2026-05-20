@@ -5067,6 +5067,33 @@ function _compPropertyTypeBucket(comp) {
   return null;
 }
 
+// Resolve a Propelio comp's tax appraised value via its matched CAD
+// parcel. Propelio data itself carries sold/list price, never tax
+// assessment — but propelio_comps rows store (parcel_account_num,
+// parcel_county) pointing back to whichever CAD parcel matched at
+// scrape time, and the CAD parcel feature in lastAnalysisGeojson
+// carries `tot_val`. Returns a number, or null when the comp has no
+// CAD match (orphan / cross-county spillover) or the parcel isn't in
+// the current analysis geojson.
+function _compMatchedTotVal(comp) {
+  const acct = String(comp?.parcel_account_num || "").trim();
+  if (!acct) return null;
+  const features = lastAnalysisGeojson?.features;
+  if (!Array.isArray(features) || features.length === 0) return null;
+  const cnty = String(comp?.parcel_county || "").trim().toLowerCase();
+  const match = features.find((f) => {
+    const p = f?.properties || {};
+    if (String(p.account_num || "").trim() !== acct) return false;
+    // Match on county when the comp specifies one — protects against
+    // cross-county account_num collisions (rare but possible).
+    if (cnty && String(p.source_county || "").trim().toLowerCase() !== cnty) return false;
+    return true;
+  });
+  if (!match) return null;
+  const raw = String(match.properties?.tot_val || "").replace(/[$,]/g, "").match(/^[\d.]+/);
+  return raw ? Number(raw[0]) : null;
+}
+
 function compPassesPropelioFilters(comp, filters) {
   const status = String(comp?.status || "").toLowerCase();
   // Status checkbox filters
@@ -5125,18 +5152,24 @@ function compPassesPropelioFilters(comp, filters) {
   if (filters.priceMax != null && (!Number.isFinite(price) || price > filters.priceMax)) return false;
 
   // Property Filters (the global #numeric-filters / "Property Filters"
-  // section) also gate comps as of 2026-05-20. Three of the four
-  // dimensions translate to comp records; appraised value (appr_val_*)
-  // doesn't — comps carry sold/list price, not CAD tax assessment. When
-  // both Property Filters and Comp Filters constrain the same dimension,
-  // the stricter of the two wins (AND semantics). `lotSqft`, `sqft`,
-  // `yr` are reused from the comp-filter blocks above.
+  // section) also gate comps as of 2026-05-20. Lot/sqft/year translate
+  // directly from comp data; appraised value comes from the comp's
+  // MATCHED CAD parcel (Propelio comps don't carry tot_val themselves —
+  // we follow the parcel_account_num + parcel_county link into
+  // lastAnalysisGeojson). When both Property Filters and Comp Filters
+  // constrain the same dimension, the stricter wins (AND). `lotSqft`,
+  // `sqft`, `yr` are reused from the comp-filter blocks above.
   if (numericFilters.lot_sqft_min != null && (!Number.isFinite(lotSqft) || lotSqft < numericFilters.lot_sqft_min)) return false;
   if (numericFilters.lot_sqft_max != null && (!Number.isFinite(lotSqft) || lotSqft > numericFilters.lot_sqft_max)) return false;
   if (numericFilters.yr_built_min != null && (!Number.isFinite(yr) || yr < numericFilters.yr_built_min)) return false;
   if (numericFilters.yr_built_max != null && (!Number.isFinite(yr) || yr > numericFilters.yr_built_max)) return false;
   if (numericFilters.sqft_min != null && (!Number.isFinite(sqft) || sqft < numericFilters.sqft_min)) return false;
   if (numericFilters.sqft_max != null && (!Number.isFinite(sqft) || sqft > numericFilters.sqft_max)) return false;
+  if (numericFilters.appr_val_min != null || numericFilters.appr_val_max != null) {
+    const compTotVal = _compMatchedTotVal(comp);
+    if (numericFilters.appr_val_min != null && (compTotVal == null || compTotVal < numericFilters.appr_val_min)) return false;
+    if (numericFilters.appr_val_max != null && (compTotVal == null || compTotVal > numericFilters.appr_val_max)) return false;
+  }
 
   // Parcel-type gate: hide comp if its bucket is toggled off in Property Type
   // Filters. CAD is the source of truth — when a comp matches a parcel, the
