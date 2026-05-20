@@ -2777,7 +2777,14 @@ async function saveParcel(account_num, county, addr, lat, lng, geometry) {
     _setCurrentTargetParcel({ county: targetCounty, account: targetAccount, lat, lng });
     void _renderOriginatorTargetStar(targetCounty, targetAccount, lat, lng);
   }
-  setActiveItem("Workspace", row.name);
+  // Only seed the Workspace slot label when there is no loaded workspace.
+  // When one is loaded (xyz), saving a different parcel as the new target
+  // must NOT rename the workspace — the Target row (updated via
+  // _setCurrentTargetParcel above) carries the new address; the workspace
+  // name belongs to the user.
+  if (!_currentLoadedAreaId) {
+    setActiveItem("Workspace", row.name);
+  }
 }
 
 async function _rightClickSaveParcel(p, knownGeometry) {
@@ -8565,6 +8572,17 @@ document.getElementById("btn-download").addEventListener("click", async () => {
 });
 
 function _suggestAreaNameFromContainedParcels() {
+  // Save Area = Save As (always creates a new saved_areas row). If a
+  // workspace is already loaded, the user's mental model is "fork xyz
+  // into a new one" — pre-fill with the current workspace name so they
+  // can hit Enter to keep it (dedupes server-side to "xyz (2)") or type
+  // a replacement. Beats stomping it with whatever target address
+  // happens to be in the polygon.
+  if (_currentLoadedAreaId) {
+    const loaded = _savedAreasCache.find((a) => String(a.id) === String(_currentLoadedAreaId));
+    const loadedName = String(loaded?.name || "").trim();
+    if (loadedName) return loadedName;
+  }
   if (!Array.isArray(lastPolygon) || lastPolygon.length < 3) return null;
   if (!Array.isArray(_savedParcelsCache) || _savedParcelsCache.length === 0) return null;
   for (const p of _savedParcelsCache) {
