@@ -3401,6 +3401,90 @@ async def _run_download_csv(
         finally:
             release_session_conn(_conn)
 
+    # Comp ratings pre-fetch: snapshot the workspace's rating state once at
+    # export start. Bad-rated rows are skipped entirely; good-rated rows get
+    # a "yes" in the trailing Good Comp column. Unsaved-area exports
+    # (job_saved_area_id is None) skip this entirely → no drops, no flags.
+    #
+    # Two dicts are built from a single query:
+    # - rating_by_comp_id: comp_id → rating. Used by the orphan row path
+    #   (each orphan row IS one comp, so per-comp rating is the right level).
+    # - parcel_rating_by_key: (county, account_num) → effective rating with
+    #   bad-wins conflict resolution. Used by the parcel row path so the
+    #   logic is provenance-agnostic — ANY rated comp matched to a visible
+    #   parcel (via propelio_comps.parcel_county + parcel_account_num)
+    #   drives the parcel's effective rating, regardless of which writer
+    #   (analyze sold-match, Quick Sweep, deep pull, strip runner, etc.)
+    #   put the comp in propelio_comps. This bridges the user's mental
+    #   model ("I rated the property") to the comp-keyed data model.
+    # See docs/COMP_RATING_EXPORT_SPEC.md §3.3 File 3.
+    rating_by_comp_id: dict[int, str] = {}
+    parcel_rating_by_key: dict[tuple[str, str], str] = {}
+    if job_saved_area_id:
+        _conn = get_session_conn()
+        try:
+            with _conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        cr.comp_id,
+                        cr.rating,
+                        pc.parcel_county,
+                        pc.parcel_account_num
+                    FROM comp_ratings cr
+                    JOIN propelio_comps pc ON cr.comp_id = pc.comp_id
+                    WHERE cr.workspace_id = %s
+                    """,
+                    (job_saved_area_id,),
+                )
+                for comp_id, rating, parcel_county, parcel_account_num in cur.fetchall():
+                    rating_by_comp_id[int(comp_id)] = rating
+                    if not parcel_county or not parcel_account_num:
+                        continue
+                    pkey = (
+                        str(parcel_county).strip().lower(),
+                        str(parcel_account_num).strip(),
+                    )
+                    if not pkey[0] or not pkey[1]:
+                        continue
+                    # Bad-wins conflict resolution: once a parcel has any bad
+                    # rating, no other rating displaces it. Otherwise good
+                    # upgrades from no-rating, but cannot overwrite an
+                    # earlier bad.
+                    existing = parcel_rating_by_key.get(pkey)
+                    if existing == "bad":
+                        continue
+                    if rating == "bad" or existing is None:
+                        parcel_rating_by_key[pkey] = rating
+        finally:
+            release_session_conn(_conn)
+
+    def _rating_for(comp_id_raw) -> str | None:
+        """Resolve a comp_id (any type) to its rating, treating malformed
+        values as unrated. Never raises — degrades silently to None
+        (no drop, no flag) for ALL of the following inputs:
+
+        - None (legacy cached_jobs propelio_sold_points entries with no comp_id).
+        - bool (True/False are instances of int in Python; without this
+          explicit reject they would resolve to comp_id=1 / comp_id=0
+          and silently hit real or sentinel rating rows).
+        - Non-numeric types (string, dict, list, NaN payloads).
+        - OverflowError on absurdly large numeric values.
+        - Non-positive ints (comp_id is BIGSERIAL, always >= 1; negative,
+          zero, or sentinel-style values are not real comp_ids).
+
+        See docs/COMP_RATING_EXPORT_SPEC.md §3.3 File 3 + §4 decision #10.
+        """
+        if comp_id_raw is None or isinstance(comp_id_raw, bool):
+            return None
+        try:
+            cid = int(comp_id_raw)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if cid <= 0:
+            return None
+        return rating_by_comp_id.get(cid)
+
     # Visible parcel keys set — used both for parcel-row filtering AND for
     # deduping comp rows (a comp whose (parcel_county, parcel_account_num) is
     # already in this set is represented by its parent parcel row inline).
@@ -3429,7 +3513,7 @@ async def _run_download_csv(
         try:
             with _conn.cursor(cursor_factory=RealDictCursor) as _cur:
                 _cur.execute(
-                    "SELECT comp_address_key, address, lat, lng, status, last_status,"
+                    "SELECT comp_id, comp_address_key, address, lat, lng, status, last_status,"
                     " price, last_price, sold_date, close_date, dom, beds, baths,"
                     " sqft, lot_size, year_built, parcel_county, parcel_account_num"
                     " FROM propelio_comps WHERE comp_address_key = ANY(%s)",
@@ -3600,6 +3684,12 @@ async def _run_download_csv(
                 "Comp Days on Market",
                 "Comp Listing URL",
                 "Comp Status",
+                # COMPATIBILITY LOCK: Good Comp slots immediately after Comp
+                # Status, grouped with the comp data columns. Mirror locks
+                # at parcel/orphan writerow append sites must place the
+                # "yes"/blank cell at the exact same offset. Do not move
+                # this column without coordinated updates at all three sites.
+                "Good Comp",
                 "RF_Comp Sold Price",
                 "RF_Comp Sold Date",
                 "RF_Comp $/sqft",
@@ -3700,6 +3790,16 @@ async def _run_download_csv(
                 str(row.get("account_num", "") or "").strip(),
             )
             propelio_comp = propelio_comp_by_parcel_key.get(row_key)
+            # Comp-rating gate at parcel level: skip parcel row entirely if
+            # ANY rated comp in this workspace matches the parcel by
+            # (parcel_county, parcel_account_num). Provenance-agnostic — the
+            # comp doesn't have to be in propelio_sold_points; any writer to
+            # propelio_comps (analyze, Quick Sweep, deep pull, strip runner)
+            # counts. bad-wins / good-otherwise conflict resolution applied
+            # at pre-fetch time. See docs/COMP_RATING_EXPORT_SPEC.md §3.1.
+            _parcel_rating = parcel_rating_by_key.get(row_key)
+            if _parcel_rating == "bad":
+                continue
             rf_comp = comp_by_parcel_key.get(str(row.get("account_num", "") or ""))
 
             _is_intended_target = (
@@ -3809,6 +3909,10 @@ async def _run_download_csv(
                     int(_safe_float(propelio_comp.get("dom"))) if propelio_comp and _safe_float(propelio_comp.get("dom")) not in (None, 0.0) else "",
                     (propelio_comp.get("listing_url", "") or "") if propelio_comp else "",
                     (propelio_comp.get("status", "") or "") if propelio_comp else "",
+                    # COMPATIBILITY LOCK: Good Comp slots immediately after
+                    # Comp Status. Mirrored at header + orphan writerow.
+                    # Do not move without coordinated updates at all three sites.
+                    "yes" if _parcel_rating == "good" else "",
                     round(_safe_float(rf_comp.get("sold_price")), 0) if rf_comp and _safe_float(rf_comp.get("sold_price")) is not None else "",
                     (rf_comp.get("sold_date", "") or "") if rf_comp else "",
                     round(_safe_float(rf_comp.get("price_per_sqft")), 0) if rf_comp and _safe_float(rf_comp.get("price_per_sqft")) is not None else "",
@@ -3833,6 +3937,13 @@ async def _run_download_csv(
         # a visible parent parcel row). Same column shape as parcel rows; the
         # parcel-specific cells are left blank.
         for _c in orphan_comps:
+            # Comp-rating gate: skip orphan row entirely if the comp is rated
+            # 'bad' in this workspace. 'good' surfaces as "yes" in the
+            # trailing Good Comp column; unrated stays blank. See
+            # docs/COMP_RATING_EXPORT_SPEC.md §3.1.
+            _orphan_rating = _rating_for(_c.get("comp_id"))
+            if _orphan_rating == "bad":
+                continue
             _comp_price = _safe_float(_c.get("price")) or _safe_float(_c.get("last_price"))
             _comp_sqft = _safe_float(_c.get("sqft"))
             _comp_sold_date = _c.get("sold_date") or _c.get("close_date") or ""
@@ -4058,19 +4169,23 @@ async def _run_download_csv(
                     _dom_csv,                                                                                    # 93 Comp DOM
                     "",                                                                                          # 94 Comp Listing URL
                     _comp_status_titled,                                                                         # 95 Comp Status
-                    "",                                                                                          # 96 RF_Comp Sold Price
-                    "",                                                                                          # 97 RF_Comp Sold Date
-                    "",                                                                                          # 98 RF_Comp $/sqft
-                    "",                                                                                          # 99 RF_Comp Year Built
-                    "",                                                                                          # 100 RF_Comp Living Area
-                    "",                                                                                          # 101 RF_Comp Lot Size
-                    "",                                                                                          # 102 RF_Comp Beds
-                    "",                                                                                          # 103 RF_Comp Baths
-                    "",                                                                                          # 104 RF_Comp DOM
-                    "",                                                                                          # 105 RF_Comp Listing URL
-                    "",                                                                                          # 106 Seed Target
-                    csv_share_id,                                                                                # 107 share_id
-                    *stored_value_export_cells,                                                                   # 108-117 stored value snapshot
+                    # COMPATIBILITY LOCK: Good Comp slots immediately after
+                    # Comp Status. Mirrored at header + parcel writerow.
+                    # Do not move without coordinated updates at all three sites.
+                    "yes" if _orphan_rating == "good" else "",                                                    # 96 Good Comp
+                    "",                                                                                          # 97 RF_Comp Sold Price
+                    "",                                                                                          # 98 RF_Comp Sold Date
+                    "",                                                                                          # 99 RF_Comp $/sqft
+                    "",                                                                                          # 100 RF_Comp Year Built
+                    "",                                                                                          # 101 RF_Comp Living Area
+                    "",                                                                                          # 102 RF_Comp Lot Size
+                    "",                                                                                          # 103 RF_Comp Beds
+                    "",                                                                                          # 104 RF_Comp Baths
+                    "",                                                                                          # 105 RF_Comp DOM
+                    "",                                                                                          # 106 RF_Comp Listing URL
+                    "",                                                                                          # 107 Seed Target
+                    csv_share_id,                                                                                # 108 share_id
+                    *stored_value_export_cells,                                                                   # 109-118 stored value snapshot
                 ]
             )
             buffer.seek(0)

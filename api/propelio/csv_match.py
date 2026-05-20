@@ -63,6 +63,8 @@ def query_propelio_sold_for_parcels(
     # event-type column is populated for a given row.
     sql = """
         SELECT DISTINCT ON (parcel_county, parcel_account_num)
+            comp_id,
+            comp_address_key,
             parcel_county,
             parcel_account_num,
             status,
@@ -124,6 +126,12 @@ def _normalize_propelio_row(row: dict) -> dict:
         sold_date = None
 
     return {
+        # comp_id / comp_address_key carried forward for export-time rating
+        # lookup + traceability. comp_id is the join key against comp_ratings
+        # in the CSV download path; comp_address_key is debug/trace only.
+        # See docs/COMP_RATING_EXPORT_SPEC.md §3.3 File 1.
+        "comp_id": row.get("comp_id"),
+        "comp_address_key": row.get("comp_address_key"),
         "status": status,
         "sold_price": _safe_float(row.get("price")),
         "sold_date": sold_date,
