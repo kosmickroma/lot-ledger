@@ -689,6 +689,39 @@ body.is-not-power-user .power-user-only {
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
 
+.active-item-target-row {
+  display: block;
+  margin-bottom: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  line-height: 1.25;
+}
+
+.active-item-target-row.hidden {
+  display: none;
+}
+
+.active-item-target-type {
+  display: inline-block;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--gold);
+  opacity: 0.85;
+  margin-right: 6px;
+  vertical-align: baseline;
+}
+
+.active-item-target-name {
+  display: inline;
+  font-size: 12px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.78);
+  word-break: break-word;
+  vertical-align: baseline;
+}
+
 .active-item-type {
   display: block;
   font-size: 10px;

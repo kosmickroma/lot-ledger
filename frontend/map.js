@@ -643,6 +643,76 @@ function _setCurrentTargetParcel(parcel) {
   ) {
     void _ensureCurrentTargetParcelCoords();
   }
+  // Keep the Target row in the active-item slot in lock-step with the
+  // current bonded originator. Non-null → resolve address + show row;
+  // null → hide row. Address resolution is async (cache-first, fetch
+  // fallback) — the row stays hidden until resolution completes to
+  // avoid a "Target —" placeholder flash.
+  if (normalized) {
+    void _refreshOriginatorTargetLabel(normalized.county, normalized.account);
+  } else {
+    _setOriginatorTargetLabel(null);
+  }
+}
+
+function _setOriginatorTargetLabel(addr) {
+  const row = document.getElementById("active-item-target-row");
+  const nameEl = document.getElementById("active-item-target-name");
+  if (!row || !nameEl) return;
+  const text = (addr || "").toString().trim();
+  if (!text) {
+    nameEl.textContent = "";
+    row.classList.add("hidden");
+    return;
+  }
+  nameEl.textContent = text;
+  row.classList.remove("hidden");
+}
+
+async function _resolveTargetAddress(county, account) {
+  const c = String(county || "").trim().toLowerCase();
+  const a = String(account || "").trim();
+  if (!c || !a) return null;
+  // Cache-first: saved-parcels rows carry the address as `name` (set at
+  // saveParcel time via the addr arg). Common case for bonded originators.
+  try {
+    const cached = (Array.isArray(_savedParcelsCache) ? _savedParcelsCache : []).find((p) =>
+      String(p?.account_num || "").trim() === a
+      && String(p?.county || "").trim().toLowerCase() === c,
+    );
+    if (cached && cached.name) {
+      const trimmed = String(cached.name).trim();
+      if (trimmed) return trimmed;
+    }
+  } catch {}
+  // Fallback: same endpoint that resolves originator coords, so the network
+  // round-trip is paid at most once per workspace load (browser cache).
+  try {
+    const resp = await fetch(`/api/parcel/${encodeURIComponent(c)}/${encodeURIComponent(a)}`);
+    if (!resp.ok) return null;
+    const detail = await resp.json();
+    const props = detail?.properties || detail || {};
+    const addr = String(props.addr || "").trim();
+    return addr || null;
+  } catch (err) {
+    console.warn("[target-label] address resolve failed:", err);
+    return null;
+  }
+}
+
+async function _refreshOriginatorTargetLabel(county, account) {
+  const c = String(county || "").trim().toLowerCase();
+  const a = String(account || "").trim();
+  if (!c || !a) {
+    _setOriginatorTargetLabel(null);
+    return;
+  }
+  const addr = await _resolveTargetAddress(c, a);
+  // Guard against races: if the user switched workspaces between the
+  // fetch firing and resolving, _currentTargetParcel will have moved on
+  // and we'd stomp the new label with stale data.
+  if (!_sameParcelIdentity(_currentTargetParcel, { county: c, account: a })) return;
+  _setOriginatorTargetLabel(addr);
 }
 
 async function _ensureCurrentTargetParcelCoords() {
@@ -982,6 +1052,7 @@ function clearActiveItem() {
   const nameEl = document.getElementById("active-item-name");
   if (typeEl) typeEl.textContent = "Workspace";
   if (nameEl) nameEl.textContent = "—";
+  _setOriginatorTargetLabel(null);
   _updateActiveItemRenameVisibility();
 }
 
