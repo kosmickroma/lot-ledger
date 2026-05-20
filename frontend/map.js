@@ -633,6 +633,59 @@ function _sameParcelIdentity(a, b) {
     && String(a.account || "").trim() === String(b.account || "").trim();
 }
 
+// Per-county normalizer: produces "STREET CITY" with no comma, no state,
+// no ZIP, no duplicate city. Each county's source data is shaped
+// differently — this is the single place that handles the variance.
+//
+// - collin: property_address bundles "STREET CITY, TX ZIP"  → strip from first comma.
+// - denton: property_address is "STREET, CITY, TX"          → take street, append property_city.
+// - tad   : property_address is "STREET" only (no city)     → return street.
+// - dcad  : property_address is "STREET" only (no city)     → return street.
+//
+// TAD + DCAD will appear without a city until KK lands a city-resolver
+// for those two (memory: project_save_vs_update_model notes scope).
+function _formatPropertyAddress(county, rawAddr, rawCity) {
+  const addr = String(rawAddr || "").trim();
+  if (!addr) return "";
+  const city = String(rawCity || "").trim();
+  const c = String(county || "").trim().toLowerCase();
+
+  switch (c) {
+    case "collin": {
+      // "1713 N COLLEGE ST MCKINNEY, TX 75069" → "1713 N COLLEGE ST MCKINNEY"
+      const beforeComma = addr.split(",")[0].trim();
+      return beforeComma || addr;
+    }
+    case "denton": {
+      // "8812 ENCLAVE WAY, NORTHLAKE, TX" → "8812 ENCLAVE WAY" + " NORTHLAKE"
+      const street = addr.split(",")[0].trim();
+      if (city && street) {
+        const lower = street.toLowerCase();
+        const cityLower = city.toLowerCase();
+        if (!lower.endsWith(cityLower)) {
+          return `${street} ${city}`;
+        }
+      }
+      return street || addr;
+    }
+    case "tad":
+    case "dcad": {
+      // No reliable city in source. Strip any stray comma fragments.
+      return addr.split(",")[0].trim() || addr;
+    }
+    default: {
+      // Unknown county: conservative — return addr, append city only if
+      // it isn't already the trailing token.
+      if (city) {
+        const tokens = addr.split(/\s+/);
+        const last = (tokens[tokens.length - 1] || "").toLowerCase();
+        if (last !== city.toLowerCase()) return `${addr} ${city}`.trim();
+      }
+      return addr;
+    }
+  }
+}
+
 function _setCurrentTargetParcel(parcel) {
   const normalized = _normalizeTargetParcel(parcel);
   _currentTargetParcel = normalized;
@@ -673,29 +726,28 @@ async function _resolveTargetAddress(county, account) {
   const c = String(county || "").trim().toLowerCase();
   const a = String(account || "").trim();
   if (!c || !a) return null;
-  // Cache-first: saved-parcels rows carry the address as `name` (set at
-  // saveParcel time via the addr arg). Common case for bonded originators.
-  try {
-    const cached = (Array.isArray(_savedParcelsCache) ? _savedParcelsCache : []).find((p) =>
-      String(p?.account_num || "").trim() === a
-      && String(p?.county || "").trim().toLowerCase() === c,
-    );
-    if (cached && cached.name) {
-      const trimmed = String(cached.name).trim();
-      if (trimmed) return trimmed;
-    }
-  } catch {}
-  // Fallback: same endpoint that resolves originator coords, so the network
-  // round-trip is paid at most once per workspace load (browser cache).
+  // Always fetch + format from raw props. Cache `name` can carry
+  // pre-fix dirty values ("STREET CITY, TX ZIP CITY") for parcels saved
+  // before _formatPropertyAddress landed — fetching guarantees we
+  // rebuild from the source row each time.
   try {
     const resp = await fetch(`/api/parcel/${encodeURIComponent(c)}/${encodeURIComponent(a)}`);
-    if (!resp.ok) return null;
+    if (!resp.ok) {
+      // Fetch failed (404, network) — fall back to whatever the cache
+      // has so the Subject Property row still shows something.
+      const cached = (Array.isArray(_savedParcelsCache) ? _savedParcelsCache : []).find((p) =>
+        String(p?.account_num || "").trim() === a
+        && String(p?.county || "").trim().toLowerCase() === c,
+      );
+      const fallback = String(cached?.name || "").trim();
+      return fallback || null;
+    }
     const detail = await resp.json();
     const props = detail?.properties || detail || {};
-    const addr = String(props.addr || "").trim();
-    return addr || null;
+    const formatted = _formatPropertyAddress(c, props.addr, props.city);
+    return formatted || null;
   } catch (err) {
-    console.warn("[target-label] address resolve failed:", err);
+    console.warn("[subject-property] address resolve failed:", err);
     return null;
   }
 }
@@ -2817,20 +2869,10 @@ async function _rightClickSaveParcel(p, knownGeometry) {
       if (resp.ok) {
         const detail = await resp.json();
         const props = detail.properties || detail;
-        addr = addr || String(props.addr || "");
-        const propsCity = String(props.city || "").trim();
-        if (propsCity && addr) {
-          // Tighter "already has city" guard than includes(): tokenize addr by
-          // whitespace and check whether the last token already matches the city
-          // case-insensitively. This avoids false-matching things like "Plano"
-          // appearing inside "Esplanade Dr" (which includes() would mishandle).
-          const addrTokens = addr.trim().split(/\s+/);
-          const lastToken = (addrTokens[addrTokens.length - 1] || "").toLowerCase();
-          const cityLower = propsCity.toLowerCase();
-          if (lastToken !== cityLower) {
-            addr = `${addr.trim()} ${propsCity}`.trim();
-          }
-        }
+        // Normalize per-county to "STREET CITY" (no comma/state/zip/dupe).
+        // Always rebuild from raw props rather than trusting the incoming
+        // `addr` arg, since it can be pre-concatenated upstream.
+        addr = _formatPropertyAddress(county, props.addr || addr, props.city);
         if (!Number.isFinite(lat) && Number.isFinite(Number(props.lat))) lat = Number(props.lat);
         if (!Number.isFinite(lng) && Number.isFinite(Number(props.lng))) lng = Number(props.lng);
         if (!geometry && (detail.geometry?.type === "Polygon" || detail.geometry?.type === "MultiPolygon")) {
@@ -9037,7 +9079,7 @@ function _wireParcelInteractiveUi(root, options = {}) {
     saveLink.addEventListener("click", async (ev) => {
       ev.preventDefault();
       const { account, county, addr, city, lat, lng } = saveLink.dataset;
-      const fullName = city ? `${(addr || "").trim()} ${city.trim()}`.trim() : (addr || "").trim();
+      const fullName = _formatPropertyAddress(county, addr, city);
       let geometry = null;
       try {
         const resp = await fetch(`/api/parcel/${county}/${account}`);
