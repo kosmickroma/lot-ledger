@@ -4185,7 +4185,7 @@ async def _run_download_csv(
                     "",                                                                                          # 106 RF_Comp Listing URL
                     "",                                                                                          # 107 Seed Target
                     csv_share_id,                                                                                # 108 share_id
-                    *stored_value_export_cells,                                                                   # 109-118 stored value snapshot
+                    *stored_value_export_cells,                                                                   # 109-118 stored values snapshot
                 ]
             )
             buffer.seek(0)

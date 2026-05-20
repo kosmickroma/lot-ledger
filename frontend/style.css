@@ -3294,7 +3294,7 @@ body.is-not-power-user .power-user-only {
   }
 }
 
-/* ─── Stored Value sidebar block ───────────────────────────────── */
+/* ─── Stored Values sidebar block ──────────────────────────────── */
 
 #stored-value-block.hidden {
   display: none;
