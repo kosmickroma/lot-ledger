@@ -3405,17 +3405,57 @@ async def _run_download_csv(
     # export start. Bad-rated rows are skipped entirely; good-rated rows get
     # a "yes" in the trailing Good Comp column. Unsaved-area exports
     # (job_saved_area_id is None) skip this entirely → no drops, no flags.
+    #
+    # Two dicts are built from a single query:
+    # - rating_by_comp_id: comp_id → rating. Used by the orphan row path
+    #   (each orphan row IS one comp, so per-comp rating is the right level).
+    # - parcel_rating_by_key: (county, account_num) → effective rating with
+    #   bad-wins conflict resolution. Used by the parcel row path so the
+    #   logic is provenance-agnostic — ANY rated comp matched to a visible
+    #   parcel (via propelio_comps.parcel_county + parcel_account_num)
+    #   drives the parcel's effective rating, regardless of which writer
+    #   (analyze sold-match, Quick Sweep, deep pull, strip runner, etc.)
+    #   put the comp in propelio_comps. This bridges the user's mental
+    #   model ("I rated the property") to the comp-keyed data model.
     # See docs/COMP_RATING_EXPORT_SPEC.md §3.3 File 3.
     rating_by_comp_id: dict[int, str] = {}
+    parcel_rating_by_key: dict[tuple[str, str], str] = {}
     if job_saved_area_id:
         _conn = get_session_conn()
         try:
             with _conn.cursor() as cur:
                 cur.execute(
-                    "SELECT comp_id, rating FROM comp_ratings WHERE workspace_id = %s",
+                    """
+                    SELECT
+                        cr.comp_id,
+                        cr.rating,
+                        pc.parcel_county,
+                        pc.parcel_account_num
+                    FROM comp_ratings cr
+                    JOIN propelio_comps pc ON cr.comp_id = pc.comp_id
+                    WHERE cr.workspace_id = %s
+                    """,
                     (job_saved_area_id,),
                 )
-                rating_by_comp_id = {int(cid): r for cid, r in cur.fetchall()}
+                for comp_id, rating, parcel_county, parcel_account_num in cur.fetchall():
+                    rating_by_comp_id[int(comp_id)] = rating
+                    if not parcel_county or not parcel_account_num:
+                        continue
+                    pkey = (
+                        str(parcel_county).strip().lower(),
+                        str(parcel_account_num).strip(),
+                    )
+                    if not pkey[0] or not pkey[1]:
+                        continue
+                    # Bad-wins conflict resolution: once a parcel has any bad
+                    # rating, no other rating displaces it. Otherwise good
+                    # upgrades from no-rating, but cannot overwrite an
+                    # earlier bad.
+                    existing = parcel_rating_by_key.get(pkey)
+                    if existing == "bad":
+                        continue
+                    if rating == "bad" or existing is None:
+                        parcel_rating_by_key[pkey] = rating
         finally:
             release_session_conn(_conn)
 
@@ -3752,14 +3792,15 @@ async def _run_download_csv(
                 str(row.get("account_num", "") or "").strip(),
             )
             propelio_comp = propelio_comp_by_parcel_key.get(row_key)
-            # Comp-rating gate: skip parcel row entirely if the matched comp
-            # is rated 'bad' in this workspace. 'good' surfaces as "yes" in
-            # the trailing Good Comp column; unrated stays blank. See
-            # docs/COMP_RATING_EXPORT_SPEC.md §3.1.
-            _matched_rating = _rating_for(
-                propelio_comp.get("comp_id") if propelio_comp else None
-            )
-            if _matched_rating == "bad":
+            # Comp-rating gate at parcel level: skip parcel row entirely if
+            # ANY rated comp in this workspace matches the parcel by
+            # (parcel_county, parcel_account_num). Provenance-agnostic — the
+            # comp doesn't have to be in propelio_sold_points; any writer to
+            # propelio_comps (analyze, Quick Sweep, deep pull, strip runner)
+            # counts. bad-wins / good-otherwise conflict resolution applied
+            # at pre-fetch time. See docs/COMP_RATING_EXPORT_SPEC.md §3.1.
+            _parcel_rating = parcel_rating_by_key.get(row_key)
+            if _parcel_rating == "bad":
                 continue
             rf_comp = comp_by_parcel_key.get(str(row.get("account_num", "") or ""))
 
@@ -3889,7 +3930,7 @@ async def _run_download_csv(
                     # and this line without also updating the header and the
                     # orphan writerow tail. See
                     # docs/COMP_RATING_EXPORT_SPEC.md §3.2.
-                    "yes" if _matched_rating == "good" else "",
+                    "yes" if _parcel_rating == "good" else "",
                 ]
             )
             buffer.seek(0)
