@@ -5549,11 +5549,14 @@ async function _autoCacheOnDraw() {
     console.warn("[auto-cache-on-draw] auto-save failed, continuing without saved area id:", err);
   }
 
-  try {
-    await _fetchPolygonCacheOnly();
-  } catch (err) {
-    console.warn("[auto-cache-on-draw] cache lookup failed:", err);
-  }
+  // Fire-and-forget: saveCurrentArea above already set _currentLoadedAreaId.
+  // The caller (draw:created) awaits _autoCacheOnDraw before calling
+  // runAnalysis, so /api/analyze receives the correct area_id immediately and
+  // the new cached_jobs row is born with saved_area_id populated.  Cache
+  // pre-warm doesn't need to block analysis.
+  void _fetchPolygonCacheOnly().catch((err) =>
+    console.warn("[auto-cache-on-draw] cache lookup failed:", err)
+  );
 }
 
 function _navigationGuardForActiveDeepPull(actionDescription) {
@@ -8171,7 +8174,14 @@ map.on("draw:created", async (e) => {
   propelioCompLayerByKey.clear();
   renderPropelioCompList([]);
   propelioCmaChip.hide();
-  void _autoCacheOnDraw();
+  // Await the autosave so _currentLoadedAreaId is set before runAnalysis
+  // fires.  Without this, /api/analyze receives area_id: null and the new
+  // cached_jobs row is born with saved_area_id = NULL → Stored Value columns
+  // come back empty on CSV export.  The cache pre-warm inside
+  // _autoCacheOnDraw is fire-and-forget, so this only adds the ~100ms
+  // POST /api/areas round-trip before analysis starts — invisible against
+  // the several-second analysis itself.
+  await _autoCacheOnDraw();
   _showPropelioPolygonButton(e.layer.getLatLngs()[0]);
   const analysisRequest = beginLatestAnalysisRequest();
 
