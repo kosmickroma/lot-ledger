@@ -3684,6 +3684,12 @@ async def _run_download_csv(
                 "Comp Days on Market",
                 "Comp Listing URL",
                 "Comp Status",
+                # COMPATIBILITY LOCK: Good Comp slots immediately after Comp
+                # Status, grouped with the comp data columns. Mirror locks
+                # at parcel/orphan writerow append sites must place the
+                # "yes"/blank cell at the exact same offset. Do not move
+                # this column without coordinated updates at all three sites.
+                "Good Comp",
                 "RF_Comp Sold Price",
                 "RF_Comp Sold Date",
                 "RF_Comp $/sqft",
@@ -3706,14 +3712,6 @@ async def _run_download_csv(
                 "Stored MAO (ARV) Comment",
                 "Stored TDPP-MAO (ARV)",
                 "Stored TDPP-MAO (ARV) Comment",
-                # COMPATIBILITY LOCK: Good Comp MUST remain the final column.
-                # Mike's spreadsheets reference column indices; regrouping
-                # with comp data columns would shift indices and break
-                # downstream consumers. Mirrored locks at parcel/orphan
-                # row append sites prevent one-path drift. Do not reorder
-                # without explicit unlock. See
-                # docs/COMP_RATING_EXPORT_SPEC.md §3.2.
-                "Good Comp",
             ]
         )
         buffer.seek(0)
@@ -3911,6 +3909,10 @@ async def _run_download_csv(
                     int(_safe_float(propelio_comp.get("dom"))) if propelio_comp and _safe_float(propelio_comp.get("dom")) not in (None, 0.0) else "",
                     (propelio_comp.get("listing_url", "") or "") if propelio_comp else "",
                     (propelio_comp.get("status", "") or "") if propelio_comp else "",
+                    # COMPATIBILITY LOCK: Good Comp slots immediately after
+                    # Comp Status. Mirrored at header + orphan writerow.
+                    # Do not move without coordinated updates at all three sites.
+                    "yes" if _parcel_rating == "good" else "",
                     round(_safe_float(rf_comp.get("sold_price")), 0) if rf_comp and _safe_float(rf_comp.get("sold_price")) is not None else "",
                     (rf_comp.get("sold_date", "") or "") if rf_comp else "",
                     round(_safe_float(rf_comp.get("price_per_sqft")), 0) if rf_comp and _safe_float(rf_comp.get("price_per_sqft")) is not None else "",
@@ -3924,13 +3926,6 @@ async def _run_download_csv(
                     "yes" if str(row.get("account_num", "") or "") in seed_account_nums else "",
                     csv_share_id,
                     *stored_value_export_cells,
-                    # COMPATIBILITY LOCK: keep "Good Comp" as the final element
-                    # of this row. Mirror of the lock at the header writerow.
-                    # Do not insert new fields between *stored_value_export_cells
-                    # and this line without also updating the header and the
-                    # orphan writerow tail. See
-                    # docs/COMP_RATING_EXPORT_SPEC.md §3.2.
-                    "yes" if _parcel_rating == "good" else "",
                 ]
             )
             buffer.seek(0)
@@ -4174,26 +4169,23 @@ async def _run_download_csv(
                     _dom_csv,                                                                                    # 93 Comp DOM
                     "",                                                                                          # 94 Comp Listing URL
                     _comp_status_titled,                                                                         # 95 Comp Status
-                    "",                                                                                          # 96 RF_Comp Sold Price
-                    "",                                                                                          # 97 RF_Comp Sold Date
-                    "",                                                                                          # 98 RF_Comp $/sqft
-                    "",                                                                                          # 99 RF_Comp Year Built
-                    "",                                                                                          # 100 RF_Comp Living Area
-                    "",                                                                                          # 101 RF_Comp Lot Size
-                    "",                                                                                          # 102 RF_Comp Beds
-                    "",                                                                                          # 103 RF_Comp Baths
-                    "",                                                                                          # 104 RF_Comp DOM
-                    "",                                                                                          # 105 RF_Comp Listing URL
-                    "",                                                                                          # 106 Seed Target
-                    csv_share_id,                                                                                # 107 share_id
-                    *stored_value_export_cells,                                                                   # 108-117 stored value snapshot
-                    # COMPATIBILITY LOCK: keep "Good Comp" as the final element
-                    # of this row. Mirror of the lock at the header writerow
-                    # and the parcel writerow. Do not insert new fields
-                    # between *stored_value_export_cells and this line
-                    # without also updating the header and the parcel
-                    # writerow tail. See docs/COMP_RATING_EXPORT_SPEC.md §3.2.
-                    "yes" if _orphan_rating == "good" else "",                                                    # 118 Good Comp
+                    # COMPATIBILITY LOCK: Good Comp slots immediately after
+                    # Comp Status. Mirrored at header + parcel writerow.
+                    # Do not move without coordinated updates at all three sites.
+                    "yes" if _orphan_rating == "good" else "",                                                    # 96 Good Comp
+                    "",                                                                                          # 97 RF_Comp Sold Price
+                    "",                                                                                          # 98 RF_Comp Sold Date
+                    "",                                                                                          # 99 RF_Comp $/sqft
+                    "",                                                                                          # 100 RF_Comp Year Built
+                    "",                                                                                          # 101 RF_Comp Living Area
+                    "",                                                                                          # 102 RF_Comp Lot Size
+                    "",                                                                                          # 103 RF_Comp Beds
+                    "",                                                                                          # 104 RF_Comp Baths
+                    "",                                                                                          # 105 RF_Comp DOM
+                    "",                                                                                          # 106 RF_Comp Listing URL
+                    "",                                                                                          # 107 Seed Target
+                    csv_share_id,                                                                                # 108 share_id
+                    *stored_value_export_cells,                                                                   # 109-118 stored value snapshot
                 ]
             )
             buffer.seek(0)
