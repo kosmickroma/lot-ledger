@@ -3055,8 +3055,12 @@ async function restoreSavedArea(area, options = {}) {
             const detail = await resp.json();
             const geom = detail.geometry;
             if (geom && (geom.type === "Polygon" || geom.type === "MultiPolygon")) {
+              // Match the click-to-select purple outline so location pins
+              // look identical to mouse-clicked parcels.
               highlightLayer = L.geoJSON(detail, {
-                style: { color: "#f1c40f", weight: 3, fill: false, interactive: false },
+                pane: "selectedOutlinePane",
+                className: "selected-outline-glow",
+                style: { color: "#a855f7", weight: 5, fill: false, interactive: false },
                 interactive: false,
               }).addTo(map);
             }
@@ -3066,8 +3070,9 @@ async function restoreSavedArea(area, options = {}) {
         }
         if (!highlightLayer) {
           highlightLayer = L.circleMarker(latlng, {
-            radius: 14, color: "#f1c40f", weight: 3,
-            fillColor: "#f1c40f", fillOpacity: 0.12,
+            pane: "selectedOutlinePane",
+            radius: 14, color: "#a855f7", weight: 5,
+            fillColor: "#a855f7", fillOpacity: 0.08,
             interactive: false,
           }).addTo(map);
         }
@@ -6007,6 +6012,9 @@ const AddressSearch = L.Control.extend({
           let highlightLayer = null;
 
           // Direct DB lookup — works for any parcel size, no tile dependency.
+          // Style matches the click-to-select purple outline (chunk-5 selection
+          // visual), so address-search-selected parcels and mouse-click-selected
+          // parcels look identical. Same z-index pane + drop-shadow glow.
           try {
             const resp = await fetch(`/api/parcel/near?lat=${slat}&lng=${slng}`);
             if (resp.ok) {
@@ -6014,7 +6022,9 @@ const AddressSearch = L.Control.extend({
               const geom = detail.geometry;
               if (geom && (geom.type === "Polygon" || geom.type === "MultiPolygon")) {
                 highlightLayer = L.geoJSON(detail, {
-                  style: { color: "#f1c40f", weight: 5, fill: false, interactive: false },
+                  pane: "selectedOutlinePane",
+                  className: "selected-outline-glow",
+                  style: { color: "#a855f7", weight: 5, fill: false, interactive: false },
                   interactive: false,
                 }).addTo(map);
               }
@@ -6024,12 +6034,15 @@ const AddressSearch = L.Control.extend({
           }
 
           if (!highlightLayer) {
+            // No parcel polygon available — drop a purple ring at the lat/lng
+            // as a fallback. Same visual family as the polygon outline above.
             highlightLayer = L.circleMarker(latlng, {
+              pane: "selectedOutlinePane",
               radius: 14,
-              color: "#f1c40f",
-              weight: 3,
-              fillColor: "#f1c40f",
-              fillOpacity: 0.12,
+              color: "#a855f7",
+              weight: 5,
+              fillColor: "#a855f7",
+              fillOpacity: 0.08,
               interactive: false,
             }).addTo(map);
           }
@@ -6544,6 +6557,22 @@ function _panelDisplayValue(value) {
   return value && value !== "N/A" ? value : "N/A";
 }
 
+// Total Value display with prior-year provenance tag. When build_feature
+// (api/counties/dcad.py) emits a non-empty total_value_source flag on the
+// parcel properties — currently Collin-only via _normalize_collin_row's
+// cert_total_value fallback — append " (prior year YYYY)" to the displayed
+// value so analysts know the number is from last certification, not this
+// year's roll. Keeps p.tot_val itself numeric-clean for passesNumericFilters.
+function _totalValueDisplay(p) {
+  const raw = p?.tot_val;
+  if (!raw || raw === "N/A") return "N/A";
+  const source = String(p?.total_value_source || "").trim();
+  if (!source) return raw;
+  const yearMatch = source.startsWith("prior_year_cert_") ? source.slice("prior_year_cert_".length) : "";
+  const suffix = yearMatch ? `(prior year ${yearMatch})` : "(prior year)";
+  return `${raw} <span class="prior-year-tag" style="opacity:0.7;font-style:italic;font-size:11px;">${suffix}</span>`;
+}
+
 function _buildParcelDetailTableRow(label, value) {
   return `<tr><td class="popup-label">${label}</td><td class="popup-val">${value || "N/A"}</td></tr>`;
 }
@@ -6806,7 +6835,7 @@ function _buildParcelDetailPanelHtml(p, matchedComp) {
             <table class="popup-table">
               ${_buildParcelDetailTableRow("Owner", _panelDisplayValue(p.owner))}
               ${_buildParcelDetailTableRow("Land Value", _panelDisplayValue(p.land_val))}
-              ${_buildParcelDetailTableRow("Total Value", _panelDisplayValue(p.tot_val))}
+              ${_buildParcelDetailTableRow("Total Value", _totalValueDisplay(p))}
               ${listingDelta ? _buildParcelDetailTableRow(listingDelta.label, `<span style="color:${listingDelta.color}">${_propelioEscape(listingDelta.text)}</span>`) : ""}
               ${compDelta ? _buildParcelDetailTableRow(compDelta.label, `<span style="color:${compDelta.color}">${_propelioEscape(compDelta.text)}</span>`) : ""}
               ${_buildParcelDetailTableRow("Land % of Total", _panelDisplayValue(p.land_pct))}
@@ -7091,7 +7120,7 @@ function makePopupHtml(p) {
         <table class="popup-table">
           ${row("Owner", p.owner)}
           ${row("Land Value", p.land_val)}
-          ${row("Total Value", p.tot_val)}
+          ${row("Total Value", _totalValueDisplay(p))}
           ${listingDeltaRow}
           ${propelioDeltaRow}
           ${row("Land % of Total", p.land_pct)}
@@ -9107,7 +9136,7 @@ map.on("click", async (ev) => {
     const resp = await fetch(`/api/parcel/${county}/${accountNum}`);
     if (!resp.ok) return;
     const detail = await resp.json();
-    openParcelDetailPanel(detail.properties || detail, { latlng: ev.latlng });
+    openParcelDetailPanel(detail.properties || detail, { latlng: ev.latlng, geometry: detail.geometry });
   } catch (e) {
     console.error("Browse popup failed", e);
   }

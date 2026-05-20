@@ -501,6 +501,7 @@ def build_feature(row: dict[str, Any], prop_type: str, on_redfin: bool, redfin_l
         "owner": _clean_text(row.get("owner_name")),
         "land_val": "Ag-exempt" if ag_zero else (f"${row['land_val']:,.0f}" if _safe_float(row.get("land_val")) is not None else "N/A"),
         "tot_val": "Ag-exempt" if ag_zero else (f"${row['tot_val']:,.0f}" if _safe_float(row.get("tot_val")) is not None else "N/A"),
+        "total_value_source": _clean_text(row.get("total_value_source")),  # "" when not set, or "prior_year_cert_YYYY"
         "land_pct": f"{land_pct:.1f}%" if land_pct is not None else "N/A",
         "lot_sqft": f"{int(area_size):,} sf{est_tag}" if area_size is not None and area_size > 0 else "N/A",
         "lot_acres": f"{area_size / 43560:.2f} ac{est_tag}" if area_size is not None and area_size > 0 else "N/A",

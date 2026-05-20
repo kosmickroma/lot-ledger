@@ -209,7 +209,21 @@ def _classify_collin(row: dict[str, Any]) -> str:
 def _normalize_collin_row(raw: dict[str, Any]) -> dict[str, Any]:
     sptd_code = _clean_text(raw.get("state_cd"))
     land_val = _safe_float(raw.get("land_value"))
-    tot_val = _safe_float(raw.get("total_value"))
+    tot_val_current = _safe_float(raw.get("total_value"))
+    cert_tot_val = _safe_float(raw.get("cert_total_value"))
+
+    # Prior-year fallback: if current is null/0 but cert is real, use cert.
+    # `cert_total_value` represents Collin's last final certified value, baked
+    # into the shapefile DBF — when GIS staff have drawn a polygon but the
+    # appraisal team hasn't entered this year's value yet, this carries the
+    # last-known-good value forward. Tag with provenance for UX surfacing.
+    total_value_source: str | None = None
+    if (tot_val_current is None or tot_val_current <= 0) and cert_tot_val and cert_tot_val > 0:
+        tot_val = cert_tot_val
+        cert_year = _clean_text(raw.get("cert_val_year")) or ""
+        total_value_source = f"prior_year_cert_{cert_year}" if cert_year else "prior_year_cert"
+    else:
+        tot_val = tot_val_current
 
     area_size = _safe_float(raw.get("land_sqft"))
     area_estimated = False
@@ -329,6 +343,7 @@ def _normalize_collin_row(raw: dict[str, Any]) -> dict[str, Any]:
         "curr_ag_market_value": _safe_float(raw.get("curr_ag_market_value")),
         "curr_ag_loss_value": _safe_float(raw.get("curr_ag_loss_value")),
         "cert_total_value": _safe_float(raw.get("cert_total_value")),
+        "total_value_source": total_value_source,  # None when current-year is used
     }
 
 
