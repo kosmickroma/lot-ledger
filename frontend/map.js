@@ -633,6 +633,59 @@ function _sameParcelIdentity(a, b) {
     && String(a.account || "").trim() === String(b.account || "").trim();
 }
 
+// Per-county normalizer: produces "STREET CITY" with no comma, no state,
+// no ZIP, no duplicate city. Each county's source data is shaped
+// differently — this is the single place that handles the variance.
+//
+// - collin: property_address bundles "STREET CITY, TX ZIP"  → strip from first comma.
+// - denton: property_address is "STREET, CITY, TX"          → take street, append property_city.
+// - tad   : property_address is "STREET" only (no city)     → return street.
+// - dcad  : property_address is "STREET" only (no city)     → return street.
+//
+// TAD + DCAD will appear without a city until KK lands a city-resolver
+// for those two (memory: project_save_vs_update_model notes scope).
+function _formatPropertyAddress(county, rawAddr, rawCity) {
+  const addr = String(rawAddr || "").trim();
+  if (!addr) return "";
+  const city = String(rawCity || "").trim();
+  const c = String(county || "").trim().toLowerCase();
+
+  switch (c) {
+    case "collin": {
+      // "1713 N COLLEGE ST MCKINNEY, TX 75069" → "1713 N COLLEGE ST MCKINNEY"
+      const beforeComma = addr.split(",")[0].trim();
+      return beforeComma || addr;
+    }
+    case "denton": {
+      // "8812 ENCLAVE WAY, NORTHLAKE, TX" → "8812 ENCLAVE WAY" + " NORTHLAKE"
+      const street = addr.split(",")[0].trim();
+      if (city && street) {
+        const lower = street.toLowerCase();
+        const cityLower = city.toLowerCase();
+        if (!lower.endsWith(cityLower)) {
+          return `${street} ${city}`;
+        }
+      }
+      return street || addr;
+    }
+    case "tad":
+    case "dcad": {
+      // No reliable city in source. Strip any stray comma fragments.
+      return addr.split(",")[0].trim() || addr;
+    }
+    default: {
+      // Unknown county: conservative — return addr, append city only if
+      // it isn't already the trailing token.
+      if (city) {
+        const tokens = addr.split(/\s+/);
+        const last = (tokens[tokens.length - 1] || "").toLowerCase();
+        if (last !== city.toLowerCase()) return `${addr} ${city}`.trim();
+      }
+      return addr;
+    }
+  }
+}
+
 function _setCurrentTargetParcel(parcel) {
   const normalized = _normalizeTargetParcel(parcel);
   _currentTargetParcel = normalized;
@@ -643,6 +696,75 @@ function _setCurrentTargetParcel(parcel) {
   ) {
     void _ensureCurrentTargetParcelCoords();
   }
+  // Keep the Target row in the active-item slot in lock-step with the
+  // current bonded originator. Non-null → resolve address + show row;
+  // null → hide row. Address resolution is async (cache-first, fetch
+  // fallback) — the row stays hidden until resolution completes to
+  // avoid a "Target —" placeholder flash.
+  if (normalized) {
+    void _refreshOriginatorTargetLabel(normalized.county, normalized.account);
+  } else {
+    _setOriginatorTargetLabel(null);
+  }
+}
+
+function _setOriginatorTargetLabel(addr) {
+  const row = document.getElementById("active-item-target-row");
+  const nameEl = document.getElementById("active-item-target-name");
+  if (!row || !nameEl) return;
+  const text = (addr || "").toString().trim();
+  if (!text) {
+    nameEl.textContent = "";
+    row.classList.add("hidden");
+    return;
+  }
+  nameEl.textContent = text;
+  row.classList.remove("hidden");
+}
+
+async function _resolveTargetAddress(county, account) {
+  const c = String(county || "").trim().toLowerCase();
+  const a = String(account || "").trim();
+  if (!c || !a) return null;
+  // Always fetch + format from raw props. Cache `name` can carry
+  // pre-fix dirty values ("STREET CITY, TX ZIP CITY") for parcels saved
+  // before _formatPropertyAddress landed — fetching guarantees we
+  // rebuild from the source row each time.
+  try {
+    const resp = await fetch(`/api/parcel/${encodeURIComponent(c)}/${encodeURIComponent(a)}`);
+    if (!resp.ok) {
+      // Fetch failed (404, network) — fall back to whatever the cache
+      // has so the Subject Property row still shows something.
+      const cached = (Array.isArray(_savedParcelsCache) ? _savedParcelsCache : []).find((p) =>
+        String(p?.account_num || "").trim() === a
+        && String(p?.county || "").trim().toLowerCase() === c,
+      );
+      const fallback = String(cached?.name || "").trim();
+      return fallback || null;
+    }
+    const detail = await resp.json();
+    const props = detail?.properties || detail || {};
+    const formatted = _formatPropertyAddress(c, props.addr, props.city);
+    return formatted || null;
+  } catch (err) {
+    console.warn("[subject-property] address resolve failed:", err);
+    return null;
+  }
+}
+
+async function _refreshOriginatorTargetLabel(county, account) {
+  const c = String(county || "").trim().toLowerCase();
+  const a = String(account || "").trim();
+  if (!c || !a) {
+    _setOriginatorTargetLabel(null);
+    return;
+  }
+  const addr = await _resolveTargetAddress(c, a);
+  // Guard against races: if the user switched workspaces between the
+  // fetch firing and resolving, _currentTargetParcel will have moved on
+  // and we'd stomp the new label with stale data.
+  if (!_sameParcelIdentity(_currentTargetParcel, { county: c, account: a })) return;
+  _setOriginatorTargetLabel(addr);
 }
 
 async function _ensureCurrentTargetParcelCoords() {
@@ -982,6 +1104,7 @@ function clearActiveItem() {
   const nameEl = document.getElementById("active-item-name");
   if (typeEl) typeEl.textContent = "Workspace";
   if (nameEl) nameEl.textContent = "—";
+  _setOriginatorTargetLabel(null);
   _updateActiveItemRenameVisibility();
 }
 
@@ -2706,7 +2829,14 @@ async function saveParcel(account_num, county, addr, lat, lng, geometry) {
     _setCurrentTargetParcel({ county: targetCounty, account: targetAccount, lat, lng });
     void _renderOriginatorTargetStar(targetCounty, targetAccount, lat, lng);
   }
-  setActiveItem("Workspace", row.name);
+  // Only seed the Workspace slot label when there is no loaded workspace.
+  // When one is loaded (xyz), saving a different parcel as the new target
+  // must NOT rename the workspace — the Target row (updated via
+  // _setCurrentTargetParcel above) carries the new address; the workspace
+  // name belongs to the user.
+  if (!_currentLoadedAreaId) {
+    setActiveItem("Workspace", row.name);
+  }
 }
 
 async function _rightClickSaveParcel(p, knownGeometry) {
@@ -2739,20 +2869,10 @@ async function _rightClickSaveParcel(p, knownGeometry) {
       if (resp.ok) {
         const detail = await resp.json();
         const props = detail.properties || detail;
-        addr = addr || String(props.addr || "");
-        const propsCity = String(props.city || "").trim();
-        if (propsCity && addr) {
-          // Tighter "already has city" guard than includes(): tokenize addr by
-          // whitespace and check whether the last token already matches the city
-          // case-insensitively. This avoids false-matching things like "Plano"
-          // appearing inside "Esplanade Dr" (which includes() would mishandle).
-          const addrTokens = addr.trim().split(/\s+/);
-          const lastToken = (addrTokens[addrTokens.length - 1] || "").toLowerCase();
-          const cityLower = propsCity.toLowerCase();
-          if (lastToken !== cityLower) {
-            addr = `${addr.trim()} ${propsCity}`.trim();
-          }
-        }
+        // Normalize per-county to "STREET CITY" (no comma/state/zip/dupe).
+        // Always rebuild from raw props rather than trusting the incoming
+        // `addr` arg, since it can be pre-concatenated upstream.
+        addr = _formatPropertyAddress(county, props.addr || addr, props.city);
         if (!Number.isFinite(lat) && Number.isFinite(Number(props.lat))) lat = Number(props.lat);
         if (!Number.isFinite(lng) && Number.isFinite(Number(props.lng))) lng = Number(props.lng);
         if (!geometry && (detail.geometry?.type === "Polygon" || detail.geometry?.type === "MultiPolygon")) {
@@ -4947,6 +5067,33 @@ function _compPropertyTypeBucket(comp) {
   return null;
 }
 
+// Resolve a Propelio comp's tax appraised value via its matched CAD
+// parcel. Propelio data itself carries sold/list price, never tax
+// assessment — but propelio_comps rows store (parcel_account_num,
+// parcel_county) pointing back to whichever CAD parcel matched at
+// scrape time, and the CAD parcel feature in lastAnalysisGeojson
+// carries `tot_val`. Returns a number, or null when the comp has no
+// CAD match (orphan / cross-county spillover) or the parcel isn't in
+// the current analysis geojson.
+function _compMatchedTotVal(comp) {
+  const acct = String(comp?.parcel_account_num || "").trim();
+  if (!acct) return null;
+  const features = lastAnalysisGeojson?.features;
+  if (!Array.isArray(features) || features.length === 0) return null;
+  const cnty = String(comp?.parcel_county || "").trim().toLowerCase();
+  const match = features.find((f) => {
+    const p = f?.properties || {};
+    if (String(p.account_num || "").trim() !== acct) return false;
+    // Match on county when the comp specifies one — protects against
+    // cross-county account_num collisions (rare but possible).
+    if (cnty && String(p.source_county || "").trim().toLowerCase() !== cnty) return false;
+    return true;
+  });
+  if (!match) return null;
+  const raw = String(match.properties?.tot_val || "").replace(/[$,]/g, "").match(/^[\d.]+/);
+  return raw ? Number(raw[0]) : null;
+}
+
 function compPassesPropelioFilters(comp, filters) {
   const status = String(comp?.status || "").toLowerCase();
   // Status checkbox filters
@@ -5003,6 +5150,26 @@ function compPassesPropelioFilters(comp, filters) {
   const price = Number(comp?.price);
   if (filters.priceMin != null && (!Number.isFinite(price) || price < filters.priceMin)) return false;
   if (filters.priceMax != null && (!Number.isFinite(price) || price > filters.priceMax)) return false;
+
+  // Property Filters (the global #numeric-filters / "Property Filters"
+  // section) also gate comps as of 2026-05-20. Lot/sqft/year translate
+  // directly from comp data; appraised value comes from the comp's
+  // MATCHED CAD parcel (Propelio comps don't carry tot_val themselves —
+  // we follow the parcel_account_num + parcel_county link into
+  // lastAnalysisGeojson). When both Property Filters and Comp Filters
+  // constrain the same dimension, the stricter wins (AND). `lotSqft`,
+  // `sqft`, `yr` are reused from the comp-filter blocks above.
+  if (numericFilters.lot_sqft_min != null && (!Number.isFinite(lotSqft) || lotSqft < numericFilters.lot_sqft_min)) return false;
+  if (numericFilters.lot_sqft_max != null && (!Number.isFinite(lotSqft) || lotSqft > numericFilters.lot_sqft_max)) return false;
+  if (numericFilters.yr_built_min != null && (!Number.isFinite(yr) || yr < numericFilters.yr_built_min)) return false;
+  if (numericFilters.yr_built_max != null && (!Number.isFinite(yr) || yr > numericFilters.yr_built_max)) return false;
+  if (numericFilters.sqft_min != null && (!Number.isFinite(sqft) || sqft < numericFilters.sqft_min)) return false;
+  if (numericFilters.sqft_max != null && (!Number.isFinite(sqft) || sqft > numericFilters.sqft_max)) return false;
+  if (numericFilters.appr_val_min != null || numericFilters.appr_val_max != null) {
+    const compTotVal = _compMatchedTotVal(comp);
+    if (numericFilters.appr_val_min != null && (compTotVal == null || compTotVal < numericFilters.appr_val_min)) return false;
+    if (numericFilters.appr_val_max != null && (compTotVal == null || compTotVal > numericFilters.appr_val_max)) return false;
+  }
 
   // Parcel-type gate: hide comp if its bucket is toggled off in Property Type
   // Filters. CAD is the source of truth — when a comp matches a parcel, the
@@ -6196,6 +6363,10 @@ function _applyNumericFilters() {
     : renderFeatures(lastAnalysisGeojson);
   const counts = getVisibleFeatureCounts(lastAnalysisGeojson.features || [], { ignoreBucketToggles: true });
   if (lastAnalysisCounts) renderSidebar(counts, markers || {});
+  // Property Filters now also gate Propelio comps (compPassesPropelioFilters
+  // reads numericFilters). Keep the comp overlay + list in sync when the
+  // user edits a Property Filter input.
+  applyPropelioClientFilters();
   _refreshLoadedAreaUi();
 }
 
@@ -8176,7 +8347,7 @@ map.on("draw:created", async (e) => {
   propelioCmaChip.hide();
   // Await the autosave so _currentLoadedAreaId is set before runAnalysis
   // fires.  Without this, /api/analyze receives area_id: null and the new
-  // cached_jobs row is born with saved_area_id = NULL → Stored Value columns
+  // cached_jobs row is born with saved_area_id = NULL → Stored Values columns
   // come back empty on CSV export.  The cache pre-warm inside
   // _autoCacheOnDraw is fire-and-forget, so this only adds the ~100ms
   // POST /api/areas round-trip before analysis starts — invisible against
@@ -8494,6 +8665,17 @@ document.getElementById("btn-download").addEventListener("click", async () => {
 });
 
 function _suggestAreaNameFromContainedParcels() {
+  // Save Area = Save As (always creates a new saved_areas row). If a
+  // workspace is already loaded, the user's mental model is "fork xyz
+  // into a new one" — pre-fill with the current workspace name so they
+  // can hit Enter to keep it (dedupes server-side to "xyz (2)") or type
+  // a replacement. Beats stomping it with whatever target address
+  // happens to be in the polygon.
+  if (_currentLoadedAreaId) {
+    const loaded = _savedAreasCache.find((a) => String(a.id) === String(_currentLoadedAreaId));
+    const loadedName = String(loaded?.name || "").trim();
+    if (loadedName) return loadedName;
+  }
   if (!Array.isArray(lastPolygon) || lastPolygon.length < 3) return null;
   if (!Array.isArray(_savedParcelsCache) || _savedParcelsCache.length === 0) return null;
   for (const p of _savedParcelsCache) {
@@ -8948,7 +9130,7 @@ function _wireParcelInteractiveUi(root, options = {}) {
     saveLink.addEventListener("click", async (ev) => {
       ev.preventDefault();
       const { account, county, addr, city, lat, lng } = saveLink.dataset;
-      const fullName = city ? `${(addr || "").trim()} ${city.trim()}`.trim() : (addr || "").trim();
+      const fullName = _formatPropertyAddress(county, addr, city);
       let geometry = null;
       try {
         const resp = await fetch(`/api/parcel/${county}/${account}`);
@@ -9808,7 +9990,7 @@ async function stopDeepPull() {
 
 document.getElementById("btn-deep-pull-stop")?.addEventListener("click", stopDeepPull);
 
-// ─── Stored Value sidebar block (Phase 3 wiring) ─────────────────────────
+// ─── Stored Values sidebar block (Phase 3 wiring) ────────────────────────
 // Workspace-scoped per-saved-area value tracking. Backed by
 // stored_value_entries. Manual fields: arv, tdpp, rehab_needed.
 // Calc fields (computed locally + server-side):

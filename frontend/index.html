@@ -35,6 +35,10 @@
       </div>
       <div id="active-item-slot" class="active-item-slot">
         <div class="active-item-slot-inner">
+          <div id="active-item-target-row" class="active-item-target-row hidden">
+            <span class="active-item-target-type">Subject Property</span>
+            <span class="active-item-target-name" id="active-item-target-name"></span>
+          </div>
           <span class="active-item-type" id="active-item-type">Workspace</span>
           <strong class="active-item-name" id="active-item-name">—</strong>
           <button id="active-item-rename" class="active-item-rename-btn hidden" type="button" title="Rename workspace" aria-label="Rename workspace">✎</button>
@@ -60,7 +64,7 @@
       <div id="stored-value-block" class="filter-card collapsible-section hidden">
         <div class="section-header">
           <button class="section-toggle" type="button" data-target="stored-value-body" aria-expanded="true">
-            <span class="sidebar-label">Stored Value</span>
+            <span class="sidebar-label">Stored Values</span>
           </button>
           <span id="stored-value-status" class="stored-value-status" aria-live="polite" data-state="idle">Saved</span>
         </div>
