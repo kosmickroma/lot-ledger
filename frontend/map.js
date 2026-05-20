@@ -3055,8 +3055,12 @@ async function restoreSavedArea(area, options = {}) {
             const detail = await resp.json();
             const geom = detail.geometry;
             if (geom && (geom.type === "Polygon" || geom.type === "MultiPolygon")) {
+              // Match the click-to-select purple outline so location pins
+              // look identical to mouse-clicked parcels.
               highlightLayer = L.geoJSON(detail, {
-                style: { color: "#f1c40f", weight: 3, fill: false, interactive: false },
+                pane: "selectedOutlinePane",
+                className: "selected-outline-glow",
+                style: { color: "#a855f7", weight: 5, fill: false, interactive: false },
                 interactive: false,
               }).addTo(map);
             }
@@ -3066,8 +3070,9 @@ async function restoreSavedArea(area, options = {}) {
         }
         if (!highlightLayer) {
           highlightLayer = L.circleMarker(latlng, {
-            radius: 14, color: "#f1c40f", weight: 3,
-            fillColor: "#f1c40f", fillOpacity: 0.12,
+            pane: "selectedOutlinePane",
+            radius: 14, color: "#a855f7", weight: 5,
+            fillColor: "#a855f7", fillOpacity: 0.08,
             interactive: false,
           }).addTo(map);
         }
@@ -6007,6 +6012,9 @@ const AddressSearch = L.Control.extend({
           let highlightLayer = null;
 
           // Direct DB lookup — works for any parcel size, no tile dependency.
+          // Style matches the click-to-select purple outline (chunk-5 selection
+          // visual), so address-search-selected parcels and mouse-click-selected
+          // parcels look identical. Same z-index pane + drop-shadow glow.
           try {
             const resp = await fetch(`/api/parcel/near?lat=${slat}&lng=${slng}`);
             if (resp.ok) {
@@ -6014,7 +6022,9 @@ const AddressSearch = L.Control.extend({
               const geom = detail.geometry;
               if (geom && (geom.type === "Polygon" || geom.type === "MultiPolygon")) {
                 highlightLayer = L.geoJSON(detail, {
-                  style: { color: "#f1c40f", weight: 5, fill: false, interactive: false },
+                  pane: "selectedOutlinePane",
+                  className: "selected-outline-glow",
+                  style: { color: "#a855f7", weight: 5, fill: false, interactive: false },
                   interactive: false,
                 }).addTo(map);
               }
@@ -6024,12 +6034,15 @@ const AddressSearch = L.Control.extend({
           }
 
           if (!highlightLayer) {
+            // No parcel polygon available — drop a purple ring at the lat/lng
+            // as a fallback. Same visual family as the polygon outline above.
             highlightLayer = L.circleMarker(latlng, {
+              pane: "selectedOutlinePane",
               radius: 14,
-              color: "#f1c40f",
-              weight: 3,
-              fillColor: "#f1c40f",
-              fillOpacity: 0.12,
+              color: "#a855f7",
+              weight: 5,
+              fillColor: "#a855f7",
+              fillOpacity: 0.08,
               interactive: false,
             }).addTo(map);
           }
@@ -9123,7 +9136,7 @@ map.on("click", async (ev) => {
     const resp = await fetch(`/api/parcel/${county}/${accountNum}`);
     if (!resp.ok) return;
     const detail = await resp.json();
-    openParcelDetailPanel(detail.properties || detail, { latlng: ev.latlng });
+    openParcelDetailPanel(detail.properties || detail, { latlng: ev.latlng, geometry: detail.geometry });
   } catch (e) {
     console.error("Browse popup failed", e);
   }
