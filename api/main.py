@@ -3401,6 +3401,50 @@ async def _run_download_csv(
         finally:
             release_session_conn(_conn)
 
+    # Comp ratings pre-fetch: snapshot the workspace's rating state once at
+    # export start. Bad-rated rows are skipped entirely; good-rated rows get
+    # a "yes" in the trailing Good Comp column. Unsaved-area exports
+    # (job_saved_area_id is None) skip this entirely → no drops, no flags.
+    # See docs/COMP_RATING_EXPORT_SPEC.md §3.3 File 3.
+    rating_by_comp_id: dict[int, str] = {}
+    if job_saved_area_id:
+        _conn = get_session_conn()
+        try:
+            with _conn.cursor() as cur:
+                cur.execute(
+                    "SELECT comp_id, rating FROM comp_ratings WHERE workspace_id = %s",
+                    (job_saved_area_id,),
+                )
+                rating_by_comp_id = {int(cid): r for cid, r in cur.fetchall()}
+        finally:
+            release_session_conn(_conn)
+
+    def _rating_for(comp_id_raw) -> str | None:
+        """Resolve a comp_id (any type) to its rating, treating malformed
+        values as unrated. Never raises — degrades silently to None
+        (no drop, no flag) for ALL of the following inputs:
+
+        - None (legacy cached_jobs propelio_sold_points entries with no comp_id).
+        - bool (True/False are instances of int in Python; without this
+          explicit reject they would resolve to comp_id=1 / comp_id=0
+          and silently hit real or sentinel rating rows).
+        - Non-numeric types (string, dict, list, NaN payloads).
+        - OverflowError on absurdly large numeric values.
+        - Non-positive ints (comp_id is BIGSERIAL, always >= 1; negative,
+          zero, or sentinel-style values are not real comp_ids).
+
+        See docs/COMP_RATING_EXPORT_SPEC.md §3.3 File 3 + §4 decision #10.
+        """
+        if comp_id_raw is None or isinstance(comp_id_raw, bool):
+            return None
+        try:
+            cid = int(comp_id_raw)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if cid <= 0:
+            return None
+        return rating_by_comp_id.get(cid)
+
     # Visible parcel keys set — used both for parcel-row filtering AND for
     # deduping comp rows (a comp whose (parcel_county, parcel_account_num) is
     # already in this set is represented by its parent parcel row inline).
@@ -3429,7 +3473,7 @@ async def _run_download_csv(
         try:
             with _conn.cursor(cursor_factory=RealDictCursor) as _cur:
                 _cur.execute(
-                    "SELECT comp_address_key, address, lat, lng, status, last_status,"
+                    "SELECT comp_id, comp_address_key, address, lat, lng, status, last_status,"
                     " price, last_price, sold_date, close_date, dom, beds, baths,"
                     " sqft, lot_size, year_built, parcel_county, parcel_account_num"
                     " FROM propelio_comps WHERE comp_address_key = ANY(%s)",
@@ -3622,6 +3666,14 @@ async def _run_download_csv(
                 "Stored MAO (ARV) Comment",
                 "Stored TDPP-MAO (ARV)",
                 "Stored TDPP-MAO (ARV) Comment",
+                # COMPATIBILITY LOCK: Good Comp MUST remain the final column.
+                # Mike's spreadsheets reference column indices; regrouping
+                # with comp data columns would shift indices and break
+                # downstream consumers. Mirrored locks at parcel/orphan
+                # row append sites prevent one-path drift. Do not reorder
+                # without explicit unlock. See
+                # docs/COMP_RATING_EXPORT_SPEC.md §3.2.
+                "Good Comp",
             ]
         )
         buffer.seek(0)
@@ -3700,6 +3752,15 @@ async def _run_download_csv(
                 str(row.get("account_num", "") or "").strip(),
             )
             propelio_comp = propelio_comp_by_parcel_key.get(row_key)
+            # Comp-rating gate: skip parcel row entirely if the matched comp
+            # is rated 'bad' in this workspace. 'good' surfaces as "yes" in
+            # the trailing Good Comp column; unrated stays blank. See
+            # docs/COMP_RATING_EXPORT_SPEC.md §3.1.
+            _matched_rating = _rating_for(
+                propelio_comp.get("comp_id") if propelio_comp else None
+            )
+            if _matched_rating == "bad":
+                continue
             rf_comp = comp_by_parcel_key.get(str(row.get("account_num", "") or ""))
 
             _is_intended_target = (
@@ -3822,6 +3883,13 @@ async def _run_download_csv(
                     "yes" if str(row.get("account_num", "") or "") in seed_account_nums else "",
                     csv_share_id,
                     *stored_value_export_cells,
+                    # COMPATIBILITY LOCK: keep "Good Comp" as the final element
+                    # of this row. Mirror of the lock at the header writerow.
+                    # Do not insert new fields between *stored_value_export_cells
+                    # and this line without also updating the header and the
+                    # orphan writerow tail. See
+                    # docs/COMP_RATING_EXPORT_SPEC.md §3.2.
+                    "yes" if _matched_rating == "good" else "",
                 ]
             )
             buffer.seek(0)
@@ -3833,6 +3901,13 @@ async def _run_download_csv(
         # a visible parent parcel row). Same column shape as parcel rows; the
         # parcel-specific cells are left blank.
         for _c in orphan_comps:
+            # Comp-rating gate: skip orphan row entirely if the comp is rated
+            # 'bad' in this workspace. 'good' surfaces as "yes" in the
+            # trailing Good Comp column; unrated stays blank. See
+            # docs/COMP_RATING_EXPORT_SPEC.md §3.1.
+            _orphan_rating = _rating_for(_c.get("comp_id"))
+            if _orphan_rating == "bad":
+                continue
             _comp_price = _safe_float(_c.get("price")) or _safe_float(_c.get("last_price"))
             _comp_sqft = _safe_float(_c.get("sqft"))
             _comp_sold_date = _c.get("sold_date") or _c.get("close_date") or ""
@@ -4071,6 +4146,13 @@ async def _run_download_csv(
                     "",                                                                                          # 106 Seed Target
                     csv_share_id,                                                                                # 107 share_id
                     *stored_value_export_cells,                                                                   # 108-117 stored value snapshot
+                    # COMPATIBILITY LOCK: keep "Good Comp" as the final element
+                    # of this row. Mirror of the lock at the header writerow
+                    # and the parcel writerow. Do not insert new fields
+                    # between *stored_value_export_cells and this line
+                    # without also updating the header and the parcel
+                    # writerow tail. See docs/COMP_RATING_EXPORT_SPEC.md §3.2.
+                    "yes" if _orphan_rating == "good" else "",                                                    # 118 Good Comp
                 ]
             )
             buffer.seek(0)
