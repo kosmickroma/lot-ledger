@@ -5124,6 +5124,20 @@ function compPassesPropelioFilters(comp, filters) {
   if (filters.priceMin != null && (!Number.isFinite(price) || price < filters.priceMin)) return false;
   if (filters.priceMax != null && (!Number.isFinite(price) || price > filters.priceMax)) return false;
 
+  // Property Filters (the global #numeric-filters / "Property Filters"
+  // section) also gate comps as of 2026-05-20. Three of the four
+  // dimensions translate to comp records; appraised value (appr_val_*)
+  // doesn't — comps carry sold/list price, not CAD tax assessment. When
+  // both Property Filters and Comp Filters constrain the same dimension,
+  // the stricter of the two wins (AND semantics). `lotSqft`, `sqft`,
+  // `yr` are reused from the comp-filter blocks above.
+  if (numericFilters.lot_sqft_min != null && (!Number.isFinite(lotSqft) || lotSqft < numericFilters.lot_sqft_min)) return false;
+  if (numericFilters.lot_sqft_max != null && (!Number.isFinite(lotSqft) || lotSqft > numericFilters.lot_sqft_max)) return false;
+  if (numericFilters.yr_built_min != null && (!Number.isFinite(yr) || yr < numericFilters.yr_built_min)) return false;
+  if (numericFilters.yr_built_max != null && (!Number.isFinite(yr) || yr > numericFilters.yr_built_max)) return false;
+  if (numericFilters.sqft_min != null && (!Number.isFinite(sqft) || sqft < numericFilters.sqft_min)) return false;
+  if (numericFilters.sqft_max != null && (!Number.isFinite(sqft) || sqft > numericFilters.sqft_max)) return false;
+
   // Parcel-type gate: hide comp if its bucket is toggled off in Property Type
   // Filters. CAD is the source of truth — when a comp matches a parcel, the
   // parcel's prop_type wins. When CAD has nothing to say, Propelio's coarse
@@ -6316,6 +6330,10 @@ function _applyNumericFilters() {
     : renderFeatures(lastAnalysisGeojson);
   const counts = getVisibleFeatureCounts(lastAnalysisGeojson.features || [], { ignoreBucketToggles: true });
   if (lastAnalysisCounts) renderSidebar(counts, markers || {});
+  // Property Filters now also gate Propelio comps (compPassesPropelioFilters
+  // reads numericFilters). Keep the comp overlay + list in sync when the
+  // user edits a Property Filter input.
+  applyPropelioClientFilters();
   _refreshLoadedAreaUi();
 }
 
