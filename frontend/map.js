@@ -8176,7 +8176,7 @@ map.on("draw:created", async (e) => {
   propelioCmaChip.hide();
   // Await the autosave so _currentLoadedAreaId is set before runAnalysis
   // fires.  Without this, /api/analyze receives area_id: null and the new
-  // cached_jobs row is born with saved_area_id = NULL → Stored Value columns
+  // cached_jobs row is born with saved_area_id = NULL → Stored Values columns
   // come back empty on CSV export.  The cache pre-warm inside
   // _autoCacheOnDraw is fire-and-forget, so this only adds the ~100ms
   // POST /api/areas round-trip before analysis starts — invisible against
@@ -9808,7 +9808,7 @@ async function stopDeepPull() {
 
 document.getElementById("btn-deep-pull-stop")?.addEventListener("click", stopDeepPull);
 
-// ─── Stored Value sidebar block (Phase 3 wiring) ─────────────────────────
+// ─── Stored Values sidebar block (Phase 3 wiring) ────────────────────────
 // Workspace-scoped per-saved-area value tracking. Backed by
 // stored_value_entries. Manual fields: arv, tdpp, rehab_needed.
 // Calc fields (computed locally + server-side):
