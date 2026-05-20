@@ -643,6 +643,76 @@ function _setCurrentTargetParcel(parcel) {
   ) {
     void _ensureCurrentTargetParcelCoords();
   }
+  // Keep the Target row in the active-item slot in lock-step with the
+  // current bonded originator. Non-null → resolve address + show row;
+  // null → hide row. Address resolution is async (cache-first, fetch
+  // fallback) — the row stays hidden until resolution completes to
+  // avoid a "Target —" placeholder flash.
+  if (normalized) {
+    void _refreshOriginatorTargetLabel(normalized.county, normalized.account);
+  } else {
+    _setOriginatorTargetLabel(null);
+  }
+}
+
+function _setOriginatorTargetLabel(addr) {
+  const row = document.getElementById("active-item-target-row");
+  const nameEl = document.getElementById("active-item-target-name");
+  if (!row || !nameEl) return;
+  const text = (addr || "").toString().trim();
+  if (!text) {
+    nameEl.textContent = "";
+    row.classList.add("hidden");
+    return;
+  }
+  nameEl.textContent = text;
+  row.classList.remove("hidden");
+}
+
+async function _resolveTargetAddress(county, account) {
+  const c = String(county || "").trim().toLowerCase();
+  const a = String(account || "").trim();
+  if (!c || !a) return null;
+  // Cache-first: saved-parcels rows carry the address as `name` (set at
+  // saveParcel time via the addr arg). Common case for bonded originators.
+  try {
+    const cached = (Array.isArray(_savedParcelsCache) ? _savedParcelsCache : []).find((p) =>
+      String(p?.account_num || "").trim() === a
+      && String(p?.county || "").trim().toLowerCase() === c,
+    );
+    if (cached && cached.name) {
+      const trimmed = String(cached.name).trim();
+      if (trimmed) return trimmed;
+    }
+  } catch {}
+  // Fallback: same endpoint that resolves originator coords, so the network
+  // round-trip is paid at most once per workspace load (browser cache).
+  try {
+    const resp = await fetch(`/api/parcel/${encodeURIComponent(c)}/${encodeURIComponent(a)}`);
+    if (!resp.ok) return null;
+    const detail = await resp.json();
+    const props = detail?.properties || detail || {};
+    const addr = String(props.addr || "").trim();
+    return addr || null;
+  } catch (err) {
+    console.warn("[target-label] address resolve failed:", err);
+    return null;
+  }
+}
+
+async function _refreshOriginatorTargetLabel(county, account) {
+  const c = String(county || "").trim().toLowerCase();
+  const a = String(account || "").trim();
+  if (!c || !a) {
+    _setOriginatorTargetLabel(null);
+    return;
+  }
+  const addr = await _resolveTargetAddress(c, a);
+  // Guard against races: if the user switched workspaces between the
+  // fetch firing and resolving, _currentTargetParcel will have moved on
+  // and we'd stomp the new label with stale data.
+  if (!_sameParcelIdentity(_currentTargetParcel, { county: c, account: a })) return;
+  _setOriginatorTargetLabel(addr);
 }
 
 async function _ensureCurrentTargetParcelCoords() {
@@ -982,6 +1052,7 @@ function clearActiveItem() {
   const nameEl = document.getElementById("active-item-name");
   if (typeEl) typeEl.textContent = "Workspace";
   if (nameEl) nameEl.textContent = "—";
+  _setOriginatorTargetLabel(null);
   _updateActiveItemRenameVisibility();
 }
 
@@ -2706,7 +2777,14 @@ async function saveParcel(account_num, county, addr, lat, lng, geometry) {
     _setCurrentTargetParcel({ county: targetCounty, account: targetAccount, lat, lng });
     void _renderOriginatorTargetStar(targetCounty, targetAccount, lat, lng);
   }
-  setActiveItem("Workspace", row.name);
+  // Only seed the Workspace slot label when there is no loaded workspace.
+  // When one is loaded (xyz), saving a different parcel as the new target
+  // must NOT rename the workspace — the Target row (updated via
+  // _setCurrentTargetParcel above) carries the new address; the workspace
+  // name belongs to the user.
+  if (!_currentLoadedAreaId) {
+    setActiveItem("Workspace", row.name);
+  }
 }
 
 async function _rightClickSaveParcel(p, knownGeometry) {
@@ -8494,6 +8572,17 @@ document.getElementById("btn-download").addEventListener("click", async () => {
 });
 
 function _suggestAreaNameFromContainedParcels() {
+  // Save Area = Save As (always creates a new saved_areas row). If a
+  // workspace is already loaded, the user's mental model is "fork xyz
+  // into a new one" — pre-fill with the current workspace name so they
+  // can hit Enter to keep it (dedupes server-side to "xyz (2)") or type
+  // a replacement. Beats stomping it with whatever target address
+  // happens to be in the polygon.
+  if (_currentLoadedAreaId) {
+    const loaded = _savedAreasCache.find((a) => String(a.id) === String(_currentLoadedAreaId));
+    const loadedName = String(loaded?.name || "").trim();
+    if (loadedName) return loadedName;
+  }
   if (!Array.isArray(lastPolygon) || lastPolygon.length < 3) return null;
   if (!Array.isArray(_savedParcelsCache) || _savedParcelsCache.length === 0) return null;
   for (const p of _savedParcelsCache) {
