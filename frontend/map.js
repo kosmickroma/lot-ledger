@@ -911,6 +911,11 @@ function _populateSubjectPropertyCard(props, county) {
         parts.push(`${garageNum}-car garage`);
       }
     }
+    // Pool on line 1 (always visible) — the line-2 amenity cap can hide
+    // it when DCAD parcels have rich structural data filling the first
+    // 5 slots. Pool is the most investor-relevant amenity flag → top.
+    const poolFlag = String(props.pool_flag || "").trim().toUpperCase();
+    if (poolFlag === "T") parts.push("pool");
     const school = String(props.school || "").trim();
     if (school && school !== "N/A") parts.push(school);
     metaEl.textContent = parts.join(" · ");
@@ -1000,9 +1005,9 @@ function _populateSubjectPropertyCard(props, county) {
     }
 
     // 6+. Amenity flags — only push truthy ('T') and only when we still
-    //     have room. Order: pool, spa, sauna, fireplace, sprinkler, deck.
+    //     have room. Order: spa, sauna, fireplace, sprinkler, deck.
+    //     Pool is on line 1 (most investor-relevant — always visible).
     const amenityChecks = [
-      { flag: props.pool_flag, label: "Pool" },
       { flag: props.spa_flag, label: "Spa" },
       { flag: props.sauna_flag, label: "Sauna" },
       { flag: props.fireplaces, label: "Fireplace", numeric: true },
