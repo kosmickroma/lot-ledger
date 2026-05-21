@@ -905,8 +905,13 @@ def _load_session_tags(session_id: str, user_id: int) -> dict[tuple[str, str], d
         release_session_conn(conn)
 
 
-def _row_county(row: dict[str, Any]) -> str:
-    division = str(row.get("division_cd", "") or "").upper()
+def _county_from_division(division_cd: Any) -> str:
+    """Single source of truth for division_cd → county string.
+    Used by _row_county (dict input) and the save_verification fast-path
+    (raw division string from a thin JSONB query). Keep helpers unified
+    here so the two callers can't drift.
+    """
+    division = str(division_cd or "").strip().upper()
     if division == "TAD":
         return "tad"
     if division == "COLLIN":
@@ -914,6 +919,13 @@ def _row_county(row: dict[str, Any]) -> str:
     if division == "DENTON":
         return "denton"
     return "dcad"
+
+
+def _row_county(row: dict[str, Any]) -> str:
+    """Returns the canonical county string for a row dict. Delegates to
+    _county_from_division — kept as a thin wrapper for the many existing
+    callers that pass row dicts."""
+    return _county_from_division(row.get("division_cd"))
 
 
 def _apply_session_tags(session_id: str, user_id: int, rows: list[dict[str, Any]]) -> None:
@@ -1114,6 +1126,80 @@ def _get_job(job_id: str, user_id: int | None = None) -> dict[str, Any] | None:
         return restored
     job["last_accessed"] = now
     return job
+
+
+def _load_cached_job_metadata(job_id: str, user_id: int) -> tuple[Any, int] | None:
+    """Thin point-lookup for (polygon, parcel_count) — no row hydration.
+
+    Returns None if the cached job doesn't exist OR if the user_id doesn't
+    match. Mirrors the user-id gate that _get_job applies. Used by the
+    save_verification fast-path to skip the expensive jsonb deserialization
+    of the full rows blob when we only need the polygon + count.
+    """
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT polygon, COALESCE(jsonb_array_length(rows), 0) AS parcel_count
+                FROM cached_jobs
+                WHERE job_id = %s AND user_id = %s
+                """,
+                (job_id, int(user_id)),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            polygon_val = row[0]
+            parcel_count = int(row[1] or 0)
+            return polygon_val if polygon_val is not None else [], parcel_count
+    finally:
+        release_session_conn(conn)
+
+
+def _load_cached_account_county_pairs(job_id: str, user_id: int) -> list[tuple[str, str]]:
+    """Stream (account_num, county) tuples for every parcel in a cached job.
+
+    Uses LATERAL jsonb_array_elements server-side so only the two narrow
+    fields cross the wire — never the ~50-key per-parcel row dict. Generic
+    naming: reusable by any future endpoint that needs account/county
+    pairs from cached_jobs.rows without the full payload.
+
+    Performance note: this trades client-side JSON decode of a multi-MB
+    blob for ~N narrow tuple rows over the wire. For an 11k-parcel job,
+    typically ~5-10x faster on cold Cloud Run instances. See
+    docs/SAVE_VERIFICATION_FAST_PATH_SPEC.md.
+    """
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    el->>'account_num'                AS account_num,
+                    COALESCE(el->>'division_cd', '')  AS division_cd
+                FROM cached_jobs c,
+                LATERAL jsonb_array_elements(c.rows) AS el
+                WHERE c.job_id = %s AND c.user_id = %s
+                """,
+                (job_id, int(user_id)),
+            )
+            pairs: list[tuple[str, str]] = []
+            for account_num_raw, division_cd_raw in cur:
+                account_num = str(account_num_raw or "").strip()
+                if not account_num:
+                    continue
+                pairs.append((account_num, _county_from_division(division_cd_raw)))
+            return pairs
+    finally:
+        release_session_conn(conn)
+
+
+def _counties_from_pairs(pairs: list[tuple[str, str]]) -> list[str]:
+    """Returns sorted unique county codes from a list of (account, county)
+    tuples. Parallel to _counties_from_rows but operates on the thin-query
+    output of _load_cached_account_county_pairs."""
+    return sorted({county for _, county in pairs if county})
 
 
 class AnalyzeRequest(BaseModel):
@@ -3173,15 +3259,55 @@ async def merge_jobs(request: MergeJobsRequest, req: Request, user: dict[str, An
 
 @app.post("/api/job/{job_id}/verification")
 async def save_verification(job_id: str, request: VerificationRequest, req: Request, user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
-    require_csrf(req)
-    job = _get_job(job_id, int(user["id"]))
-    if job is None:
-        raise HTTPException(status_code=404, detail="Job not found")
+    """Persist verify/target tags for a cached job.
 
-    rows = job.get("rows", [])
+    Performance: branches on whether the job is in the in-memory _job_store.
+    - WARM (_job_store hit): use existing path that iterates the full row
+      dicts. Lets us mutate in-place so subsequent reads see the new tag
+      values without a DB roundtrip. Same behavior as before this refactor.
+    - COLD (_job_store miss): use the fast-path. Two thin JSONB queries
+      replace the multi-MB row blob hydration that was the bottleneck for
+      large jobs after the residential-detail expansion. The in-memory
+      mutation is moot in this branch (no _job_store entry to mutate) so
+      we skip it cleanly.
+    See docs/SAVE_VERIFICATION_FAST_PATH_SPEC.md for the design.
+    """
+    require_csrf(req)
+    user_id = int(user["id"])
+
+    # Branch on warm vs cold cache state.
+    warm_job = _job_store.get(job_id)
+    if warm_job is not None and int(warm_job.get("user_id", -1)) != user_id:
+        # User-id mismatch on the in-memory entry — treat as not found for
+        # this user. Same behavior as _get_job's gate.
+        warm_job = None
+
+    rows: list[dict[str, Any]] = []
+    polygon: Any = []
+    parcel_count: int = 0
+    account_county_pairs: list[tuple[str, str]] = []
+
+    if warm_job is not None:
+        # Warm path: existing behavior preserved.
+        rows = warm_job.get("rows", [])
+        polygon = warm_job.get("polygon", [])
+        parcel_count = len(rows)
+        # Iterate full row dicts for pairs (same logic as the original loop).
+        for row in rows:
+            account_num = str(row.get("account_num", "") or "").strip()
+            if not account_num:
+                continue
+            account_county_pairs.append((account_num, _row_county(row)))
+    else:
+        # Cold path: thin JSONB queries — no full blob hydration.
+        metadata = _load_cached_job_metadata(job_id, user_id)
+        if metadata is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        polygon, parcel_count = metadata
+        account_county_pairs = _load_cached_account_county_pairs(job_id, user_id)
+
     verifications = request.verifications or {}
     potential_targets = request.potential_targets or {}
-    polygon = job.get("polygon", [])
 
     def _normalize_verification(value: Any) -> str:
         raw = str(value or "").strip().lower()
@@ -3197,24 +3323,22 @@ async def save_verification(job_id: str, request: VerificationRequest, req: Requ
 
     try:
         # Ensure parent session row exists before writing child tag rows.
+        county_coverage = (
+            _counties_from_rows(rows) if warm_job is not None else _counties_from_pairs(account_county_pairs)
+        )
         _persist_session_sync(
             job_id,
             polygon,
-            len(rows),
-            _counties_from_rows(rows),
-            int(user["id"]),
+            parcel_count,
+            county_coverage,
+            user_id,
             None,
         )
 
         upsert_rows: dict[tuple[str, str, str], tuple[str, str, str, str, str]] = {}
         delete_rows: set[tuple[str, str, str]] = set()
 
-        for row in rows:
-            account_num = str(row.get("account_num", "") or "").strip()
-            if not account_num:
-                continue
-            county = _row_county(row)
-
+        for account_num, county in account_county_pairs:
             verification_value = _normalize_verification(verifications.get(account_num, ""))
             key_ver = (account_num, county, "verification")
             if verification_value:
