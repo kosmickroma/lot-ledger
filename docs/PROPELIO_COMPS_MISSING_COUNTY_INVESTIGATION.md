@@ -155,3 +155,38 @@ Likely candidate code: the Propelio comp scrape / CMA harvest writer in `api/pro
 - Master TODO bug entry to add after this is resolved
 - `_master_todo_done.md` — the 2026-05-12 to 14 "Propelio comp pipeline maturation" entry — investigate which commits there fixed the original scrape
 - [[feedback_db_production_discipline]] — DB-adjacent change rule applies
+
+---
+
+## Copilot prompt — paste into Copilot tomorrow morning
+
+```
+@workspace Read docs/PROPELIO_COMPS_MISSING_COUNTY_INVESTIGATION.md end-to-end. Give a rigorous review of the fix options and answer the 6 numbered questions in the "Questions for Copilot review" section.
+
+CONTEXT:
+A user reported a parcel-type filter bug today (2026-05-20): toggling off "Multifamily" failed to hide a sold condo comp at 6307 BANDERA AVE (Dallas, sptd A13 = Condominiums). We traced it to 867 of ~59k propelio_comps rows that have parcel_account_num set but parcel_county empty. The frontend lookup at frontend/map.js:5047 requires both fields, so these comps fall back to Propelio's MLS taxonomy → wrong bucket. The bug is dormant — all 867 affected rows were written in two weeks (2026-05-04 and 2026-05-11), nothing since 2026-05-12.
+
+KK's two pushbacks on my initial "one-line frontend loosen" pitch were sharp and correct:
+1. The frontend fix could mask other issues we haven't traced
+2. If frontend truly fixes it, why backfill at all?
+
+Investigation revealed parcel_county is read in 5+ server-side paths (comp ratings bridge, dedup, CSV CAD-match, GIST index, future tuple-keyed code). Frontend-only fix would leave all those broken. So backfill is the real answer.
+
+The doc proposes three complementary options:
+- Option A: backfill the 867 rows (primary fix)
+- Option B: frontend defense-in-depth (optional, against future regressions)
+- Option C: investigate the original scrape bug to confirm it's truly dormant
+
+WHAT WE WANT:
+1. Answer the 6 numbered questions in the doc directly. Be specific.
+2. Push back on anything you disagree with. Particularly: is the recommended sequence (C → A → optionally B) correct, or should the order be different?
+3. Flag any downstream consumers of parcel_county we missed (5 sites in api/main.py + 1 in frontend/map.js were listed).
+4. Comment on the CHECK constraint idea (Q6) — useful or noise?
+5. Specifically check the proposed backfill SQL strategy in Option A: anything risky about looking up account_num against all 4 county parcels tables? Cross-county collisions possible?
+
+CONSTRAINTS:
+- Don't write code yet. Spec critique only.
+- Don't run shell commands. Trust the numbers in the doc.
+- Be opinionated. We need pushback, not validation.
+- 600-1000 words. Numbered list keyed to the 6 questions plus your pushback section.
+```
