@@ -1,11 +1,31 @@
 ---
 title: CAD Residential Detail Expansion — DCAD + TAD (Phase 1 = Ingest + Display)
-status: DRAFT — pending KK greenlight + Copilot critique
+status: v2 — Copilot critique 1 folded in, ready for second-round critique
 date: 2026-05-21
 branch: feat/cad-residential-detail-expansion-2026-05-21 (off develop)
 deployment: PREVIEW ONLY for the whole arc; gated promote to develop/main
 discovered_via: 2026-05-21 audit after KK observed Collin's CSV ships beds/baths/pool from CAD (not MLS), and asked "do the others have it?"
+revisions:
+  v1 (initial): 2026-05-21 morning
+  v2 (this): 2026-05-21 afternoon, after Copilot's round-1 critique
 ---
+
+## Changelog
+
+**v2 (this rev — Copilot round-1 critique folded in):**
+
+- Added explicit **canonical-field contract section** so the per-county alias mapping (Collin native column → DCAD `r.num_bedrooms AS beds` → TAD `num_bedrooms AS beds`) has one authoritative source.
+- **Pool / spa / sauna / sprinkler / deck flag normalization moved to INGEST TIME** (canonical "T"/"F"/NULL stored in DB), not display time. Eliminates the brittle multi-encoding conditional in the frontend formatter and simplifies CSV Phase 2.
+- TAD ingest gains explicit **defensive-cast requirement** for all DBF text-typed numeric fields (Num_Bedroo, Num_Bathro, Garage_Cap, etc.) — blank/padded/garbage coerces to NULL, never raises.
+- TAD `_upsert_batch` gains an **invariant assertion** at run start: `len(column_list) == len(placeholders) == len(row_tuple)`. One sanity check up front, not silent positional corruption mid-run.
+- TAD backfill: **surgical residential-only script promoted from "recommend" to DEFAULT for production.** Full re-ingest is reserved for controlled rebuild windows.
+- DCAD `query_parcels` SELECT gets an explicit **ORDER BY tie-breaker** to make `DISTINCT ON (p.account_num)` deterministic if join multiplicity ever surfaces.
+- Half-baths: **derive `baths = full + 0.5 * half` for display, AND preserve `full_baths` + `half_baths` as separate props** for audit. Future-proof against decimal-baths sources.
+- Subject card meta line 2: **explicit token priority order** (structure → foundation → HVAC → roof → amenities, cap 5 tokens) — prevents visual churn across parcels.
+- Test plan expanded to **regression-test ALL res_detail readers** (CSV export + comp-matching), not just popup/card.
+- **Phase 1.5 commitment** added: move to structured Core/Structure/Mechanical/Amenities sections on the card before string-concat debt accumulates. Spec'd separately.
+- Phase 2 preview gains a **`county_source` CSV column** so generic concept columns retain provenance without prefix bloat.
+- Denton + DCAD-supplemental gaps explicitly documented as "current public bundle parity" — not absolute ceiling.
 
 # CAD Residential Detail Expansion Spec
 
@@ -28,6 +48,51 @@ CSV column additions are split into **Phase 2** (separate spec, separate ship) t
 **OUT (Phase 2, separate ship):**
 - CSV column additions for the new fields. Will land as a separate compatibility-lock-aware ship with Mike notification of column-shift.
 - Denton residential detail — Denton's published `Parcels_FC.csv` doesn't have bed/bath/pool/garage columns (audited 71 columns + xlsx/gpkg files). Document the gap in master_todo; defer pending Denton publishing more data OR pulling from an alternate source.
+
+## Canonical-field contract (v2 addition)
+
+This is the **authoritative list of normalized property keys** that flow into
+`feature.properties` via `build_feature`. Per-county SQL SELECTs alias their
+local column names INTO these canonical keys, so downstream code (frontend
+card, CSV writer, comp matcher, popup) reads from a single set of names.
+
+| Canonical prop key | Type / format | Collin source | DCAD source | TAD source |
+|---|---|---|---|---|
+| `beds` | int or "N/A" | `collin_parcels.beds` | `res_detail.num_bedrooms AS beds` | `tad_parcels.num_bedrooms AS beds` |
+| `full_baths` | int or "N/A" | (derive from baths if needed) | `res_detail.num_full_baths AS full_baths` | (none — TAD lumps as `num_bathrooms`) |
+| `half_baths` | int or "N/A" | (derive from baths if needed) | `res_detail.num_half_baths AS half_baths` | (none) |
+| `baths` | decimal (`X.X`) or "N/A" | `collin_parcels.baths` | computed: `full + 0.5 * half` | `tad_parcels.num_bathrooms AS baths` |
+| `stories` | int or float or "N/A" | `collin_parcels.stories` | computed from `num_stories_desc` lookup | (none — TAD doesn't expose) |
+| `stories_desc` | text or "N/A" | (none) | `res_detail.num_stories_desc AS stories_desc` | (none) |
+| `pool_flag` | "T"/"F"/"" (canonical) | `collin_parcels.pool_flag` (normalized at ingest) | `res_detail.pool_ind AS pool_flag` (normalized at ingest) | `tad_parcels.swimming_pool AS pool_flag` (normalized at ingest) |
+| `spa_flag` | "T"/"F"/"" | (none) | `res_detail.spa_ind AS spa_flag` | (none) |
+| `sauna_flag` | "T"/"F"/"" | (none) | `res_detail.sauna_ind AS sauna_flag` | (none) |
+| `sprinkler_flag` | "T"/"F"/"" | (none) | `res_detail.sprinkler_sys_ind AS sprinkler_flag` | (none) |
+| `deck_flag` | "T"/"F"/"" | (none) | `res_detail.deck_ind AS deck_flag` | (none) |
+| `fireplaces` | int or "N/A" | (none) | `res_detail.num_fireplaces AS fireplaces` | (none) |
+| `kitchens` | int or "N/A" | (none) | `res_detail.num_kitchens AS kitchens` | (none) |
+| `wet_bars` | int or "N/A" | (none) | `res_detail.num_wet_bars AS wet_bars` | (none) |
+| `units` | int or "N/A" | `collin_parcels.units` | `res_detail.num_units AS units` | (none) |
+| `garage_capacity` | int or "N/A" | (audit TBD) | (none — DCAD doesn't expose) | `tad_parcels.garage_capacity AS garage_capacity` |
+| `bldg_class` | text or "N/A" | `collin_parcels.class_cd`? | `res_detail.bldg_class_desc AS bldg_class` | (none) |
+| `cdu_rating` | text or "N/A" | (none) | `res_detail.cdu_rating_desc AS cdu_rating` | (none) |
+| `foundation_type` | text or "N/A" | (none) | `res_detail.foundation_typ_desc AS foundation_type` | (none) |
+| `construction_frame_type` | text or "N/A" | (none) | `res_detail.constr_fram_typ_desc AS construction_frame_type` | (none) |
+| `heating_type` | text or "N/A" | (none — Collin has heating?) | `res_detail.heating_typ_desc AS heating_type` | derived from `central_heating` Y/N |
+| `ac_type` | text or "N/A" | (none) | `res_detail.ac_typ_desc AS ac_type` | derived from `central_air` Y/N |
+| `ext_wall` | text or "N/A" | (none) | `res_detail.ext_wall_desc AS ext_wall` | (none) |
+| `roof_type` | text or "N/A" | (none) | `res_detail.roof_typ_desc AS roof_type` | (none) |
+| `roof_material` | text or "N/A" | (none) | `res_detail.roof_mat_desc AS roof_material` | (none) |
+| `basement` | text or "N/A" | (none) | `res_detail.basement_desc AS basement` | (none) |
+| `fence_type` | text or "N/A" | (none) | `res_detail.fence_typ_desc AS fence_type` | (none) |
+| `eff_yr_built` | int or "N/A" | (none) | `res_detail.eff_yr_built AS eff_yr_built` | (none) |
+| `act_age` | int or "N/A" | (none) | `res_detail.act_age AS act_age` | (none) |
+| `pct_complete` | text or "N/A" | (none) | `res_detail.pct_complete AS pct_complete` | (none) |
+| `deed_date` | text/date or "N/A" | `collin_parcels.deed_date` | (none — DCAD has it elsewhere?) | `tad_parcels.deed_date AS deed_date` |
+| `mapsco` | text or "N/A" | (none) | (none — DCAD has MAPSCO in ACCOUNT_INFO but separate) | `tad_parcels.mapsco AS mapsco` |
+| `tad_arb_indicator` | text or "N/A" (TAD-only) | — | — | `tad_parcels.arb_indicator` |
+
+**Drift-prevention rule:** any code path that needs a county-specific field MUST either (a) use the canonical key from this table, or (b) explicitly document the per-county field name + the divergence reason. New canonical keys added here go through a quick spec amendment, not silent code drift.
 
 ## Source data audit (already done)
 
@@ -135,11 +200,63 @@ ALTER TABLE tad_parcels ADD COLUMN IF NOT EXISTS special_dist_5 TEXT;
 
 Expand the row dict to include all 27 new fields. Helpers `_to_int`, `_to_float`, `_clean_text` already exist. Add each field with appropriate type coercion. Patch the `_upsert_rows("res_detail", ...)` call so `update_cols` includes all new columns (so re-runs UPDATE them).
 
+**Flag normalization at ingest (v2):** for `pool_ind`, `spa_ind`, `sauna_ind`, `sprinkler_sys_ind`, `deck_ind` — DCAD source uses `"Y"` / `"N"` / `""`. Normalize at row-construction time:
+
+```python
+def _normalize_flag(value: object) -> str | None:
+    text = _clean_text(value)
+    if text is None:
+        return None
+    t = text.strip().upper()
+    if t in {"Y", "T", "TRUE", "YES", "1"}:
+        return "T"
+    if t in {"N", "F", "FALSE", "NO", "0"}:
+        return "F"
+    return None  # unknown → null, NOT silent F (preserves "unknown" vs "no")
+```
+
+Same helper reused by Collin's ingest (refactor to dcad.py shared module) and the TAD ingest below. **Canonical stored value is "T" / "F" / NULL** — no Y/N/T/F divergence in the DB.
+
 ### TAD: `scripts/build_tad_db.py:_extract_row`
 
 Currently extracts ~25 fields from the shapefile record. Expand to extract the additional 22 fields. Append them to the row tuple in the same order as the schema columns. Update `_upsert_batch` SQL to reference the new columns.
 
-**Important compatibility note:** the existing `tad_parcels` INSERT in `_upsert_batch` uses positional placeholders matching the column order in the CREATE TABLE. Adding columns in the middle of the column list will break the insert. Append new columns at the END of the column list — same pattern the TAD `property_city` work used.
+**Defensive casting requirement (v2 — Copilot pushback):** TAD's DBF stores numeric fields as **TEXT** columns of varying widths (`Num_Bedroo` is `C[2]`, `Num_Bathro` is `C[2]`, `Garage_Cap` is `C[2]`, `Year_Built` is `C[4]`, etc.). Source values can be blank, padded with spaces, leading zeros, or contain unexpected non-numeric tokens. Every cast in `_extract_row` MUST be defensive:
+
+```python
+def _safe_int_text(value: object) -> int | None:
+    """Coerce DBF text → int. Returns None for blank/garbage/non-numeric.
+    NEVER raises. Logs once-per-distinct-bad-value at DEBUG level only."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return int(text)
+    except (ValueError, TypeError):
+        return None
+```
+
+Same pattern via `_safe_float_text` for decimal-valued text columns. **Existing `_to_int` / `_to_float` helpers should be reviewed and hardened if they're not already safe** — one bad cast in a 760k-row batch UPSERT can poison a long run.
+
+**UPSERT invariant assertion (v2 — Copilot pushback):** the existing `tad_parcels` INSERT in `_upsert_batch` uses positional placeholders matching the column order in the CREATE TABLE. Adding columns in the middle of the column list silently mis-maps values across all rows in the batch. **Add a length/order sanity check at run start:**
+
+```python
+def _assert_batch_invariants(column_list: list[str], placeholder_count: int, sample_row: tuple) -> None:
+    """One-shot assertion at batch start. Catches the silent positional-
+    misalignment bug class before any data is written."""
+    assert len(column_list) == placeholder_count, (
+        f"TAD UPSERT misalignment: {len(column_list)} columns vs "
+        f"{placeholder_count} placeholders"
+    )
+    assert len(column_list) == len(sample_row), (
+        f"TAD UPSERT misalignment: {len(column_list)} columns vs "
+        f"{len(sample_row)} tuple values in sample row"
+    )
+```
+
+Run this once per batch start, not per-row. Append new columns at the END of the column list AND the row tuple — same pattern the TAD `property_city` work used.
 
 ## Backfill scripts
 
@@ -156,17 +273,50 @@ Mirrors `scripts/build_dcad_property_city.py` pattern. Reads `RES_DETAIL.CSV`, A
 4. Print verification stats (populated counts per column).
 ```
 
-### TAD: no separate backfill needed
+### TAD: surgical residential-only backfill is DEFAULT for production (v2)
 
-Running `scripts/build_tad_db.py` against the existing 2026-05-01 shapefile already re-upserts every row. Once the script reads the new columns + writes them, an in-place re-run populates them. (KK confirms before running on prod — it's ~10 min of UPSERT load.)
+**Default path:** `scripts/build_tad_residential_backfill.py` (new) — reads the same shapefile but ONLY writes to the new columns. UPDATE-by-account-num, never INSERT, never touches owner_name/situs_addr/value fields. Blast radius limited to the new fields. Idempotent + reportable.
 
-Could also write a thin `scripts/build_tad_residential_backfill.py` to ONLY update the new columns (read shapefile, UPDATE only the new cols by account_num) for surgical safety. Recommend this for production safety — avoids re-touching other tad_parcels columns.
+**Reserved for controlled rebuild windows only:** running `scripts/build_tad_db.py` in full re-ingest mode. Full re-upsert re-touches every column on every row — fine for an initial bake or annual refresh, dangerous for incremental "add a few new columns" work because any unrelated bug in the broader ingest could corrupt healthy data.
+
+Pre-deploy verification on the surgical script:
+
+```sql
+-- (a) Before run
+SELECT COUNT(*) FILTER (WHERE num_bedrooms IS NOT NULL) FROM tad_parcels;
+-- Expect: 0 (column just added)
+
+-- (b) After surgical backfill
+SELECT COUNT(*) FILTER (WHERE num_bedrooms IS NOT NULL) FROM tad_parcels;
+-- Expect: ~700k populated (most TAD parcels have a bedroom count in source)
+
+-- (c) Confirm un-touched columns are unchanged
+SELECT COUNT(*) FILTER (WHERE owner_name IS NOT NULL) FROM tad_parcels;
+-- Should match pre-run count exactly (surgical script did not touch this column)
+```
 
 ## SELECT expansion
 
 ### `_fetch_dcad_parcel_by_account` + `query_parcels` in `api/main.py` + `api/counties/dcad.py`
 
-Both already JOIN against `res_detail` and project `r.yr_built, r.tot_living_area, r.tot_main_sf`. Add the new columns:
+Both already JOIN against `res_detail` and project `r.yr_built, r.tot_living_area, r.tot_main_sf`. Add the new columns.
+
+**`query_parcels` DISTINCT ON tie-breaker (v2 — Copilot pushback):** the current `SELECT DISTINCT ON (p.account_num) ...` block has no `ORDER BY` clause, which means PostgreSQL picks an arbitrary row when join multiplicity surfaces. With `res_detail` joined LEFT (one row per account), this is fine today, but adding the new columns adds JOIN surface area and the dedup nondeterminism is a latent bug class. Add an explicit ORDER BY:
+
+```sql
+SELECT DISTINCT ON (p.account_num)
+    p.account_num, ...,
+    r.yr_built, r.tot_living_area, ...,
+    r.num_bedrooms AS beds, r.num_full_baths AS full_baths, ...
+FROM parcels p
+LEFT JOIN appraisal a ...
+LEFT JOIN res_detail r ...
+LEFT JOIN land_detail l ...
+WHERE ...
+ORDER BY p.account_num, r.yr_built DESC NULLS LAST, l.area_size DESC NULLS LAST
+-- tie-breaker: prefer the res_detail row with most recent yr_built, then
+-- the land_detail row with largest area_size. Makes dedup deterministic.
+```
 
 ```sql
 r.yr_built, r.tot_living_area, r.tot_main_sf,
@@ -223,32 +373,90 @@ Per-county-agnostic mapping (works for whichever county populates the row):
 "deed_date": _clean_text(row.get("deed_date")) or "N/A",
 ```
 
-## Frontend Subject Property card meta line
+## Frontend Subject Property card meta lines
 
-Extend `_populateSubjectPropertyCard` to add more fields after the existing `sqft · ac · year · beds · baths · pool · school` line. Suggest a second meta line for additional structural data (otherwise the single line gets too long):
+Extend `_populateSubjectPropertyCard` to render TWO meta lines. Line 1 is the dimensional/identity strip already there; Line 2 is structural detail when present.
+
+**Line 1 (dimensional + bath derivation, v2 clarification):**
+```
+2,617 sqft · 0.36 ac · 1983 · 4bd · 3.5ba · 2-car garage · SPL
+```
+- `baths` rendered as the DERIVED decimal (`3` if half_baths is 0; `3.5` if 1 half-bath).
+- `full_baths` and `half_baths` remain on `feature.properties` for popup / CSV / audit but the card displays the derived form for compactness.
+
+**Line 2 — explicit token priority order + 5-token cap (v2 — Copilot pushback):**
+
+Tokens are pushed in this order; first 5 with non-N/A values win:
+
+1. Structure type (e.g., "1-Story Frame" — derived from `construction_frame_type` + `stories_desc`)
+2. Foundation type (e.g., "Pier and Beam" — from `foundation_type`)
+3. HVAC summary ("Central HVAC" / "Central Heat" / "Central AC" — from `heating_type` + `ac_type`)
+4. Roof material (e.g., "Comp Shingles" — from `roof_material`)
+5. Exterior wall (e.g., "Brick Veneer" — from `ext_wall`)
+6. Amenity flags: "Pool", "Spa", "Sauna", "Sprinkler", "Deck", "Fireplace" — render only those with canonical `"T"` in their flag prop.
+
+Cap at 5 tokens for visual consistency parcel-to-parcel. If a parcel has 10 truthy fields, prioritize the first 5 in the list above. (Future Phase 1.5 fixes this with a structured panel instead of more tokens.)
 
 ```js
-// Meta line 1: dimensional
-"2,617 sqft · 0.36 ac · 1983 · 4bd · 3.5ba · 2-car garage · SPL"
+// DCAD parcel example (rich source):
+// Line 2: "1-Story Frame · Pier and Beam · Central HVAC · Comp Shingles · Pool"
 
-// Meta line 2: structural (optional, when data is present)
-"Brick · Pier and Beam · Central HVAC · Comp Shingles · Pool · Spa"
+// TAD parcel example (less rich):
+// Line 2: "Central Heat · Central AC · Pool"
+
+// Denton parcel example (no structural data):
+// Line 2: (empty, hidden via :empty CSS rule)
 ```
 
-The second line shows only fields with non-N/A values. Stays compact for counties that don't have the data (TAD/Denton parcels just get an empty second line, hidden via `:empty`).
+**Phase 1.5 commitment (v2 addition):** the two-line meta is acceptable for Phase 1 but is string-concatenation debt waiting to happen. Phase 1.5 (separate spec) replaces the meta lines with a structured panel:
+
+- **Core** (sqft, lot, year built)
+- **Structure** (beds, full/half baths, garage, stories)
+- **Mechanical** (HVAC types, foundation, roof type/material)
+- **Amenities** (pool, spa, sauna, fireplaces, sprinkler, deck — as iconified chips)
+- **Record** (deed date, eff yr built, building class, CDU rating)
+
+Each section collapses to "—" if its data is unavailable for the parcel's county. Phase 1.5 is the natural successor when this card gains real estate (e.g., expanded sidebar mode).
 
 ## Phase 1 testing
 
-- pytest: `tests/test_dcad_res_detail_expansion.py` — exercise the new build_db `_build_res_detail_table` field reads + a mock CSV row → asserts all 27 fields make it to the output dict.
-- pytest: `tests/test_tad_residential_expansion.py` — exercise `_extract_row` + `_normalize_tad_row` for the new shapefile fields.
-- Integration: after backfill, verify with SQL:
-  - DCAD: `SELECT COUNT(*) FILTER (WHERE num_bedrooms IS NOT NULL) FROM res_detail` — expect ~600k populated.
-  - TAD: `SELECT COUNT(*) FILTER (WHERE num_bedrooms IS NOT NULL) FROM tad_parcels` — expect ~700k populated.
-- Manual smoke test: load Dallas + Tarrant polygons on preview; click parcels; popup + card should show beds/baths/pool when applicable.
+**Unit tests (pytest):**
+- `tests/test_dcad_res_detail_expansion.py` — exercise `_build_res_detail_table` field reads with a mock CSV row → asserts all 27 fields make it to the output dict. Include hostile-input cases: blank, padded, garbage non-numeric for the int fields; Y/N/T/F/blank for flag fields; verify `_normalize_flag` outputs canonical "T"/"F"/None.
+- `tests/test_tad_residential_expansion.py` — exercise `_extract_row` for the new shapefile fields including DBF text-typed numeric hostile inputs. Confirm `_safe_int_text` and `_safe_float_text` coerce to None without raising.
+- `tests/test_tad_upsert_invariant.py` — assert `_assert_batch_invariants` catches column/placeholder/tuple-length mismatches and passes when aligned.
+- `tests/test_build_feature_res_detail_props.py` — confirm `build_feature` emits ALL canonical residential keys on `props`. Mock a Collin row, DCAD row, TAD row, and Denton row — each populating only its available fields. Assert no KeyError, no exception, correct N/A fallbacks where data is absent.
+
+**Regression coverage (v2 expansion — Copilot pushback):**
+- **CSV export paths** — ANY consumer of `r.yr_built` / `r.tot_living_area` / `r.tot_main_sf` in `_run_download_csv` MUST be regression-tested with null-heavy parcel data. Grep coverage: `grep -n "tot_living_area\|tot_main_sf\|yr_built" api/main.py` and walk every site.
+- **Comp-matching paths** — `compPassesPropelioFilters` and downstream filter code already use `props.sqft` (= tot_living_area). Confirm none of the NEW props (`fireplaces`, `foundation_type`, etc.) are accidentally read in a way that breaks when null.
+- **Cached job consumers** — `cached_jobs.rows` is a JSON snapshot of build_feature output. Old cached jobs will not have the new props until the next /api/analyze run. The frontend card must gracefully render N/A when a prop key is missing (not just when its value is "N/A"). Test by loading a cached_jobs row from yesterday + confirming card renders cleanly.
+
+**Integration verification (after backfill, before greenlight):**
+- DCAD: `SELECT COUNT(*) FILTER (WHERE num_bedrooms IS NOT NULL) FROM res_detail` — expect ~600k populated.
+- DCAD: `SELECT COUNT(*) FILTER (WHERE pool_ind = 'T') FROM res_detail` — sample for sanity; in Dallas County ~10-15% of residential parcels expected.
+- TAD: `SELECT COUNT(*) FILTER (WHERE num_bedrooms IS NOT NULL) FROM tad_parcels` — expect ~700k populated.
+- TAD: `SELECT COUNT(*) FILTER (WHERE pool_flag = 'T') FROM tad_parcels` — sample for sanity.
+- Surgical-backfill safety check (TAD): `SELECT COUNT(*) FILTER (WHERE owner_name IS NOT NULL) FROM tad_parcels` BEFORE and AFTER — must match exactly (surgical script didn't touch owner data).
+
+**Manual smoke test on preview:**
+- Load Dallas + Tarrant + Collin polygons in three separate workspaces.
+- Click 5 parcels per county. Popup + card should show beds/baths/pool/structural fields when data is available.
+- Verify Denton parcels show only the pre-existing fields (no spurious "N/A"-fills cluttering the meta line).
 
 ## Phase 2 preview (separate ship)
 
 CSV column additions. Carries `compatibility lock` shift discipline — all 4 writerow sites + header coordinated. Mike notification of column-shift. Likely +20-30 new CSV columns. Will require its own spec + Copilot critique.
+
+**v2 addition — `county_source` CSV column:** when introducing the new generic concept columns (Beds, Baths, Pool Flag, Garage Capacity), add a separate `County Source` column that records which county the row's data came from (DCAD / TAD / Collin / Denton). This way:
+- Generic concept columns stay short ("Beds", not "DCAD Beds" / "TAD Beds" / "Collin Beds" × 3 redundant columns)
+- Data provenance preserved — downstream consumers (Mike's spreadsheets, future filter UIs) can pivot by source
+- Reduces CSV column count growth (otherwise we'd need 3-4× as many columns)
+
+Column-naming convention recap for Phase 2:
+- **Generic concept columns** (Beds, Baths, Pool Flag, Garage Capacity, Year Built, Living Area, Heating Type, AC Type, Roof Material, Pool Flag, Spa Flag, etc.) — exposed in cross-county data. Single column. Provenance via `County Source`.
+- **County-prefixed columns** for unique fields ("DCAD CDU Rating", "DCAD Foundation Type" if not generic enough, "TAD ARB Indicator", "TAD MAPSCO", "Denton - Homestead", etc.) — only one county exposes these.
+
+KK to confirm the generic-vs-prefixed cutover in Phase 2 spec; current default: anything 2+ counties expose → generic. Anything unique to 1 county → prefixed.
 
 ## Constraints
 
