@@ -2666,8 +2666,37 @@ def _fetch_denton_parcel_by_account(account_num: str) -> dict[str, Any] | None:
                     ST_Area(ST_Transform(ST_OrientedEnvelope(p.geom), 2276)) AS envelope_area_sqft,
                     ST_Perimeter(ST_Transform(p.geom, 2276)) AS envelope_perim_ft,
                     ST_Area(ST_Transform(p.geom, 2276)) AS geom_sqft,
-                    ST_Area(ST_Transform(ST_OrientedEnvelope(p.geom), 2276)) / NULLIF(ST_Area(ST_Transform(p.geom, 2276)), 0) AS envelope_ratio
+                    ST_Area(ST_Transform(ST_OrientedEnvelope(p.geom), 2276)) / NULLIF(ST_Area(ST_Transform(p.geom, 2276)), 0) AS envelope_ratio,
+                    -- Phase 3 (2026-05-21): residential detail aliased from
+                    -- denton_improvement_detail via LATERAL one-row pick.
+                    -- Mirrors the bbox-filter SELECT in
+                    -- api/counties/denton.py. Without this, popup clicks
+                    -- on Denton parcels would still show N/A even after
+                    -- the cached job refreshes.
+                    d.foundation_type,
+                    d.roof_material,
+                    d.roof_type,
+                    d.ext_wall,
+                    d.heating_type,
+                    d.ac_type,
+                    d.beds,
+                    d.fireplaces,
+                    d.cdu_rating,
+                    d.bldg_class,
+                    d.sprinkler_flag,
+                    d.plumbing_count,
+                    d.interior_finish,
+                    d.flooring,
+                    d.eff_yr_built,
+                    d.dropped_imprv_count,
+                    d.raw_heating_cooling_code
                 FROM denton_parcels p
+                LEFT JOIN LATERAL (
+                    SELECT *
+                    FROM denton_improvement_detail
+                    WHERE prop_id = p.account_num
+                    LIMIT 1
+                ) d ON TRUE
                 WHERE p.account_num = %s
                 LIMIT 1
                 """,
