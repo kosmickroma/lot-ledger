@@ -9,7 +9,32 @@ parent docs:
   - docs/CAD_DATA_SOURCES_DEEP_DIVE_2026_05_21.md (county data audit)
 revisions:
   v1 (initial): 2026-05-21
-  v2 (this): 2026-05-21 — Copilot round-1 critique folded in
+  v2: 2026-05-21 — Copilot round-1 critique folded in
+  v3 (this): 2026-05-21 — KK "no multi-family stacking shenanigans" deep-dive + empirical edge case audit
+
+## v3 locked decisions (KK's "don't break existing behavior" sweep)
+
+After empirically scanning the certified data for known-issue categories (multi-family, condos, multi-improvement parcels, mobile homes, UDI), the following adjustments lock in:
+
+12. **Widen filter to include mobile homes.** `imprv_type_cd IN ('R', 'M')` instead of just 'R'. Texas state code A2 (Mobile Home on Owners Land) is residential. **Expect sparse attribute coverage** — most mobile homes don't carry foundation/roof/HVAC in IMPROVEMENT_DETAIL_ATTR. Surface what's there; N/A elsewhere.
+13. **Denton B1/B2 multifamily (duplexes, apartments) → Commercial improvement type.** Empirically verified: ALL 5 sampled B1 parcels had `imprv_type_cd='C'` (commercial), not 'R'. **Excluded from residential aggregation.** Consistent with DCAD (RES_DETAIL.CSV excludes commercial). Users will see N/A for foundation/roof on Denton duplexes — same as today, no regression.
+14. **Multi-R-improvement parcels: 914 in current data.** Worst case found: 12 R improvements on prop_id 1012796 (likely undivided-interest multi-unit complex). Pick rule = highest-value residential improvement (already specced); `dropped_imprv_count` field surfaces the lost data count. Future Phase 1.5 can show per-improvement breakdown.
+15. **UDI (Undivided Interest) parcels: NOT SUPPORTED in Phase 3.** Denton's improvement layout supports an alternate join `property.udi_group = imprv.prop_id`, but our `denton_parcels` table has no `udi_group` column. UDI parcels (typically <5% of inventory) will miss their improvements via our prop_id JOIN. **Deferred to Phase 5+** with a separate `denton_parcels` schema expansion. Document in master_todo.
+16. **Multiple "MA" Main Area detail rows per improvement:** pick the row with the **largest `imprv_det_area`**, tie-break by lowest `imprv_det_id`. Deterministic + matches "the main living space" semantics.
+17. **Type-cd combinations seen empirically:** R alone (238k parcels), R+I (56k, primary house + misc improvement like pool/shed), C alone (11k commercial), M alone (10k mobile only), I alone (1.7k vacant lot with shed). Filter `R OR M` + pick logic should handle all canonical cases.
+18. **CRITICAL non-regression assertion:** This work touches ONLY `denton_improvement_detail` (NEW table). Does NOT modify:
+   - `denton_parcels` schema (existing columns untouched)
+   - `classify_parcel` / `_classify_denton` logic
+   - `_dedupCompsForRender` condo dedup
+   - `condoOutlineSeen` + `geometryKey` rendering dedup
+   - Multi-family color rendering (`#2c2c2c` etc.)
+   - `saved-parcel-glow` / `saved-target-star` keyed by `account_num`
+   - `session_tags` keyed by `account_num + county`
+   - `hoa_lookup` matching
+   - Comp matching to parcels via `parcel_account_num`
+   - Stored Value snapshots
+   
+   The new column projections in `query_denton_parcels` are ADDITIVE (LEFT JOIN). No existing field changes. No new global state. No new race conditions. **Surgical extension only.**
 ---
 
 ## v2 locked decisions (Copilot round-1)
