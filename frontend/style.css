@@ -1120,6 +1120,17 @@ body.is-not-power-user .power-user-only {
   padding: 14px 16px;
 }
 
+/* v3 residential detail expansion (2026-05-21): the CAD section now
+   carries ~35+ rows (Owner → Roof Material → amenity flags), which is
+   substantially taller than the MLS column. Cap height + internal
+   vertical scroll so the panel layout stays balanced and the MLS side
+   stays visible alongside. The outer .parcel-panel-body retains its
+   own scroll for the whole-panel overflow case. */
+.parcel-panel-cad {
+  max-height: 540px;
+  overflow-y: auto;
+}
+
 .parcel-panel-section-title {
   font-size: 11px;
   font-weight: 700;

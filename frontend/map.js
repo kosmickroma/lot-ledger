@@ -6851,6 +6851,26 @@ function _panelDisplayValue(value) {
   return value && value !== "N/A" ? value : "N/A";
 }
 
+function _panelFlagDisplay(value) {
+  // Canonical T/F/empty (ingest-normalized by _normalize_flag in build_db /
+  // dcad ingests) → Yes/No/N/A for the parcel detail panel display.
+  const t = String(value || "").trim().toUpperCase();
+  if (t === "T" || t === "Y" || t === "TRUE" || t === "YES" || t === "1") return "Yes";
+  if (t === "F" || t === "N" || t === "FALSE" || t === "NO" || t === "0") return "No";
+  return "N/A";
+}
+
+function _panelTitleCaseDisplay(value) {
+  // Display helper for DCAD's all-caps descriptive fields (FOUNDATION_TYP_DESC,
+  // ROOF_MAT_DESC, etc.). Title-cases per word so they read cleanly in the
+  // panel ("PIER AND BEAM" → "Pier And Beam"). Preserves "N/A".
+  const text = String(value || "").trim();
+  if (!text || text === "N/A") return "N/A";
+  return text.split(/\s+/).map((w) =>
+    w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()
+  ).join(" ");
+}
+
 // Total Value display with prior-year provenance tag. When build_feature
 // (api/counties/dcad.py) emits a non-empty total_value_source flag on the
 // parcel properties — currently Collin-only via _normalize_collin_row's
@@ -7143,6 +7163,43 @@ function _buildParcelDetailPanelHtml(p, matchedComp) {
               ${_buildParcelDetailTableRow("Year Built", _panelDisplayValue(p.yr_built))}
               ${_buildParcelDetailTableRow("Living Area", p.sqft && p.sqft !== "N/A" ? `${p.sqft} sf` : "N/A")}
               ${p.subdivision ? _buildParcelDetailTableRow("Neighborhood", _propelioEscape(p.subdivision)) : ""}
+              <!-- v3 residential detail expansion (Phase 1): per-county
+                   CAD source data exposed on feature.properties via the
+                   canonical-field contract in
+                   docs/CAD_RESIDENTIAL_DETAIL_EXPANSION_SPEC.md.
+                   DCAD parcels populate most of these from RES_DETAIL.CSV;
+                   Collin partial (beds/baths/pool/stories); TAD pending
+                   the TAD-half PR; Denton no source data → N/A everywhere. -->
+              ${_buildParcelDetailTableRow("Effective Year Built", _panelDisplayValue(p.eff_yr_built))}
+              ${_buildParcelDetailTableRow("Actual Age", _panelDisplayValue(p.act_age))}
+              ${_buildParcelDetailTableRow("% Complete", _panelDisplayValue(p.pct_complete))}
+              ${_buildParcelDetailTableRow("Beds", _panelDisplayValue(p.beds))}
+              ${_buildParcelDetailTableRow("Full Baths", _panelDisplayValue(p.full_baths))}
+              ${_buildParcelDetailTableRow("Half Baths", _panelDisplayValue(p.half_baths))}
+              ${_buildParcelDetailTableRow("Baths (derived)", _panelDisplayValue(p.baths))}
+              ${_buildParcelDetailTableRow("Fireplaces", _panelDisplayValue(p.fireplaces))}
+              ${_buildParcelDetailTableRow("Kitchens", _panelDisplayValue(p.kitchens))}
+              ${_buildParcelDetailTableRow("Wet Bars", _panelDisplayValue(p.wet_bars))}
+              ${_buildParcelDetailTableRow("Units", _panelDisplayValue(p.units))}
+              ${_buildParcelDetailTableRow("Garage Capacity", _panelDisplayValue(p.garage_capacity))}
+              ${_buildParcelDetailTableRow("Stories", _panelDisplayValue(p.stories))}
+              ${p.stories_desc ? _buildParcelDetailTableRow("Stories (raw)", _propelioEscape(p.stories_desc)) : ""}
+              ${_buildParcelDetailTableRow("Foundation Type", _panelTitleCaseDisplay(p.foundation_type))}
+              ${_buildParcelDetailTableRow("Construction Frame", _panelTitleCaseDisplay(p.construction_frame_type))}
+              ${_buildParcelDetailTableRow("Exterior Wall", _panelTitleCaseDisplay(p.ext_wall))}
+              ${_buildParcelDetailTableRow("Heating Type", _panelTitleCaseDisplay(p.heating_type))}
+              ${_buildParcelDetailTableRow("AC Type", _panelTitleCaseDisplay(p.ac_type))}
+              ${_buildParcelDetailTableRow("Roof Type", _panelTitleCaseDisplay(p.roof_type))}
+              ${_buildParcelDetailTableRow("Roof Material", _panelTitleCaseDisplay(p.roof_material))}
+              ${_buildParcelDetailTableRow("Fence Type", _panelTitleCaseDisplay(p.fence_type))}
+              ${_buildParcelDetailTableRow("Basement", _panelTitleCaseDisplay(p.basement))}
+              ${_buildParcelDetailTableRow("Building Class", _panelDisplayValue(p.bldg_class))}
+              ${_buildParcelDetailTableRow("CDU Rating", _panelTitleCaseDisplay(p.cdu_rating))}
+              ${_buildParcelDetailTableRow("Pool", _panelFlagDisplay(p.pool_flag))}
+              ${_buildParcelDetailTableRow("Spa", _panelFlagDisplay(p.spa_flag))}
+              ${_buildParcelDetailTableRow("Sauna", _panelFlagDisplay(p.sauna_flag))}
+              ${_buildParcelDetailTableRow("Sprinkler System", _panelFlagDisplay(p.sprinkler_flag))}
+              ${_buildParcelDetailTableRow("Deck", _panelFlagDisplay(p.deck_flag))}
               ${p.on_redfin && p.redfin_url ? _buildParcelDetailTableRow("Listing", `<a href="${p.redfin_url}" target="_blank" rel="noopener noreferrer">View listing</a>`) : ""}
               ${soldCompRows}
             </table>
