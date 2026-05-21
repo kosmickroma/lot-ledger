@@ -305,7 +305,7 @@ def query_parcels(polygon: list[list[float]]) -> ParcelQueryResult:
                 SELECT DISTINCT ON (p.account_num)
                     p.account_num, p.parcel_key, p.gis_parcel_id,
                     p.owner_name, p.owner_address, p.owner_city, p.owner_state, p.owner_zip,
-                    p.street_num, p.full_street_name, p.property_address, p.property_zip,
+                    p.street_num, p.full_street_name, p.property_address, p.property_city, p.property_zip,
                     p.division_cd, p.nbhd_cd,
                     p.legal1, p.legal2, p.legal3, p.legal4, p.legal5,
                     p.polygon_geojson,
