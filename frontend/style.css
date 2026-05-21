@@ -776,10 +776,9 @@ body.is-not-power-user .power-user-only {
   display: none;
 }
 
-/* v3 line 2 — structural / amenity strip. Slightly dimmer than line 1
-   (text-muted vs text-soft) so the dimensional/identity line reads
-   first. Capped at 5 tokens by _populateSubjectPropertyCard to keep
-   visual rhythm parcel-to-parcel. */
+/* v3 line 2 — structural materials + systems. Slightly dimmer than
+   line 1 so the dimensional/identity line reads first. Capped at
+   6 tokens by _populateSubjectPropertyCard. */
 .comps-block-target-card-meta2 {
   font-size: 10px;
   color: var(--text-muted);
@@ -789,6 +788,21 @@ body.is-not-power-user .power-user-only {
 }
 
 .comps-block-target-card-meta2:empty {
+  display: none;
+}
+
+/* v3 line 3 — amenities + quality + record metadata.
+   Capped at 6 tokens by _populateSubjectPropertyCard. Dimmer
+   still so the visual reads top-to-bottom in importance. */
+.comps-block-target-card-meta3 {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 1px;
+  letter-spacing: 0.01em;
+  opacity: 0.62;
+}
+
+.comps-block-target-card-meta3:empty {
   display: none;
 }
 

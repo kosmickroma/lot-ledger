@@ -921,24 +921,28 @@ function _populateSubjectPropertyCard(props, county) {
     metaEl.textContent = parts.join(" · ");
   }
 
-  // Line 2 (v3): structural + amenity strip.
-  // Priority order (cap at 5 tokens for visual consistency):
-  //   1. Structure type (from structure_type, else derived from frame + stories)
-  //   2. Foundation type
-  //   3. HVAC summary
-  //   4. Roof material (preferred) else roof type
-  //   5. Exterior wall material
-  //   6+. Amenity flags: pool, spa, sauna, fireplace, sprinkler, deck
-  // DCAD parcels populate most of this; TAD has heat/ac/pool; Denton +
-  // Collin (limited) → line stays empty and hides via :empty CSS rule.
+  // Helpers reused across line 2 + line 3.
+  const isTruthyFlag = (v) => String(v || "").trim().toUpperCase() === "T";
+  const titleCase = (s) => {
+    const text = String(s || "").trim();
+    if (!text || text === "N/A") return "";
+    return text.split(/\s+/).map((w) =>
+      w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()
+    ).join(" ");
+  };
+
+  // Line 2 (v3): structural materials + systems. Cap 6 tokens.
+  // Order: structure type → foundation → ext wall → roof material →
+  // HVAC summary → construction frame (if structure_type was missing,
+  // already covered there; this lets DCAD show Frame separately when
+  // we have both structure and frame info).
   const meta2El = document.getElementById("comps-block-target-card-meta2");
   if (meta2El) {
     const tokens = [];
-    const MAX_TOKENS = 5;
-    const isTruthyFlag = (v) => String(v || "").trim().toUpperCase() === "T";
+    const MAX_TOKENS = 6;
 
-    // 1. Structure type — prefer explicit structure_type (TAD), else derive
-    //    from construction_frame_type + stories (DCAD).
+    // 1. Structure type — prefer explicit structure_type (TAD), else
+    //    derive from construction_frame_type + stories (DCAD-ish).
     const structureType = String(props.structure_type || "").trim();
     if (structureType && structureType !== "N/A") {
       tokens.push(structureType);
@@ -946,7 +950,7 @@ function _populateSubjectPropertyCard(props, county) {
       const frame = String(props.construction_frame_type || "").trim();
       const stories = String(props.stories || "").trim();
       if (frame && frame !== "N/A") {
-        const titled = frame.charAt(0).toUpperCase() + frame.slice(1).toLowerCase();
+        const titled = titleCase(frame);
         if (stories && stories !== "N/A" && Number(stories) > 0) {
           const storiesNum = Number(stories);
           const storiesLabel = storiesNum % 1 === 0 ? `${storiesNum}-Story` : `${storiesNum.toFixed(1)}-Story`;
@@ -959,54 +963,55 @@ function _populateSubjectPropertyCard(props, county) {
 
     // 2. Foundation
     if (tokens.length < MAX_TOKENS) {
-      const foundation = String(props.foundation_type || "").trim();
-      if (foundation && foundation !== "N/A") {
-        const titled = foundation.charAt(0).toUpperCase() + foundation.slice(1).toLowerCase();
-        tokens.push(titled);
-      }
+      const t = titleCase(props.foundation_type);
+      if (t) tokens.push(t);
     }
 
-    // 3. HVAC summary — collapse heating + ac into one token.
+    // 3. Exterior wall
+    if (tokens.length < MAX_TOKENS) {
+      const t = titleCase(props.ext_wall);
+      if (t) tokens.push(t);
+    }
+
+    // 4. Roof — prefer roof_material (more specific) else roof_type.
+    if (tokens.length < MAX_TOKENS) {
+      const t = titleCase(props.roof_material) || titleCase(props.roof_type);
+      if (t) tokens.push(t);
+    }
+
+    // 5. HVAC summary — collapse heating + ac into one token when they
+    //    match, else show whichever is present.
     if (tokens.length < MAX_TOKENS) {
       const heat = String(props.heating_type || "").trim();
       const ac = String(props.ac_type || "").trim();
       const hasHeat = heat && heat !== "N/A";
       const hasAc = ac && ac !== "N/A";
       if (hasHeat && hasAc && heat.toUpperCase() === ac.toUpperCase()) {
-        // e.g. "CENTRAL FULL" / "CENTRAL FULL" → "Central HVAC"
         if (heat.toUpperCase().startsWith("CENTRAL")) {
           tokens.push("Central HVAC");
         } else {
-          tokens.push(heat.charAt(0).toUpperCase() + heat.slice(1).toLowerCase());
+          tokens.push(titleCase(heat));
         }
       } else if (hasHeat) {
-        tokens.push(heat.charAt(0).toUpperCase() + heat.slice(1).toLowerCase() + " Heat");
+        tokens.push(`${titleCase(heat)} Heat`);
       } else if (hasAc) {
-        tokens.push(ac.charAt(0).toUpperCase() + ac.slice(1).toLowerCase() + " AC");
+        tokens.push(`${titleCase(ac)} AC`);
       }
     }
 
-    // 4. Roof — prefer roof_material (more specific) else roof_type.
-    if (tokens.length < MAX_TOKENS) {
-      const roofMat = String(props.roof_material || "").trim();
-      const roofType = String(props.roof_type || "").trim();
-      const pick = (roofMat && roofMat !== "N/A") ? roofMat : (roofType && roofType !== "N/A" ? roofType : "");
-      if (pick) {
-        tokens.push(pick.charAt(0).toUpperCase() + pick.slice(1).toLowerCase());
-      }
-    }
+    meta2El.textContent = tokens.join(" · ");
+  }
 
-    // 5. Exterior wall
-    if (tokens.length < MAX_TOKENS) {
-      const extWall = String(props.ext_wall || "").trim();
-      if (extWall && extWall !== "N/A") {
-        tokens.push(extWall.charAt(0).toUpperCase() + extWall.slice(1).toLowerCase());
-      }
-    }
+  // Line 3 (v3): amenities + quality + record metadata. Cap 6 tokens.
+  // Order: spa → sauna → fireplaces → sprinkler → deck → CDU rating →
+  // building class → effective yr built → % complete (when != 100).
+  // Pool is on line 1 (most investor-relevant), so excluded here.
+  const meta3El = document.getElementById("comps-block-target-card-meta3");
+  if (meta3El) {
+    const tokens = [];
+    const MAX_TOKENS = 6;
 
-    // 6+. Amenity flags — only push truthy ('T') and only when we still
-    //     have room. Order: spa, sauna, fireplace, sprinkler, deck.
-    //     Pool is on line 1 (most investor-relevant — always visible).
+    // Amenity flags (T/F)
     const amenityChecks = [
       { flag: props.spa_flag, label: "Spa" },
       { flag: props.sauna_flag, label: "Sauna" },
@@ -1026,7 +1031,38 @@ function _populateSubjectPropertyCard(props, county) {
       }
     }
 
-    meta2El.textContent = tokens.join(" · ");
+    // CDU rating (DCAD condition rating: Excellent / Very Good / Good / etc.)
+    if (tokens.length < MAX_TOKENS) {
+      const cdu = titleCase(props.cdu_rating);
+      if (cdu) tokens.push(cdu);
+    }
+
+    // Building class (DCAD numeric grade like "09" — not user-friendly
+    // but visible per KK's "let the client decide what to take out").
+    if (tokens.length < MAX_TOKENS) {
+      const cls = String(props.bldg_class || "").trim();
+      if (cls && cls !== "N/A") tokens.push(`Class ${cls}`);
+    }
+
+    // Effective year built (renovation/replacement year, often != yr_built)
+    if (tokens.length < MAX_TOKENS) {
+      const eff = String(props.eff_yr_built || "").trim();
+      const yr = String(props.yr_built || "").trim();
+      // Show eff_yr only when it differs from regular yr_built (otherwise redundant)
+      if (eff && eff !== "N/A" && eff !== yr) {
+        tokens.push(`Eff. ${eff}`);
+      }
+    }
+
+    // % complete — show only when not 100% (incomplete construction)
+    if (tokens.length < MAX_TOKENS) {
+      const pct = String(props.pct_complete || "").trim();
+      if (pct && pct !== "N/A" && pct !== "100" && pct !== "100.00") {
+        tokens.push(`${pct}% complete`);
+      }
+    }
+
+    meta3El.textContent = tokens.join(" · ");
   }
 }
 
