@@ -668,9 +668,26 @@ function _formatPropertyAddress(county, rawAddr, rawCity) {
       }
       return street || addr;
     }
-    case "tad":
+    case "tad": {
+      // 2026-05-21: TAD now ships property_city via the tad_city_lookup
+      // join populated by scripts/build_tad_city_lookup.py from
+      // Cities.shp's DBF (CITY_TDC → CITY_NAME). addr is still
+      // street-only from the ParcelView source; city comes from the
+      // lookup. Same shape as Denton's path.
+      const street = addr.split(",")[0].trim();
+      if (city && street) {
+        const lower = street.toLowerCase();
+        const cityLower = city.toLowerCase();
+        if (!lower.endsWith(cityLower)) {
+          return `${street} ${city}`;
+        }
+      }
+      return street || addr;
+    }
     case "dcad": {
-      // No reliable city in source. Strip any stray comma fragments.
+      // DCAD's source has property_city in ACCOUNT_INFO.CSV but our
+      // ingest doesn't pull it yet (separate follow-up). Strip any
+      // stray comma fragments until that lands.
       return addr.split(",")[0].trim() || addr;
     }
     default: {
