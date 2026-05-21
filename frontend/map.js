@@ -6910,7 +6910,14 @@ function geometryKey(geometry) {
 }
 
 function _panelDisplayValue(value) {
-  return value && value !== "N/A" ? value : "N/A";
+  // 2026-05-21 fix: distinguish missing data (null/undefined/"N/A" → "N/A")
+  // from explicit zero (0 → "0"). The old `value &&` short-circuit treated
+  // 0 as falsy, which was wrong for fields like half_baths where 0 is real
+  // information (parcel has zero half-baths, not unknown).
+  if (value === null || value === undefined || value === "" || value === "N/A") {
+    return "N/A";
+  }
+  return value;
 }
 
 function _panelFlagDisplay(value) {
@@ -7238,7 +7245,6 @@ function _buildParcelDetailPanelHtml(p, matchedComp) {
               ${_buildParcelDetailTableRow("Beds", _panelDisplayValue(p.beds))}
               ${_buildParcelDetailTableRow("Full Baths", _panelDisplayValue(p.full_baths))}
               ${_buildParcelDetailTableRow("Half Baths", _panelDisplayValue(p.half_baths))}
-              ${_buildParcelDetailTableRow("Baths (derived)", _panelDisplayValue(p.baths))}
               ${_buildParcelDetailTableRow("Fireplaces", _panelDisplayValue(p.fireplaces))}
               ${_buildParcelDetailTableRow("Kitchens", _panelDisplayValue(p.kitchens))}
               ${_buildParcelDetailTableRow("Wet Bars", _panelDisplayValue(p.wet_bars))}
