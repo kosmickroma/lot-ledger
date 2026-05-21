@@ -2572,6 +2572,42 @@ body.is-not-power-user .power-user-only {
   animation: savedParcelPulse 2.2s ease-in-out infinite;
 }
 
+/* === GPU pressure mitigation (2026-05-21) ===
+
+   The .saved-parcel-glow + .propelio-comp-pulse halos use animated
+   filter: drop-shadow stacks. Each visible halo runs an independent
+   2.2s composite-layer animation. With 30+ saved parcels OR many
+   propelio comps visible, GPU pressure adds up — and on top of
+   today's Phase 1 feature.properties bloat (~30% more bytes per
+   parcel in memory), it can manifest as browser-wide slowdown.
+
+   Two suspensions:
+
+   (1) Zoom-gate via .saved-glow-suspended on the map container.
+       Frontend toggles this class via map.on("zoomend") whenever the
+       zoom level drops below ~15 (city/neighborhood overview). At
+       those zoom levels individual halos are too small to perceive
+       the pulse anyway, so suspending the animation costs no visual
+       fidelity. When user zooms in to look at parcels, animation
+       resumes naturally.
+
+   (2) prefers-reduced-motion media query — respects the OS-level
+       accessibility setting. Users who explicitly opt out of
+       motion-heavy UIs get a static halo. Also useful for users on
+       low-power devices.
+
+   Filter + will-change stay on so the visual still has its rich
+   halo even when the pulse is suspended. */
+.saved-glow-suspended .saved-parcel-glow {
+  animation: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .saved-parcel-glow {
+    animation: none;
+  }
+}
+
 .saved-target-star {
   width: 22px;
   height: 22px;
