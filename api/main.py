@@ -2323,7 +2323,7 @@ def _fetch_tad_parcel_by_account(account_num: str) -> dict[str, Any] | None:
                 """
                 SELECT parcel_key, account_num, taxpin,
                        owner_name, owner_addr, owner_city, owner_citystate,
-                       owner_zip, situs_addr, property_class, state_use_code,
+                       owner_zip, situs_addr, property_city, property_class, state_use_code,
                        legal_descr, school_code,
                        acres, land_acres, land_sqft,
                        year_built, living_area,
