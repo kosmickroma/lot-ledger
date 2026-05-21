@@ -531,6 +531,43 @@ def query_parcels(polygon: list[list[float]]) -> ParcelQueryResult:
                 "land_pct": round((land_val / tot_val) * 100, 1) if land_val is not None and tot_val not in (None, 0) else None,
                 "hoa_name": "",
                 "hoa_url": "",
+                # === v3 residential detail expansion (2026-05-21) ===
+                # These canonical keys are aliased OUT of res_detail by the
+                # SELECT above (e.g. r.num_bedrooms AS beds). They were being
+                # silently DROPPED here because the dict-builder enumerated
+                # keys explicitly. Fix: pass them through so cached_jobs.rows
+                # (and downstream CSV export + Subject Property card from
+                # cached geojson) carry the new data. Typed-normalized per
+                # field class — int counts via _safe_int, text descriptors
+                # via _clean_text, canonical T/F/'' flags pass through as-is.
+                "beds": _safe_int(row.get("beds")),
+                "full_baths": _safe_int(row.get("full_baths")),
+                "half_baths": _safe_int(row.get("half_baths")),
+                "fireplaces": _safe_int(row.get("fireplaces")),
+                "kitchens": _safe_int(row.get("kitchens")),
+                "wet_bars": _safe_int(row.get("wet_bars")),
+                "units": _safe_int(row.get("units")),
+                "eff_yr_built": _safe_int(row.get("eff_yr_built")),
+                "act_age": _safe_int(row.get("act_age")),
+                "pool_flag": _clean_text(row.get("pool_flag")),
+                "spa_flag": _clean_text(row.get("spa_flag")),
+                "sauna_flag": _clean_text(row.get("sauna_flag")),
+                "sprinkler_flag": _clean_text(row.get("sprinkler_flag")),
+                "deck_flag": _clean_text(row.get("deck_flag")),
+                "stories_desc": _clean_text(row.get("stories_desc")),
+                "bldg_class": _clean_text(row.get("bldg_class")),
+                "cdu_rating": _clean_text(row.get("cdu_rating")),
+                "construction_frame_type": _clean_text(row.get("construction_frame_type")),
+                "foundation_type": _clean_text(row.get("foundation_type")),
+                "heating_type": _clean_text(row.get("heating_type")),
+                "ac_type": _clean_text(row.get("ac_type")),
+                "fence_type": _clean_text(row.get("fence_type")),
+                "ext_wall": _clean_text(row.get("ext_wall")),
+                "basement": _clean_text(row.get("basement")),
+                "roof_type": _clean_text(row.get("roof_type")),
+                "roof_material": _clean_text(row.get("roof_material")),
+                "pct_complete": _clean_text(row.get("pct_complete")),
+                # === end v3 residential detail expansion ===
             }
         )
 
