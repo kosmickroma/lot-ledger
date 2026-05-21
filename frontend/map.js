@@ -464,6 +464,27 @@ function _updateBrowseLayerVisibility() {
 map.on("zoomend", _updateBrowseLayerVisibility);
 _updateBrowseLayerVisibility();
 
+// === GPU pressure mitigation (2026-05-21) ===
+// Gate the .saved-parcel-glow filter-stack animation by zoom level.
+// At zoom < 15 (city/neighborhood overview), the gold halo's pulse is
+// too small to perceive AND many halos may be visible at once — each
+// runs its own GPU-composited animation. Suspending the pulse below
+// the threshold cuts GPU load without hurting visual fidelity (the
+// filter stack stays on; only the keyframe animation pauses).
+// Pairs with the .saved-glow-suspended CSS rule in style.css.
+const SAVED_GLOW_ZOOM_THRESHOLD = 15;
+function _updateSavedGlowAnimationGate() {
+  const container = map.getContainer();
+  if (!container) return;
+  if (map.getZoom() < SAVED_GLOW_ZOOM_THRESHOLD) {
+    container.classList.add("saved-glow-suspended");
+  } else {
+    container.classList.remove("saved-glow-suspended");
+  }
+}
+map.on("zoomend", _updateSavedGlowAnimationGate);
+_updateSavedGlowAnimationGate();
+
 // Nudge chip: visible below zoom 13 when not in draw-results mode.
 const _zoomNudge = document.getElementById("zoom-nudge");
 function _updateZoomNudge() {
