@@ -308,11 +308,24 @@ def _ensure_schema(cur) -> None:
             raw_sprinkler_code         TEXT,
             raw_interior_finish_code   TEXT,
             raw_flooring_code          TEXT,
+            pool_flag            TEXT,
+            deck_flag            TEXT,
+            garage_capacity      INTEGER,
+            stories              INTEGER,
             source_snapshot      DATE,
             ingested_at          TIMESTAMP WITH TIME ZONE DEFAULT now()
         )
         """
     )
+    # Idempotent column additions for the Phase 3 patch (after initial backfill
+    # users may already have the table without these columns).
+    for col, type_ in [
+        ("pool_flag", "TEXT"),
+        ("deck_flag", "TEXT"),
+        ("garage_capacity", "INTEGER"),
+        ("stories", "INTEGER"),
+    ]:
+        cur.execute(f"ALTER TABLE denton_improvement_detail ADD COLUMN IF NOT EXISTS {col} {type_}")
     cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_denton_imprv_detail_prop_id "
         "ON denton_improvement_detail (prop_id)"
@@ -384,17 +397,32 @@ def _read_improvements(source_dir: Path, qa: dict) -> dict:
     return primary_by_prop
 
 
-def _read_details(source_dir: Path, primary_by_prop: dict, qa: dict) -> dict:
-    """Stream IMPROVEMENT_DETAIL.TXT. Returns dict[prop_id] → main detail row.
+# Detail-type codes that signal a feature on the parcel.
+# Pools — any pool-type detail row sets pool_flag='T'.
+_POOL_DET_CODES = {"PL", "TP", "TP+", "BH", "C-SWP"}
+# Decks
+_DECK_DET_CODES = {"DK"}
+# Garage capacity inference — any AG / DG / EG / CP detail row counts.
+_GARAGE_DET_CODES = {"AG", "DG", "EG", "CP"}
+# Stories — main area floors. MA = 1, MA + MA2 = 2, MA + MA2 + MA3 = 3.
+_STORY_DET_CODES = {"MA": 1, "MA2": 2, "MA3": 3}
 
-    Selection rule: rows MUST match the selected primary improvement (by imprv_id).
-    Pick imprv_det_type_cd='MA' (Main Area). If multiple MA rows: largest area, then
-    lowest imprv_det_id (deterministic tie-break).
+
+def _read_details(source_dir: Path, primary_by_prop: dict, qa: dict) -> tuple[dict, dict]:
+    """Stream IMPROVEMENT_DETAIL.TXT. Returns (main_by_prop, features_by_prop).
+
+    Two-pass aggregation per parcel:
+    1. main_by_prop: pick the MA (Main Area) detail of the selected primary
+       improvement for residential-detail attribute matching.
+    2. features_by_prop: scan ALL details across ALL improvements for the parcel
+       and detect features that live as separate detail rows (pool, deck,
+       garage capacity, stories from MA/MA2/MA3 presence).
     """
     path = source_dir / "2025-07-28_2025_APPRAISAL_IMPROVEMENT_DETAIL.TXT"
     print(f"Reading {path.name}...")
 
-    candidate_by_prop: dict[str, list[dict]] = defaultdict(list)
+    # Collect ALL detail rows per prop_id (any improvement, any type).
+    all_details_by_prop: dict[str, list[dict]] = defaultdict(list)
     total = 0
     with path.open("r", encoding="utf-8", errors="replace") as f:
         for line in f:
@@ -405,27 +433,93 @@ def _read_details(source_dir: Path, primary_by_prop: dict, qa: dict) -> dict:
             canonical, _ = _normalize_prop_id(row.get("prop_id"))
             if not canonical:
                 continue
-            primary = primary_by_prop.get(canonical)
-            if not primary:
-                continue
-            if row.get("imprv_id") != primary.get("imprv_id"):
-                continue
-            if row.get("imprv_det_type_cd") != "MA":
-                continue
-            candidate_by_prop[canonical].append(row)
+            # We need ALL details for feature detection, not just those of
+            # the primary improvement. Pools/decks live as their own
+            # 'I' (Misc) improvements separate from the main residential 'R'.
+            if canonical in primary_by_prop:
+                all_details_by_prop[canonical].append(row)
 
-    # Pick one per prop_id
+    # Pass 1: pick MA detail of the primary improvement per parcel
     main_by_prop = {}
-    for prop_id, details in candidate_by_prop.items():
+    for prop_id, details in all_details_by_prop.items():
+        primary = primary_by_prop[prop_id]
+        ma_candidates = [
+            d for d in details
+            if d.get("imprv_id") == primary.get("imprv_id")
+            and d.get("imprv_det_type_cd") == "MA"
+        ]
+        if not ma_candidates:
+            continue
         best = sorted(
-            details,
+            ma_candidates,
             key=lambda r: (-(r.get("imprv_det_area") or 0), r.get("imprv_det_id", "")),
         )[0]
         main_by_prop[prop_id] = best
 
+    # Pass 2: detect parcel-level features (pool, deck, garage, stories)
+    # by scanning ALL details across ALL improvements for the parcel.
+    features_by_prop: dict[str, dict] = {}
+    pool_count = 0
+    deck_count = 0
+    garage_count = 0
+    multi_story_count = 0
+    for prop_id, details in all_details_by_prop.items():
+        feat = {
+            "pool_flag": "F",          # default off until evidence
+            "deck_flag": "F",
+            "garage_capacity": None,   # numeric — count of garage bays inferred
+            "stories_max": 1,          # default 1, bumped if MA2/MA3 present
+        }
+        type_set = {d.get("imprv_det_type_cd", "") for d in details}
+
+        # Pool
+        if type_set & _POOL_DET_CODES:
+            feat["pool_flag"] = "T"
+            pool_count += 1
+
+        # Deck
+        if type_set & _DECK_DET_CODES:
+            feat["deck_flag"] = "T"
+            deck_count += 1
+
+        # Garage — infer capacity from total garage sub-area sqft.
+        # Industry rule of thumb: ~250-300 sqft per single-car space.
+        garage_sqft = sum(
+            d.get("imprv_det_area") or 0
+            for d in details
+            if d.get("imprv_det_type_cd") in _GARAGE_DET_CODES
+        )
+        if garage_sqft > 0:
+            # Conservative: 280 sqft per car. Floor + cap at reasonable bounds.
+            est_cars = max(1, min(8, int(round(garage_sqft / 280))))
+            feat["garage_capacity"] = est_cars
+            garage_count += 1
+
+        # Stories — max of MA / MA2 / MA3 present in the primary improvement
+        primary_imprv_id = primary_by_prop[prop_id].get("imprv_id")
+        primary_floor_types = {
+            d.get("imprv_det_type_cd", "")
+            for d in details
+            if d.get("imprv_id") == primary_imprv_id
+        }
+        story_max = max(
+            (_STORY_DET_CODES.get(t, 0) for t in primary_floor_types),
+            default=0,
+        )
+        if story_max > 0:
+            feat["stories_max"] = story_max
+            if story_max > 1:
+                multi_story_count += 1
+
+        features_by_prop[prop_id] = feat
+
     qa["improvement_detail_total_rows"] = total
     qa["parcels_with_main_area_detail"] = len(main_by_prop)
-    return main_by_prop
+    qa["parcels_with_pool"] = pool_count
+    qa["parcels_with_deck"] = deck_count
+    qa["parcels_with_garage"] = garage_count
+    qa["parcels_multi_story"] = multi_story_count
+    return main_by_prop, features_by_prop
 
 
 def _read_attributes(source_dir: Path, main_by_prop: dict, qa: dict, bedroom_threshold: int) -> dict:
@@ -625,12 +719,21 @@ def _read_attributes(source_dir: Path, main_by_prop: dict, qa: dict, bedroom_thr
     return aggregated
 
 
-def _compose_rows(primary_by_prop, main_by_prop, attrs_by_prop, snapshot_date):
-    """Combine the three layers into final row tuples for INSERT."""
+def _compose_rows(primary_by_prop, main_by_prop, attrs_by_prop, features_by_prop, snapshot_date):
+    """Combine the layers (improvements + main detail + attributes + features)
+    into final row tuples for INSERT."""
     rows = []
     for prop_id, primary in primary_by_prop.items():
         main = main_by_prop.get(prop_id, {})
         attrs = attrs_by_prop.get(prop_id, {})
+        feat = features_by_prop.get(prop_id, {})
+
+        # Override pool_flag / deck_flag from features (overrides attrs which
+        # likely have no data — Denton tracks these as separate detail rows).
+        pool_flag = feat.get("pool_flag") or attrs.get("pool_flag")
+        deck_flag = feat.get("deck_flag") or attrs.get("deck_flag")
+        garage_capacity = feat.get("garage_capacity")
+        stories = feat.get("stories_max")
 
         row = (
             prop_id,
@@ -670,6 +773,13 @@ def _compose_rows(primary_by_prop, main_by_prop, attrs_by_prop, snapshot_date):
             attrs.get("raw_sprinkler_code"),
             attrs.get("raw_interior_finish_code"),
             attrs.get("raw_flooring_code"),
+            # Feature-derived columns (Phase 3 patch — added 2026-05-21 after
+            # discovering Denton tracks pool/deck/garage as separate detail
+            # rows, not attributes on the main house).
+            pool_flag,
+            deck_flag,
+            garage_capacity,
+            stories,
             snapshot_date,
         )
         rows.append(row)
@@ -687,7 +797,10 @@ _INSERT_COLS = [
     "raw_foundation_code", "raw_roof_covering_code", "raw_roof_style_code",
     "raw_ext_wall_code", "raw_heating_cooling_code", "raw_construction_style",
     "raw_condition_code", "raw_sprinkler_code", "raw_interior_finish_code",
-    "raw_flooring_code", "source_snapshot",
+    "raw_flooring_code",
+    # Phase 3 patch — feature-derived columns from sub-area detail rows
+    "pool_flag", "deck_flag", "garage_capacity", "stories",
+    "source_snapshot",
 ]
 
 
@@ -726,6 +839,10 @@ def _verify(cur) -> dict:
             COUNT(*) FILTER (WHERE heating_type IS NOT NULL) AS has_heating,
             COUNT(*) FILTER (WHERE beds IS NOT NULL) AS has_beds,
             COUNT(*) FILTER (WHERE beds > 20) AS bad_beds,
+            COUNT(*) FILTER (WHERE pool_flag = 'T') AS pools,
+            COUNT(*) FILTER (WHERE deck_flag = 'T') AS decks,
+            COUNT(*) FILTER (WHERE garage_capacity IS NOT NULL) AS garages,
+            COUNT(*) FILTER (WHERE stories > 1) AS multi_story,
             COUNT(*) FILTER (WHERE imprv_type_cd = 'M') AS mobile_homes,
             COUNT(*) FILTER (WHERE dropped_imprv_count > 0) AS multi_improvement_parcels,
             MAX(dropped_imprv_count) AS max_dropped
@@ -803,9 +920,13 @@ def main() -> int:
     print(f"     → elapsed: {time.time() - start:.1f}s")
 
     t = time.time()
-    print(f"[2/4] Reading IMPROVEMENT_DETAIL + selecting MA detail per primary improvement...")
-    main_details = _read_details(source_dir, primary, qa)
+    print(f"[2/4] Reading IMPROVEMENT_DETAIL + detecting features (pool/deck/garage/stories)...")
+    main_details, features = _read_details(source_dir, primary, qa)
     print(f"     → {len(main_details):,} parcels with main-area detail")
+    print(f"     → features detected: pool={qa.get('parcels_with_pool',0):,}, "
+          f"deck={qa.get('parcels_with_deck',0):,}, "
+          f"garage={qa.get('parcels_with_garage',0):,}, "
+          f"multi_story={qa.get('parcels_multi_story',0):,}")
     print(f"     → elapsed: {time.time() - t:.1f}s")
 
     t = time.time()
@@ -814,7 +935,7 @@ def main() -> int:
     print(f"     → {len(attrs):,} parcels with aggregated attributes")
     print(f"     → elapsed: {time.time() - t:.1f}s")
 
-    rows = _compose_rows(primary, main_details, attrs, snapshot_date=date(2025, 7, 28))
+    rows = _compose_rows(primary, main_details, attrs, features, snapshot_date=date(2025, 7, 28))
     print(f"     → {len(rows):,} canonical rows composed")
 
     if args.dry_run:

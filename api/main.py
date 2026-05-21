@@ -2689,7 +2689,12 @@ def _fetch_denton_parcel_by_account(account_num: str) -> dict[str, Any] | None:
                     d.flooring,
                     d.eff_yr_built,
                     d.dropped_imprv_count,
-                    d.raw_heating_cooling_code
+                    d.raw_heating_cooling_code,
+                    -- Feature-derived columns (Phase 3 patch 2026-05-21).
+                    d.pool_flag,
+                    d.deck_flag,
+                    d.garage_capacity,
+                    d.stories
                 FROM denton_parcels p
                 LEFT JOIN LATERAL (
                     SELECT *

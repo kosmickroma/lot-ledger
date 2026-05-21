@@ -128,7 +128,12 @@ def _denton_bbox_filter(min_lat: float, min_lng: float, max_lat: float, max_lng:
                     d.eff_yr_built       AS eff_yr_built,
                     d.main_area_sqft     AS denton_main_area_sqft,
                     d.dropped_imprv_count AS dropped_imprv_count,
-                    d.raw_heating_cooling_code AS raw_heating_cooling_code
+                    d.raw_heating_cooling_code AS raw_heating_cooling_code,
+                    -- Feature-derived columns from sub-area details (Phase 3 patch 2026-05-21)
+                    d.pool_flag          AS pool_flag,
+                    d.deck_flag          AS deck_flag,
+                    d.garage_capacity    AS garage_capacity,
+                    d.stories            AS stories
                 FROM denton_parcels p_outer
                 LEFT JOIN LATERAL (
                     -- Single-row pick per parcel — prop_id is the canonical
@@ -302,6 +307,13 @@ def _normalize_denton_row(raw: dict[str, Any]) -> dict[str, Any]:
         "dropped_imprv_count": _safe_int(raw.get("dropped_imprv_count")),
         # Raw code preservation for debug + future re-decoding
         "raw_heating_cooling_code": _clean_text(raw.get("raw_heating_cooling_code")),
+        # Feature-derived (Phase 3 patch — sub-area detail rows, 2026-05-21).
+        # Overrides any attr-table value since Denton tracks pool/deck/garage
+        # as separate IMPROVEMENT_DETAIL rows, not as attributes.
+        "pool_flag": _clean_text(raw.get("pool_flag")),
+        "deck_flag": _clean_text(raw.get("deck_flag")),
+        "garage_capacity": _safe_int(raw.get("garage_capacity")),
+        "stories": _safe_int(raw.get("stories")),
         # === end Phase 3 expansion ===
     }
 
