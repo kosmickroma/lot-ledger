@@ -776,6 +776,22 @@ body.is-not-power-user .power-user-only {
   display: none;
 }
 
+/* v3 line 2 — structural / amenity strip. Slightly dimmer than line 1
+   (text-muted vs text-soft) so the dimensional/identity line reads
+   first. Capped at 5 tokens by _populateSubjectPropertyCard to keep
+   visual rhythm parcel-to-parcel. */
+.comps-block-target-card-meta2 {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 1px;
+  letter-spacing: 0.01em;
+  opacity: 0.78;
+}
+
+.comps-block-target-card-meta2:empty {
+  display: none;
+}
+
 .active-item-target-row.hidden {
   display: none;
 }

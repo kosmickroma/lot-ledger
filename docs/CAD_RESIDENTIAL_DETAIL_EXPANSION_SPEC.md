@@ -7,7 +7,30 @@ deployment: PREVIEW ONLY for the whole arc; gated promote to develop/main
 discovered_via: 2026-05-21 audit after KK observed Collin's CSV ships beds/baths/pool from CAD (not MLS), and asked "do the others have it?"
 revisions:
   v1 (initial): 2026-05-21 morning
-  v2 (this): 2026-05-21 afternoon, after Copilot's round-1 critique
+  v2: 2026-05-21 afternoon, after Copilot's round-1 critique
+  v3 (this): 2026-05-21 evening, after Copilot round-2 + KK greenlight to code
+
+## v3 locked decisions
+
+1. **Canonical key cleanup:**
+   - One name only: `roof_material` (drop `roof_mat` spelling everywhere).
+   - `bldg_class` is **DCAD-only** (drop the speculative Collin `class_cd` mapping — different concept).
+   - **Added `structure_type` as canonical key** (TAD-sourced today, future-extensible).
+   - **Stories precedence:** numeric `stories` wins. If only DCAD's `stories_desc` text is present, parse the leading word:
+     ```
+     "ONE STORY"               → 1.0
+     "ONE AND ONE HALF STORIES" → 1.5
+     "TWO STORIES"             → 2.0
+     "TWO AND ONE HALF STORIES" → 2.5
+     "THREE STORIES"           → 3.0
+     other / unparseable       → None (and keep stories_desc text in prop)
+     ```
+2. **DISTINCT ON strategy:** convert `res_detail` JOIN in `query_parcels` to a **LATERAL one-row pick** (matches existing `land_detail` pattern). Eliminates dedup uncertainty at the root. No ORDER BY tie-breaker needed.
+3. **Null vs "N/A" hygiene** flagged as KNOWN SMELL — deferred to separate "API contract hygiene" PR. New fields in this spec follow the existing "N/A" inline convention to stay consistent within Phase 1.
+4. **Date format for new date fields:** **ISO 8601 strings `"YYYY-MM-DD"`** (e.g., `deed_date`, `notice_date`). Source-text parsed at ingest; unparseable → NULL, never raw text.
+5. **TAD schema signature check** at ingest startup — `information_schema` query confirms expected column names + order before first batch. Complements `_assert_batch_invariants`.
+6. **`county_source` CSV column** controlled enum: `"DCAD" | "TAD" | "Collin" | "Denton"` (PascalCase). Positioned as first metadata column near parcel identity.
+7. **Phase 1.5 guardrail:** Phase 1 canonical keys MUST map 1:1 into Phase 1.5 structured-panel sections without renaming. Spec'd separately when Phase 1 ships.
 ---
 
 ## Changelog

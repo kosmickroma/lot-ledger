@@ -883,6 +883,9 @@ function _populateSubjectPropertyCard(props, county) {
     nbhdEl.textContent = sub;
   }
 
+  // Line 1: dimensional + identity strip.
+  // Order: sqft, lot acres, year built, beds, baths, garage, school.
+  // Pool moved to line 2 amenity strip per v3 spec.
   if (metaEl) {
     const parts = [];
     const sqft = String(props.sqft || "").trim();
@@ -891,9 +894,6 @@ function _populateSubjectPropertyCard(props, county) {
     if (acres && acres !== "N/A") parts.push(acres);
     const yr = String(props.yr_built || "").trim();
     if (yr && yr !== "N/A") parts.push(yr);
-    // Beds / baths / pool — only Collin currently populates these; other
-    // counties fall through to "N/A" until their ingests expand (see
-    // master_todo: parcel-detail parity for non-Collin counties).
     const beds = props.beds;
     if (beds && beds !== "N/A") parts.push(`${beds}bd`);
     const baths = props.baths;
@@ -904,13 +904,124 @@ function _populateSubjectPropertyCard(props, county) {
         : null;
       if (bathsStr) parts.push(bathsStr);
     }
-    const pool = String(props.pool_flag || "").trim().toUpperCase();
-    if (pool === "T" || pool === "Y" || pool === "TRUE" || pool === "YES") {
-      parts.push("pool");
+    const garage = props.garage_capacity;
+    if (garage && garage !== "N/A") {
+      const garageNum = Number(garage);
+      if (Number.isFinite(garageNum) && garageNum > 0) {
+        parts.push(`${garageNum}-car garage`);
+      }
     }
     const school = String(props.school || "").trim();
     if (school && school !== "N/A") parts.push(school);
     metaEl.textContent = parts.join(" · ");
+  }
+
+  // Line 2 (v3): structural + amenity strip.
+  // Priority order (cap at 5 tokens for visual consistency):
+  //   1. Structure type (from structure_type, else derived from frame + stories)
+  //   2. Foundation type
+  //   3. HVAC summary
+  //   4. Roof material (preferred) else roof type
+  //   5. Exterior wall material
+  //   6+. Amenity flags: pool, spa, sauna, fireplace, sprinkler, deck
+  // DCAD parcels populate most of this; TAD has heat/ac/pool; Denton +
+  // Collin (limited) → line stays empty and hides via :empty CSS rule.
+  const meta2El = document.getElementById("comps-block-target-card-meta2");
+  if (meta2El) {
+    const tokens = [];
+    const MAX_TOKENS = 5;
+    const isTruthyFlag = (v) => String(v || "").trim().toUpperCase() === "T";
+
+    // 1. Structure type — prefer explicit structure_type (TAD), else derive
+    //    from construction_frame_type + stories (DCAD).
+    const structureType = String(props.structure_type || "").trim();
+    if (structureType && structureType !== "N/A") {
+      tokens.push(structureType);
+    } else {
+      const frame = String(props.construction_frame_type || "").trim();
+      const stories = String(props.stories || "").trim();
+      if (frame && frame !== "N/A") {
+        const titled = frame.charAt(0).toUpperCase() + frame.slice(1).toLowerCase();
+        if (stories && stories !== "N/A" && Number(stories) > 0) {
+          const storiesNum = Number(stories);
+          const storiesLabel = storiesNum % 1 === 0 ? `${storiesNum}-Story` : `${storiesNum.toFixed(1)}-Story`;
+          tokens.push(`${storiesLabel} ${titled}`);
+        } else {
+          tokens.push(titled);
+        }
+      }
+    }
+
+    // 2. Foundation
+    if (tokens.length < MAX_TOKENS) {
+      const foundation = String(props.foundation_type || "").trim();
+      if (foundation && foundation !== "N/A") {
+        const titled = foundation.charAt(0).toUpperCase() + foundation.slice(1).toLowerCase();
+        tokens.push(titled);
+      }
+    }
+
+    // 3. HVAC summary — collapse heating + ac into one token.
+    if (tokens.length < MAX_TOKENS) {
+      const heat = String(props.heating_type || "").trim();
+      const ac = String(props.ac_type || "").trim();
+      const hasHeat = heat && heat !== "N/A";
+      const hasAc = ac && ac !== "N/A";
+      if (hasHeat && hasAc && heat.toUpperCase() === ac.toUpperCase()) {
+        // e.g. "CENTRAL FULL" / "CENTRAL FULL" → "Central HVAC"
+        if (heat.toUpperCase().startsWith("CENTRAL")) {
+          tokens.push("Central HVAC");
+        } else {
+          tokens.push(heat.charAt(0).toUpperCase() + heat.slice(1).toLowerCase());
+        }
+      } else if (hasHeat) {
+        tokens.push(heat.charAt(0).toUpperCase() + heat.slice(1).toLowerCase() + " Heat");
+      } else if (hasAc) {
+        tokens.push(ac.charAt(0).toUpperCase() + ac.slice(1).toLowerCase() + " AC");
+      }
+    }
+
+    // 4. Roof — prefer roof_material (more specific) else roof_type.
+    if (tokens.length < MAX_TOKENS) {
+      const roofMat = String(props.roof_material || "").trim();
+      const roofType = String(props.roof_type || "").trim();
+      const pick = (roofMat && roofMat !== "N/A") ? roofMat : (roofType && roofType !== "N/A" ? roofType : "");
+      if (pick) {
+        tokens.push(pick.charAt(0).toUpperCase() + pick.slice(1).toLowerCase());
+      }
+    }
+
+    // 5. Exterior wall
+    if (tokens.length < MAX_TOKENS) {
+      const extWall = String(props.ext_wall || "").trim();
+      if (extWall && extWall !== "N/A") {
+        tokens.push(extWall.charAt(0).toUpperCase() + extWall.slice(1).toLowerCase());
+      }
+    }
+
+    // 6+. Amenity flags — only push truthy ('T') and only when we still
+    //     have room. Order: pool, spa, sauna, fireplace, sprinkler, deck.
+    const amenityChecks = [
+      { flag: props.pool_flag, label: "Pool" },
+      { flag: props.spa_flag, label: "Spa" },
+      { flag: props.sauna_flag, label: "Sauna" },
+      { flag: props.fireplaces, label: "Fireplace", numeric: true },
+      { flag: props.sprinkler_flag, label: "Sprinkler" },
+      { flag: props.deck_flag, label: "Deck" },
+    ];
+    for (const a of amenityChecks) {
+      if (tokens.length >= MAX_TOKENS) break;
+      if (a.numeric) {
+        const n = Number(a.flag);
+        if (Number.isFinite(n) && n > 0) {
+          tokens.push(n > 1 ? `${n} ${a.label}s` : a.label);
+        }
+      } else if (isTruthyFlag(a.flag)) {
+        tokens.push(a.label);
+      }
+    }
+
+    meta2El.textContent = tokens.join(" · ");
   }
 }
 
