@@ -709,17 +709,27 @@ function _setCurrentTargetParcel(parcel) {
 }
 
 function _setOriginatorTargetLabel(addr) {
+  // Two surfaces share this label: the top active-item slot row AND the
+  // mirror row inside the Comps List block. Both are updated atomically in
+  // this single synchronous function — no separate state, no async hop, no
+  // way for the two to diverge. The mirror has its own styling but reads
+  // the same text + hidden state as the slot.
   const row = document.getElementById("active-item-target-row");
   const nameEl = document.getElementById("active-item-target-name");
-  if (!row || !nameEl) return;
+  const mirrorRow = document.getElementById("comps-block-target-row");
+  const mirrorNameEl = document.getElementById("comps-block-target-name");
   const text = (addr || "").toString().trim();
   if (!text) {
-    nameEl.textContent = "";
-    row.classList.add("hidden");
+    if (nameEl) nameEl.textContent = "";
+    if (row) row.classList.add("hidden");
+    if (mirrorNameEl) mirrorNameEl.textContent = "";
+    if (mirrorRow) mirrorRow.classList.add("hidden");
     return;
   }
-  nameEl.textContent = text;
-  row.classList.remove("hidden");
+  if (nameEl) nameEl.textContent = text;
+  if (row) row.classList.remove("hidden");
+  if (mirrorNameEl) mirrorNameEl.textContent = text;
+  if (mirrorRow) mirrorRow.classList.remove("hidden");
 }
 
 async function _resolveTargetAddress(county, account) {
