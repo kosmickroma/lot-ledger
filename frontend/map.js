@@ -685,10 +685,20 @@ function _formatPropertyAddress(county, rawAddr, rawCity) {
       return street || addr;
     }
     case "dcad": {
-      // DCAD's source has property_city in ACCOUNT_INFO.CSV but our
-      // ingest doesn't pull it yet (separate follow-up). Strip any
-      // stray comma fragments until that lands.
-      return addr.split(",")[0].trim() || addr;
+      // 2026-05-21: DCAD now ships property_city populated from
+      // ACCOUNT_INFO.CSV via scripts/build_dcad_property_city.py.
+      // The "(DALLAS CO)" multi-county-disambiguation suffix is
+      // stripped at ingest time, so city is a clean uppercase name
+      // (e.g., "GARLAND", "MESQUITE", "DALLAS"). Same shape as Denton.
+      const street = addr.split(",")[0].trim();
+      if (city && street) {
+        const lower = street.toLowerCase();
+        const cityLower = city.toLowerCase();
+        if (!lower.endsWith(cityLower)) {
+          return `${street} ${city}`;
+        }
+      }
+      return street || addr;
     }
     default: {
       // Unknown county: conservative — return addr, append city only if

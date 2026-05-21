@@ -30,6 +30,13 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT_DIR / "data"
 PARCEL_GEOM_DIR = DATA_DIR / "PARCEL_GEOM"
 
+# Strip DCAD's "(DALLAS CO)" multi-county-disambiguation suffix from
+# PROPERTY_CITY values like "GARLAND (DALLAS CO)" → "GARLAND".
+# See scripts/build_dcad_property_city.py for the same logic used by the
+# one-shot backfill script. Both must stay in sync.
+import re as _re
+_DALLAS_CO_SUFFIX = _re.compile(r"\s*\(DALLAS\s+CO\)\s*$", _re.IGNORECASE)
+
 
 def _clean_text(value: object) -> str | None:
     if value is None:
@@ -38,6 +45,15 @@ def _clean_text(value: object) -> str | None:
         return None
     text = str(value).strip()
     return text if text else None
+
+
+def _clean_property_city(value: object) -> str | None:
+    """Strip whitespace + (DALLAS CO) suffix + uppercase. Returns None if empty."""
+    text = _clean_text(value)
+    if not text:
+        return None
+    text = _DALLAS_CO_SUFFIX.sub("", text).strip()
+    return text.upper() if text else None
 
 
 def _normalize_key(value: object) -> str:
@@ -369,6 +385,7 @@ def _build_parcels_table() -> list[dict[str, object]]:
                 "street_num": _clean_text(getattr(row, "STREET_NUM", None)),
                 "full_street_name": _clean_text(getattr(row, "FULL_STREET_NAME", None)),
                 "property_address": property_address,
+                "property_city": _clean_property_city(getattr(row, "PROPERTY_CITY", None)),
                 "property_zip": _clean_text(getattr(row, "PROPERTY_ZIPCODE", None)),
                 "division_cd": _clean_text(getattr(row, "DIVISION_CD", None)),
                 "sptd_code": _clean_text(getattr(row, "SPTD_CODE", None)),
