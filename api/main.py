@@ -1510,6 +1510,41 @@ def _run_propelio_query_with_conn(parcel_input: list[tuple[str, str]]) -> dict[t
         release_session_conn(conn)
 
 
+_CSV_COUNTY_SOURCE_MAP = {
+    "dcad": "DCAD",
+    "tad": "TAD",
+    "collin": "Collin",
+    "denton": "Denton",
+    "dallas": "DCAD",
+    "tarrant": "TAD",
+    # divison_cd variants written by per-county ingests:
+    "RES": "DCAD",
+    "COM": "DCAD",
+    "TAD": "TAD",
+    "COLLIN": "Collin",
+    "DENTON": "Denton",
+    "COLLIN_CAD": "Collin",
+}
+
+
+def _csv_county_source(row: dict[str, Any]) -> str:
+    """Return the PascalCase County Source enum value for a CSV row.
+    Tries source_county first (the canonical feature.properties key set by
+    /api/analyze), then division_cd (set by per-county ingests), then
+    falls back to "". Phase 2 CSV column 2 — drives the 'County Source'
+    cell so analysts know which CAD a row's data came from.
+    """
+    for key in ("source_county", "division_cd"):
+        raw = str(row.get(key) or "").strip()
+        if not raw:
+            continue
+        # Try direct map, then lowercase.
+        mapped = _CSV_COUNTY_SOURCE_MAP.get(raw) or _CSV_COUNTY_SOURCE_MAP.get(raw.lower())
+        if mapped:
+            return mapped
+    return ""
+
+
 def _google_maps_link(row: dict[str, Any]) -> str:
     property_address = str(row.get("property_address", "") or "").strip()
     street_num = str(row.get("street_num", "") or "").strip()
@@ -3645,6 +3680,7 @@ async def _run_download_csv(
         writer.writerow(
             [
                 "Row Type",
+                "County Source",  # 2 (Phase 2 — 2026-05-21): "DCAD" / "TAD" / "Collin" / "Denton"
                 "Intended Target",
                 "Property Address",
                 "MLS Status",
@@ -3716,6 +3752,41 @@ async def _run_download_csv(
                 "Baths",
                 "Stories",
                 "Units",
+                # === Phase 2 residential detail expansion (2026-05-21) ===
+                # New cross-county canonical columns. Populated for any
+                # county whose ingest exposes the field via build_feature
+                # (DCAD: full coverage after Phase 1 backfill; Collin:
+                # beds/baths/pool/stories already covered; TAD: pending
+                # TAD-half PR for the structural fields; Denton: blank).
+                # See docs/CAD_RESIDENTIAL_DETAIL_EXPANSION_SPEC.md
+                # canonical-field contract.
+                "Full Baths",
+                "Half Baths",
+                "Fireplaces",
+                "Kitchens",
+                "Wet Bars",
+                "Garage Capacity",
+                "Stories (raw)",
+                "Structure Type",
+                "Foundation Type",
+                "Construction Frame Type",
+                "Exterior Wall",
+                "Heating Type",
+                "AC Type",
+                "Roof Type",
+                "Roof Material",
+                "Fence Type",
+                "Basement",
+                "Building Class",
+                "CDU Rating",
+                "Effective Year Built",
+                "Actual Age",
+                "% Complete",
+                "Spa Flag",
+                "Sauna Flag",
+                "Sprinkler Flag",
+                "Deck Flag",
+                # === end Phase 2 residential detail expansion ===
                 "Current Market Value",
                 "Current Assessed Value",
                 "Current Ag Use Value",
@@ -3741,8 +3812,11 @@ async def _run_download_csv(
                 "Comp Listing URL",
                 "Comp Status",
                 # COMPATIBILITY LOCK: Good Comp slots immediately after Comp
-                # Status, grouped with the comp data columns. Shifted +1 by
-                # Value Source at column 13. Mirror locks at parcel/orphan
+                # Status, grouped with the comp data columns. Layout history:
+                # originally col 96; +1 to col 97 by Value Source (col 13,
+                # 2026-05-20); +27 to col 124 by Phase 2 residential detail
+                # expansion (County Source col 2 + 26 residential cols after
+                # Units col 73, 2026-05-21). Mirror locks at parcel/orphan
                 # writerow append sites must place the "yes"/blank cell at the
                 # exact same offset. Do not move this column without
                 # coordinated updates at all three sites.
@@ -3869,6 +3943,7 @@ async def _run_download_csv(
             writer.writerow(
                 [
                     "Parcel",
+                    _csv_county_source(row),  # 2 (Phase 2)
                     "yes" if _is_intended_target else "",
                     display_address,
                     "Active" if on_redfin else "Off Market",
@@ -3943,6 +4018,36 @@ async def _run_download_csv(
                     round(_safe_float(row.get("baths")), 1) if _safe_float(row.get("baths")) is not None else "",
                     round(_safe_float(row.get("stories")), 1) if _safe_float(row.get("stories")) is not None else "",
                     round(_safe_float(row.get("units")), 0) if _safe_float(row.get("units")) is not None else "",
+                    # === Phase 2 residential detail cells (parcel writerow) ===
+                    # Same canonical keys as the popup/card reads. row.get() returns
+                    # None for counties that don't expose the field → blank cell.
+                    round(_safe_float(row.get("full_baths")), 0) if _safe_float(row.get("full_baths")) is not None else "",
+                    round(_safe_float(row.get("half_baths")), 0) if _safe_float(row.get("half_baths")) is not None else "",
+                    round(_safe_float(row.get("fireplaces")), 0) if _safe_float(row.get("fireplaces")) is not None else "",
+                    round(_safe_float(row.get("kitchens")), 0) if _safe_float(row.get("kitchens")) is not None else "",
+                    round(_safe_float(row.get("wet_bars")), 0) if _safe_float(row.get("wet_bars")) is not None else "",
+                    round(_safe_float(row.get("garage_capacity")), 0) if _safe_float(row.get("garage_capacity")) is not None else "",
+                    row.get("stories_desc", "") or "",
+                    row.get("structure_type", "") or "" if (row.get("structure_type") or "") != "N/A" else "",
+                    row.get("foundation_type", "") or "" if (row.get("foundation_type") or "") != "N/A" else "",
+                    row.get("construction_frame_type", "") or "" if (row.get("construction_frame_type") or "") != "N/A" else "",
+                    row.get("ext_wall", "") or "" if (row.get("ext_wall") or "") != "N/A" else "",
+                    row.get("heating_type", "") or "" if (row.get("heating_type") or "") != "N/A" else "",
+                    row.get("ac_type", "") or "" if (row.get("ac_type") or "") != "N/A" else "",
+                    row.get("roof_type", "") or "" if (row.get("roof_type") or "") != "N/A" else "",
+                    row.get("roof_material", "") or "" if (row.get("roof_material") or "") != "N/A" else "",
+                    row.get("fence_type", "") or "" if (row.get("fence_type") or "") != "N/A" else "",
+                    row.get("basement", "") or "" if (row.get("basement") or "") != "N/A" else "",
+                    row.get("bldg_class", "") or "" if (row.get("bldg_class") or "") != "N/A" else "",
+                    row.get("cdu_rating", "") or "" if (row.get("cdu_rating") or "") != "N/A" else "",
+                    row.get("eff_yr_built", "") or "" if (row.get("eff_yr_built") or "") != "N/A" else "",
+                    row.get("act_age", "") or "" if (row.get("act_age") or "") != "N/A" else "",
+                    row.get("pct_complete", "") or "" if (row.get("pct_complete") or "") != "N/A" else "",
+                    row.get("spa_flag", "") or "",
+                    row.get("sauna_flag", "") or "",
+                    row.get("sprinkler_flag", "") or "",
+                    row.get("deck_flag", "") or "",
+                    # === end Phase 2 residential detail cells ===
                     round(_safe_float(row.get("curr_market_value")), 0) if _safe_float(row.get("curr_market_value")) is not None else "",
                     round(_safe_float(row.get("curr_assessed_value")), 0) if _safe_float(row.get("curr_assessed_value")) is not None else "",
                     round(_safe_float(row.get("curr_ag_use_value")), 0) if _safe_float(row.get("curr_ag_use_value")) is not None else "",
@@ -4134,8 +4239,9 @@ async def _run_download_csv(
             writer.writerow(
                 [
                     "Comp",                                                                                     # 1
-                    "",                                                                                          # 2 Intended Target
-                    _row_address,                                                                                # 3 Property Address
+                    _csv_county_source(_cad) if _cad else "",                                                   # 2 County Source (Phase 2)
+                    "",                                                                                          # 3 Intended Target
+                    _row_address,                                                                                # 4 Property Address
                     _comp_status_titled,                                                                         # 4 MLS Status (comp's own status)
                     _cad.get("owner_name", "") or "",                                                            # 5
                     _cad.get("owner_address", "") or "",                                                         # 6
@@ -4205,7 +4311,37 @@ async def _run_download_csv(
                     _baths_csv,                                                                                  # 70
                     round(_safe_float(_cad.get("stories")), 1) if _safe_float(_cad.get("stories")) is not None else "",  # 71
                     round(_safe_float(_cad.get("units")), 0) if _safe_float(_cad.get("units")) is not None else "",      # 72
-                    round(_safe_float(_cad.get("curr_market_value")), 0) if _safe_float(_cad.get("curr_market_value")) is not None else "",      # 73
+                    # === Phase 2 residential detail cells (comp writerow, matched CAD) ===
+                    # Pulls from _cad via canonical keys — same fields as parcel writerow.
+                    # Empty when _cad missing (orphan comps populated by the orphan writerow below).
+                    round(_safe_float(_cad.get("full_baths")), 0) if _cad and _safe_float(_cad.get("full_baths")) is not None else "",
+                    round(_safe_float(_cad.get("half_baths")), 0) if _cad and _safe_float(_cad.get("half_baths")) is not None else "",
+                    round(_safe_float(_cad.get("fireplaces")), 0) if _cad and _safe_float(_cad.get("fireplaces")) is not None else "",
+                    round(_safe_float(_cad.get("kitchens")), 0) if _cad and _safe_float(_cad.get("kitchens")) is not None else "",
+                    round(_safe_float(_cad.get("wet_bars")), 0) if _cad and _safe_float(_cad.get("wet_bars")) is not None else "",
+                    round(_safe_float(_cad.get("garage_capacity")), 0) if _cad and _safe_float(_cad.get("garage_capacity")) is not None else "",
+                    (_cad.get("stories_desc") or "") if _cad else "",
+                    (_cad.get("structure_type") or "") if _cad and (_cad.get("structure_type") or "") != "N/A" else "",
+                    (_cad.get("foundation_type") or "") if _cad and (_cad.get("foundation_type") or "") != "N/A" else "",
+                    (_cad.get("construction_frame_type") or "") if _cad and (_cad.get("construction_frame_type") or "") != "N/A" else "",
+                    (_cad.get("ext_wall") or "") if _cad and (_cad.get("ext_wall") or "") != "N/A" else "",
+                    (_cad.get("heating_type") or "") if _cad and (_cad.get("heating_type") or "") != "N/A" else "",
+                    (_cad.get("ac_type") or "") if _cad and (_cad.get("ac_type") or "") != "N/A" else "",
+                    (_cad.get("roof_type") or "") if _cad and (_cad.get("roof_type") or "") != "N/A" else "",
+                    (_cad.get("roof_material") or "") if _cad and (_cad.get("roof_material") or "") != "N/A" else "",
+                    (_cad.get("fence_type") or "") if _cad and (_cad.get("fence_type") or "") != "N/A" else "",
+                    (_cad.get("basement") or "") if _cad and (_cad.get("basement") or "") != "N/A" else "",
+                    (_cad.get("bldg_class") or "") if _cad and (_cad.get("bldg_class") or "") != "N/A" else "",
+                    (_cad.get("cdu_rating") or "") if _cad and (_cad.get("cdu_rating") or "") != "N/A" else "",
+                    (_cad.get("eff_yr_built") or "") if _cad and (_cad.get("eff_yr_built") or "") != "N/A" else "",
+                    (_cad.get("act_age") or "") if _cad and (_cad.get("act_age") or "") != "N/A" else "",
+                    (_cad.get("pct_complete") or "") if _cad and (_cad.get("pct_complete") or "") != "N/A" else "",
+                    (_cad.get("spa_flag") or "") if _cad else "",
+                    (_cad.get("sauna_flag") or "") if _cad else "",
+                    (_cad.get("sprinkler_flag") or "") if _cad else "",
+                    (_cad.get("deck_flag") or "") if _cad else "",
+                    # === end Phase 2 residential detail cells (comp) ===
+                    round(_safe_float(_cad.get("curr_market_value")), 0) if _safe_float(_cad.get("curr_market_value")) is not None else "",      # was 73
                     round(_safe_float(_cad.get("curr_assessed_value")), 0) if _safe_float(_cad.get("curr_assessed_value")) is not None else "",  # 74
                     round(_safe_float(_cad.get("curr_ag_use_value")), 0) if _safe_float(_cad.get("curr_ag_use_value")) is not None else "",      # 75
                     round(_safe_float(_cad.get("curr_ag_market_value")), 0) if _safe_float(_cad.get("curr_ag_market_value")) is not None else "",  # 76
