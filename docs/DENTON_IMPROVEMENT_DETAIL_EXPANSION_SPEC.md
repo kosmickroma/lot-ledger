@@ -1,13 +1,30 @@
 ---
 title: Denton residential detail expansion — Phase 3 (mirror DCAD Phase 1 pattern)
-status: DRAFT v1 for KK greenlight + Copilot critique
+status: v2 — Copilot round-1 critique folded in, awaiting KK greenlight to code
 date: 2026-05-21
 branch: feat/denton-improvement-detail-2026-05-21
 deployment: PREVIEW ONLY for whole arc; gated promote to develop/main
 parent docs:
   - docs/CAD_RESIDENTIAL_DETAIL_EXPANSION_SPEC.md (DCAD canonical-field contract)
   - docs/CAD_DATA_SOURCES_DEEP_DIVE_2026_05_21.md (county data audit)
+revisions:
+  v1 (initial): 2026-05-21
+  v2 (this): 2026-05-21 — Copilot round-1 critique folded in
 ---
+
+## v2 locked decisions (Copilot round-1)
+
+1. **prop_id normalization contract** — digits-only strip, empty→NULL, **retain `raw_prop_id` column** for provenance.
+2. **Multi-improvement observability** — add `selected_imprv_count` + `dropped_imprv_count` columns so future audits see how much we discarded.
+3. **Truncated code expansion** — keep BOTH normalized AND raw columns for each field where expansion happens. First-release safety.
+4. **Bedroom threshold** — configurable CLI flag, default 20. Report bucket counts in QA report (21-30, 31+).
+5. **Heating/Cooling parser** — preserve `raw_heating_cooling_code` column. Unknown codes don't get dropped.
+6. **Backfill performance** — **NO single-shot in-memory dict load.** Pivot to SQL-staging approach: COPY fixed-width files into temp staging tables, do canonical aggregation in PostgreSQL with multi-CTE. Memory-bounded + deterministic.
+7. **Unmatched prop_ids (5,738)** — classify by type + recency in QA report. Tracked follow-up, not silent.
+8. **CSV Phase 4 SPLIT** — Phase 3 ships data flow only. Phase 4 (CSV column additions for Interior Finish / Flooring / Plumbing Fixtures) ships as a separate PR with compatibility-lock-aware shift discipline. Matches DCAD Phase 1 → Phase 2 sequencing.
+9. **Data quality report** — every backfill run emits a machine-readable JSON QA report: top unknown codes, dropped rows, threshold violations, unresolved truncations, attribute description variants seen.
+10. **Canonical divergence table** — explicit doc for Denton-only fields (interior_finish, flooring, plumbing_count) vs the cross-county contract. Lives in `docs/CAD_RESIDENTIAL_DETAIL_EXPANSION_SPEC.md` extended.
+11. **Frontend verification criteria** — explicit for ambiguous normalized labels + unknown-code fallback display.
 
 # Denton Improvement Detail Expansion Spec
 
@@ -87,19 +104,27 @@ Same architectural pattern as DCAD. One row per Denton residential parcel. LEFT 
 
 ```sql
 CREATE TABLE IF NOT EXISTS denton_improvement_detail (
-    prop_id           TEXT PRIMARY KEY,    -- zero-padded? or stripped? See "Key normalization" below.
+    prop_id           TEXT PRIMARY KEY,    -- canonical stripped (digits-only). NULL if non-numeric source.
+    raw_prop_id       TEXT,                -- v2: original zero-padded 12-char from source for provenance / debug
+
     -- Improvement-level summary (from IMPROVEMENT_INFO, primary residential improvement)
     imprv_id          TEXT,
     imprv_type_cd     TEXT,                -- 'R' / 'I' / 'M'
     imprv_homesite    TEXT,                -- 'Y' / 'N'
     imprv_val         NUMERIC(14,2),
+
+    -- v2: multi-improvement observability
+    selected_imprv_count INTEGER,          -- always 1 (the primary residential we chose)
+    dropped_imprv_count  INTEGER,          -- count of other improvements not surfaced (guest house, ADU, etc.)
+
     -- Main detail summary (from IMPROVEMENT_DETAIL, the 'MA' Main Area row)
     main_det_id       TEXT,
     main_det_class    TEXT,                -- e.g. 'FB1' (first-floor 1-story?)
     yr_built          INTEGER,
     eff_yr_built      INTEGER,
     main_area_sqft    NUMERIC(15,2),
-    -- Aggregated attributes (one cell per DCAD canonical key)
+
+    -- Aggregated attributes — NORMALIZED (truncated→readable). One cell per DCAD canonical key.
     foundation_type   TEXT,
     roof_material     TEXT,
     roof_type         TEXT,
@@ -114,33 +139,87 @@ CREATE TABLE IF NOT EXISTS denton_improvement_detail (
     plumbing_count    INTEGER,
     interior_finish   TEXT,                -- NEW (Denton-only)
     flooring          TEXT,                -- NEW (Denton-only)
+
+    -- v2: RAW values preserved for traceability + unknown-code recovery.
+    -- Stored alongside the normalized columns. Frontend ignores; analytics + debug use them.
+    raw_foundation_code      TEXT,
+    raw_roof_covering_code   TEXT,
+    raw_roof_style_code      TEXT,
+    raw_ext_wall_code        TEXT,
+    raw_heating_cooling_code TEXT,        -- Critical: full code preserved (CHCA, CH, Allowance, Cold Stora, etc.)
+    raw_construction_style   TEXT,
+    raw_condition_code       TEXT,
+    raw_sprinkler_code       TEXT,
+    raw_interior_finish_code TEXT,
+    raw_flooring_code        TEXT,
+
     -- Provenance
     source_snapshot   DATE,
     ingested_at       TIMESTAMP WITH TIME ZONE DEFAULT now(),
+
     CONSTRAINT denton_improvement_detail_prop_id_key UNIQUE (prop_id)
 );
 CREATE INDEX IF NOT EXISTS idx_denton_imprv_detail_prop_id ON denton_improvement_detail (prop_id);
 ```
 
-### Key normalization (locked decision)
+### Key normalization (v2: explicit contract per Copilot pushback)
 
-Denton certified files use zero-padded 12-char prop_ids ("000000000008"). Our `denton_parcels.account_num` stores stripped integer-as-text ("8"). **Strip leading zeros at ingest time** so `denton_improvement_detail.prop_id` = "8", matching `denton_parcels.account_num`. Saves a CAST at every query.
+**Canonical join key contract (per Copilot v2 critique):**
+
+```python
+def _normalize_prop_id(raw: str | None) -> tuple[str | None, str]:
+    """Normalize Denton prop_id from certified files for join compatibility.
+
+    Returns (canonical, raw_preserved). Canonical is the digits-only
+    stripped form (matches denton_parcels.account_num). Raw is the
+    source string preserved for provenance / debug.
+
+    Cases:
+    - "000000000008" → ("8", "000000000008")
+    - "111625"       → ("111625", "111625")
+    - "   "          → (None, "")            # empty / whitespace
+    - "abc123"       → ("123", "abc123")     # non-numeric chars stripped
+    - "00000abc"     → (None, "00000abc")    # no digits → NULL
+    - None           → (None, "")
+    """
+```
+
+Stored as `prop_id` (canonical, used for JOIN) + `raw_prop_id` (original). Empty canonical → row dropped during ingest with a counter logged in QA report.
 
 ## Ingest expansion
 
 ### New script: `scripts/build_denton_improvement_detail.py`
 
-Mirrors `scripts/build_dcad_res_detail_backfill.py` pattern. Idempotent + reportable.
+**v2 architecture (per Copilot pushback): SQL-staging, not in-memory dicts.**
+
+Mirrors `scripts/build_dcad_res_detail_backfill.py` pattern at a high level (idempotent + reportable), but avoids loading 4M attribute rows into Python memory. Instead, COPY the fixed-width files into temp staging tables and let PostgreSQL do the aggregation.
 
 **Stages:**
 
-1. **Parse `APPRAISAL_HEADER.TXT`** for snapshot date + appraisal year (sanity-check we're reading the right file).
-2. **Stream `APPRAISAL_IMPROVEMENT_INFO.TXT`** — build dict `improvements_by_prop_id` keyed by (prop_id, imprv_id) → {type_cd, homesite, val}. Prefer rows with `imprv_homesite='Y' AND imprv_type_cd='R'`. If multiple residential improvements per parcel, take highest `imprv_val` (the main house).
-3. **Stream `APPRAISAL_IMPROVEMENT_DETAIL.TXT`** — build dict `main_detail_by_prop_id` keyed by prop_id → {imprv_det_id, det_class, yr_built, eff_yr_built, area}. Pick the `imprv_det_type_cd='MA'` (Main Area) row from the selected improvement.
-4. **Stream `APPRAISAL_IMPROVEMENT_DETAIL_ATTR.TXT`** — build dict `attrs_by_prop_id` keyed by prop_id → {foundation: ..., roof_material: ..., beds: ..., ...}. Apply per-attribute normalization rules (see "Attribute normalization" below).
-5. **Compose final per-parcel rows** — merge improvements + main detail + attrs.
-6. **Bulk-upsert** via temp-table-JOIN pattern (same as DCAD backfill). Idempotent.
-7. **Report** — coverage stats, field-population percentages, sanity-check counts (e.g., parcels with bedrooms > 20 = data quality fail count).
+1. **Parse `APPRAISAL_HEADER.TXT`** in Python for snapshot date + appraisal year (sanity-check we're reading the right file). Tiny (246 bytes).
+2. **Convert fixed-width files to delimited CSV** in chunks, then COPY into PG temp staging tables:
+   - `_denton_imprv_info_stage` (~404k rows) — IMPROVEMENT_INFO parsed via field-width spec
+   - `_denton_imprv_detail_stage` (~5M rows) — IMPROVEMENT_DETAIL
+   - `_denton_imprv_attr_stage` (~3.9M rows) — IMPROVEMENT_DETAIL_ATTR
+   Use `csv.writer` to a tempfile (or psycopg2's `copy_expert` with a generator) so memory stays bounded to ~10MB regardless of input size.
+3. **Aggregate via single multi-CTE PostgreSQL query** that produces one canonical row per prop_id:
+   - `primary_improvements` CTE: pick highest-value residential improvement per prop_id (with ROW_NUMBER() OVER PARTITION BY prop_id)
+   - `main_details` CTE: pick the MA (Main Area) detail row from the selected improvement
+   - `aggregated_attrs` CTE: pivot attribute rows from long → wide form (one column per canonical key). Apply defensive parsing (drop bedrooms > threshold, skip "Allowance" placeholders).
+   - Final SELECT joins all three CTEs + writes to `denton_improvement_detail`.
+   PostgreSQL handles 5M-row joins natively + uses indexes efficiently. Python memory stays minimal.
+4. **Apply code-expansion lookup** in the SELECT itself using a CASE expression OR via post-process UPDATE (preferred for maintainability). Keeps raw + normalized columns both populated per the v2 schema.
+5. **Drop staging tables** + report verification.
+6. **Emit QA report JSON** (per v2 decision #9) with:
+   - Coverage: total rows, JOIN-hit count
+   - Bedroom bucket counts (0, 1-3, 4-6, 7-10, 11-20, 21-30, 31+)
+   - Top-50 unknown codes per attribute (frequency-ranked)
+   - Truncated codes seen but not in expansion lookup
+   - Unmatched prop_ids classified by state code prefix (A*=residential, C*=commercial, etc.)
+   - Per-canonical-key population percentage
+   - Run elapsed time + row counts at each stage
+
+**Path-A fallback if SQL-staging is over-engineered:** for prototyping, OK to start with the in-memory approach AS LONG AS we benchmark RAM usage on full prod data first. If RAM stays under 2GB, in-memory is acceptable. If above, switch to SQL-staging immediately.
 
 ### Attribute normalization rules
 
@@ -295,23 +374,26 @@ What you'll see post-deploy:
 
 The frontend was DESIGNED for this — it's county-agnostic by design (Phase 1 architecture).
 
-## CSV columns (KK confirmed 2026-05-21: reuse + add new beside)
+## CSV columns (v2: SPLIT per Copilot critique)
 
-**Generic concept columns already exist (Phase 2)** — Beds, Full Baths, Half Baths, Pool Flag, Foundation Type, Construction Frame Type, Exterior Wall, Heating Type, AC Type, Roof Type, Roof Material, Fence Type, Basement, Building Class, CDU Rating, Effective Year Built, Spa Flag, Sauna Flag, Sprinkler Flag, Deck Flag, etc. These columns LIVE in `api/main.py` writerow at cols 74-99.
+**Phase 3 (this PR) — existing CSV columns populate for Denton automatically.**
 
-After this PR, Denton parcels populate these columns identically to DCAD. No CSV header changes needed for existing columns.
+The generic concept columns from DCAD Phase 2 (Beds, Full Baths, Half Baths, Pool Flag, Foundation Type, Construction Frame Type, Exterior Wall, Heating Type, AC Type, Roof Type, Roof Material, Fence Type, Basement, Building Class, CDU Rating, Effective Year Built, Spa Flag, Sauna Flag, Sprinkler Flag, Deck Flag) are already in the CSV writer at cols 74-99. Once Denton parcels emit canonical props (foundation_type, roof_material, etc.) via build_feature, those existing CSV cells populate identically to DCAD. **No CSV header changes for these columns in Phase 3.**
 
-**NEW Denton-specific columns to add** (right beside the existing residential block, before "Current Market Value" at col 100):
+**Phase 4 (separate ship) — Denton-specific NEW columns.**
 
-- `Interior Finish` (NEW) — Denton publishes Sheetrock/Drywall/Plaster/Concrete. DCAD doesn't have this.
-- `Flooring` (NEW) — Carpet/Tile/Wood/Vinyl. Denton-only.
-- `Plumbing Fixtures` (NEW) — Denton's numeric plumbing count. Probably more meaningful than DCAD's separate full/half_baths.
+Per Copilot v2 critique #8: SPLIT this work. Phase 4 ships the new columns separately to avoid bundling compatibility-lock-shift risk with data-flow work. Same pattern as DCAD Phase 1 → Phase 2.
 
-These 3 new columns slot in after col 99 (`Deck Flag`), shifting the existing col 100 (`Current Market Value`) to 103, etc. **All COMPATIBILITY LOCK comments at Good Comp / Stored Values sites need their offset history updated** — same pattern as Phase 2 shifts.
+Planned Phase 4 additions (right beside existing residential block, before "Current Market Value" at col 100):
 
-For Phase 4 (CSV expansion for Denton-specific fields), this becomes a follow-up ship: header + parcel writerow + comp writerow + COMPATIBILITY LOCK comment refresh. Same shape as the County Source + 26-residential expansion we did this morning.
+- `Interior Finish` (NEW) — Sheetrock/Drywall/Plaster/Concrete
+- `Flooring` (NEW) — Carpet/Tile/Wood/Vinyl/Marble
+- `Plumbing Fixtures` (NEW) — numeric fixture count
+- `Raw Heating/Cooling Code` (NEW) — preserves source code for analysts (CHCA, CH, Allowance, etc.) — debug + analytics value
 
-If KK wants to keep this PR scope tight (data flow only), CSV expansion ships separately as Phase 4 (mirroring the DCAD Phase 1 → Phase 2 split). Defaulting to "include Phase 4 in this PR" unless KK pushes back — KK's direction was "reuse existing CSV cols + add new ones beside" which is a single PR.
+Total: +4 new columns. Shifts cols 100+ by +4. COMPATIBILITY LOCK comments at Good Comp + Stored Values get history-updated.
+
+Phase 4 gets its own spec + Copilot critique pass after Phase 3 is on develop.
 
 ## Test plan
 
@@ -343,6 +425,43 @@ If KK wants to keep this PR scope tight (data flow only), CSV expansion ships se
 4. **5,738 prop_ids in attrs but not in our denton_parcels.** Either commercial parcels (state code C* / F*) OR new parcels added after our Parcels_FC.csv snapshot. Treat as OK — they don't break anything; we just don't surface them in the UI. If we ever refresh denton_parcels from Parcels_FC.csv, may need to re-run this backfill to catch new accounts.
 5. **Mike's prod DB has live users.** Backfill runs an ALTER TABLE (new table) + INSERT — no risk to existing data. Schema change is additive.
 6. **Source data refreshes.** 2025 certified is stable until Denton publishes 2026 certified (July 2026). When that happens, swap to new files + re-run script. No schema migration needed.
+
+## Canonical divergence table (v2 addition — Copilot critique #10)
+
+This is the authoritative list of Denton-specific fields that diverge from the cross-county canonical contract in `docs/CAD_RESIDENTIAL_DETAIL_EXPANSION_SPEC.md`:
+
+| Denton field | Cross-county equivalent? | Status |
+|---|---|---|
+| `foundation_type` | Same canonical key (DCAD has it) | ✅ Portable |
+| `roof_material` | Same | ✅ Portable |
+| `roof_type` | Same (DCAD: roof_type) | ✅ Portable |
+| `ext_wall` | Same | ✅ Portable |
+| `heating_type` | Same | ✅ Portable (decoded from Heating/Cooling code) |
+| `ac_type` | Same | ✅ Portable (decoded from Heating/Cooling code) |
+| `beds` | Same | ✅ Portable |
+| `fireplaces` | Same | ✅ Portable |
+| `cdu_rating` | Same (DCAD: cdu_rating_desc) | ✅ Portable |
+| `bldg_class` | Same (DCAD: bldg_class_desc, but DCAD's is a code, Denton's is "Ranch / Contemporary" text) | ⚠️ Semantic divergence — DCAD says "09" Denton says "Ranch" |
+| `sprinkler_flag` | Same | ✅ Portable |
+| `interior_finish` | **Denton-only** | 🎁 New field, not in DCAD |
+| `flooring` | **Denton-only** | 🎁 New field, not in DCAD |
+| `plumbing_count` | **Denton-only** (DCAD has separate full_baths/half_baths) | 🎁 New field, Denton lumps it |
+| `eff_yr_built` | Same | ✅ Portable |
+
+**Cross-county implication for frontend code:** `props.bldg_class` for DCAD is "09"; for Denton is "Ranch". UI rendering should handle both. Suggest displaying as-is (no special-case logic) — analysts looking at CSV will understand the divergence.
+
+**Cross-county implication for future TAD expansion:** TAD doesn't publish foundation/roof/HVAC descriptors. TAD residential parcels will still show "N/A" for those canonical keys after Phase 3 ships (no regression — they're already N/A today).
+
+## UI verification criteria (v2 addition — Copilot critique #11)
+
+Before promoting Phase 3 to develop, smoke test on preview against the following:
+
+1. **Ambiguous normalized labels:** load a Denton parcel known to have "Concrete B" foundation. Confirm UI displays "Concrete Block" (expanded) not "Concrete B" (truncated). If still showing raw, fix the expansion lookup.
+2. **Unknown-code fallback:** find a parcel with an unknown Heating/Cooling code in the QA report. Confirm UI shows the raw code (not blank, not crashing). E.g., if code is "Moist Air", we don't have a parser for it yet — the popup should show "Moist Air" verbatim with the canonical heating_type=NULL.
+3. **Multi-improvement parcel:** find a parcel with both primary house + ADU (selected_imprv_count=1, dropped_imprv_count>0). Confirm the Subject Card shows the primary house's attributes (not a mix or the wrong improvement).
+4. **Cross-county consistency:** load a mixed-county polygon (Dallas + Denton parcels in one analysis). Confirm both populate the same canonical key set + frontend renders them uniformly.
+5. **Regression on DCAD + Collin:** confirm DCAD parcels still show full residential detail (Phase 1 unchanged). Confirm Collin parcels still show their partial set (beds/baths/pool from native column).
+6. **CSV download:** existing canonical columns (Beds, Foundation Type, Roof Material, etc.) populate for Denton parcels. Phase 4 columns (Interior Finish, Flooring, Plumbing) absent in this PR — confirm no extra columns appear.
 
 ## Open questions for Copilot critique
 
