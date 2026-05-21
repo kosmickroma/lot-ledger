@@ -98,14 +98,51 @@ def _denton_bbox_filter(min_lat: float, min_lng: float, max_lat: float, max_lng:
                     subdivision,
                     zoning,
                     area_estimated,
-                    ST_Area(ST_OrientedEnvelope(geom)::geography) / NULLIF(ST_Area(geom::geography), 0) AS envelope_ratio,
-                    ST_Perimeter(ST_OrientedEnvelope(geom)::geography) * 3.28084 AS envelope_perim_ft,
-                    ST_Area(ST_OrientedEnvelope(geom)::geography) * 10.763910416709722 AS envelope_area_sqft,
-                    ST_Area(geom::geography) * 10.763910416709722 AS geom_sqft,
-                    ST_AsGeoJSON(geom)::json AS polygon_geojson,
-                    ST_AsGeoJSON(centroid)::json AS centroid_json
-                FROM denton_parcels
-                WHERE ST_Intersects(centroid, ST_MakeEnvelope(%s, %s, %s, %s, 4326))
+                    ST_Area(ST_OrientedEnvelope(p_outer.geom)::geography) / NULLIF(ST_Area(p_outer.geom::geography), 0) AS envelope_ratio,
+                    ST_Perimeter(ST_OrientedEnvelope(p_outer.geom)::geography) * 3.28084 AS envelope_perim_ft,
+                    ST_Area(ST_OrientedEnvelope(p_outer.geom)::geography) * 10.763910416709722 AS envelope_area_sqft,
+                    ST_Area(p_outer.geom::geography) * 10.763910416709722 AS geom_sqft,
+                    ST_AsGeoJSON(p_outer.geom)::json AS polygon_geojson,
+                    ST_AsGeoJSON(p_outer.centroid)::json AS centroid_json,
+                    -- v3 residential detail expansion (Phase 3, 2026-05-21):
+                    -- LEFT JOIN denton_improvement_detail provides canonical
+                    -- residential keys (foundation, roof, beds, etc.) sourced
+                    -- from Denton's 2025 certified data extract. See
+                    -- docs/DENTON_IMPROVEMENT_DETAIL_EXPANSION_SPEC.md v3.
+                    -- Frontend popup + Subject Property card already consume
+                    -- these via row.get('foundation_type') etc. (Phase 1).
+                    d.foundation_type    AS foundation_type,
+                    d.roof_material      AS roof_material,
+                    d.roof_type          AS roof_type,
+                    d.ext_wall           AS ext_wall,
+                    d.heating_type       AS heating_type,
+                    d.ac_type            AS ac_type,
+                    d.beds               AS beds,
+                    d.fireplaces         AS fireplaces,
+                    d.cdu_rating         AS cdu_rating,
+                    d.bldg_class         AS bldg_class,
+                    d.sprinkler_flag     AS sprinkler_flag,
+                    d.plumbing_count     AS plumbing_count,
+                    d.interior_finish    AS interior_finish,
+                    d.flooring           AS flooring,
+                    d.eff_yr_built       AS eff_yr_built,
+                    d.main_area_sqft     AS denton_main_area_sqft,
+                    d.dropped_imprv_count AS dropped_imprv_count,
+                    d.raw_heating_cooling_code AS raw_heating_cooling_code
+                FROM denton_parcels p_outer
+                LEFT JOIN LATERAL (
+                    -- Single-row pick per parcel — prop_id is the canonical
+                    -- digits-only key (matches denton_parcels.account_num).
+                    -- LATERAL ensures we never multiply rows even if any
+                    -- future schema change introduces multiple detail rows
+                    -- per parcel (defensive — today PK constraint guarantees
+                    -- one row).
+                    SELECT *
+                    FROM denton_improvement_detail
+                    WHERE prop_id = p_outer.account_num
+                    LIMIT 1
+                ) d ON TRUE
+                WHERE ST_Intersects(p_outer.centroid, ST_MakeEnvelope(%s, %s, %s, %s, 4326))
                 """,
                 (min_lng, min_lat, max_lng, max_lat),
             )
@@ -240,6 +277,32 @@ def _normalize_denton_row(raw: dict[str, Any]) -> dict[str, Any]:
         "deed_date": _clean_text(raw.get("deed_date")),
         "legal_descr": _clean_text(raw.get("legal_descr")),
         "subdivision": _clean_text(raw.get("subdivision")),
+        # === Phase 3 residential detail expansion (2026-05-21) ===
+        # Aliased from denton_improvement_detail via LEFT JOIN in
+        # _denton_bbox_filter SELECT. Must explicitly pass through here
+        # because this dict-builder enumerates output keys (same pattern
+        # that caused the DCAD merged_rows leak in Phase 1 — fixed in
+        # commit 8684b96). Carry the canonical keys per the contract in
+        # docs/CAD_RESIDENTIAL_DETAIL_EXPANSION_SPEC.md.
+        "foundation_type": _clean_text(raw.get("foundation_type")),
+        "roof_material": _clean_text(raw.get("roof_material")),
+        "roof_type": _clean_text(raw.get("roof_type")),
+        "ext_wall": _clean_text(raw.get("ext_wall")),
+        "heating_type": _clean_text(raw.get("heating_type")),
+        "ac_type": _clean_text(raw.get("ac_type")),
+        "beds": _safe_int(raw.get("beds")),
+        "fireplaces": _safe_int(raw.get("fireplaces")),
+        "cdu_rating": _clean_text(raw.get("cdu_rating")),
+        "bldg_class": _clean_text(raw.get("bldg_class")),
+        "sprinkler_flag": _clean_text(raw.get("sprinkler_flag")),
+        "plumbing_count": _safe_int(raw.get("plumbing_count")),
+        "interior_finish": _clean_text(raw.get("interior_finish")),
+        "flooring": _clean_text(raw.get("flooring")),
+        "eff_yr_built": _safe_int(raw.get("eff_yr_built")),
+        "dropped_imprv_count": _safe_int(raw.get("dropped_imprv_count")),
+        # Raw code preservation for debug + future re-decoding
+        "raw_heating_cooling_code": _clean_text(raw.get("raw_heating_cooling_code")),
+        # === end Phase 3 expansion ===
     }
 
 

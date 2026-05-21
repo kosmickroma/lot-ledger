@@ -725,6 +725,20 @@ def build_feature(row: dict[str, Any], prop_type: str, on_redfin: bool, redfin_l
         "cdu_rating": _clean_text(row.get("cdu_rating")) or "N/A",
         "pct_complete": _clean_text(row.get("pct_complete")) or "N/A",
 
+        # === Denton-only canonical keys (Phase 3, 2026-05-21) ===
+        # Sourced from denton_improvement_detail (Denton CAD 2025 certified
+        # data). N/A for DCAD/TAD/Collin parcels (those CADs don't publish
+        # these specific fields). See
+        # docs/DENTON_IMPROVEMENT_DETAIL_EXPANSION_SPEC.md v3 canonical
+        # divergence table.
+        "interior_finish": _clean_text(row.get("interior_finish")) or "N/A",
+        "flooring": _clean_text(row.get("flooring")) or "N/A",
+        "plumbing_count": int(_safe_float(row.get("plumbing_count"))) if _safe_float(row.get("plumbing_count")) not in (None, 0.0) else "N/A",
+        # Multi-improvement observability — when > 0, the parcel had additional
+        # residential improvements (e.g. guest house) we didn't surface. Phase
+        # 1.5 panel could expose these.
+        "dropped_imprv_count": int(_safe_float(row.get("dropped_imprv_count"))) if _safe_float(row.get("dropped_imprv_count")) not in (None, 0.0) else 0,
+
         "verified_vacant": _clean_text(row.get("verified_vacant")),
         "potential_target": _clean_text(row.get("potential_target")),
         "redfin_price": f"${redfin_listing['price']:,}" if redfin_listing and redfin_listing.get("price") else None,
