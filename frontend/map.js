@@ -262,7 +262,7 @@ function passesCompFilters(feature) {
 const PARCEL_LAYER_KEYS = ["active", "sold", "off_market", "vacant", "multifamily", "commercial", "exempt"];
 
 // -- Click mode helpers (Jump vs Stay) --
-let currentClickMode = "jump";
+let currentClickMode = "stay";
 
 function getClickMode() {
   return currentClickMode;
@@ -6248,9 +6248,13 @@ function initSidebarCollapsibles() {
 }
 
 function initClickModeToggle() {
-  // Per Mike's feedback: always start in "jump" (zoom) mode at page load.
-  // Mid-session toggles work via currentClickMode but do not persist across refreshes.
-  currentClickMode = "jump";
+  // 2026-05-20: flipped default to "stay" per KK — analysts found the auto-
+  // zoom-on-every-click disorienting. The toolbar ZOOM button is the user-
+  // facing toggle; mid-session toggles work via currentClickMode but do not
+  // persist across refreshes (always re-init to "stay" on page load).
+  // (Original Mike feedback was jump-default; superseded by this 2026-05-20
+  // change after real-world workflow review.)
+  currentClickMode = "stay";
 
   // Set up button click handlers (legacy saved-areas-section toggle —
   // markup may have been removed in the 2026-05-11 toolbar relocation,
