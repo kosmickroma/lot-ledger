@@ -751,6 +751,10 @@ function _setOriginatorTargetLabel(addr) {
     if (row) row.classList.add("hidden");
     if (mirrorNameEl) mirrorNameEl.textContent = "";
     if (mirrorRow) mirrorRow.classList.add("hidden");
+    // Also wipe the card's rich fields so a direct clearActiveItem path
+    // (which doesn't go through _refreshOriginatorTargetLabel) doesn't
+    // leave stale price/nbhd/meta behind for the next render.
+    _populateSubjectPropertyCard(null);
     return;
   }
   if (nameEl) nameEl.textContent = text;
@@ -759,33 +763,87 @@ function _setOriginatorTargetLabel(addr) {
   if (mirrorRow) mirrorRow.classList.remove("hidden");
 }
 
-async function _resolveTargetAddress(county, account) {
+async function _resolveTargetParcelFeatureProps(county, account) {
+  // Returns the parcel's feature.properties dict (or null). Two-tier:
+  //   1) Cache-first against lastAnalysisGeojson — when the target is
+  //      inside the current polygon analysis, we already have the props
+  //      and skip the network round-trip.
+  //   2) Otherwise, fetch /api/parcel/{county}/{account} and use its
+  //      properties.
+  // Caller is responsible for race-guarding against _currentTargetParcel
+  // moving on between fetch start and resolve.
   const c = String(county || "").trim().toLowerCase();
   const a = String(account || "").trim();
   if (!c || !a) return null;
-  // Always fetch + format from raw props. Cache `name` can carry
-  // pre-fix dirty values ("STREET CITY, TX ZIP CITY") for parcels saved
-  // before _formatPropertyAddress landed — fetching guarantees we
-  // rebuild from the source row each time.
+
+  if (Array.isArray(lastAnalysisGeojson?.features)) {
+    for (const f of lastAnalysisGeojson.features) {
+      const p = f?.properties || {};
+      if (String(p.account_num || "").trim() === a
+        && String(p.source_county || "").trim().toLowerCase() === c) {
+        return p;
+      }
+    }
+  }
+
   try {
     const resp = await fetch(`/api/parcel/${encodeURIComponent(c)}/${encodeURIComponent(a)}`);
-    if (!resp.ok) {
-      // Fetch failed (404, network) — fall back to whatever the cache
-      // has so the Subject Property row still shows something.
-      const cached = (Array.isArray(_savedParcelsCache) ? _savedParcelsCache : []).find((p) =>
-        String(p?.account_num || "").trim() === a
-        && String(p?.county || "").trim().toLowerCase() === c,
-      );
-      const fallback = String(cached?.name || "").trim();
-      return fallback || null;
-    }
+    if (!resp.ok) return null;
     const detail = await resp.json();
-    const props = detail?.properties || detail || {};
-    const formatted = _formatPropertyAddress(c, props.addr, props.city);
-    return formatted || null;
+    return detail?.properties || detail || null;
   } catch (err) {
-    console.warn("[subject-property] address resolve failed:", err);
+    console.warn("[subject-property] parcel props resolve failed:", err);
     return null;
+  }
+}
+
+function _populateSubjectPropertyCard(props) {
+  // Fills the rich Subject Property card in the Comps List block:
+  //   - Total Value (cyan #22d3ee, top-left)
+  //   - Subject badge (cyan, top-right) — static text, always "Subject"
+  //   - Subdivision line (italic gold)
+  //   - Meta line: sqft · ac lot · year built · school district
+  // The address is set by _setOriginatorTargetLabel (top + bottom share
+  // that DOM node), so this function only touches price/nbhd/meta.
+  // Called atomically from _refreshOriginatorTargetLabel — no separate
+  // state, no possibility of divergence from the top slot row.
+  const priceEl = document.getElementById("comps-block-target-card-price");
+  const nbhdEl = document.getElementById("comps-block-target-card-nbhd");
+  const metaEl = document.getElementById("comps-block-target-card-meta");
+
+  if (!props) {
+    if (priceEl) priceEl.textContent = "—";
+    if (nbhdEl) nbhdEl.textContent = "";
+    if (metaEl) metaEl.textContent = "";
+    return;
+  }
+
+  // Price = CAD total value. tot_val on feature.properties is a
+  // pre-formatted "$NNN,NNN" string (see build_feature in dcad.py:500-ish).
+  // Strip any prior-year tag suffix here too — _totalValueDisplay handles
+  // that for the popup; for the card we want a clean number for the
+  // headline. Append (prior year YYYY) inline using existing helper.
+  if (priceEl) {
+    const totVal = String(props.tot_val || "").trim();
+    priceEl.textContent = totVal || "—";
+  }
+
+  if (nbhdEl) {
+    const sub = String(props.subdivision || "").trim();
+    nbhdEl.textContent = sub;
+  }
+
+  if (metaEl) {
+    const parts = [];
+    const sqft = String(props.sqft || "").trim();
+    if (sqft && sqft !== "N/A") parts.push(`${sqft} sqft`);
+    const acres = String(props.lot_acres || "").trim();
+    if (acres && acres !== "N/A") parts.push(acres);
+    const yr = String(props.yr_built || "").trim();
+    if (yr && yr !== "N/A") parts.push(yr);
+    const school = String(props.school || "").trim();
+    if (school && school !== "N/A") parts.push(school);
+    metaEl.textContent = parts.join(" · ");
   }
 }
 
@@ -794,14 +852,31 @@ async function _refreshOriginatorTargetLabel(county, account) {
   const a = String(account || "").trim();
   if (!c || !a) {
     _setOriginatorTargetLabel(null);
+    _populateSubjectPropertyCard(null);
     return;
   }
-  const addr = await _resolveTargetAddress(c, a);
-  // Guard against races: if the user switched workspaces between the
-  // fetch firing and resolving, _currentTargetParcel will have moved on
-  // and we'd stomp the new label with stale data.
+  const props = await _resolveTargetParcelFeatureProps(c, a);
+  // Race guard: if the user switched workspaces between fetch firing
+  // and resolving, _currentTargetParcel has moved on; skip the stomp.
   if (!_sameParcelIdentity(_currentTargetParcel, { county: c, account: a })) return;
-  _setOriginatorTargetLabel(addr);
+
+  if (!props) {
+    // Fallback path: parcel not in analysis AND /api/parcel failed. Try
+    // the saved-parcels cache for a plain address string so at least the
+    // top slot + card address line still show something.
+    const cached = (Array.isArray(_savedParcelsCache) ? _savedParcelsCache : []).find((p) =>
+      String(p?.account_num || "").trim() === a
+      && String(p?.county || "").trim().toLowerCase() === c,
+    );
+    const fallbackAddr = String(cached?.name || "").trim() || null;
+    _setOriginatorTargetLabel(fallbackAddr);
+    _populateSubjectPropertyCard(null);
+    return;
+  }
+
+  const formattedAddr = _formatPropertyAddress(c, props.addr, props.city);
+  _setOriginatorTargetLabel(formattedAddr);
+  _populateSubjectPropertyCard(props);
 }
 
 async function _ensureCurrentTargetParcelCoords() {
