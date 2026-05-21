@@ -741,16 +741,20 @@ function _setOriginatorTargetLabel(addr) {
   // this single synchronous function — no separate state, no async hop, no
   // way for the two to diverge. The mirror has its own styling but reads
   // the same text + hidden state as the slot.
+  // Top active-item slot only writes the simple "STREET CITY" address.
+  // The Comps List block CARD has its own full-address element
+  // (#comps-block-target-card-addr) populated by
+  // _populateSubjectPropertyCard with "STREET, CITY, TX ZIP". Both
+  // surfaces still update together via _refreshOriginatorTargetLabel —
+  // top + bottom are linked, just different render formats.
   const row = document.getElementById("active-item-target-row");
   const nameEl = document.getElementById("active-item-target-name");
-  const mirrorRow = document.getElementById("comps-block-target-row");
-  const mirrorNameEl = document.getElementById("comps-block-target-name");
+  const cardRow = document.getElementById("comps-block-target-row");
   const text = (addr || "").toString().trim();
   if (!text) {
     if (nameEl) nameEl.textContent = "";
     if (row) row.classList.add("hidden");
-    if (mirrorNameEl) mirrorNameEl.textContent = "";
-    if (mirrorRow) mirrorRow.classList.add("hidden");
+    if (cardRow) cardRow.classList.add("hidden");
     // Also wipe the card's rich fields so a direct clearActiveItem path
     // (which doesn't go through _refreshOriginatorTargetLabel) doesn't
     // leave stale price/nbhd/meta behind for the next render.
@@ -759,8 +763,7 @@ function _setOriginatorTargetLabel(addr) {
   }
   if (nameEl) nameEl.textContent = text;
   if (row) row.classList.remove("hidden");
-  if (mirrorNameEl) mirrorNameEl.textContent = text;
-  if (mirrorRow) mirrorRow.classList.remove("hidden");
+  if (cardRow) cardRow.classList.remove("hidden");
 }
 
 async function _resolveTargetParcelFeatureProps(county, account) {
@@ -797,32 +800,79 @@ async function _resolveTargetParcelFeatureProps(county, account) {
   }
 }
 
-function _populateSubjectPropertyCard(props) {
+function _formatFullPropertyAddress(county, props) {
+  // Full USPS-style address for the Subject Property card:
+  //   "STREET, CITY, TX ZIP"
+  // Distinct from _formatPropertyAddress (which trims to "STREET CITY"
+  // for the top slot label). The card wants all the disambiguating
+  // info — analysts cross-reference against MLS / public records.
+  //
+  // Per-county quirks on the source addr field:
+  //   - collin / denton: addr is bundled (e.g. "1713 N COLLEGE ST MCKINNEY, TX 75069"
+  //                      or "8812 ENCLAVE WAY, NORTHLAKE, TX") — extract the street
+  //                      portion by splitting on first comma; if the street still has
+  //                      the city as the last token, strip it so we don't repeat.
+  //   - dcad / tad:     addr is street-only — use as-is.
+  const c = String(county || "").trim().toLowerCase();
+  const rawAddr = String(props?.addr || "").trim();
+  const city = String(props?.city || "").trim();
+  const zip = String(props?.property_zip || "").trim();
+
+  let street = rawAddr;
+  if (c === "collin" || c === "denton") {
+    street = rawAddr.split(",")[0].trim();
+  }
+  // For all counties: if the extracted street ends with the city
+  // (Collin's bundled format does this), trim it so we don't show
+  // "1713 N COLLEGE ST MCKINNEY, MCKINNEY, TX 75069".
+  if (city && street.toUpperCase().endsWith(" " + city.toUpperCase())) {
+    street = street.slice(0, -(city.length + 1)).trim();
+  }
+
+  const parts = [];
+  if (street) parts.push(street);
+  if (city) parts.push(city);
+  // State always "TX" for our four counties; zip is optional.
+  if (zip) {
+    parts.push(`TX ${zip}`);
+  } else {
+    parts.push("TX");
+  }
+  return parts.join(", ");
+}
+
+function _populateSubjectPropertyCard(props, county) {
   // Fills the rich Subject Property card in the Comps List block:
   //   - Total Value (cyan #22d3ee, top-left)
   //   - Subject badge (cyan, top-right) — static text, always "Subject"
+  //   - Full address: "STREET, CITY, TX ZIP" (separate from top slot's
+  //     trimmed "STREET CITY" form so the card carries the disambiguating
+  //     state + zip)
   //   - Subdivision line (italic gold)
   //   - Meta line: sqft · ac lot · year built · school district
-  // The address is set by _setOriginatorTargetLabel (top + bottom share
-  // that DOM node), so this function only touches price/nbhd/meta.
   // Called atomically from _refreshOriginatorTargetLabel — no separate
   // state, no possibility of divergence from the top slot row.
   const priceEl = document.getElementById("comps-block-target-card-price");
+  const addrEl = document.getElementById("comps-block-target-card-addr");
   const nbhdEl = document.getElementById("comps-block-target-card-nbhd");
   const metaEl = document.getElementById("comps-block-target-card-meta");
 
   if (!props) {
     if (priceEl) priceEl.textContent = "—";
+    if (addrEl) addrEl.textContent = "—";
     if (nbhdEl) nbhdEl.textContent = "";
     if (metaEl) metaEl.textContent = "";
     return;
   }
 
+  // Full address with state + zip on the card (top slot keeps the simple
+  // "STREET CITY" form for compactness).
+  if (addrEl) {
+    addrEl.textContent = _formatFullPropertyAddress(county, props);
+  }
+
   // Price = CAD total value. tot_val on feature.properties is a
   // pre-formatted "$NNN,NNN" string (see build_feature in dcad.py:500-ish).
-  // Strip any prior-year tag suffix here too — _totalValueDisplay handles
-  // that for the popup; for the card we want a clean number for the
-  // headline. Append (prior year YYYY) inline using existing helper.
   if (priceEl) {
     const totVal = String(props.tot_val || "").trim();
     priceEl.textContent = totVal || "—";
@@ -876,7 +926,7 @@ async function _refreshOriginatorTargetLabel(county, account) {
 
   const formattedAddr = _formatPropertyAddress(c, props.addr, props.city);
   _setOriginatorTargetLabel(formattedAddr);
-  _populateSubjectPropertyCard(props);
+  _populateSubjectPropertyCard(props, c);
 }
 
 async function _ensureCurrentTargetParcelCoords() {
