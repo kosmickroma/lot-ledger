@@ -14,6 +14,34 @@ status: living-document
 
 ## ⚡ In flight right now
 
+- [ ] **🆕 NEXT SESSION PICKUP — 2026-05-21 end-of-day state**
+  - [x] HIGH
+  - [ ] 2nd
+  - [ ] Defer
+  - **Shipped to develop today (commit `55f86c7`):**
+    - DCAD residential detail (Phase 1+2 morning): 27 RES_DETAIL.CSV columns ingested, canonical keys flow through `feature.properties`, +27 CSV columns at 74-99
+    - `merged_rows` leak fix: dcad.py was silently dropping the new keys; fix shipped
+    - save_verification fast-path: branches on `_job_store` warmth, thin JSONB queries on cold instances
+    - Animation gate: `.saved-parcel-glow` paused at zoom < 15
+    - Cloud Run free tuning: concurrency 80 → 20, startup CPU boost on (preview + dev only)
+    - **Denton Phase 3** (afternoon): 306,688 parcels ingested from 2025 certified data (`denton_improvement_detail` table), 95.9% residential coverage. Pool, garage, stories, deck derived from sub-area detail rows. Plumbing reinterpreted as bath count (decimal half-baths). Total Rooms / Outdoor Fireplaces / End Unit added as canonical keys.
+    - **Phase 4 CSV**: +5 columns at 100-104 (Interior Finish, Flooring, Total Rooms, Outdoor Fireplaces, End Unit). Total CSV columns 146 → 151.
+    - Quick fixes: half_baths=0 now displays as "0" not "N/A"; "Baths (derived)" row dropped; Actual Age derived from yr_built when CAD doesn't publish.
+  - **On preview only (NOT promoted to main / Mike's prod):**
+    - Everything above is on develop @ `lot-ledger-dev`. Mike's prod still at the pre-2026-05-21 state.
+    - **Before promoting to main / Mike's prod**, draft column-shift heads-up for Mike (CSV total cols went 119 → 146 morning, then 146 → 151 afternoon = +32 new columns total. Cells 1-99 unchanged. Anything past col 99 has shifted. Spreadsheets that reference by header name = fine. Spreadsheets that reference by column letter past col 99 = need re-mapping.)
+  - **Likely next-session items (pick whichever fits the moment):**
+    - [ ] TAD-half PR — spec is already in `docs/CAD_RESIDENTIAL_DETAIL_EXPANSION_SPEC.md` v3. Next step is downloading TAD's "Residential Comp Attribute Data" file from `tad.org/data-download/` (browser-only — bot 403s), then mirror the Denton pattern. ~12-15 fields available including garage_capacity which DCAD doesn't have.
+    - [ ] Mike CSV heads-up draft + prod promote (when ready). Don't promote without notifying him.
+    - [ ] Regular-users-inherit-filters regression — LIVE PROD BUG, see Bugs section below
+    - [ ] Mike's GCP SQL password rotation — still HIGH, untouched
+    - [ ] Phase 5 Denton extras KK didn't request today but data is there: Open Porch sqft (485k coverage), Bonus Room sqft (48k), Outdoor Kitchen, Balcony, Storage / Barn / Stables, Gazebo, Tennis Court, Basement Finished, Detached Living, etc. — all sub-area detail rows we don't currently surface.
+    - [ ] Phase 1.5 structured panel for Subject Property card (committed in v3 spec; Core/Structure/Mechanical/Amenities/Record sections).
+  - **Deferred per KK call today (in master_todo below, NOT cleared):**
+    - Multi-year prior owner ingest (Denton + DCAD) — back-burner per KK
+    - DCAD garage capacity from supplemental release — 2nd priority
+    - TAD/Collin paid/PIA paths for richer residential detail — out for now
+
 - [ ] **Neighborhood overlay POC — TIGER block groups as gold-line toggle** (client validation BEFORE building bigger vision)
   - [ ] HIGH
   - [x] 2nd
@@ -439,18 +467,22 @@ Captured from a repo-wide scan. Threat model: auth-gated team tool with Mike + V
   - [ ] 2nd
   - [x] Defer
 
-- [ ] **Bring TAD + Denton + Dallas parcel-detail data up to Collin parity** (2026-05-21 — bedrooms, baths, pool, garage, deed, etc.)
-  - [ ] HIGH
-  - [x] 2nd
+- [ ] **TAD half — bring TAD parcel-detail up to DCAD/Denton parity** (2026-05-21 — last county remaining after Phase 1+3 wins today)
+  - [x] HIGH
+  - [ ] 2nd
   - [ ] Defer
-  - **What Collin gives us today (api/counties/collin.py `_normalize_collin_row`):** beds, baths, pool, deed date, deed type, agent summary, permit count + latest, protest case count + latest, ag value, multi-year history flags, etc.
-  - **What the others give:** mostly land/improvement values + year built + living area. Missing: structural specifics (rooms, garage, pool flag), agent/permit/protest data, recent deeds.
-  - **What we know is available:**
-    - **DCAD:** `data/RES_DETAIL.CSV` already on disk — contains BLDG_CLASS_DESC, NUM_BEDROOMS, NUM_FULL_BATHS, NUM_HALF_BATHS, POOL_IND, NUM_FIREPLACES, FOUNDATION_TYP_DESC, HEATING_TYP_DESC, ROOF_MAT_DESC, EXT_WALL_DESC, etc. The build_db.py reads it but only pulls year_built and living_area. **Same shape as the property_city win — DCAD publishes the data, we just don't pull all columns.**
-    - **TAD:** `StandardData/ResidentialPropertyData/PropertyData(Delimited)_R.txt` schema includes Garage_Capacity, Num_Bedrooms, Num_Bathrooms — but file currently empty (header-only template). Need to find the populated version OR look at the TAD ParcelView shapefile DBF for these columns.
-    - **Denton:** TBD — audit unzipped folder for similar files.
-  - **Effort:** medium. Per-county ingest expansion, schema additions, CSV column additions. Should be scoped after TAD city resolution lands.
-  - **Why we want it:** investor workflow benefits from quick read of "3bd/2ba with pool" right in the parcel popup without having to drill down. Currently only Collin parcels give this; the other 3 counties feel sparser by comparison.
+  - **Status update (2026-05-21 EOD):** DCAD ✅ DONE (Phase 1+2, commit `5bbbf7a` morning). Denton ✅ DONE (Phase 3+4, commit `55f86c7` afternoon). Only **TAD remaining**.
+  - **Spec ready:** `docs/CAD_RESIDENTIAL_DETAIL_EXPANSION_SPEC.md` v3 covers TAD. Section: "TAD source data audit".
+  - **Concrete next steps:**
+    1. Open `tad.org/data-download/` in browser (bot 403s — must use browser). Look for "Residential Comp Attribute Data" download for tax year 2024 (or latest).
+    2. Drop in `ingest/counties/tarrant/tad/2026-05-01/unzipped/ResCompAttribute/`. Likely 100-300MB.
+    3. Audit columns vs canonical residential keys (foundation_type, roof_material, etc.).
+    4. Build `scripts/build_tad_comp_attribute.py` mirroring the Denton ingest pattern. Mirror new `tad_improvement_detail` table.
+    5. Update SELECTs in `api/counties/tad.py:query_tad_parcels` + `_fetch_tad_parcel_by_account` with LATERAL JOIN (same shape as Denton/DCAD).
+    6. Update `_normalize_tad_row` to carry new canonical keys (avoid the dict-rebuilder leak class that hit DCAD).
+    7. Backfill + preview-deploy + smoke.
+  - **Bonus TAD-only field:** `Garage_Capacity` (already in ParcelView shapefile DBF — empirically verified). DCAD doesn't have this; TAD does. Pull it into the canonical contract.
+  - **What's stable from Phase 1-4:** build_feature canonical-key emission, popup row layout, Subject Property card lines 2-3. TAD parcels start populating once the table exists + SELECT projects the keys. Zero frontend code needed.
 
 - [ ] **TAD frontage / depth data**
   - [ ] HIGH
