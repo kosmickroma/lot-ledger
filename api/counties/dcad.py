@@ -513,6 +513,16 @@ def build_feature(row: dict[str, Any], prop_type: str, on_redfin: bool, redfin_l
         "subdivision": _clean_text(row.get("subdivision")) or _dcad_subdivision_from_legal(row.get("legal1")),
         "yr_built": str(row.get("yr_built")) if row.get("yr_built") else "N/A",
         "sqft": f"{int(float(row['tot_living_area'])):,}" if _safe_float(row.get("tot_living_area")) not in (None, 0.0) else "N/A",
+        # Structural fields — Collin ingests these from its shapefile DBF
+        # (api/counties/collin.py:_normalize_collin_row populates them).
+        # DCAD/TAD/Denton don't yet pull beds/baths/pool from their
+        # sources, so row.get() returns None → "N/A" for those.
+        # Followup in master_todo: ingest beds/baths/pool from
+        # DCAD's RES_DETAIL.CSV + equivalent for TAD/Denton.
+        "beds": int(_safe_float(row.get("beds"))) if _safe_float(row.get("beds")) not in (None, 0.0) else "N/A",
+        "baths": _safe_float(row.get("baths")) if _safe_float(row.get("baths")) not in (None, 0.0) else "N/A",
+        "stories": _safe_float(row.get("stories")) if _safe_float(row.get("stories")) not in (None, 0.0) else "N/A",
+        "pool_flag": _clean_text(row.get("pool_flag")) or "",
         "verified_vacant": _clean_text(row.get("verified_vacant")),
         "potential_target": _clean_text(row.get("potential_target")),
         "redfin_price": f"${redfin_listing['price']:,}" if redfin_listing and redfin_listing.get("price") else None,

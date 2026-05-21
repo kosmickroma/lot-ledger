@@ -891,6 +891,23 @@ function _populateSubjectPropertyCard(props, county) {
     if (acres && acres !== "N/A") parts.push(acres);
     const yr = String(props.yr_built || "").trim();
     if (yr && yr !== "N/A") parts.push(yr);
+    // Beds / baths / pool — only Collin currently populates these; other
+    // counties fall through to "N/A" until their ingests expand (see
+    // master_todo: parcel-detail parity for non-Collin counties).
+    const beds = props.beds;
+    if (beds && beds !== "N/A") parts.push(`${beds}bd`);
+    const baths = props.baths;
+    if (baths && baths !== "N/A") {
+      const bathsNum = Number(baths);
+      const bathsStr = Number.isFinite(bathsNum)
+        ? (bathsNum % 1 === 0 ? `${bathsNum}ba` : `${bathsNum.toFixed(1)}ba`)
+        : null;
+      if (bathsStr) parts.push(bathsStr);
+    }
+    const pool = String(props.pool_flag || "").trim().toUpperCase();
+    if (pool === "T" || pool === "Y" || pool === "TRUE" || pool === "YES") {
+      parts.push("pool");
+    }
     const school = String(props.school || "").trim();
     if (school && school !== "N/A") parts.push(school);
     metaEl.textContent = parts.join(" · ");
