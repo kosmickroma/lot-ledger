@@ -733,7 +733,12 @@ def build_feature(row: dict[str, Any], prop_type: str, on_redfin: bool, redfin_l
         # divergence table.
         "interior_finish": _clean_text(row.get("interior_finish")) or "N/A",
         "flooring": _clean_text(row.get("flooring")) or "N/A",
-        "plumbing_count": int(_safe_float(row.get("plumbing_count"))) if _safe_float(row.get("plumbing_count")) not in (None, 0.0) else "N/A",
+        # Phase 3 patch v3 (2026-05-21) — Denton publishes total room count
+        # + outdoor fireplaces + end-unit (condo/townhome) flag as cross-county
+        # canonical keys. N/A for non-Denton counties until those expansions land.
+        "total_rooms": int(_safe_float(row.get("total_rooms"))) if _safe_float(row.get("total_rooms")) not in (None, 0.0) else "N/A",
+        "outdoor_fireplaces": int(_safe_float(row.get("outdoor_fireplaces"))) if _safe_float(row.get("outdoor_fireplaces")) not in (None, 0.0) else "N/A",
+        "end_unit": _clean_text(row.get("end_unit")) or "",
         # Multi-improvement observability — when > 0, the parcel had additional
         # residential improvements (e.g. guest house) we didn't surface. Phase
         # 1.5 panel could expose these.

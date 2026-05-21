@@ -2694,7 +2694,14 @@ def _fetch_denton_parcel_by_account(account_num: str) -> dict[str, Any] | None:
                     d.pool_flag,
                     d.deck_flag,
                     d.garage_capacity,
-                    d.stories
+                    d.stories,
+                    -- Phase 3 patch v3 (bath + room + outdoor + end_unit).
+                    d.baths,
+                    d.full_baths,
+                    d.half_baths,
+                    d.total_rooms,
+                    d.outdoor_fireplaces,
+                    d.end_unit
                 FROM denton_parcels p
                 LEFT JOIN LATERAL (
                     SELECT *

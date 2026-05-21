@@ -312,18 +312,30 @@ def _ensure_schema(cur) -> None:
             deck_flag            TEXT,
             garage_capacity      INTEGER,
             stories              INTEGER,
+            -- Phase 3 patch v3 (2026-05-21): reinterpret Plumbing as bath count
+            baths                NUMERIC(4,1),     -- decimal e.g. 2.5
+            full_baths           INTEGER,
+            half_baths           INTEGER,
+            total_rooms          INTEGER,
+            outdoor_fireplaces   INTEGER,
+            end_unit             TEXT,            -- 'T' for condo/townhome end units
             source_snapshot      DATE,
             ingested_at          TIMESTAMP WITH TIME ZONE DEFAULT now()
         )
         """
     )
-    # Idempotent column additions for the Phase 3 patch (after initial backfill
-    # users may already have the table without these columns).
+    # Idempotent column additions for Phase 3 patches.
     for col, type_ in [
         ("pool_flag", "TEXT"),
         ("deck_flag", "TEXT"),
         ("garage_capacity", "INTEGER"),
         ("stories", "INTEGER"),
+        ("baths", "NUMERIC(4,1)"),
+        ("full_baths", "INTEGER"),
+        ("half_baths", "INTEGER"),
+        ("total_rooms", "INTEGER"),
+        ("outdoor_fireplaces", "INTEGER"),
+        ("end_unit", "TEXT"),
     ]:
         cur.execute(f"ALTER TABLE denton_improvement_detail ADD COLUMN IF NOT EXISTS {col} {type_}")
     cur.execute(
@@ -580,6 +592,13 @@ def _read_attributes(source_dir: Path, main_by_prop: dict, qa: dict, bedroom_thr
             "plumbing_count": None,
             "interior_finish": None,
             "flooring": None,
+            # Phase 3 patch v3 (2026-05-21) — bath + room expansions
+            "baths": None,
+            "full_baths": None,
+            "half_baths": None,
+            "total_rooms": None,
+            "outdoor_fireplaces": None,
+            "end_unit": None,
             # raw preservation
             "raw_foundation_code": None,
             "raw_roof_covering_code": None,
@@ -694,11 +713,43 @@ def _read_attributes(source_dir: Path, main_by_prop: dict, qa: dict, bedroom_thr
             agg["raw_sprinkler_code"] = c
             agg["sprinkler_flag"] = _normalize_flag_sprinkler(c)
 
-        # Plumbing
+        # Plumbing — Denton's "Plumbing" attribute IS the bath count
+        # (decimal, e.g. 2.5 = 2 full + 1 half), NOT plumbing fixture count.
+        # Verified 2026-05-21 against full data distribution. Most common
+        # values: 2.0 (132k), 2.5 (45k), 3.0 (39k), 3.5 (24k).
+        # Keep plumbing_count populated with the int floor for backward
+        # compat; populate baths/full_baths/half_baths as the canonical view.
         for code in attrs_by_desc.get("Plumbing", []):
+            v = _safe_decimal(code)
+            if v is None or v < 0 or v > 20:
+                continue
+            agg["baths"] = round(v, 1)
+            agg["full_baths"] = int(v)
+            # Decimal portion .0 → 0 half; .5 → 1 half; other fractions → round
+            frac = v - int(v)
+            agg["half_baths"] = 1 if frac >= 0.25 else 0
+            # Legacy plumbing_count = integer floor for backward compat
+            agg["plumbing_count"] = int(v)
+            break
+
+        # Number of Rooms — clean attribute (28k coverage, 3-18+ range)
+        for code in attrs_by_desc.get("Number of Rooms", []):
             n = _safe_int(code)
-            if n is not None and 0 <= n <= 30:
-                agg["plumbing_count"] = n
+            if n is not None and 1 <= n <= 40:
+                agg["total_rooms"] = n
+                break
+
+        # Outdoor Fireplace — separate from indoor (6.5k coverage, values 1/2/3)
+        for code in attrs_by_desc.get("Outdoor Fireplace", []):
+            n = _safe_int(code)
+            if n is not None and 0 <= n <= 10:
+                agg["outdoor_fireplaces"] = n
+                break
+
+        # End Unit — condo/townhome end-unit flag (535 rows; "end unit" code)
+        for code in attrs_by_desc.get("End Unit (Condo, Townhome", []):
+            if code and code.strip():
+                agg["end_unit"] = "T"
                 break
 
         # Interior Finish (Denton-only)
@@ -780,6 +831,13 @@ def _compose_rows(primary_by_prop, main_by_prop, attrs_by_prop, features_by_prop
             deck_flag,
             garage_capacity,
             stories,
+            # Phase 3 patch v3 — bath / room / outdoor / end_unit expansion.
+            attrs.get("baths"),
+            attrs.get("full_baths"),
+            attrs.get("half_baths"),
+            attrs.get("total_rooms"),
+            attrs.get("outdoor_fireplaces"),
+            attrs.get("end_unit"),
             snapshot_date,
         )
         rows.append(row)
@@ -800,6 +858,9 @@ _INSERT_COLS = [
     "raw_flooring_code",
     # Phase 3 patch — feature-derived columns from sub-area detail rows
     "pool_flag", "deck_flag", "garage_capacity", "stories",
+    # Phase 3 patch v3 — bath / room / outdoor / end_unit
+    "baths", "full_baths", "half_baths", "total_rooms",
+    "outdoor_fireplaces", "end_unit",
     "source_snapshot",
 ]
 

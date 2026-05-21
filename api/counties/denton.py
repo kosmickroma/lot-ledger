@@ -133,7 +133,14 @@ def _denton_bbox_filter(min_lat: float, min_lng: float, max_lat: float, max_lng:
                     d.pool_flag          AS pool_flag,
                     d.deck_flag          AS deck_flag,
                     d.garage_capacity    AS garage_capacity,
-                    d.stories            AS stories
+                    d.stories            AS stories,
+                    -- Phase 3 patch v3 (Plumbing-as-baths reinterpretation + rooms + outdoor FP + end unit)
+                    d.baths              AS baths,
+                    d.full_baths         AS full_baths,
+                    d.half_baths         AS half_baths,
+                    d.total_rooms        AS total_rooms,
+                    d.outdoor_fireplaces AS outdoor_fireplaces,
+                    d.end_unit           AS end_unit
                 FROM denton_parcels p_outer
                 LEFT JOIN LATERAL (
                     -- Single-row pick per parcel — prop_id is the canonical
@@ -314,6 +321,15 @@ def _normalize_denton_row(raw: dict[str, Any]) -> dict[str, Any]:
         "deck_flag": _clean_text(raw.get("deck_flag")),
         "garage_capacity": _safe_int(raw.get("garage_capacity")),
         "stories": _safe_int(raw.get("stories")),
+        # Phase 3 patch v3 — Plumbing-as-baths reinterpretation + new canonical fields.
+        # `baths` is a decimal (e.g. 2.5 = 2 full + 1 half) from Denton's Plumbing
+        # attribute. full_baths + half_baths split for compatibility with DCAD shape.
+        "baths": _safe_float(raw.get("baths")),
+        "full_baths": _safe_int(raw.get("full_baths")),
+        "half_baths": _safe_int(raw.get("half_baths")),
+        "total_rooms": _safe_int(raw.get("total_rooms")),
+        "outdoor_fireplaces": _safe_int(raw.get("outdoor_fireplaces")),
+        "end_unit": _clean_text(raw.get("end_unit")),
         # === end Phase 3 expansion ===
     }
 

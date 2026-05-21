@@ -7262,12 +7262,18 @@ function _buildParcelDetailPanelHtml(p, matchedComp) {
               ${_buildParcelDetailTableRow("Sauna", _panelFlagDisplay(p.sauna_flag))}
               ${_buildParcelDetailTableRow("Sprinkler System", _panelFlagDisplay(p.sprinkler_flag))}
               ${_buildParcelDetailTableRow("Deck", _panelFlagDisplay(p.deck_flag))}
-              <!-- Phase 3 — Denton-only canonical keys (2026-05-21). Show
-                   "N/A" for DCAD/Collin/TAD parcels since those CADs don't
-                   publish these. Title-case display via _panelDisplayValue. -->
+              <!-- Phase 3 — Denton-only / Denton-rich canonical keys
+                   (2026-05-21). Show "N/A" for DCAD/Collin/TAD parcels when
+                   those CADs don't publish the field. Phase 3 patch v3
+                   removed the wrong "Plumbing Fixtures" label — Denton's
+                   "Plumbing" attribute IS actually bath count (decimal,
+                   half-baths). That now flows through Full/Half/Baths rows
+                   above instead.   -->
+              ${_buildParcelDetailTableRow("Total Rooms", _panelDisplayValue(p.total_rooms))}
+              ${_buildParcelDetailTableRow("Outdoor Fireplace", _panelDisplayValue(p.outdoor_fireplaces))}
+              ${_buildParcelDetailTableRow("End Unit (Condo/TH)", _panelFlagDisplay(p.end_unit))}
               ${_buildParcelDetailTableRow("Interior Finish", _panelDisplayValue(p.interior_finish))}
               ${_buildParcelDetailTableRow("Flooring", _panelDisplayValue(p.flooring))}
-              ${_buildParcelDetailTableRow("Plumbing Fixtures", _panelDisplayValue(p.plumbing_count))}
               ${p.on_redfin && p.redfin_url ? _buildParcelDetailTableRow("Listing", `<a href="${p.redfin_url}" target="_blank" rel="noopener noreferrer">View listing</a>`) : ""}
               ${soldCompRows}
             </table>
