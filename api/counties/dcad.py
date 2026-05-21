@@ -14,9 +14,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 import logging
 import math
 from typing import Any
+
+
+def _current_year() -> int:
+    """Calendar year for act_age derivation. Wrapped in a function so tests
+    can monkeypatch when verifying age math against fixed yr_built values."""
+    return datetime.now().year
 
 logger = logging.getLogger(__name__)
 
@@ -655,15 +662,18 @@ def build_feature(row: dict[str, Any], prop_type: str, on_redfin: bool, redfin_l
         # these. Followup hygiene PR will replace "N/A" inline with true null
         # at API boundary (Copilot round-2 callout).
 
-        # Structural counts (integer canonical keys)
-        "beds": int(_safe_float(row.get("beds"))) if _safe_float(row.get("beds")) not in (None, 0.0) else "N/A",
-        "full_baths": int(_safe_float(row.get("full_baths"))) if _safe_float(row.get("full_baths")) not in (None, 0.0) else "N/A",
-        "half_baths": int(_safe_float(row.get("half_baths"))) if _safe_float(row.get("half_baths")) not in (None, 0.0) else "N/A",
-        "fireplaces": int(_safe_float(row.get("fireplaces"))) if _safe_float(row.get("fireplaces")) not in (None, 0.0) else "N/A",
-        "kitchens": int(_safe_float(row.get("kitchens"))) if _safe_float(row.get("kitchens")) not in (None, 0.0) else "N/A",
-        "wet_bars": int(_safe_float(row.get("wet_bars"))) if _safe_float(row.get("wet_bars")) not in (None, 0.0) else "N/A",
-        "units": int(_safe_float(row.get("units"))) if _safe_float(row.get("units")) not in (None, 0.0) else "N/A",
-        "garage_capacity": int(_safe_float(row.get("garage_capacity"))) if _safe_float(row.get("garage_capacity")) not in (None, 0.0) else "N/A",
+        # Structural counts (integer canonical keys).
+        # 2026-05-21 fix: distinguish missing data (None → "N/A") from
+        # explicit zero (0 → 0). Previously treated 0 as N/A which was wrong
+        # for fields like half_baths where 0 is a real value.
+        "beds": int(_safe_float(row.get("beds"))) if _safe_float(row.get("beds")) is not None else "N/A",
+        "full_baths": int(_safe_float(row.get("full_baths"))) if _safe_float(row.get("full_baths")) is not None else "N/A",
+        "half_baths": int(_safe_float(row.get("half_baths"))) if _safe_float(row.get("half_baths")) is not None else "N/A",
+        "fireplaces": int(_safe_float(row.get("fireplaces"))) if _safe_float(row.get("fireplaces")) is not None else "N/A",
+        "kitchens": int(_safe_float(row.get("kitchens"))) if _safe_float(row.get("kitchens")) is not None else "N/A",
+        "wet_bars": int(_safe_float(row.get("wet_bars"))) if _safe_float(row.get("wet_bars")) is not None else "N/A",
+        "units": int(_safe_float(row.get("units"))) if _safe_float(row.get("units")) is not None else "N/A",
+        "garage_capacity": int(_safe_float(row.get("garage_capacity"))) if _safe_float(row.get("garage_capacity")) is not None else "N/A",
 
         # `baths` is derived per v3 spec: prefer source decimal (Collin),
         # else full + 0.5 * half (DCAD), else None. Component fields stay
@@ -692,9 +702,20 @@ def build_feature(row: dict[str, Any], prop_type: str, on_redfin: bool, redfin_l
         ),
         "stories_desc": _clean_text(row.get("stories_desc")),  # "" or e.g. "ONE STORY"
 
-        # Year-built variants
+        # Year-built variants. act_age preference:
+        #   1. CAD-published act_age (DCAD has it)
+        #   2. Derived from yr_built (universal — works for all counties)
+        # 2026-05-21: Denton/Collin/TAD don't publish act_age, so we derive
+        # from yr_built using current calendar year. Cheap, county-agnostic.
         "eff_yr_built": str(row.get("eff_yr_built")) if row.get("eff_yr_built") else "N/A",
-        "act_age": str(row.get("act_age")) if row.get("act_age") else "N/A",
+        "act_age": (
+            str(row.get("act_age")) if row.get("act_age")
+            else (
+                str(_current_year() - int(_safe_float(row.get("yr_built"))))
+                if _safe_float(row.get("yr_built")) not in (None, 0.0)
+                else "N/A"
+            )
+        ),
 
         # Canonical T/F/empty flags — ingest normalized via _normalize_flag
         # so the encoding is uniform across DCAD ('Y'/'N' → 'T'/'F'), TAD
@@ -724,6 +745,25 @@ def build_feature(row: dict[str, Any], prop_type: str, on_redfin: bool, redfin_l
         "bldg_class": _clean_text(row.get("bldg_class")) or "N/A",
         "cdu_rating": _clean_text(row.get("cdu_rating")) or "N/A",
         "pct_complete": _clean_text(row.get("pct_complete")) or "N/A",
+
+        # === Denton-only canonical keys (Phase 3, 2026-05-21) ===
+        # Sourced from denton_improvement_detail (Denton CAD 2025 certified
+        # data). N/A for DCAD/TAD/Collin parcels (those CADs don't publish
+        # these specific fields). See
+        # docs/DENTON_IMPROVEMENT_DETAIL_EXPANSION_SPEC.md v3 canonical
+        # divergence table.
+        "interior_finish": _clean_text(row.get("interior_finish")) or "N/A",
+        "flooring": _clean_text(row.get("flooring")) or "N/A",
+        # Phase 3 patch v3 (2026-05-21) — Denton publishes total room count
+        # + outdoor fireplaces + end-unit (condo/townhome) flag as cross-county
+        # canonical keys. N/A for non-Denton counties until those expansions land.
+        "total_rooms": int(_safe_float(row.get("total_rooms"))) if _safe_float(row.get("total_rooms")) not in (None, 0.0) else "N/A",
+        "outdoor_fireplaces": int(_safe_float(row.get("outdoor_fireplaces"))) if _safe_float(row.get("outdoor_fireplaces")) not in (None, 0.0) else "N/A",
+        "end_unit": _clean_text(row.get("end_unit")) or "",
+        # Multi-improvement observability — when > 0, the parcel had additional
+        # residential improvements (e.g. guest house) we didn't surface. Phase
+        # 1.5 panel could expose these.
+        "dropped_imprv_count": int(_safe_float(row.get("dropped_imprv_count"))) if _safe_float(row.get("dropped_imprv_count")) not in (None, 0.0) else 0,
 
         "verified_vacant": _clean_text(row.get("verified_vacant")),
         "potential_target": _clean_text(row.get("potential_target")),

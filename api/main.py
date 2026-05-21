@@ -2666,8 +2666,49 @@ def _fetch_denton_parcel_by_account(account_num: str) -> dict[str, Any] | None:
                     ST_Area(ST_Transform(ST_OrientedEnvelope(p.geom), 2276)) AS envelope_area_sqft,
                     ST_Perimeter(ST_Transform(p.geom, 2276)) AS envelope_perim_ft,
                     ST_Area(ST_Transform(p.geom, 2276)) AS geom_sqft,
-                    ST_Area(ST_Transform(ST_OrientedEnvelope(p.geom), 2276)) / NULLIF(ST_Area(ST_Transform(p.geom, 2276)), 0) AS envelope_ratio
+                    ST_Area(ST_Transform(ST_OrientedEnvelope(p.geom), 2276)) / NULLIF(ST_Area(ST_Transform(p.geom, 2276)), 0) AS envelope_ratio,
+                    -- Phase 3 (2026-05-21): residential detail aliased from
+                    -- denton_improvement_detail via LATERAL one-row pick.
+                    -- Mirrors the bbox-filter SELECT in
+                    -- api/counties/denton.py. Without this, popup clicks
+                    -- on Denton parcels would still show N/A even after
+                    -- the cached job refreshes.
+                    d.foundation_type,
+                    d.roof_material,
+                    d.roof_type,
+                    d.ext_wall,
+                    d.heating_type,
+                    d.ac_type,
+                    d.beds,
+                    d.fireplaces,
+                    d.cdu_rating,
+                    d.bldg_class,
+                    d.sprinkler_flag,
+                    d.plumbing_count,
+                    d.interior_finish,
+                    d.flooring,
+                    d.eff_yr_built,
+                    d.dropped_imprv_count,
+                    d.raw_heating_cooling_code,
+                    -- Feature-derived columns (Phase 3 patch 2026-05-21).
+                    d.pool_flag,
+                    d.deck_flag,
+                    d.garage_capacity,
+                    d.stories,
+                    -- Phase 3 patch v3 (bath + room + outdoor + end_unit).
+                    d.baths,
+                    d.full_baths,
+                    d.half_baths,
+                    d.total_rooms,
+                    d.outdoor_fireplaces,
+                    d.end_unit
                 FROM denton_parcels p
+                LEFT JOIN LATERAL (
+                    SELECT *
+                    FROM denton_improvement_detail
+                    WHERE prop_id = p.account_num
+                    LIMIT 1
+                ) d ON TRUE
                 WHERE p.account_num = %s
                 LIMIT 1
                 """,
@@ -3911,6 +3952,17 @@ async def _run_download_csv(
                 "Sprinkler Flag",
                 "Deck Flag",
                 # === end Phase 2 residential detail expansion ===
+                # === Phase 4 Denton-rich residential extras (2026-05-21) ===
+                # 5 new columns surfacing fields Denton publishes that DCAD
+                # doesn't (Interior Finish, Flooring, Total Rooms, Outdoor
+                # Fireplaces, End Unit). DCAD/Collin/TAD parcels return blank
+                # for these — no regression, just N/A from build_feature.
+                "Interior Finish",
+                "Flooring",
+                "Total Rooms",
+                "Outdoor Fireplaces",
+                "End Unit",
+                # === end Phase 4 residential extras ===
                 "Current Market Value",
                 "Current Assessed Value",
                 "Current Ag Use Value",
@@ -3940,7 +3992,11 @@ async def _run_download_csv(
                 # originally col 96; +1 to col 97 by Value Source (col 13,
                 # 2026-05-20); +27 to col 124 by Phase 2 residential detail
                 # expansion (County Source col 2 + 26 residential cols after
-                # Units col 73, 2026-05-21). Mirror locks at parcel/orphan
+                # Units col 73, 2026-05-21 morning); +5 to col 129 by Phase 4
+                # Denton-rich residential extras (Interior Finish, Flooring,
+                # Total Rooms, Outdoor Fireplaces, End Unit — 2026-05-21
+                # afternoon). Stored Values cluster now lives at 142-151.
+                # Total CSV columns: 151. Mirror locks at parcel/orphan
                 # writerow append sites must place the "yes"/blank cell at the
                 # exact same offset. Do not move this column without
                 # coordinated updates at all three sites.
@@ -4172,6 +4228,16 @@ async def _run_download_csv(
                     row.get("sprinkler_flag", "") or "",
                     row.get("deck_flag", "") or "",
                     # === end Phase 2 residential detail cells ===
+                    # === Phase 4 Denton-rich residential extras (2026-05-21) ===
+                    # Same canonical keys exposed by build_feature for all
+                    # counties. DCAD/Collin/TAD parcels return "N/A" or 0
+                    # which we coerce to blank cells for spreadsheet sanity.
+                    row.get("interior_finish", "") or "" if (row.get("interior_finish") or "") != "N/A" else "",
+                    row.get("flooring", "") or "" if (row.get("flooring") or "") != "N/A" else "",
+                    int(_safe_float(row.get("total_rooms"))) if _safe_float(row.get("total_rooms")) is not None else "",
+                    int(_safe_float(row.get("outdoor_fireplaces"))) if _safe_float(row.get("outdoor_fireplaces")) is not None else "",
+                    row.get("end_unit", "") or "",
+                    # === end Phase 4 residential extras ===
                     round(_safe_float(row.get("curr_market_value")), 0) if _safe_float(row.get("curr_market_value")) is not None else "",
                     round(_safe_float(row.get("curr_assessed_value")), 0) if _safe_float(row.get("curr_assessed_value")) is not None else "",
                     round(_safe_float(row.get("curr_ag_use_value")), 0) if _safe_float(row.get("curr_ag_use_value")) is not None else "",
@@ -4465,6 +4531,13 @@ async def _run_download_csv(
                     (_cad.get("sprinkler_flag") or "") if _cad else "",
                     (_cad.get("deck_flag") or "") if _cad else "",
                     # === end Phase 2 residential detail cells (comp) ===
+                    # === Phase 4 Denton-rich residential extras (comp) 2026-05-21 ===
+                    (_cad.get("interior_finish") or "") if _cad and (_cad.get("interior_finish") or "") != "N/A" else "",
+                    (_cad.get("flooring") or "") if _cad and (_cad.get("flooring") or "") != "N/A" else "",
+                    int(_safe_float(_cad.get("total_rooms"))) if _cad and _safe_float(_cad.get("total_rooms")) is not None else "",
+                    int(_safe_float(_cad.get("outdoor_fireplaces"))) if _cad and _safe_float(_cad.get("outdoor_fireplaces")) is not None else "",
+                    (_cad.get("end_unit") or "") if _cad else "",
+                    # === end Phase 4 residential extras (comp) ===
                     round(_safe_float(_cad.get("curr_market_value")), 0) if _safe_float(_cad.get("curr_market_value")) is not None else "",      # was 73
                     round(_safe_float(_cad.get("curr_assessed_value")), 0) if _safe_float(_cad.get("curr_assessed_value")) is not None else "",  # 74
                     round(_safe_float(_cad.get("curr_ag_use_value")), 0) if _safe_float(_cad.get("curr_ag_use_value")) is not None else "",      # 75

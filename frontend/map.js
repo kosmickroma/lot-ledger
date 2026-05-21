@@ -6910,7 +6910,14 @@ function geometryKey(geometry) {
 }
 
 function _panelDisplayValue(value) {
-  return value && value !== "N/A" ? value : "N/A";
+  // 2026-05-21 fix: distinguish missing data (null/undefined/"N/A" → "N/A")
+  // from explicit zero (0 → "0"). The old `value &&` short-circuit treated
+  // 0 as falsy, which was wrong for fields like half_baths where 0 is real
+  // information (parcel has zero half-baths, not unknown).
+  if (value === null || value === undefined || value === "" || value === "N/A") {
+    return "N/A";
+  }
+  return value;
 }
 
 function _panelFlagDisplay(value) {
@@ -7238,7 +7245,6 @@ function _buildParcelDetailPanelHtml(p, matchedComp) {
               ${_buildParcelDetailTableRow("Beds", _panelDisplayValue(p.beds))}
               ${_buildParcelDetailTableRow("Full Baths", _panelDisplayValue(p.full_baths))}
               ${_buildParcelDetailTableRow("Half Baths", _panelDisplayValue(p.half_baths))}
-              ${_buildParcelDetailTableRow("Baths (derived)", _panelDisplayValue(p.baths))}
               ${_buildParcelDetailTableRow("Fireplaces", _panelDisplayValue(p.fireplaces))}
               ${_buildParcelDetailTableRow("Kitchens", _panelDisplayValue(p.kitchens))}
               ${_buildParcelDetailTableRow("Wet Bars", _panelDisplayValue(p.wet_bars))}
@@ -7262,6 +7268,18 @@ function _buildParcelDetailPanelHtml(p, matchedComp) {
               ${_buildParcelDetailTableRow("Sauna", _panelFlagDisplay(p.sauna_flag))}
               ${_buildParcelDetailTableRow("Sprinkler System", _panelFlagDisplay(p.sprinkler_flag))}
               ${_buildParcelDetailTableRow("Deck", _panelFlagDisplay(p.deck_flag))}
+              <!-- Phase 3 — Denton-only / Denton-rich canonical keys
+                   (2026-05-21). Show "N/A" for DCAD/Collin/TAD parcels when
+                   those CADs don't publish the field. Phase 3 patch v3
+                   removed the wrong "Plumbing Fixtures" label — Denton's
+                   "Plumbing" attribute IS actually bath count (decimal,
+                   half-baths). That now flows through Full/Half/Baths rows
+                   above instead.   -->
+              ${_buildParcelDetailTableRow("Total Rooms", _panelDisplayValue(p.total_rooms))}
+              ${_buildParcelDetailTableRow("Outdoor Fireplace", _panelDisplayValue(p.outdoor_fireplaces))}
+              ${_buildParcelDetailTableRow("End Unit (Condo/TH)", _panelFlagDisplay(p.end_unit))}
+              ${_buildParcelDetailTableRow("Interior Finish", _panelDisplayValue(p.interior_finish))}
+              ${_buildParcelDetailTableRow("Flooring", _panelDisplayValue(p.flooring))}
               ${p.on_redfin && p.redfin_url ? _buildParcelDetailTableRow("Listing", `<a href="${p.redfin_url}" target="_blank" rel="noopener noreferrer">View listing</a>`) : ""}
               ${soldCompRows}
             </table>
