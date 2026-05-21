@@ -883,6 +883,9 @@ function _populateSubjectPropertyCard(props, county) {
     nbhdEl.textContent = sub;
   }
 
+  // Line 1: dimensional + identity strip.
+  // Order: sqft, lot acres, year built, beds, baths, garage, school.
+  // Pool moved to line 2 amenity strip per v3 spec.
   if (metaEl) {
     const parts = [];
     const sqft = String(props.sqft || "").trim();
@@ -891,9 +894,6 @@ function _populateSubjectPropertyCard(props, county) {
     if (acres && acres !== "N/A") parts.push(acres);
     const yr = String(props.yr_built || "").trim();
     if (yr && yr !== "N/A") parts.push(yr);
-    // Beds / baths / pool — only Collin currently populates these; other
-    // counties fall through to "N/A" until their ingests expand (see
-    // master_todo: parcel-detail parity for non-Collin counties).
     const beds = props.beds;
     if (beds && beds !== "N/A") parts.push(`${beds}bd`);
     const baths = props.baths;
@@ -904,13 +904,165 @@ function _populateSubjectPropertyCard(props, county) {
         : null;
       if (bathsStr) parts.push(bathsStr);
     }
-    const pool = String(props.pool_flag || "").trim().toUpperCase();
-    if (pool === "T" || pool === "Y" || pool === "TRUE" || pool === "YES") {
-      parts.push("pool");
+    const garage = props.garage_capacity;
+    if (garage && garage !== "N/A") {
+      const garageNum = Number(garage);
+      if (Number.isFinite(garageNum) && garageNum > 0) {
+        parts.push(`${garageNum}-car garage`);
+      }
     }
+    // Pool on line 1 (always visible) — the line-2 amenity cap can hide
+    // it when DCAD parcels have rich structural data filling the first
+    // 5 slots. Pool is the most investor-relevant amenity flag → top.
+    const poolFlag = String(props.pool_flag || "").trim().toUpperCase();
+    if (poolFlag === "T") parts.push("pool");
     const school = String(props.school || "").trim();
     if (school && school !== "N/A") parts.push(school);
     metaEl.textContent = parts.join(" · ");
+  }
+
+  // Helpers reused across line 2 + line 3.
+  const isTruthyFlag = (v) => String(v || "").trim().toUpperCase() === "T";
+  const titleCase = (s) => {
+    const text = String(s || "").trim();
+    if (!text || text === "N/A") return "";
+    return text.split(/\s+/).map((w) =>
+      w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()
+    ).join(" ");
+  };
+
+  // Line 2 (v3): structural materials + systems. Cap 6 tokens.
+  // Order: structure type → foundation → ext wall → roof material →
+  // HVAC summary → construction frame (if structure_type was missing,
+  // already covered there; this lets DCAD show Frame separately when
+  // we have both structure and frame info).
+  const meta2El = document.getElementById("comps-block-target-card-meta2");
+  if (meta2El) {
+    const tokens = [];
+    const MAX_TOKENS = 6;
+
+    // 1. Structure type — prefer explicit structure_type (TAD), else
+    //    derive from construction_frame_type + stories (DCAD-ish).
+    const structureType = String(props.structure_type || "").trim();
+    if (structureType && structureType !== "N/A") {
+      tokens.push(structureType);
+    } else {
+      const frame = String(props.construction_frame_type || "").trim();
+      const stories = String(props.stories || "").trim();
+      if (frame && frame !== "N/A") {
+        const titled = titleCase(frame);
+        if (stories && stories !== "N/A" && Number(stories) > 0) {
+          const storiesNum = Number(stories);
+          const storiesLabel = storiesNum % 1 === 0 ? `${storiesNum}-Story` : `${storiesNum.toFixed(1)}-Story`;
+          tokens.push(`${storiesLabel} ${titled}`);
+        } else {
+          tokens.push(titled);
+        }
+      }
+    }
+
+    // 2. Foundation
+    if (tokens.length < MAX_TOKENS) {
+      const t = titleCase(props.foundation_type);
+      if (t) tokens.push(t);
+    }
+
+    // 3. Exterior wall
+    if (tokens.length < MAX_TOKENS) {
+      const t = titleCase(props.ext_wall);
+      if (t) tokens.push(t);
+    }
+
+    // 4. Roof — prefer roof_material (more specific) else roof_type.
+    if (tokens.length < MAX_TOKENS) {
+      const t = titleCase(props.roof_material) || titleCase(props.roof_type);
+      if (t) tokens.push(t);
+    }
+
+    // 5. HVAC summary — collapse heating + ac into one token when they
+    //    match, else show whichever is present.
+    if (tokens.length < MAX_TOKENS) {
+      const heat = String(props.heating_type || "").trim();
+      const ac = String(props.ac_type || "").trim();
+      const hasHeat = heat && heat !== "N/A";
+      const hasAc = ac && ac !== "N/A";
+      if (hasHeat && hasAc && heat.toUpperCase() === ac.toUpperCase()) {
+        if (heat.toUpperCase().startsWith("CENTRAL")) {
+          tokens.push("Central HVAC");
+        } else {
+          tokens.push(titleCase(heat));
+        }
+      } else if (hasHeat) {
+        tokens.push(`${titleCase(heat)} Heat`);
+      } else if (hasAc) {
+        tokens.push(`${titleCase(ac)} AC`);
+      }
+    }
+
+    meta2El.textContent = tokens.join(" · ");
+  }
+
+  // Line 3 (v3): amenities + quality + record metadata. Cap 6 tokens.
+  // Order: spa → sauna → fireplaces → sprinkler → deck → CDU rating →
+  // building class → effective yr built → % complete (when != 100).
+  // Pool is on line 1 (most investor-relevant), so excluded here.
+  const meta3El = document.getElementById("comps-block-target-card-meta3");
+  if (meta3El) {
+    const tokens = [];
+    const MAX_TOKENS = 6;
+
+    // Amenity flags (T/F)
+    const amenityChecks = [
+      { flag: props.spa_flag, label: "Spa" },
+      { flag: props.sauna_flag, label: "Sauna" },
+      { flag: props.fireplaces, label: "Fireplace", numeric: true },
+      { flag: props.sprinkler_flag, label: "Sprinkler" },
+      { flag: props.deck_flag, label: "Deck" },
+    ];
+    for (const a of amenityChecks) {
+      if (tokens.length >= MAX_TOKENS) break;
+      if (a.numeric) {
+        const n = Number(a.flag);
+        if (Number.isFinite(n) && n > 0) {
+          tokens.push(n > 1 ? `${n} ${a.label}s` : a.label);
+        }
+      } else if (isTruthyFlag(a.flag)) {
+        tokens.push(a.label);
+      }
+    }
+
+    // CDU rating (DCAD condition rating: Excellent / Very Good / Good / etc.)
+    if (tokens.length < MAX_TOKENS) {
+      const cdu = titleCase(props.cdu_rating);
+      if (cdu) tokens.push(cdu);
+    }
+
+    // Building class (DCAD numeric grade like "09" — not user-friendly
+    // but visible per KK's "let the client decide what to take out").
+    if (tokens.length < MAX_TOKENS) {
+      const cls = String(props.bldg_class || "").trim();
+      if (cls && cls !== "N/A") tokens.push(`Class ${cls}`);
+    }
+
+    // Effective year built (renovation/replacement year, often != yr_built)
+    if (tokens.length < MAX_TOKENS) {
+      const eff = String(props.eff_yr_built || "").trim();
+      const yr = String(props.yr_built || "").trim();
+      // Show eff_yr only when it differs from regular yr_built (otherwise redundant)
+      if (eff && eff !== "N/A" && eff !== yr) {
+        tokens.push(`Eff. ${eff}`);
+      }
+    }
+
+    // % complete — show only when not 100% (incomplete construction)
+    if (tokens.length < MAX_TOKENS) {
+      const pct = String(props.pct_complete || "").trim();
+      if (pct && pct !== "N/A" && pct !== "100" && pct !== "100.00") {
+        tokens.push(`${pct}% complete`);
+      }
+    }
+
+    meta3El.textContent = tokens.join(" · ");
   }
 }
 
@@ -6740,6 +6892,26 @@ function _panelDisplayValue(value) {
   return value && value !== "N/A" ? value : "N/A";
 }
 
+function _panelFlagDisplay(value) {
+  // Canonical T/F/empty (ingest-normalized by _normalize_flag in build_db /
+  // dcad ingests) → Yes/No/N/A for the parcel detail panel display.
+  const t = String(value || "").trim().toUpperCase();
+  if (t === "T" || t === "Y" || t === "TRUE" || t === "YES" || t === "1") return "Yes";
+  if (t === "F" || t === "N" || t === "FALSE" || t === "NO" || t === "0") return "No";
+  return "N/A";
+}
+
+function _panelTitleCaseDisplay(value) {
+  // Display helper for DCAD's all-caps descriptive fields (FOUNDATION_TYP_DESC,
+  // ROOF_MAT_DESC, etc.). Title-cases per word so they read cleanly in the
+  // panel ("PIER AND BEAM" → "Pier And Beam"). Preserves "N/A".
+  const text = String(value || "").trim();
+  if (!text || text === "N/A") return "N/A";
+  return text.split(/\s+/).map((w) =>
+    w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()
+  ).join(" ");
+}
+
 // Total Value display with prior-year provenance tag. When build_feature
 // (api/counties/dcad.py) emits a non-empty total_value_source flag on the
 // parcel properties — currently Collin-only via _normalize_collin_row's
@@ -7032,6 +7204,43 @@ function _buildParcelDetailPanelHtml(p, matchedComp) {
               ${_buildParcelDetailTableRow("Year Built", _panelDisplayValue(p.yr_built))}
               ${_buildParcelDetailTableRow("Living Area", p.sqft && p.sqft !== "N/A" ? `${p.sqft} sf` : "N/A")}
               ${p.subdivision ? _buildParcelDetailTableRow("Neighborhood", _propelioEscape(p.subdivision)) : ""}
+              <!-- v3 residential detail expansion (Phase 1): per-county
+                   CAD source data exposed on feature.properties via the
+                   canonical-field contract in
+                   docs/CAD_RESIDENTIAL_DETAIL_EXPANSION_SPEC.md.
+                   DCAD parcels populate most of these from RES_DETAIL.CSV;
+                   Collin partial (beds/baths/pool/stories); TAD pending
+                   the TAD-half PR; Denton no source data → N/A everywhere. -->
+              ${_buildParcelDetailTableRow("Effective Year Built", _panelDisplayValue(p.eff_yr_built))}
+              ${_buildParcelDetailTableRow("Actual Age", _panelDisplayValue(p.act_age))}
+              ${_buildParcelDetailTableRow("% Complete", _panelDisplayValue(p.pct_complete))}
+              ${_buildParcelDetailTableRow("Beds", _panelDisplayValue(p.beds))}
+              ${_buildParcelDetailTableRow("Full Baths", _panelDisplayValue(p.full_baths))}
+              ${_buildParcelDetailTableRow("Half Baths", _panelDisplayValue(p.half_baths))}
+              ${_buildParcelDetailTableRow("Baths (derived)", _panelDisplayValue(p.baths))}
+              ${_buildParcelDetailTableRow("Fireplaces", _panelDisplayValue(p.fireplaces))}
+              ${_buildParcelDetailTableRow("Kitchens", _panelDisplayValue(p.kitchens))}
+              ${_buildParcelDetailTableRow("Wet Bars", _panelDisplayValue(p.wet_bars))}
+              ${_buildParcelDetailTableRow("Units", _panelDisplayValue(p.units))}
+              ${_buildParcelDetailTableRow("Garage Capacity", _panelDisplayValue(p.garage_capacity))}
+              ${_buildParcelDetailTableRow("Stories", _panelDisplayValue(p.stories))}
+              ${p.stories_desc ? _buildParcelDetailTableRow("Stories (raw)", _propelioEscape(p.stories_desc)) : ""}
+              ${_buildParcelDetailTableRow("Foundation Type", _panelTitleCaseDisplay(p.foundation_type))}
+              ${_buildParcelDetailTableRow("Construction Frame", _panelTitleCaseDisplay(p.construction_frame_type))}
+              ${_buildParcelDetailTableRow("Exterior Wall", _panelTitleCaseDisplay(p.ext_wall))}
+              ${_buildParcelDetailTableRow("Heating Type", _panelTitleCaseDisplay(p.heating_type))}
+              ${_buildParcelDetailTableRow("AC Type", _panelTitleCaseDisplay(p.ac_type))}
+              ${_buildParcelDetailTableRow("Roof Type", _panelTitleCaseDisplay(p.roof_type))}
+              ${_buildParcelDetailTableRow("Roof Material", _panelTitleCaseDisplay(p.roof_material))}
+              ${_buildParcelDetailTableRow("Fence Type", _panelTitleCaseDisplay(p.fence_type))}
+              ${_buildParcelDetailTableRow("Basement", _panelTitleCaseDisplay(p.basement))}
+              ${_buildParcelDetailTableRow("Building Class", _panelDisplayValue(p.bldg_class))}
+              ${_buildParcelDetailTableRow("CDU Rating", _panelTitleCaseDisplay(p.cdu_rating))}
+              ${_buildParcelDetailTableRow("Pool", _panelFlagDisplay(p.pool_flag))}
+              ${_buildParcelDetailTableRow("Spa", _panelFlagDisplay(p.spa_flag))}
+              ${_buildParcelDetailTableRow("Sauna", _panelFlagDisplay(p.sauna_flag))}
+              ${_buildParcelDetailTableRow("Sprinkler System", _panelFlagDisplay(p.sprinkler_flag))}
+              ${_buildParcelDetailTableRow("Deck", _panelFlagDisplay(p.deck_flag))}
               ${p.on_redfin && p.redfin_url ? _buildParcelDetailTableRow("Listing", `<a href="${p.redfin_url}" target="_blank" rel="noopener noreferrer">View listing</a>`) : ""}
               ${soldCompRows}
             </table>

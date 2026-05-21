@@ -109,6 +109,48 @@ def _clean_text(value: Any) -> str:
     return "" if text.lower() == "none" else text
 
 
+def _normalize_flag(value: Any) -> str | None:
+    """Canonical boolean-ish flag for fields like POOL_IND, SPA_IND, etc.
+    Returns 'T' for truthy, 'F' for falsy, None for unknown / unparseable.
+    Unknown stays NULL — preserves data truth (unknown vs no) rather than
+    silently coercing missing data to false. Shared across DCAD ingest +
+    TAD ingest so the DB stores a single canonical encoding.
+    """
+    if value is None:
+        return None
+    text = str(value).strip().upper()
+    if not text:
+        return None
+    if text in {"Y", "T", "TRUE", "YES", "1"}:
+        return "T"
+    if text in {"N", "F", "FALSE", "NO", "0"}:
+        return "F"
+    return None
+
+
+# Map DCAD's NUM_STORIES_DESC text → numeric stories per v3 spec.
+# When text is missing or unparseable, returns None — callers should
+# fall back to whatever fragment they have (e.g. keep the raw desc).
+_STORIES_DESC_MAP = {
+    "ONE STORY": 1.0,
+    "ONE AND ONE HALF STORIES": 1.5,
+    "TWO STORIES": 2.0,
+    "TWO AND ONE HALF STORIES": 2.5,
+    "THREE STORIES": 3.0,
+    "THREE AND ONE HALF STORIES": 3.5,
+    "FOUR STORIES": 4.0,
+}
+
+
+def _stories_from_desc(value: Any) -> float | None:
+    """Parse DCAD's NUM_STORIES_DESC into a numeric stories value.
+    Conservative — only known phrases map. Unknown → None."""
+    text = _clean_text(value).upper()
+    if not text:
+        return None
+    return _STORIES_DESC_MAP.get(text)
+
+
 def _extract_centroid(point_value: Any) -> tuple[float | None, float | None]:
     """Best-effort parser for PostGIS centroid values returned by PostgREST."""
     if point_value is None:
@@ -332,11 +374,65 @@ def query_parcels(polygon: list[list[float]]) -> ParcelQueryResult:
                     COALESCE(a.sptd_code, p.sptd_code) AS sptd_code,
                     a.land_val, a.impr_val, a.tot_val, a.isd_desc,
                     r.yr_built, r.tot_living_area, r.tot_main_sf,
+                    -- v3 residential detail expansion: aliased into canonical keys
+                    -- (see CAD_RESIDENTIAL_DETAIL_EXPANSION_SPEC.md canonical-field
+                    -- contract). build_feature reads these via row.get("beds"),
+                    -- row.get("full_baths"), etc., so the same code path serves
+                    -- Collin (native columns) and DCAD (aliased from res_detail).
+                    r.num_bedrooms AS beds,
+                    r.num_full_baths AS full_baths,
+                    r.num_half_baths AS half_baths,
+                    r.num_fireplaces AS fireplaces,
+                    r.num_kitchens AS kitchens,
+                    r.num_wet_bars AS wet_bars,
+                    r.num_units AS units,
+                    r.eff_yr_built AS eff_yr_built,
+                    r.act_age AS act_age,
+                    r.pool_ind AS pool_flag,
+                    r.spa_ind AS spa_flag,
+                    r.sauna_ind AS sauna_flag,
+                    r.sprinkler_sys_ind AS sprinkler_flag,
+                    r.deck_ind AS deck_flag,
+                    r.num_stories_desc AS stories_desc,
+                    r.bldg_class_desc AS bldg_class,
+                    r.cdu_rating_desc AS cdu_rating,
+                    r.constr_fram_typ_desc AS construction_frame_type,
+                    r.foundation_typ_desc AS foundation_type,
+                    r.heating_typ_desc AS heating_type,
+                    r.ac_typ_desc AS ac_type,
+                    r.fence_typ_desc AS fence_type,
+                    r.ext_wall_desc AS ext_wall,
+                    r.basement_desc AS basement,
+                    r.roof_typ_desc AS roof_type,
+                    r.roof_mat_desc AS roof_material,
+                    r.pct_complete AS pct_complete,
                     l.zoning, l.front_dim, l.depth_dim, l.area_size, l.area_uom, l.area_estimated,
                     (e.account_num IS NOT NULL) AS is_exempt
                 FROM parcels p
                 LEFT JOIN appraisal a ON a.account_num = p.account_num
-                LEFT JOIN res_detail r ON r.account_num = p.account_num
+                LEFT JOIN LATERAL (
+                    -- v3: lateral one-row pick for res_detail. Mirrors the
+                    -- LATERAL land_detail pattern already used by
+                    -- _fetch_dcad_parcel_by_account. Even though res_detail
+                    -- is one-row-per-account today, lateral makes the join
+                    -- shape explicit and bulletproof against future
+                    -- duplicates. Pairs with the DISTINCT ON below (which
+                    -- still defends against the non-lateral land_detail
+                    -- LEFT JOIN further down).
+                    SELECT yr_built, tot_living_area, tot_main_sf,
+                           num_bedrooms, num_full_baths, num_half_baths,
+                           num_fireplaces, num_kitchens, num_wet_bars, num_units,
+                           eff_yr_built, act_age,
+                           pool_ind, spa_ind, sauna_ind, sprinkler_sys_ind, deck_ind,
+                           num_stories_desc, bldg_class_desc, cdu_rating_desc,
+                           constr_fram_typ_desc, foundation_typ_desc,
+                           heating_typ_desc, ac_typ_desc, fence_typ_desc,
+                           ext_wall_desc, basement_desc,
+                           roof_typ_desc, roof_mat_desc, pct_complete
+                    FROM res_detail
+                    WHERE account_num = p.account_num
+                    LIMIT 1
+                ) r ON TRUE
                 LEFT JOIN land_detail l ON l.account_num = p.account_num
                 LEFT JOIN exempt_accounts e ON e.account_num = p.account_num
                 WHERE p.division_cd IN ('RES', 'COM')
@@ -513,16 +609,85 @@ def build_feature(row: dict[str, Any], prop_type: str, on_redfin: bool, redfin_l
         "subdivision": _clean_text(row.get("subdivision")) or _dcad_subdivision_from_legal(row.get("legal1")),
         "yr_built": str(row.get("yr_built")) if row.get("yr_built") else "N/A",
         "sqft": f"{int(float(row['tot_living_area'])):,}" if _safe_float(row.get("tot_living_area")) not in (None, 0.0) else "N/A",
-        # Structural fields — Collin ingests these from its shapefile DBF
-        # (api/counties/collin.py:_normalize_collin_row populates them).
-        # DCAD/TAD/Denton don't yet pull beds/baths/pool from their
-        # sources, so row.get() returns None → "N/A" for those.
-        # Followup in master_todo: ingest beds/baths/pool from
-        # DCAD's RES_DETAIL.CSV + equivalent for TAD/Denton.
+        # === v3 residential detail expansion (CAD_RESIDENTIAL_DETAIL_EXPANSION_SPEC.md) ===
+        # All canonical residential keys land here. SELECT statements alias their
+        # per-county source columns INTO these canonical names (DCAD: r.num_bedrooms
+        # AS beds, etc.), so row.get() reads cleanly across counties. When a
+        # county doesn't expose a field, row.get() returns None → "N/A" / "" /
+        # null fallback. Frontend card line 2 + popup detail panel both consume
+        # these. Followup hygiene PR will replace "N/A" inline with true null
+        # at API boundary (Copilot round-2 callout).
+
+        # Structural counts (integer canonical keys)
         "beds": int(_safe_float(row.get("beds"))) if _safe_float(row.get("beds")) not in (None, 0.0) else "N/A",
-        "baths": _safe_float(row.get("baths")) if _safe_float(row.get("baths")) not in (None, 0.0) else "N/A",
-        "stories": _safe_float(row.get("stories")) if _safe_float(row.get("stories")) not in (None, 0.0) else "N/A",
+        "full_baths": int(_safe_float(row.get("full_baths"))) if _safe_float(row.get("full_baths")) not in (None, 0.0) else "N/A",
+        "half_baths": int(_safe_float(row.get("half_baths"))) if _safe_float(row.get("half_baths")) not in (None, 0.0) else "N/A",
+        "fireplaces": int(_safe_float(row.get("fireplaces"))) if _safe_float(row.get("fireplaces")) not in (None, 0.0) else "N/A",
+        "kitchens": int(_safe_float(row.get("kitchens"))) if _safe_float(row.get("kitchens")) not in (None, 0.0) else "N/A",
+        "wet_bars": int(_safe_float(row.get("wet_bars"))) if _safe_float(row.get("wet_bars")) not in (None, 0.0) else "N/A",
+        "units": int(_safe_float(row.get("units"))) if _safe_float(row.get("units")) not in (None, 0.0) else "N/A",
+        "garage_capacity": int(_safe_float(row.get("garage_capacity"))) if _safe_float(row.get("garage_capacity")) not in (None, 0.0) else "N/A",
+
+        # `baths` is derived per v3 spec: prefer source decimal (Collin),
+        # else full + 0.5 * half (DCAD), else None. Component fields stay
+        # above for audit / CSV.
+        "baths": (
+            f"{_safe_float(row.get('baths')):g}"
+            if _safe_float(row.get("baths")) not in (None, 0.0)
+            else (
+                f"{(_safe_float(row.get('full_baths')) or 0) + 0.5 * (_safe_float(row.get('half_baths')) or 0):g}"
+                if _safe_float(row.get("full_baths")) not in (None, 0.0) or _safe_float(row.get("half_baths")) not in (None, 0.0)
+                else "N/A"
+            )
+        ),
+
+        # `stories` precedence: numeric source first, then parse DCAD's
+        # NUM_STORIES_DESC text via _stories_from_desc. Keep stories_desc
+        # text as separate prop for audit.
+        "stories": (
+            f"{_safe_float(row.get('stories')):g}"
+            if _safe_float(row.get("stories")) not in (None, 0.0)
+            else (
+                f"{_stories_from_desc(row.get('stories_desc')):g}"
+                if _stories_from_desc(row.get("stories_desc")) is not None
+                else "N/A"
+            )
+        ),
+        "stories_desc": _clean_text(row.get("stories_desc")),  # "" or e.g. "ONE STORY"
+
+        # Year-built variants
+        "eff_yr_built": str(row.get("eff_yr_built")) if row.get("eff_yr_built") else "N/A",
+        "act_age": str(row.get("act_age")) if row.get("act_age") else "N/A",
+
+        # Canonical T/F/empty flags — ingest normalized via _normalize_flag
+        # so the encoding is uniform across DCAD ('Y'/'N' → 'T'/'F'), TAD
+        # ('Y'/'N' → 'T'/'F'), Collin (native T/F). Frontend treats 'T' as
+        # truthy and skips display when 'F' or empty.
         "pool_flag": _clean_text(row.get("pool_flag")) or "",
+        "spa_flag": _clean_text(row.get("spa_flag")) or "",
+        "sauna_flag": _clean_text(row.get("sauna_flag")) or "",
+        "sprinkler_flag": _clean_text(row.get("sprinkler_flag")) or "",
+        "deck_flag": _clean_text(row.get("deck_flag")) or "",
+
+        # Categorical descriptive text — DCAD-rich; other counties either
+        # null or partial. structure_type is TAD-sourced (none from DCAD
+        # today; can derive from construction_frame_type + stories later).
+        "structure_type": _clean_text(row.get("structure_type")) or "N/A",
+        "construction_frame_type": _clean_text(row.get("construction_frame_type")) or "N/A",
+        "foundation_type": _clean_text(row.get("foundation_type")) or "N/A",
+        "heating_type": _clean_text(row.get("heating_type")) or "N/A",
+        "ac_type": _clean_text(row.get("ac_type")) or "N/A",
+        "fence_type": _clean_text(row.get("fence_type")) or "N/A",
+        "ext_wall": _clean_text(row.get("ext_wall")) or "N/A",
+        "basement": _clean_text(row.get("basement")) or "N/A",
+        "roof_type": _clean_text(row.get("roof_type")) or "N/A",
+        "roof_material": _clean_text(row.get("roof_material")) or "N/A",
+
+        # DCAD-only quality / classification fields. Other counties return "N/A".
+        "bldg_class": _clean_text(row.get("bldg_class")) or "N/A",
+        "cdu_rating": _clean_text(row.get("cdu_rating")) or "N/A",
+        "pct_complete": _clean_text(row.get("pct_complete")) or "N/A",
+
         "verified_vacant": _clean_text(row.get("verified_vacant")),
         "potential_target": _clean_text(row.get("potential_target")),
         "redfin_price": f"${redfin_listing['price']:,}" if redfin_listing and redfin_listing.get("price") else None,
