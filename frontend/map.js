@@ -3863,7 +3863,7 @@ function _renderList(sectionId, listId, items) {
       <div class="saved-area-row${activeClass}" tabindex="0" data-id="${area.id}" data-type="${area.type}">
         <div class="saved-area-main">
           <span class="saved-area-icon">${icon}</span>
-          <span class="saved-area-name" data-tooltip="${_esc(displayName)}">${displayName}</span>
+          <span class="saved-area-name-wrap" data-tooltip="${_esc(displayName)}"><span class="saved-area-name">${displayName}</span></span>
           ${showFullControls ? `<button type="button" class="saved-area-quick-delete-btn" data-action="delete" title="Delete">🗑</button>` : ""}
           ${canShare ? `<button type="button" class="saved-area-action-btn saved-area-share-btn" data-action="share" data-share-id="${_esc(area.share_id)}" title="Share">🔗</button>` : ""}
         </div>
@@ -4029,7 +4029,7 @@ function _renderSessionsList(sectionId, listId, items) {
     return `
       <div class="saved-area-row" tabindex="0" data-session-id="${session.session_id}">
         <div class="saved-area-main">
-          <span class="saved-area-name" data-tooltip="${_esc(session.name || "")}">${session.name}</span>
+          <span class="saved-area-name-wrap" data-tooltip="${_esc(session.name || "")}"><span class="saved-area-name">${session.name}</span></span>
           <span class="saved-area-date">${date}</span>
         </div>
         ${meta ? `<div class="saved-item-meta">${meta}</div>` : ""}
