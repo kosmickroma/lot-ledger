@@ -1420,6 +1420,10 @@ body.is-not-power-user .power-user-only {
     0 0 4px rgba(0, 0, 0, 0.5);
   white-space: nowrap;
   pointer-events: none;
+  /* 2026-05-22: keep label visually centered on its lat/lng anchor as
+     font-size changes. Without this, Leaflet's default top-left icon
+     anchor causes the label to drift ("jump") when its size changes. */
+  transform: translate(-50%, -50%);
   transition: font-size 0.18s ease, opacity 0.18s ease;
 }
 

@@ -2475,7 +2475,12 @@ async function toggleCountyLayer() {
       if (!bounds || !bounds.isValid()) return;
       const name = layer.feature?.properties?.name || layer.feature?.properties?.NAME || "";
       if (!name) return;
-      L.marker(bounds.getCenter(), {
+      // 2026-05-22: prefer the polygon's mass-center (Leaflet's getCenter on
+      // the polygon layer = area-weighted centroid) over bounds.getCenter
+      // (bbox center, can fall outside irregular shapes). Falls back to bbox
+      // if mass-center isn't available.
+      const labelLatLng = (typeof layer.getCenter === "function" ? layer.getCenter() : bounds.getCenter());
+      L.marker(labelLatLng, {
         pane: "countyLabelPane",
         interactive: false,
         icon: L.divIcon({
@@ -2525,8 +2530,8 @@ const _LABEL_MAX_PX = 13;
 const _LABEL_MIN_PX = 9;
 const _LABEL_WIDTH_PAD = 0.70;
 const _LABEL_HEIGHT_PAD = 0.28;
-const _LABEL_MIN_COUNTY_PX = 220; // labels disappear earlier — only show on
-                                  // counties with substantial screen footprint
+const _LABEL_MIN_COUNTY_PX = 110; // 2026-05-22 (220 → 110) — one zoom level
+                                  // further out before disappearing
 
 let _labelMeasureCanvas = null;
 function _measureLabelWidth(text, fontPx) {
