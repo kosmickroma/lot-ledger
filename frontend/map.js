@@ -1460,14 +1460,24 @@ function clearActiveItem() {
   _updateActiveItemRenameVisibility();
 }
 
-// Pencil only shows when there's actually a saved area to rename. For
-// transient states (no workspace loaded, snapshots, location pins) it
-// stays hidden so users don't try to rename something the API doesn't
-// own. Called from setActiveItem / clearActiveItem and after renames.
+// Pencil shows whenever there's a real workspace/area context loaded.
+// 2026-05-21 hotfix: previously gated solely on _currentLoadedAreaId.
+// Multiple side-effect paths reset that variable to null transiently
+// (between session restore, area reload, snapshot bounce, etc.), leaving
+// the pencil hidden after a rename even though the workspace name is
+// still real and renameable. Now we ALSO accept the case where the
+// displayed name is non-placeholder ("—") — if the user sees a workspace
+// name on screen, the rename pencil belongs next to it. Click handler
+// still gates the actual API call on _currentLoadedAreaId at the moment
+// of rename so we never attempt to rename a transient state.
 function _updateActiveItemRenameVisibility() {
   const btn = document.getElementById("active-item-rename");
   if (!btn) return;
-  btn.classList.toggle("hidden", !_currentLoadedAreaId);
+  const nameEl = document.getElementById("active-item-name");
+  const visibleName = (nameEl?.textContent || "").trim();
+  const hasRealName = Boolean(visibleName) && visibleName !== "—";
+  const shouldShow = Boolean(_currentLoadedAreaId) || hasRealName;
+  btn.classList.toggle("hidden", !shouldShow);
 }
 
 (function _initActiveItemRenamePencil() {
@@ -3853,7 +3863,7 @@ function _renderList(sectionId, listId, items) {
       <div class="saved-area-row${activeClass}" tabindex="0" data-id="${area.id}" data-type="${area.type}">
         <div class="saved-area-main">
           <span class="saved-area-icon">${icon}</span>
-          <span class="saved-area-name">${displayName}</span>
+          <span class="saved-area-name-wrap" data-tooltip="${_esc(displayName)}"><span class="saved-area-name">${displayName}</span></span>
           ${showFullControls ? `<button type="button" class="saved-area-quick-delete-btn" data-action="delete" title="Delete">🗑</button>` : ""}
           ${canShare ? `<button type="button" class="saved-area-action-btn saved-area-share-btn" data-action="share" data-share-id="${_esc(area.share_id)}" title="Share">🔗</button>` : ""}
         </div>
@@ -4019,7 +4029,7 @@ function _renderSessionsList(sectionId, listId, items) {
     return `
       <div class="saved-area-row" tabindex="0" data-session-id="${session.session_id}">
         <div class="saved-area-main">
-          <span class="saved-area-name">${session.name}</span>
+          <span class="saved-area-name-wrap" data-tooltip="${_esc(session.name || "")}"><span class="saved-area-name">${session.name}</span></span>
           <span class="saved-area-date">${date}</span>
         </div>
         ${meta ? `<div class="saved-item-meta">${meta}</div>` : ""}
