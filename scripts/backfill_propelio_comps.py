@@ -25,6 +25,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from api.config import get_session_conn, release_session_conn
+from api.propelio.parcel_match import match_comps_to_parcels
 
 
 BATCH_SIZE = 500
@@ -128,7 +129,11 @@ def _extract_comp_fields(row: dict[str, Any]) -> dict[str, Any] | None:
         "photo_count": _to_int(raw.get("photo_count")),
         "photos": raw.get("photos") if isinstance(raw.get("photos"), list) else None,
         "parcel_account_num": str(row.get("parcel_account_num") or "").strip() or None,
-        "parcel_county": None,
+        # 2026-05-22 fix: parcel_county is no longer hardcoded None. The
+        # run_backfill loop now calls match_comps_to_parcels on each batch's
+        # comp_data dicts BEFORE this function reads them, mutating them in
+        # place with parcel_county set. See docs/PROPELIO_COMPS_COUNTY_BACKFILL_SPEC.md.
+        "parcel_county": str(comp_data.get("parcel_county") or "").strip() or None,
         "parcel_geom": row.get("parcel_geom") if isinstance(row.get("parcel_geom"), (dict, list)) else None,
         "parsed_payload": comp_data,
         "raw_payload": raw if raw else None,
@@ -332,6 +337,25 @@ def run_backfill(*, dry_run: bool = False, batch_size: int = BATCH_SIZE) -> None
                 rows = read_cur.fetchmany(int(batch_size))
                 if not rows:
                     break
+
+                # 2026-05-22 fix: enrich each row's comp_data dict with
+                # parcel_county / parcel_account_num / parcel_geom BEFORE
+                # _extract_comp_fields reads them. The matcher mutates each
+                # comp_data dict in place, so _extract_comp_fields picks
+                # up the populated parcel_county at line 134.
+                # See docs/PROPELIO_COMPS_COUNTY_BACKFILL_SPEC.md.
+                comp_dicts = [
+                    r.get("comp_data") for r in rows
+                    if isinstance(r.get("comp_data"), dict)
+                ]
+                if comp_dicts:
+                    try:
+                        match_comps_to_parcels(comp_dicts)
+                    except Exception as e:
+                        # Non-fatal: matcher failure leaves parcel_county None,
+                        # which is the original (broken) behavior. Log and proceed
+                        # so a transient DB hiccup doesn't kill the whole backfill.
+                        print(f"  WARN: match_comps_to_parcels failed: {e}")
 
                 with conn.cursor() as write_cur:
                     for row in rows:
