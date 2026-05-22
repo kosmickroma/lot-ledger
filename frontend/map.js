@@ -13,7 +13,12 @@
 
 const DALLAS_CENTER = [32.78, -96.8];
 const DEFAULT_ZOOM = 13;
-const COUNTY_LABEL_MIN_ZOOM = 9;
+// 2026-05-22: lowered from 9 → 5 so labels stay visible at low zooms
+// (where they're MOST useful — analyst can see "you're looking at Tarrant"
+// without zooming in). Font size scales inversely with zoom — see
+// _updateCountyLabelStyles. Below 5 (continental US view) the labels
+// would overlap into noise so we still gate at 5.
+const COUNTY_LABEL_MIN_ZOOM = 5;
 
 const COLORS = {
   single_family: "#2980b9",
@@ -2500,6 +2505,27 @@ function _updateCountyLabelVisibility() {
   } else if (map.hasLayer(countyLabelLayer)) {
     map.removeLayer(countyLabelLayer);
   }
+  _updateCountyLabelStyles();
+}
+
+// 2026-05-22: scale county labels inversely with zoom — bigger when
+// zoomed OUT so a 5-state view still reads "Tarrant / Dallas / Collin"
+// at a glance, smaller when zoomed in (where the label is just a hint).
+// Sets a CSS variable on the map container; .county-label CSS reads it.
+function _updateCountyLabelStyles() {
+  const container = map.getContainer();
+  if (!container) return;
+  const zoom = map.getZoom();
+  // Linear: size = clamp(10, 38 - zoom*2.2, 28).
+  //   zoom  5 → 27px (continental Texas view)
+  //   zoom  7 → 23px (north-Texas multi-county view)
+  //   zoom  9 → 18px (DFW metro view)
+  //   zoom 11 → 14px (county-scale)
+  //   zoom 13 → 10px (city-scale, label is a hint)
+  //   zoom 15+ → 10px (parcel-scale, smallest)
+  const raw = 38 - zoom * 2.2;
+  const px = Math.max(10, Math.min(28, raw));
+  container.style.setProperty("--county-label-font-size", `${px.toFixed(0)}px`);
 }
 
 async function _apiJson(url, options = {}) {
