@@ -2508,24 +2508,46 @@ function _updateCountyLabelVisibility() {
   _updateCountyLabelStyles();
 }
 
-// 2026-05-22: scale county labels inversely with zoom — bigger when
-// zoomed OUT so a 5-state view still reads "Tarrant / Dallas / Collin"
-// at a glance, smaller when zoomed in (where the label is just a hint).
-// Sets a CSS variable on the map container; .county-label CSS reads it.
+// 2026-05-22 v2: size each county label based on its OWN county's
+// screen footprint, so a tiny county (Rockwall) gets a tiny label and
+// a big one (Dallas) gets a big one — never exceeding what fits
+// inside the polygon visually. Previous v1 used a global zoom-based
+// scale that made labels bigger than small counties.
 function _updateCountyLabelStyles() {
-  const container = map.getContainer();
-  if (!container) return;
-  const zoom = map.getZoom();
-  // Linear: size = clamp(10, 38 - zoom*2.2, 28).
-  //   zoom  5 → 27px (continental Texas view)
-  //   zoom  7 → 23px (north-Texas multi-county view)
-  //   zoom  9 → 18px (DFW metro view)
-  //   zoom 11 → 14px (county-scale)
-  //   zoom 13 → 10px (city-scale, label is a hint)
-  //   zoom 15+ → 10px (parcel-scale, smallest)
-  const raw = 38 - zoom * 2.2;
-  const px = Math.max(10, Math.min(28, raw));
-  container.style.setProperty("--county-label-font-size", `${px.toFixed(0)}px`);
+  if (!countyLabelLayer || !countyLayer) return;
+  // Build name → polygon-bounds map (LatLngBounds for each county).
+  const boundsByName = {};
+  countyLayer.eachLayer((layer) => {
+    const name = layer.feature?.properties?.name || layer.feature?.properties?.NAME;
+    if (name && typeof layer.getBounds === "function") {
+      boundsByName[name] = layer.getBounds();
+    }
+  });
+  countyLabelLayer.eachLayer((marker) => {
+    const el = marker.getElement?.();
+    if (!el) return;
+    const name = (el.textContent || "").trim();
+    const bounds = boundsByName[name];
+    if (!bounds || !bounds.isValid()) return;
+    const sw = map.latLngToContainerPoint(bounds.getSouthWest());
+    const ne = map.latLngToContainerPoint(bounds.getNorthEast());
+    const widthPx = Math.abs(ne.x - sw.x);
+    const heightPx = Math.abs(sw.y - ne.y);
+    const minDim = Math.min(widthPx, heightPx);
+    // Font size based on screen footprint. ~widthPx / nameLength * 1.4
+    // gives "name should fit width". We also gate by minDim so very
+    // tall-thin or wide-thin counties don't get oversized labels.
+    const safeWidth = widthPx / Math.max(name.length, 4) * 1.4;
+    const safeHeight = minDim * 0.35;
+    const px = Math.max(8, Math.min(16, Math.min(safeWidth, safeHeight)));
+    if (minDim < 22) {
+      // County footprint too small on screen — hide label
+      el.style.opacity = "0";
+    } else {
+      el.style.opacity = "";
+      el.style.fontSize = `${px.toFixed(0)}px`;
+    }
+  });
 }
 
 async function _apiJson(url, options = {}) {

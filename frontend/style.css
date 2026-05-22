@@ -1409,19 +1409,18 @@ body.is-not-power-user .power-user-only {
 
 .county-label {
   color: #f3e6be;
-  /* Scales inversely with zoom via CSS variable set by
-     _updateCountyLabelStyles. Bigger when zoomed out (broader context),
-     smaller when zoomed in. Fallback 12px matches prior behavior. */
-  font-size: var(--county-label-font-size, 12px);
+  /* Fixed 12px fallback; actual size is per-label inline-styled by
+     _updateCountyLabelStyles to fit each county's screen footprint. */
+  font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
   text-shadow:
     0 1px 2px rgba(0, 0, 0, 0.85),
-    0 0 6px rgba(0, 0, 0, 0.6);  /* extra glow at larger sizes for readability */
+    0 0 4px rgba(0, 0, 0, 0.5);
   white-space: nowrap;
   pointer-events: none;
-  transition: font-size 0.18s ease;
+  transition: font-size 0.18s ease, opacity 0.18s ease;
 }
 
 .address-search {
