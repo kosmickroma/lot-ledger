@@ -128,8 +128,8 @@ def _tad_bbox_filter(
             cur.execute(
                 """
                 SELECT parcel_key, account_num, sequence_num, taxpin, pidn,
-                      owner_name, owner_addr, owner_city, owner_citystate, owner_zip, owner_zip4,
-                       situs_addr, property_class, state_use_code, legal_descr,
+                       owner_name, owner_addr, owner_city, owner_citystate, owner_zip, owner_zip4,
+                       situs_addr, property_city, property_class, state_use_code, legal_descr,
                        county_code, city_code, school_code,
                        acres, land_acres, land_sqft,
                        year_built, living_area,
@@ -244,6 +244,7 @@ def _normalize_tad_row(raw: dict[str, Any]) -> dict[str, Any]:
         "street_num": "",
         "full_street_name": "",
         "property_address": property_address,
+        "property_city": _clean_text(raw.get("property_city")),
         "property_zip": owner_zip,
         # classification
         "division_cd": "TAD",

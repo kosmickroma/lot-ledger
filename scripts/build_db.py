@@ -30,6 +30,13 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT_DIR / "data"
 PARCEL_GEOM_DIR = DATA_DIR / "PARCEL_GEOM"
 
+# Strip DCAD's "(DALLAS CO)" multi-county-disambiguation suffix from
+# PROPERTY_CITY values like "GARLAND (DALLAS CO)" → "GARLAND".
+# See scripts/build_dcad_property_city.py for the same logic used by the
+# one-shot backfill script. Both must stay in sync.
+import re as _re
+_DALLAS_CO_SUFFIX = _re.compile(r"\s*\(DALLAS\s+CO\)\s*$", _re.IGNORECASE)
+
 
 def _clean_text(value: object) -> str | None:
     if value is None:
@@ -38,6 +45,32 @@ def _clean_text(value: object) -> str | None:
         return None
     text = str(value).strip()
     return text if text else None
+
+
+def _clean_property_city(value: object) -> str | None:
+    """Strip whitespace + (DALLAS CO) suffix + uppercase. Returns None if empty."""
+    text = _clean_text(value)
+    if not text:
+        return None
+    text = _DALLAS_CO_SUFFIX.sub("", text).strip()
+    return text.upper() if text else None
+
+
+def _normalize_flag(value: object) -> str | None:
+    """Canonical 'T' / 'F' / NULL for ingest-time flag normalization.
+    Mirrors api/counties/dcad.py:_normalize_flag — kept in sync so the
+    DB stores one encoding across all four counties. Unknown stays NULL
+    (preserves data truth: unknown vs no)."""
+    if value is None:
+        return None
+    text = str(value).strip().upper()
+    if not text:
+        return None
+    if text in {"Y", "T", "TRUE", "YES", "1"}:
+        return "T"
+    if text in {"N", "F", "FALSE", "NO", "0"}:
+        return "F"
+    return None
 
 
 def _normalize_key(value: object) -> str:
@@ -369,6 +402,7 @@ def _build_parcels_table() -> list[dict[str, object]]:
                 "street_num": _clean_text(getattr(row, "STREET_NUM", None)),
                 "full_street_name": _clean_text(getattr(row, "FULL_STREET_NAME", None)),
                 "property_address": property_address,
+                "property_city": _clean_property_city(getattr(row, "PROPERTY_CITY", None)),
                 "property_zip": _clean_text(getattr(row, "PROPERTY_ZIPCODE", None)),
                 "division_cd": _clean_text(getattr(row, "DIVISION_CD", None)),
                 "sptd_code": _clean_text(getattr(row, "SPTD_CODE", None)),
@@ -412,6 +446,17 @@ def _build_appraisal_table() -> list[dict[str, object]]:
 
 
 def _build_res_detail_table() -> list[dict[str, object]]:
+    """Build res_detail rows from DCAD's RES_DETAIL.CSV.
+
+    v3 expansion: pulls 27 additional columns beyond yr_built / tot_living_area
+    / tot_main_sf. Flag fields (POOL_IND, SPA_IND, etc.) normalized at ingest
+    time via _normalize_flag — DB stores canonical 'T' / 'F' / NULL.
+
+    pandas itertuples renames columns with spaces / special chars; the
+    CSV's column names are all SQL-safe identifiers so getattr() works
+    directly. NUM_STORIES_DESC is stored as text and parsed downstream
+    via api/counties/dcad.py:_stories_from_desc when needed.
+    """
     res_detail_path = DATA_DIR / "RES_DETAIL.CSV"
     res_df = pd.read_csv(res_detail_path, dtype=str, encoding="latin-1").fillna("")
     res_df = res_df.groupby("ACCOUNT_NUM", as_index=False).first()
@@ -424,9 +469,40 @@ def _build_res_detail_table() -> list[dict[str, object]]:
         rows.append(
             {
                 "account_num": account_num,
+                # Existing fields (pre-v3) — keep at top of dict for backward-compat readability.
                 "yr_built": _to_int(getattr(row, "YR_BUILT", None)),
                 "tot_living_area": _to_float(getattr(row, "TOT_LIVING_AREA_SF", None)),
                 "tot_main_sf": _to_float(getattr(row, "TOT_MAIN_SF", None)),
+                # v3 expansion — integer counts.
+                "num_bedrooms": _to_int(getattr(row, "NUM_BEDROOMS", None)),
+                "num_full_baths": _to_int(getattr(row, "NUM_FULL_BATHS", None)),
+                "num_half_baths": _to_int(getattr(row, "NUM_HALF_BATHS", None)),
+                "num_fireplaces": _to_int(getattr(row, "NUM_FIREPLACES", None)),
+                "num_kitchens": _to_int(getattr(row, "NUM_KITCHENS", None)),
+                "num_wet_bars": _to_int(getattr(row, "NUM_WET_BARS", None)),
+                "num_units": _to_int(getattr(row, "NUM_UNITS", None)),
+                "eff_yr_built": _to_int(getattr(row, "EFF_YR_BUILT", None)),
+                "act_age": _to_int(getattr(row, "ACT_AGE", None)),
+                # v3 expansion — canonical flag normalization (T / F / NULL).
+                "pool_ind": _normalize_flag(getattr(row, "POOL_IND", None)),
+                "spa_ind": _normalize_flag(getattr(row, "SPA_IND", None)),
+                "sauna_ind": _normalize_flag(getattr(row, "SAUNA_IND", None)),
+                "sprinkler_sys_ind": _normalize_flag(getattr(row, "SPRINKLER_SYS_IND", None)),
+                "deck_ind": _normalize_flag(getattr(row, "DECK_IND", None)),
+                # v3 expansion — text/descriptor fields.
+                "num_stories_desc": _clean_text(getattr(row, "NUM_STORIES_DESC", None)),
+                "bldg_class_desc": _clean_text(getattr(row, "BLDG_CLASS_DESC", None)),
+                "cdu_rating_desc": _clean_text(getattr(row, "CDU_RATING_DESC", None)),
+                "constr_fram_typ_desc": _clean_text(getattr(row, "CONSTR_FRAM_TYP_DESC", None)),
+                "foundation_typ_desc": _clean_text(getattr(row, "FOUNDATION_TYP_DESC", None)),
+                "heating_typ_desc": _clean_text(getattr(row, "HEATING_TYP_DESC", None)),
+                "ac_typ_desc": _clean_text(getattr(row, "AC_TYP_DESC", None)),
+                "fence_typ_desc": _clean_text(getattr(row, "FENCE_TYP_DESC", None)),
+                "ext_wall_desc": _clean_text(getattr(row, "EXT_WALL_DESC", None)),
+                "basement_desc": _clean_text(getattr(row, "BASEMENT_DESC", None)),
+                "roof_typ_desc": _clean_text(getattr(row, "ROOF_TYP_DESC", None)),
+                "roof_mat_desc": _clean_text(getattr(row, "ROOF_MAT_DESC", None)),
+                "pct_complete": _clean_text(getattr(row, "PCT_COMPLETE", None)),
             }
         )
 
@@ -520,7 +596,15 @@ def main() -> None:
 
     _upsert_rows("parcels", parcels_rows, "account_num", [col for col in parcels_rows[0] if col != "account_num"])
     _upsert_rows("appraisal", appraisal_rows, "account_num", ["land_val", "impr_val", "tot_val", "isd_desc", "sptd_code"])
-    _upsert_rows("res_detail", res_detail_rows, "account_num", ["yr_built", "tot_living_area", "tot_main_sf"])
+    # v3: res_detail gained 27 columns. Mirror parcels' pattern (update everything
+    # except the conflict key) so future column additions in _build_res_detail_table
+    # automatically flow through on re-ingest.
+    _upsert_rows(
+        "res_detail",
+        res_detail_rows,
+        "account_num",
+        [col for col in res_detail_rows[0] if col != "account_num"] if res_detail_rows else [],
+    )
     _upsert_rows("land_detail", land_detail_rows, "account_num", ["zoning", "front_dim", "depth_dim", "area_size", "area_uom", "area_estimated"])
     _upsert_rows("exempt_accounts", exempt_rows, "account_num", [])
 
