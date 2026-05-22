@@ -13,7 +13,12 @@
 
 const DALLAS_CENTER = [32.78, -96.8];
 const DEFAULT_ZOOM = 13;
-const COUNTY_LABEL_MIN_ZOOM = 9;
+// 2026-05-22: lowered from 9 → 5 so labels stay visible at low zooms
+// (where they're MOST useful — analyst can see "you're looking at Tarrant"
+// without zooming in). Font size scales inversely with zoom — see
+// _updateCountyLabelStyles. Below 5 (continental US view) the labels
+// would overlap into noise so we still gate at 5.
+const COUNTY_LABEL_MIN_ZOOM = 5;
 
 const COLORS = {
   single_family: "#2980b9",
@@ -2470,7 +2475,12 @@ async function toggleCountyLayer() {
       if (!bounds || !bounds.isValid()) return;
       const name = layer.feature?.properties?.name || layer.feature?.properties?.NAME || "";
       if (!name) return;
-      L.marker(bounds.getCenter(), {
+      // 2026-05-22: prefer the polygon's mass-center (Leaflet's getCenter on
+      // the polygon layer = area-weighted centroid) over bounds.getCenter
+      // (bbox center, can fall outside irregular shapes). Falls back to bbox
+      // if mass-center isn't available.
+      const labelLatLng = (typeof layer.getCenter === "function" ? layer.getCenter() : bounds.getCenter());
+      L.marker(labelLatLng, {
         pane: "countyLabelPane",
         interactive: false,
         icon: L.divIcon({
@@ -2500,6 +2510,87 @@ function _updateCountyLabelVisibility() {
   } else if (map.hasLayer(countyLabelLayer)) {
     map.removeLayer(countyLabelLayer);
   }
+  _updateCountyLabelStyles();
+}
+
+// 2026-05-22 v3: pixel-accurate label sizing via canvas measureText.
+// Previous v2 used a char-count * fontSize heuristic that underestimated
+// width because the CSS has font-weight:700, text-transform:uppercase,
+// AND letter-spacing:0.04em — all of which expand rendered width.
+//
+// Now we MEASURE the actual text width at each candidate font-size and
+// pick the largest size where the text fits inside the county polygon
+// with comfortable padding. Conservative caps: never larger than 13px,
+// max 70% of county width, max 28% of county height.
+//
+// Pattern follows the same approach used by D3 / Mapbox label engines:
+// measure → fit → fallback to hide. Canvas measureText is fast (a few
+// microseconds per call); ~60 labels × ~6 candidates = imperceptible.
+const _LABEL_MAX_PX = 13;
+const _LABEL_MIN_PX = 9;
+const _LABEL_WIDTH_PAD = 0.70;
+const _LABEL_HEIGHT_PAD = 0.28;
+const _LABEL_MIN_COUNTY_PX = 110; // 2026-05-22 (220 → 110) — one zoom level
+                                  // further out before disappearing
+
+let _labelMeasureCanvas = null;
+function _measureLabelWidth(text, fontPx) {
+  if (!_labelMeasureCanvas) _labelMeasureCanvas = document.createElement("canvas");
+  const ctx = _labelMeasureCanvas.getContext("2d");
+  // Match .county-label CSS exactly: 700 weight, uppercase already in DOM text,
+  // 0.04em letter-spacing approximated by adding (fontPx*0.04)*(text.length-1).
+  ctx.font = `700 ${fontPx}px sans-serif`;
+  const baseWidth = ctx.measureText(text).width;
+  // letter-spacing: 0.04em × number of gaps between letters
+  const spacing = fontPx * 0.04 * Math.max(0, text.length - 1);
+  return baseWidth + spacing;
+}
+
+function _updateCountyLabelStyles() {
+  if (!countyLabelLayer || !countyLayer) return;
+  const boundsByName = {};
+  countyLayer.eachLayer((layer) => {
+    const name = layer.feature?.properties?.name || layer.feature?.properties?.NAME;
+    if (name && typeof layer.getBounds === "function") {
+      boundsByName[name] = layer.getBounds();
+    }
+  });
+  countyLabelLayer.eachLayer((marker) => {
+    const el = marker.getElement?.();
+    if (!el) return;
+    const name = (el.textContent || "").trim().toUpperCase();
+    const bounds = boundsByName[name] || boundsByName[(el.textContent || "").trim()];
+    if (!bounds || !bounds.isValid()) {
+      el.style.opacity = "0";
+      return;
+    }
+    const sw = map.latLngToContainerPoint(bounds.getSouthWest());
+    const ne = map.latLngToContainerPoint(bounds.getNorthEast());
+    const widthPx = Math.abs(ne.x - sw.x);
+    const heightPx = Math.abs(sw.y - ne.y);
+    const minDim = Math.min(widthPx, heightPx);
+    if (minDim < _LABEL_MIN_COUNTY_PX) {
+      el.style.opacity = "0";
+      return;
+    }
+    // Iterate from MAX down to MIN, pick the first that fits.
+    let chosen = 0;
+    for (let px = _LABEL_MAX_PX; px >= _LABEL_MIN_PX; px--) {
+      const measured = _measureLabelWidth(name, px);
+      const fitsWidth = measured <= widthPx * _LABEL_WIDTH_PAD;
+      const fitsHeight = px <= heightPx * _LABEL_HEIGHT_PAD;
+      if (fitsWidth && fitsHeight) {
+        chosen = px;
+        break;
+      }
+    }
+    if (chosen === 0) {
+      el.style.opacity = "0";
+      return;
+    }
+    el.style.opacity = "";
+    el.style.fontSize = `${chosen}px`;
+  });
 }
 
 async function _apiJson(url, options = {}) {
