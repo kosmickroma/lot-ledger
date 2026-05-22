@@ -30,6 +30,8 @@ docs/*
 !docs/propelio/**
 !docs/road-adjacency/
 !docs/road-adjacency/**
+!docs/property-classification/
+!docs/property-classification/**
 
 # Render / deployment artifacts
 .render/
