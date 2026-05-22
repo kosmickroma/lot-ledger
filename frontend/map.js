@@ -2522,10 +2522,13 @@ function _updateCountyLabelVisibility() {
 // measure → fit → fallback to hide. Canvas measureText is fast (a few
 // microseconds per call); ~60 labels × ~6 candidates = imperceptible.
 const _LABEL_MAX_PX = 13;
-const _LABEL_MIN_PX = 8;
+const _LABEL_MIN_PX = 6;         // 2026-05-22 (was 8) — allow tinier labels so they
+                                 // persist further out before disappearing
 const _LABEL_WIDTH_PAD = 0.70;   // text width must fit within 70% of county width
-const _LABEL_HEIGHT_PAD = 0.28;  // text height (≈ fontPx) must fit within 28% of height
-const _LABEL_MIN_COUNTY_PX = 28; // counties below this min-dim hide their label
+const _LABEL_HEIGHT_PAD = 0.50;  // 2026-05-22 (was 0.28) — relaxed since visible
+                                 // overflow is dominated by width not height
+const _LABEL_MIN_COUNTY_PX = 8;  // 2026-05-22 (was 28) — KK wants labels to stay
+                                 // visible ~2 zoom levels further out before hiding
 
 let _labelMeasureCanvas = null;
 function _measureLabelWidth(text, fontPx) {
