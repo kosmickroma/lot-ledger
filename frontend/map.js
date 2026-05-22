@@ -668,7 +668,10 @@ function _sameParcelIdentity(a, b) {
 function _formatPropertyAddress(county, rawAddr, rawCity) {
   const addr = String(rawAddr || "").trim();
   if (!addr) return "";
-  const city = String(rawCity || "").trim();
+  // 2026-05-22 hotfix: filter 'NO CITY' / NONE / N/A placeholders so they
+  // don't appear as a literal city name in the top slot. Same logic as
+  // _formatFullPropertyAddress uses for the Subject Property card.
+  const city = _normalizeCityForDisplay(rawCity);
   const c = String(county || "").trim().toLowerCase();
 
   switch (c) {
@@ -834,6 +837,25 @@ function _popupHeaderAddress(props) {
   return _formatFullPropertyAddress(county, props);
 }
 
+// City placeholder strings that mean "no incorporated city" in source data.
+// TAD encodes unincorporated Tarrant County parcels with city_code='000' which
+// the lookup table maps to the literal "NO CITY". DCAD uses blank. Anything
+// that matches this set should display as if there's no city at all.
+const _CITY_PLACEHOLDER_VALUES = new Set([
+  "NO CITY",
+  "NONE",
+  "N/A",
+  "UNKNOWN",
+  "UNINCORPORATED",
+]);
+
+function _normalizeCityForDisplay(rawCity) {
+  const city = String(rawCity || "").trim();
+  if (!city) return "";
+  if (_CITY_PLACEHOLDER_VALUES.has(city.toUpperCase())) return "";
+  return city;
+}
+
 function _formatFullPropertyAddress(county, props) {
   // Full USPS-style address for the Subject Property card:
   //   "STREET, CITY, TX ZIP"
@@ -849,7 +871,10 @@ function _formatFullPropertyAddress(county, props) {
   //   - dcad / tad:     addr is street-only — use as-is.
   const c = String(county || "").trim().toLowerCase();
   const rawAddr = String(props?.addr || "").trim();
-  const city = String(props?.city || "").trim();
+  // 2026-05-22 hotfix: treat 'NO CITY' (TAD's unincorporated-county marker)
+  // and other placeholders as empty so we don't render "5314 LEMONS RD, NO
+  // CITY, TX 76xxx". Just shows "5314 LEMONS RD, TX 76xxx" for those.
+  const city = _normalizeCityForDisplay(props?.city);
   const zip = String(props?.property_zip || "").trim();
 
   let street = rawAddr;
