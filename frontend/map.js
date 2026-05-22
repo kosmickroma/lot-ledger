@@ -3939,11 +3939,21 @@ async function _renameSavedItemInline(item, rowEl) {
   input.addEventListener("blur", cancel);
 }
 
-function _renderList(sectionId, listId, items) {
+function _renderList(sectionId, listId, items, options = {}) {
   const section = document.getElementById(sectionId);
   const list = document.getElementById(listId);
   if (!section || !list) return;
-  section.classList.toggle("hidden", items.length === 0);
+  const searchActive = Boolean(options.searchActive);
+  // 2026-05-22 bugfix: only hide the section when the list is empty AND
+  // the user is NOT actively searching. Previously, an unmatched search
+  // hid the entire section (including the search input itself), forcing
+  // a page refresh to recover. Now an unmatched search keeps the section
+  // visible and shows a small "no matches" message.
+  section.classList.toggle("hidden", items.length === 0 && !searchActive);
+  if (items.length === 0 && searchActive) {
+    list.innerHTML = `<div class="saved-list-empty-state">No matches for current search.</div>`;
+    return;
+  }
   list.innerHTML = items.map((area) => {
     const date = new Date(area.savedAt).toLocaleDateString(undefined, { month: "short", day: "numeric" });
     const icon = area.type === "parcel" ? "📌" : area.type === "location" ? "📍" : "▭";
@@ -4093,8 +4103,8 @@ function renderSavedAreasList() {
       const name = String(a.name || "").toLowerCase();
       return targetsTokens.every((t) => name.includes(t));
     });
-  _renderList("saved-areas", "saved-areas-list", areas);
-  _renderList("saved-parcels", "saved-parcels-list", targets);
+  _renderList("saved-areas", "saved-areas-list", areas, { searchActive: areasTokens.length > 0 });
+  _renderList("saved-parcels", "saved-parcels-list", targets, { searchActive: targetsTokens.length > 0 });
   _updateUpdateAreaButtonVisibility();
 }
 
