@@ -491,15 +491,30 @@ Captured from a repo-wide scan. Threat model: auth-gated team tool with Mike + V
   - Not in default ParcelView shapefile export
   - Need separate extract from Tarrant CAD
 
-- [ ] **ZIP → USPS postal-city lookup table** (2026-05-22 KK ask, back of mind)
-  - [ ] HIGH
-  - [x] 2nd
+- [ ] **🏆 TIGER Places + PostGIS spatial-join city resolution** (REINFORCED 2026-05-22 — was on 2nd, bumped to HIGH-adjacent)
+  - [x] HIGH
+  - [ ] 2nd
   - [ ] Defer
-  - **Why:** ~7,200 TAD parcels live in unincorporated Tarrant County (city_code='000', source-labeled "NO CITY"). Today we fall back to owner_city which works most of the time but breaks for absentee owners (someone in Houston owning a Fort Worth-area parcel → popup shows "Houston" which is wrong for the property's postal address). The right answer is per-ZIP USPS postal city.
-  - **Sources:** USPS pubs offer the ZIP→preferred-city mapping. ~50 ZIPs in Tarrant, ~50 in Dallas, ~30 in Collin, ~30 in Denton. Single CSV table, ~150 rows.
-  - **Schema:** new `zip_postal_city` table with `zip TEXT PRIMARY KEY, postal_city TEXT, state TEXT`. Frontend can pull via /api/zip-cities or backend just joins at SELECT time.
-  - **Display fallback order:** property_city → owner_city → ZIP postal-city lookup → omit city.
-  - **Bonus:** also fixes the `_google_maps_link` "PLANO, NY" absentee bug already in the bugs section.
+  - **Why this is the ONE right fix (verified empirically 2026-05-22):**
+    Today's hotfix journey proved that every other fallback approach fails:
+    - **Drop city entirely** → users complain ("whole neighborhood with houses + pools showing no town name, not gonna fly") and breaks scraper input.
+    - **Fallback to owner_city** → absolutely WRONG for absentee owners. A Houston resident owning a Fort Worth-area unincorporated parcel injects "HOUSTON" as the property city, which is dangerous (misleads buyers, breaks scraper, contaminates exports).
+    - **ZIP-to-postal-city lookup** → broken assumption. ZIP 76140 alone covers Fort Worth, Burleson, AND Crowley as USPS-acceptable city names. ZIPs are NOT 1:1 with cities. KK verified: Googling "5314 LEMONS RD" returned BURLESON (not Fort Worth despite owner_city='Fort Worth' and ZIP 76140 defaulting to Fort Worth in USPS lookups).
+    - **TIGER Places spatial join** → authoritative per-parcel. Census Bureau ships polygons for every incorporated TX city + Census Designated Place (CDP). PostGIS point-in-polygon: parcel centroid → containing place → that's the right city. ✓
+  - **Source:** `tl_2024_48_place.shp` from Census Bureau (~50MB, free, annual refresh). Texas places only.
+  - **Schema:** new `tx_places` table with `place_name TEXT, place_geom GEOMETRY(MULTIPOLYGON, 4326)`. Spatial GIST index. Then per-county backfill via:
+    ```sql
+    UPDATE tad_parcels SET property_city = (
+      SELECT place_name FROM tx_places
+      WHERE ST_Contains(place_geom, tad_parcels.centroid) LIMIT 1
+    )
+    WHERE property_city IN ('NO CITY', '') OR property_city IS NULL;
+    ```
+  - **Estimated effort:** ~1-2 hours total (download + ingest + 4 county backfills + verification).
+  - **Covers all four counties at once** — fixes DCAD/TAD/Collin/Denton unincorporated edge cases in one swoop.
+  - **Bonus:** also fixes the `_google_maps_link` "PLANO, NY" absentee bug already in the bugs section. A geometry-based lookup never has the owner-state contamination issue.
+  - **Today's status:** preview is on "drop city" behavior (omit city when property_city is a placeholder like "NO CITY"). KK has accepted this as temporary until TIGER lands. ~7,200 affected TAD parcels show as "STREET, TX" until then.
+  - **When to do this:** next time KK has a quiet hour, this is the unblock for "addresses look weird in unincorporated areas" complaints.
 
 - [ ] **DCAD + TAD city resolution for parcel addresses** (deferred 2026-05-20 — back of list)
   - [ ] HIGH

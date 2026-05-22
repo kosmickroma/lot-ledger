@@ -665,14 +665,16 @@ function _sameParcelIdentity(a, b) {
 //
 // TAD + DCAD will appear without a city until KK lands a city-resolver
 // for those two (memory: project_save_vs_update_model notes scope).
-function _formatPropertyAddress(county, rawAddr, rawCity, rawOwnerCity) {
+function _formatPropertyAddress(county, rawAddr, rawCity, _rawOwnerCity) {
   const addr = String(rawAddr || "").trim();
   if (!addr) return "";
   // 2026-05-22: filter 'NO CITY' (TAD unincorporated marker) / NONE / N/A
-  // placeholders, fall back to owner_city when available. Last-ditch
-  // fallback handled by individual county branches. See
-  // _normalizeCityForDisplay.
-  const city = _normalizeCityForDisplay(rawCity) || _normalizeCityForDisplay(rawOwnerCity);
+  // placeholders. owner_city fallback REMOVED 2026-05-22 — confirmed wrong
+  // for absentee owners (e.g. Houston resident owning Fort Worth area
+  // parcel would show 'HOUSTON' as property city). Until TIGER Places
+  // spatial-join backfill lands (master_todo: 'TIGER Places + PostGIS
+  // city resolution'), unincorporated parcels just omit the city.
+  const city = _normalizeCityForDisplay(rawCity);
   const c = String(county || "").trim().toLowerCase();
 
   switch (c) {
@@ -873,11 +875,11 @@ function _formatFullPropertyAddress(county, props) {
   const c = String(county || "").trim().toLowerCase();
   const rawAddr = String(props?.addr || "").trim();
   // 2026-05-22: treat 'NO CITY' (TAD's unincorporated-county marker) /
-  // NONE / N/A as empty. Fall back to owner_city (real-world postal
-  // city per USPS) so unincorporated parcels show 'FORT WORTH' etc.
-  // instead of nothing. Future Phase: ZIP→postal-city lookup (more
-  // authoritative — avoids absentee-owner mismatches).
-  const city = _normalizeCityForDisplay(props?.city) || _normalizeCityForDisplay(props?.owner_city);
+  // NONE / N/A as empty. owner_city fallback REMOVED — absentee owners
+  // would inject the WRONG city (e.g. Houston resident with Fort Worth
+  // area parcel). Until TIGER Places spatial-join backfill lands (see
+  // master_todo), unincorporated parcels simply omit the city portion.
+  const city = _normalizeCityForDisplay(props?.city);
   const zip = String(props?.property_zip || "").trim();
 
   let street = rawAddr;
