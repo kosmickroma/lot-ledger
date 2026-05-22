@@ -821,6 +821,19 @@ async function _resolveTargetParcelFeatureProps(county, account) {
   }
 }
 
+function _popupHeaderAddress(props) {
+  // Parcel popup header — full "STREET, CITY, TX ZIP" address format
+  // matching the Subject Property card. Previously the popup used
+  // raw props.addr which is street-only for DCAD/TAD parcels (city
+  // sits on a separate prop). All four counties populate the
+  // canonical city field after the 2026-05-20/21 city-resolution work,
+  // so this works uniformly across DCAD / TAD / Collin / Denton.
+  // Falls back to props.addr if county is unknown or city missing.
+  const county = String(props?.source_county || "").trim().toLowerCase();
+  if (!county) return String(props?.addr || "").trim();
+  return _formatFullPropertyAddress(county, props);
+}
+
 function _formatFullPropertyAddress(county, props) {
   // Full USPS-style address for the Subject Property card:
   //   "STREET, CITY, TX ZIP"
@@ -7211,7 +7224,7 @@ function _buildParcelDetailPanelHtml(p, matchedComp) {
     html: `
       <div class="parcel-panel-header">
         <div>
-          <div class="parcel-panel-address">${_propelioEscape(p.addr || "Unknown address")}</div>
+          <div class="parcel-panel-address">${_propelioEscape(_popupHeaderAddress(p) || p.addr || "Unknown address")}</div>
           <div class="parcel-panel-header-meta">
             <span class="parcel-panel-status-pill" style="--status-color:${statusColor}">${_propelioEscape(statusText)}</span>
             ${matchedHeaderPrice || activeListingPrice || soldHeaderPrice ? `<span class="parcel-panel-header-price">${matchedHeaderPrice || activeListingPrice || soldHeaderPrice}</span>` : ""}
