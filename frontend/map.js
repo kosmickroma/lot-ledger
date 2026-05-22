@@ -665,13 +665,14 @@ function _sameParcelIdentity(a, b) {
 //
 // TAD + DCAD will appear without a city until KK lands a city-resolver
 // for those two (memory: project_save_vs_update_model notes scope).
-function _formatPropertyAddress(county, rawAddr, rawCity) {
+function _formatPropertyAddress(county, rawAddr, rawCity, rawOwnerCity) {
   const addr = String(rawAddr || "").trim();
   if (!addr) return "";
-  // 2026-05-22 hotfix: filter 'NO CITY' / NONE / N/A placeholders so they
-  // don't appear as a literal city name in the top slot. Same logic as
-  // _formatFullPropertyAddress uses for the Subject Property card.
-  const city = _normalizeCityForDisplay(rawCity);
+  // 2026-05-22: filter 'NO CITY' (TAD unincorporated marker) / NONE / N/A
+  // placeholders, fall back to owner_city when available. Last-ditch
+  // fallback handled by individual county branches. See
+  // _normalizeCityForDisplay.
+  const city = _normalizeCityForDisplay(rawCity) || _normalizeCityForDisplay(rawOwnerCity);
   const c = String(county || "").trim().toLowerCase();
 
   switch (c) {
@@ -871,10 +872,12 @@ function _formatFullPropertyAddress(county, props) {
   //   - dcad / tad:     addr is street-only — use as-is.
   const c = String(county || "").trim().toLowerCase();
   const rawAddr = String(props?.addr || "").trim();
-  // 2026-05-22 hotfix: treat 'NO CITY' (TAD's unincorporated-county marker)
-  // and other placeholders as empty so we don't render "5314 LEMONS RD, NO
-  // CITY, TX 76xxx". Just shows "5314 LEMONS RD, TX 76xxx" for those.
-  const city = _normalizeCityForDisplay(props?.city);
+  // 2026-05-22: treat 'NO CITY' (TAD's unincorporated-county marker) /
+  // NONE / N/A as empty. Fall back to owner_city (real-world postal
+  // city per USPS) so unincorporated parcels show 'FORT WORTH' etc.
+  // instead of nothing. Future Phase: ZIP→postal-city lookup (more
+  // authoritative — avoids absentee-owner mismatches).
+  const city = _normalizeCityForDisplay(props?.city) || _normalizeCityForDisplay(props?.owner_city);
   const zip = String(props?.property_zip || "").trim();
 
   let street = rawAddr;
@@ -1152,7 +1155,7 @@ async function _refreshOriginatorTargetLabel(county, account) {
     return;
   }
 
-  const formattedAddr = _formatPropertyAddress(c, props.addr, props.city);
+  const formattedAddr = _formatPropertyAddress(c, props.addr, props.city, props.owner_city);
   _setOriginatorTargetLabel(formattedAddr);
   _populateSubjectPropertyCard(props, c);
 }
@@ -3272,7 +3275,7 @@ async function _rightClickSaveParcel(p, knownGeometry) {
         // Normalize per-county to "STREET CITY" (no comma/state/zip/dupe).
         // Always rebuild from raw props rather than trusting the incoming
         // `addr` arg, since it can be pre-concatenated upstream.
-        addr = _formatPropertyAddress(county, props.addr || addr, props.city);
+        addr = _formatPropertyAddress(county, props.addr || addr, props.city, props.owner_city);
         if (!Number.isFinite(lat) && Number.isFinite(Number(props.lat))) lat = Number(props.lat);
         if (!Number.isFinite(lng) && Number.isFinite(Number(props.lng))) lng = Number(props.lng);
         if (!geometry && (detail.geometry?.type === "Polygon" || detail.geometry?.type === "MultiPolygon")) {
@@ -9637,8 +9640,10 @@ function _wireParcelInteractiveUi(root, options = {}) {
   if (saveLink) {
     saveLink.addEventListener("click", async (ev) => {
       ev.preventDefault();
-      const { account, county, addr, city, lat, lng } = saveLink.dataset;
-      const fullName = _formatPropertyAddress(county, addr, city);
+      const { account, county, addr, city, lat, lng, ownerCity } = saveLink.dataset;
+      // ownerCity may be undefined on older popup renders — falls back to ""
+      // and _formatPropertyAddress handles empty fallback gracefully.
+      const fullName = _formatPropertyAddress(county, addr, city, ownerCity || "");
       let geometry = null;
       try {
         const resp = await fetch(`/api/parcel/${county}/${account}`);

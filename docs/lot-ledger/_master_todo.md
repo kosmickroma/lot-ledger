@@ -491,6 +491,16 @@ Captured from a repo-wide scan. Threat model: auth-gated team tool with Mike + V
   - Not in default ParcelView shapefile export
   - Need separate extract from Tarrant CAD
 
+- [ ] **ZIP → USPS postal-city lookup table** (2026-05-22 KK ask, back of mind)
+  - [ ] HIGH
+  - [x] 2nd
+  - [ ] Defer
+  - **Why:** ~7,200 TAD parcels live in unincorporated Tarrant County (city_code='000', source-labeled "NO CITY"). Today we fall back to owner_city which works most of the time but breaks for absentee owners (someone in Houston owning a Fort Worth-area parcel → popup shows "Houston" which is wrong for the property's postal address). The right answer is per-ZIP USPS postal city.
+  - **Sources:** USPS pubs offer the ZIP→preferred-city mapping. ~50 ZIPs in Tarrant, ~50 in Dallas, ~30 in Collin, ~30 in Denton. Single CSV table, ~150 rows.
+  - **Schema:** new `zip_postal_city` table with `zip TEXT PRIMARY KEY, postal_city TEXT, state TEXT`. Frontend can pull via /api/zip-cities or backend just joins at SELECT time.
+  - **Display fallback order:** property_city → owner_city → ZIP postal-city lookup → omit city.
+  - **Bonus:** also fixes the `_google_maps_link` "PLANO, NY" absentee bug already in the bugs section.
+
 - [ ] **DCAD + TAD city resolution for parcel addresses** (deferred 2026-05-20 — back of list)
   - [ ] HIGH
   - [ ] 2nd
