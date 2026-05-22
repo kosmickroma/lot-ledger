@@ -82,25 +82,51 @@ def _count_missing(cur) -> int:
     return int(cur.fetchone()[0])
 
 
-def _phase1_unambiguous(session_cur, dry_run: bool) -> dict[str, int]:
-    """Per-county UPDATE that fixes everything EXCEPT the 9 known collisions."""
+def _phase1_unambiguous(session_cur, main_cur) -> dict[str, int]:
+    """For each county, pull matching account_nums from MAIN DB then UPDATE
+    propelio_comps in SESSION DB (parcel tables live in main, propelio_comps
+    lives in session — no cross-DB JOIN possible). Skips the 9 known
+    collisions; they get geo-resolved in Phase 2.
+    """
     results: dict[str, int] = {}
-    collision_list = list(KNOWN_COLLISIONS)
+    collision_set = set(KNOWN_COLLISIONS)
+
+    # First: pull the set of affected account_nums from session DB
+    session_cur.execute("""
+        SELECT DISTINCT parcel_account_num FROM propelio_comps
+        WHERE parcel_account_num IS NOT NULL AND parcel_county IS NULL
+    """)
+    affected = [r[0] for r in session_cur.fetchall()]
+    affected_non_collision = [a for a in affected if a not in collision_set]
+    print(f"  Phase 1 input: {len(affected)} affected account_nums, "
+          f"{len(affected_non_collision)} after excluding {len(collision_set)} known collisions")
+
     for county, table in COUNTY_TABLES:
+        # Pull matching account_nums from main DB
+        main_cur.execute(
+            f"SELECT account_num FROM {table} WHERE account_num = ANY(%s)",
+            (affected_non_collision,),
+        )
+        matching = [r[0] for r in main_cur.fetchall()]
+        if not matching:
+            print(f"  Phase 1 — {county:<8} no matches")
+            results[county] = 0
+            continue
+        # UPDATE session DB. WHERE clause re-checks parcel_county IS NULL so
+        # we don't overwrite rows fixed earlier in the same script run (e.g.
+        # a later county finding a row already touched by an earlier county).
         session_cur.execute(
-            f"""
-            UPDATE propelio_comps p
+            """
+            UPDATE propelio_comps
                SET parcel_county = %s
-              FROM {table} c
-             WHERE p.parcel_county IS NULL
-               AND p.parcel_account_num IS NOT NULL
-               AND p.parcel_account_num = c.account_num
-               AND NOT (p.parcel_account_num = ANY(%s))
+             WHERE parcel_county IS NULL
+               AND parcel_account_num = ANY(%s)
             """,
-            (county, collision_list),
+            (county, matching),
         )
         results[county] = session_cur.rowcount
-        print(f"  Phase 1 — {county:<8} {session_cur.rowcount} rows updated")
+        print(f"  Phase 1 — {county:<8} {session_cur.rowcount} rows updated "
+              f"(from {len(matching)} matching account_nums)")
     return results
 
 
@@ -210,7 +236,7 @@ def run_fix(*, dry_run: bool = False) -> None:
 
             print()
             print("--- Phase 1: Unambiguous matches (817 expected) ---")
-            phase1_results = _phase1_unambiguous(session_cur, dry_run)
+            phase1_results = _phase1_unambiguous(session_cur, main_cur)
             phase1_total = sum(phase1_results.values())
             print(f"  Phase 1 total: {phase1_total} rows updated")
 
