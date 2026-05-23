@@ -3517,6 +3517,182 @@ body.is-not-power-user .power-user-only {
     0 0 6px rgba(220, 38, 38, 0.7);
 }
 
+/* Good Comps section — appears between Subject card and main comp list
+   inside #comps-list-block-body. Always-visible mini-section (not its
+   own collapsible). */
+.propelio-good-comps-section {
+  padding: 8px 0 4px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  margin-bottom: 8px;
+}
+
+.propelio-good-comps-section.hidden {
+  display: none;
+}
+
+.propelio-good-comps-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.propelio-good-comps-head .propelio-section-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-soft);
+  font-weight: 700;
+}
+
+.propelio-good-comps-count {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--gold);
+  background: rgba(201, 162, 79, 0.12);
+  border: 1px solid rgba(201, 162, 79, 0.3);
+  border-radius: 10px;
+  padding: 1px 8px;
+  min-width: 18px;
+  text-align: center;
+}
+
+.propelio-good-comps-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.propelio-good-comps-empty {
+  font-size: 12px;
+  color: var(--text-soft);
+  line-height: 1.4;
+  padding: 8px 4px;
+  margin: 0;
+}
+
+/* Good Comp card — mirrors .comps-block-target-card visual structure
+   (gold left border, dark green background, rich data layout). */
+.propelio-good-comp-card {
+  position: relative;
+  background: linear-gradient(180deg, rgba(13, 55, 42, 0.7), rgba(10, 40, 30, 0.85));
+  border-left: 3px solid var(--gold);
+  border-radius: 4px;
+  padding: 8px 10px 8px 12px;
+  cursor: pointer;
+  transition: background 0.12s ease, transform 0.08s ease;
+}
+
+.propelio-good-comp-card:hover {
+  background: linear-gradient(180deg, rgba(13, 55, 42, 0.9), rgba(10, 40, 30, 0.95));
+}
+
+.propelio-good-comp-card:focus-visible {
+  outline: 2px solid var(--gold);
+  outline-offset: 1px;
+}
+
+.propelio-good-comp-card-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.propelio-good-comp-card-price {
+  font-size: 14px;
+  font-weight: 700;
+  color: #00d2c5;
+  flex: 1;
+}
+
+.propelio-good-comp-card-badge {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--gold);
+  background: rgba(201, 162, 79, 0.15);
+  border: 1px solid rgba(201, 162, 79, 0.4);
+  border-radius: 3px;
+  padding: 2px 6px;
+}
+
+.propelio-good-comp-card-actions {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+/* Touch-friendly hit area without visually-large buttons */
+.propelio-good-comp-action-btn {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-soft);
+  font-size: 11px;
+  padding: 8px 10px;
+  border-radius: 3px;
+  cursor: pointer;
+  line-height: 1;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+
+.propelio-good-comp-action-btn:hover {
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+.propelio-good-comp-action-btn.remove {
+  font-weight: 700;
+}
+
+.propelio-good-comp-action-btn.remove:hover {
+  color: #f5e9c8;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.propelio-good-comp-action-btn.bad {
+  color: #ff8a92;
+  border-color: rgba(224, 36, 50, 0.4);
+}
+
+.propelio-good-comp-action-btn.bad:hover {
+  background: rgba(224, 36, 50, 0.18);
+  border-color: rgba(224, 36, 50, 0.9);
+}
+
+.propelio-good-comp-card-addr {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-main);
+  margin-bottom: 2px;
+  word-break: break-word;
+}
+
+.propelio-good-comp-card-nbhd {
+  font-size: 11px;
+  font-style: italic;
+  color: var(--text-soft);
+  margin-bottom: 4px;
+}
+
+.propelio-good-comp-card-nbhd:empty {
+  display: none;
+}
+
+.propelio-good-comp-card-meta,
+.propelio-good-comp-card-meta2,
+.propelio-good-comp-card-meta3 {
+  font-size: 11px;
+  color: var(--text-soft);
+  line-height: 1.4;
+}
+
+.propelio-good-comp-card-meta:empty,
+.propelio-good-comp-card-meta2:empty,
+.propelio-good-comp-card-meta3:empty {
+  display: none;
+}
+
 /* Sidebar comp list */
 .propelio-comp-list-section {
   margin-top: 12px;
@@ -3667,6 +3843,12 @@ body.is-not-power-user .power-user-only {
 
 .propelio-rate-btn.clear:hover {
   background: rgba(0, 0, 0, 0.06);
+}
+
+@media (pointer: coarse) {
+  .propelio-good-comp-action-btn {
+    padding: 12px 14px;
+  }
 }
 
 .propelio-rate-btn.good.is-active {
