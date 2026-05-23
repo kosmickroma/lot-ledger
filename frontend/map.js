@@ -4137,6 +4137,11 @@ function _handleCheckboxClickDeferred(checkbox, row, shiftKey) {
   const id = checkbox.dataset.id;
 
   if (shiftKey && sel.lastAnchorId) {
+    // Defensive: kill any stray text-selection the shift+click may have
+    // extended across rows before we got here. user-select:none on
+    // .saved-area-row prevents new text selection, but an existing
+    // selection from a prior text-click can still be extended.
+    try { window.getSelection()?.removeAllRanges(); } catch (_) { /* tolerate */ }
     // Range select from anchor to current. Compute DOM order at click
     // time — robust against cache mutations between clicks.
     const allRows = Array.from(listEl.querySelectorAll('.saved-area-row[data-id]'));

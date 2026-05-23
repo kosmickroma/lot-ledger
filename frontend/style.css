@@ -1837,6 +1837,11 @@ body.is-not-power-user .power-user-only {
   cursor: pointer;
   transition: background 0.14s ease, box-shadow 0.14s ease;
   position: relative;
+  /* Prevent text-highlight when shift+click extends a selection across
+     rows. Rows are click-targets, not content — text selection is bad UX
+     here. Per KK 2026-05-23. */
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 /* Highlight via inset box-shadow + background instead of the previous
