@@ -1833,20 +1833,21 @@ body.is-not-power-user .power-user-only {
   padding: 7px 0;
   border-bottom: 1px solid var(--panel-border);
   cursor: pointer;
-  transition: background 0.14s ease;
+  transition: background 0.14s ease, box-shadow 0.14s ease;
   position: relative;
 }
 
-.saved-area-row:hover {
-  background: var(--gold-soft);
-  margin: 0 -20px;
-  padding: 7px 20px;
-}
-
+/* Highlight via inset box-shadow + background instead of the previous
+   margin:-20px / padding:20px trick. That trick made the row 40px wider
+   than its parent's content area, which broke ellipsis on long names
+   because the .saved-area-name flex item saw the wider boundary and
+   only overflowed past the visible (overflow:auto-clipped) edge of
+   #saved-areas-list. Box-shadow doesn't affect layout, so widths stay
+   honest and the wrap rule on .saved-area-name actually works. */
+.saved-area-row:hover,
 .saved-area-row:focus-within {
   background: var(--gold-soft);
-  margin: 0 -20px;
-  padding: 7px 20px;
+  box-shadow: inset 3px 0 0 var(--gold);
 }
 
 /* Row 1: name + Share button on the same line */
@@ -1874,12 +1875,18 @@ body.is-not-power-user .power-user-only {
 .saved-area-name {
   flex: 1;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
+  line-height: 1.3;
   color: var(--text-main);
+  /* Wrap to max 2 lines with ellipsis on overflow — replaces the
+     single-line nowrap+ellipsis which was getting defeated by the
+     parent row's width math (see .saved-area-row:hover comment). */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
 }
 
 /* Tooltip popup — positioned OVER the row (not above) so the topmost
