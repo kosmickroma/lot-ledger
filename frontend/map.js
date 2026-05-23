@@ -4020,12 +4020,17 @@ function _renderList(sectionId, listId, items, options = {}) {
       const all = [..._savedAreasCache, ..._savedParcelsCache];
       const area = all.find((a) => a.id === id);
       if (!area) return;
-      // Multi-select checkbox toggle — stop row-open + native toggle so
-      // we control state entirely. Per spec v3.
+      // Multi-select checkbox toggle — let native toggle handle the
+      // instant visual feedback (:checked::after needs the property
+      // change to fire from the native click default action; setting
+      // .checked programmatically before native toggle caused the
+      // "doesn't register until next click" bug 2026-05-23). Defer
+      // state sync to after the toggle via rAF.
       if (actionEl?.dataset.action === "toggle-selection") {
-        e.preventDefault();
         e.stopPropagation();
-        _handleCheckboxClick(e, row);
+        const cb = e.target.closest('.saved-area-checkbox');
+        const shiftKey = e.shiftKey;
+        requestAnimationFrame(() => _handleCheckboxClickDeferred(cb, row, shiftKey));
         return;
       }
       if (actionEl?.dataset.action === "share") {
@@ -4118,16 +4123,20 @@ function _renderList(sectionId, listId, items, options = {}) {
 
 // ─── Multi-select handlers (spec v3 2026-05-23) ────────────────────────
 
-function _handleCheckboxClick(ev, row) {
-  const checkbox = ev.target.closest('.saved-area-checkbox');
-  if (!checkbox) return;
+// Deferred state sync — runs after the native checkbox toggle has completed
+// (via requestAnimationFrame in the row click handler), so cb.checked
+// reflects the new state. Reads from cb.checked instead of toggling
+// selectedIds independently — keeps DOM ↔ state in lockstep with whatever
+// the browser just did.
+function _handleCheckboxClickDeferred(checkbox, row, shiftKey) {
+  if (!checkbox || !row) return;
   const listEl = row.closest('[id$="-list"]');
   const listKey = listEl?.id?.replace(/-list$/, '');
   if (!listKey || !_listSelections[listKey]) return;
   const sel = _listSelections[listKey];
   const id = checkbox.dataset.id;
 
-  if (ev.shiftKey && sel.lastAnchorId) {
+  if (shiftKey && sel.lastAnchorId) {
     // Range select from anchor to current. Compute DOM order at click
     // time — robust against cache mutations between clicks.
     const allRows = Array.from(listEl.querySelectorAll('.saved-area-row[data-id]'));
@@ -4137,16 +4146,19 @@ function _handleCheckboxClick(ev, row) {
     if (anchorIdx >= 0 && currentIdx >= 0) {
       const lo = Math.min(anchorIdx, currentIdx);
       const hi = Math.max(anchorIdx, currentIdx);
+      // Range adds (matches Linear/Gmail convention). _refreshSelectionUI
+      // below will re-sync cb.checked for any rows the native click missed.
       for (let i = lo; i <= hi; i++) sel.selectedIds.add(ids[i]);
     } else {
-      // Anchor lost (cache replaced between clicks) — fall back to single toggle.
-      if (sel.selectedIds.has(id)) sel.selectedIds.delete(id);
-      else sel.selectedIds.add(id);
-      sel.lastAnchorId = id;
+      // Anchor lost — fall back: sync from native toggle on this one.
+      if (checkbox.checked) sel.selectedIds.add(id);
+      else sel.selectedIds.delete(id);
     }
+    sel.lastAnchorId = id;
   } else {
-    if (sel.selectedIds.has(id)) sel.selectedIds.delete(id);
-    else sel.selectedIds.add(id);
+    // Sync from native toggle — cb.checked is the new (post-toggle) state.
+    if (checkbox.checked) sel.selectedIds.add(id);
+    else sel.selectedIds.delete(id);
     sel.lastAnchorId = id;
   }
   _refreshSelectionUI(listKey);
