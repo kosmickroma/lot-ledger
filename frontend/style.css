@@ -1941,12 +1941,13 @@ body.is-not-power-user .power-user-only {
 
 /* Row 2: muted secondary line (chip + date) — always visible.
    margin-left aligns the subtitle with the title's effective indent
-   (checkbox 3+18+3 = 24px). Was 20px / "indent past icon" but the
-   icon was removed 2026-05-23 — old comment removed. */
+   (checkbox 3+18+3 = 24px PLUS the 6px gap from .saved-area-main's
+   `gap: 6px` flex rule = 30px). Subtitle is a sibling of .saved-area-main
+   so the gap doesn't apply to it natively. */
 .saved-area-secondary-line {
   font-size: 11px;
   color: var(--text-soft);
-  margin-left: 24px;
+  margin-left: 30px;
   padding-top: 2px;
 }
 
@@ -1977,7 +1978,7 @@ body.is-not-power-user .power-user-only {
   display: flex;
   gap: 6px;
   padding: 4px 0 2px;
-  margin-left: 24px; /* match title's effective indent */
+  margin-left: 30px; /* match title's effective indent (24 + 6 main-flex gap) */
 }
 
 /* Gold Share button — matches #btn-download primary action styling */
