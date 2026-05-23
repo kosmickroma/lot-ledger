@@ -1939,11 +1939,15 @@ body.is-not-power-user .power-user-only {
   overflow: visible;
 }
 
-/* Row 2: muted secondary line (chip + date) — always visible */
+/* Row 2: muted secondary line (chip + date) — always visible.
+   margin-left aligns the subtitle with the title's effective indent
+   (checkbox 3+18+3 = 24px PLUS the 6px gap from .saved-area-main's
+   `gap: 6px` flex rule = 30px). Subtitle is a sibling of .saved-area-main
+   so the gap doesn't apply to it natively. */
 .saved-area-secondary-line {
   font-size: 11px;
   color: var(--text-soft);
-  margin-left: 20px; /* indent past icon */
+  margin-left: 30px;
   padding-top: 2px;
 }
 
@@ -1974,7 +1978,7 @@ body.is-not-power-user .power-user-only {
   display: flex;
   gap: 6px;
   padding: 4px 0 2px;
-  margin-left: 20px; /* indent past icon */
+  margin-left: 30px; /* match title's effective indent (24 + 6 main-flex gap) */
 }
 
 /* Gold Share button — matches #btn-download primary action styling */
@@ -2146,11 +2150,12 @@ body.is-not-power-user .power-user-only {
   flex-shrink: 0;
   width: 18px;
   height: 18px;
-  /* 6px left margin pushes the checkbox off the inset gold bar
-     (box-shadow: inset 3px 0 0 var(--gold)) that lights up on hover /
-     :is-selected, giving the checkbox breathing room from the bar. */
-  margin-left: 6px;
-  margin-right: 8px;
+  /* Tightened 2026-05-23 from 6/8 → 3/3 (32px → 24px total layout
+     footprint) so the title reclaims 8px of left margin. 3px left margin
+     still clears the inset 3px gold bar (box-shadow: inset 3px 0 0) that
+     lights up on hover / .is-selected. */
+  margin-left: 3px;
+  margin-right: 3px;
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.12s ease;
