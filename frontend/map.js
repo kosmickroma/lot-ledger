@@ -3617,6 +3617,7 @@ async function restoreSavedArea(area, options = {}) {
   const includeRedfin = Boolean(filterState.active);
   const includeSold = Boolean(filterState.sold);
   document.getElementById("sidebar-results")?.classList.add("hidden");
+  document.getElementById("active-item-actions")?.classList.add("hidden");
   document.getElementById("sidebar-loading")?.classList.remove("hidden");
   document.getElementById("redfin-status").textContent = "Loading area analysis...";
   const analysisRequest = beginLatestAnalysisRequest();
@@ -3939,11 +3940,29 @@ async function _renameSavedItemInline(item, rowEl) {
   input.addEventListener("blur", cancel);
 }
 
+// ─── Multi-select selection state (spec v3 2026-05-23) ─────────────────
+// Per-list selection. Keyed by the listKey extracted from the list
+// container id ("saved-areas" or "saved-parcels"). Each entry tracks:
+//   selectedIds        — Set of currently-selected row ids
+//   lastAnchorId       — id of last clicked checkbox (for shift+range)
+//   selectModeActive   — touch-mode: explicit Select toggle is on
+const _listSelections = {
+  "saved-areas":   { selectedIds: new Set(), lastAnchorId: null, selectModeActive: false },
+  "saved-parcels": { selectedIds: new Set(), lastAnchorId: null, selectModeActive: false },
+};
+
+function _typeLabel(t) {
+  if (t === "parcel") return "Parcel";
+  if (t === "location") return "Location";
+  return "Workspace";
+}
+
 function _renderList(sectionId, listId, items, options = {}) {
   const section = document.getElementById(sectionId);
   const list = document.getElementById(listId);
   if (!section || !list) return;
   const searchActive = Boolean(options.searchActive);
+  const listKey = listId.replace(/-list$/, "");  // "saved-areas-list" → "saved-areas"
   // 2026-05-22 bugfix: only hide the section when the list is empty AND
   // the user is NOT actively searching. Previously, an unmatched search
   // hid the entire section (including the search input itself), forcing
@@ -3952,6 +3971,7 @@ function _renderList(sectionId, listId, items, options = {}) {
   section.classList.toggle("hidden", items.length === 0 && !searchActive);
   if (items.length === 0 && searchActive) {
     list.innerHTML = `<div class="saved-list-empty-state">No matches for current search.</div>`;
+    _refreshSelectionUI(listKey);
     return;
   }
   list.innerHTML = items.map((area) => {
@@ -3967,18 +3987,20 @@ function _renderList(sectionId, listId, items, options = {}) {
     const activeClass = isActiveRow ? " saved-area-row-active" : "";
     const secondaryLine = [chip, `saved ${date}`].filter(Boolean).join(" · ");
 
-    // Ownership + role gating for Rename / Delete / Fork
+    // Ownership + role gating for Rename / Fork
     const isOwn = area.user_id != null
       ? String(area.user_id) === String(_currentUser?.id || "")
       : true; // no user_id on row → treat as own (legacy safe)
     const showFullControls = isOwn || _canEditAnyArea();
+    const nameId = `name-${listKey}-${area.id}`;
+    const typeLabel = _typeLabel(area.type);
 
     return `
       <div class="saved-area-row${activeClass}" tabindex="0" data-id="${area.id}" data-type="${area.type}">
         <div class="saved-area-main">
-          <span class="saved-area-icon">${icon}</span>
-          <span class="saved-area-name-wrap" data-tooltip="${_esc(displayName)}"><span class="saved-area-name">${displayName}</span></span>
-          ${showFullControls ? `<button type="button" class="saved-area-quick-delete-btn" data-action="delete" title="Delete">🗑</button>` : ""}
+          <input type="checkbox" class="saved-area-checkbox" data-action="toggle-selection" data-id="${area.id}" aria-labelledby="${nameId}">
+          <span class="visually-hidden">${typeLabel}</span>
+          <span class="saved-area-name-wrap"><span class="saved-area-name" id="${nameId}">${displayName}</span></span>
           ${canShare ? `<button type="button" class="saved-area-action-btn saved-area-share-btn" data-action="share" data-share-id="${_esc(area.share_id)}" title="Share">🔗</button>` : ""}
         </div>
         <div class="saved-area-secondary-line">${secondaryLine}</div>
@@ -3998,6 +4020,19 @@ function _renderList(sectionId, listId, items, options = {}) {
       const all = [..._savedAreasCache, ..._savedParcelsCache];
       const area = all.find((a) => a.id === id);
       if (!area) return;
+      // Multi-select checkbox toggle — let native toggle handle the
+      // instant visual feedback (:checked::after needs the property
+      // change to fire from the native click default action; setting
+      // .checked programmatically before native toggle caused the
+      // "doesn't register until next click" bug 2026-05-23). Defer
+      // state sync to after the toggle via rAF.
+      if (actionEl?.dataset.action === "toggle-selection") {
+        e.stopPropagation();
+        const cb = e.target.closest('.saved-area-checkbox');
+        const shiftKey = e.shiftKey;
+        requestAnimationFrame(() => _handleCheckboxClickDeferred(cb, row, shiftKey));
+        return;
+      }
       if (actionEl?.dataset.action === "share") {
         e.stopPropagation();
         const shareId = String(actionEl.dataset.shareId || "").trim();
@@ -4050,11 +4085,6 @@ function _renderList(sectionId, listId, items, options = {}) {
         }
         return;
       }
-      if (actionEl?.dataset.action === "delete") {
-        e.stopPropagation();
-        await deleteSavedArea(area);
-        return;
-      }
       if (actionEl?.dataset.action === "rename") {
         e.stopPropagation();
         await _renameSavedItemInline(area, row);
@@ -4085,7 +4115,208 @@ function _renderList(sectionId, listId, items, options = {}) {
       _showUndoPill(snapshot, restoredCount);
     });
   });
+  // After every render: intersect selectedIds with currently-rendered ids
+  // (handles search-filter + server-side deletion), sync .is-selected +
+  // checkbox.checked state, update bulk toolbar count + visibility.
+  if (_listSelections[listKey]) _refreshSelectionUI(listKey);
 }
+
+// ─── Multi-select handlers (spec v3 2026-05-23) ────────────────────────
+
+// Deferred state sync — runs after the native checkbox toggle has completed
+// (via requestAnimationFrame in the row click handler), so cb.checked
+// reflects the new state. Reads from cb.checked instead of toggling
+// selectedIds independently — keeps DOM ↔ state in lockstep with whatever
+// the browser just did.
+function _handleCheckboxClickDeferred(checkbox, row, shiftKey) {
+  if (!checkbox || !row) return;
+  const listEl = row.closest('[id$="-list"]');
+  const listKey = listEl?.id?.replace(/-list$/, '');
+  if (!listKey || !_listSelections[listKey]) return;
+  const sel = _listSelections[listKey];
+  const id = checkbox.dataset.id;
+
+  if (shiftKey && sel.lastAnchorId) {
+    // Defensive: kill any stray text-selection the shift+click may have
+    // extended across rows before we got here. user-select:none on
+    // .saved-area-row prevents new text selection, but an existing
+    // selection from a prior text-click can still be extended.
+    try { window.getSelection()?.removeAllRanges(); } catch (_) { /* tolerate */ }
+    // Range select from anchor to current. Compute DOM order at click
+    // time — robust against cache mutations between clicks.
+    const allRows = Array.from(listEl.querySelectorAll('.saved-area-row[data-id]'));
+    const ids = allRows.map(r => r.dataset.id);
+    const anchorIdx = ids.indexOf(sel.lastAnchorId);
+    const currentIdx = ids.indexOf(id);
+    if (anchorIdx >= 0 && currentIdx >= 0) {
+      const lo = Math.min(anchorIdx, currentIdx);
+      const hi = Math.max(anchorIdx, currentIdx);
+      // Range adds (matches Linear/Gmail convention). _refreshSelectionUI
+      // below will re-sync cb.checked for any rows the native click missed.
+      for (let i = lo; i <= hi; i++) sel.selectedIds.add(ids[i]);
+    } else {
+      // Anchor lost — fall back: sync from native toggle on this one.
+      if (checkbox.checked) sel.selectedIds.add(id);
+      else sel.selectedIds.delete(id);
+    }
+    sel.lastAnchorId = id;
+  } else {
+    // Sync from native toggle — cb.checked is the new (post-toggle) state.
+    if (checkbox.checked) sel.selectedIds.add(id);
+    else sel.selectedIds.delete(id);
+    sel.lastAnchorId = id;
+  }
+  _refreshSelectionUI(listKey);
+}
+
+function _refreshSelectionUI(listKey) {
+  const sel = _listSelections[listKey];
+  if (!sel) return;
+  const listEl = document.getElementById(`${listKey}-list`);
+  if (!listEl) return;
+  const renderedRows = Array.from(listEl.querySelectorAll('.saved-area-row[data-id]'));
+  const renderedIds = new Set(renderedRows.map(r => r.dataset.id));
+  // Intersect selectedIds with currently-rendered (handles both server-side
+  // deletion AND search-filter narrowing — visible-only selection per v3).
+  const beforeSize = sel.selectedIds.size;
+  for (const id of Array.from(sel.selectedIds)) {
+    if (!renderedIds.has(id)) sel.selectedIds.delete(id);
+  }
+  const removed = beforeSize - sel.selectedIds.size;
+  if (sel.lastAnchorId && !renderedIds.has(sel.lastAnchorId)) {
+    sel.lastAnchorId = null;
+  }
+  // Sync DOM
+  renderedRows.forEach(r => {
+    const id = r.dataset.id;
+    const isSelected = sel.selectedIds.has(id);
+    r.classList.toggle('is-selected', isSelected);
+    const cb = r.querySelector('.saved-area-checkbox');
+    if (cb) cb.checked = isSelected;
+  });
+  listEl.classList.toggle('has-selection', sel.selectedIds.size > 0);
+  // Toolbar count + visibility
+  const toolbar = document.getElementById(`${listKey}-bulk-toolbar`);
+  const countEl = document.getElementById(`${listKey}-bulk-count`);
+  const n = sel.selectedIds.size;
+  if (toolbar) toolbar.classList.toggle('hidden', n === 0);
+  if (countEl) countEl.textContent = `${n} selected`;
+  // Don't toast on the silent search-filter narrow; only when we suspect
+  // server-side deletion (heuristic: items removed but search isn't
+  // narrowing — i.e., a refresh happened without a search-text change).
+  // For v3, keep this silent; future enhancement can add precise detection.
+  void removed;
+}
+
+function _clearSelection(listKey) {
+  const sel = _listSelections[listKey];
+  if (!sel) return;
+  sel.selectedIds.clear();
+  sel.lastAnchorId = null;
+  _refreshSelectionUI(listKey);
+}
+
+function _toggleSelectMode(listKey) {
+  const sel = _listSelections[listKey];
+  if (!sel) return;
+  sel.selectModeActive = !sel.selectModeActive;
+  const listEl = document.getElementById(`${listKey}-list`);
+  listEl?.classList.toggle('select-mode-active', sel.selectModeActive);
+  const btn = document.getElementById(`${listKey}-select-mode-btn`);
+  btn?.classList.toggle('is-active', sel.selectModeActive);
+  if (btn) btn.textContent = sel.selectModeActive ? 'Done' : 'Select';
+  if (!sel.selectModeActive) _clearSelection(listKey);
+}
+
+async function _handleBulkDelete(listKey) {
+  const sel = _listSelections[listKey];
+  if (!sel || sel.selectedIds.size === 0) return;
+  const n = sel.selectedIds.size;
+  const noun = (listKey === 'saved-areas') ? 'saved area' : 'target';
+  const ok = window.confirm(`Delete ${n} ${noun}${n > 1 ? 's' : ''}? This cannot be undone.`);
+  if (!ok) return;
+  const ids = Array.from(sel.selectedIds);
+  const all = [..._savedAreasCache, ..._savedParcelsCache];
+  const items = ids.map(id => all.find(a => a.id === id)).filter(Boolean);
+  // Bounded-concurrency pool of 4 workers
+  const queue = [...items];
+  let successCount = 0;
+  const failed = [];
+  const alreadyDeleted = [];
+  const workers = Array.from({ length: Math.min(4, queue.length) }).map(async () => {
+    while (queue.length) {
+      const item = queue.shift();
+      try {
+        await deleteSavedArea(item);
+        successCount++;
+      } catch (err) {
+        const status = err && (err.status || err?.response?.status);
+        if (status === 404) alreadyDeleted.push(item.id);
+        else failed.push({ id: item.id, err });
+      }
+    }
+  });
+  await Promise.allSettled(workers);
+  // Reset selection state — deleteSavedArea already mutated caches; re-render to sync UI.
+  sel.selectedIds.clear();
+  sel.lastAnchorId = null;
+  try { renderSavedAreasList(); } catch (_) { /* tolerate */ }
+  if (failed.length > 0) {
+    _showToast(`Deleted ${successCount}. ${failed.length} failed — check console.`, "error");
+    console.error("bulk delete failures", failed);
+  } else if (alreadyDeleted.length > 0) {
+    _showToast(`Deleted ${successCount}. ${alreadyDeleted.length} were already removed.`);
+  } else {
+    _showToast(`Deleted ${successCount} ${noun}${successCount > 1 ? 's' : ''}.`);
+  }
+}
+
+// Bulk-toolbar + Select-mode click wiring (delegated on document for
+// simplicity; targets are stable id-based elements).
+document.addEventListener('click', (ev) => {
+  const t = ev.target.closest('[data-action]');
+  if (!t) return;
+  const action = t.dataset.action;
+  if (action === 'delete-selected') {
+    const listKey = t.dataset.list;
+    if (listKey) void _handleBulkDelete(listKey);
+  } else if (action === 'clear-selection') {
+    const listKey = t.dataset.list;
+    if (listKey) _clearSelection(listKey);
+  }
+});
+
+document.querySelectorAll('.select-mode-toggle[data-list]').forEach(btn => {
+  btn.addEventListener('click', (ev) => {
+    ev.preventDefault();
+    _toggleSelectMode(btn.dataset.list);
+  });
+});
+
+// Scoped keyboard handlers — Esc clears, Cmd/Ctrl+A selects all visible.
+// Bail when target is an input/textarea/contenteditable so we don't steal
+// keystrokes from search input or rename input.
+document.addEventListener('keydown', (ev) => {
+  const t = ev.target;
+  if (t && t.matches && t.matches('input, textarea, [contenteditable=true]')) return;
+  // Find which list (if any) has keyboard focus inside it
+  const activeList = document.activeElement?.closest('[id$="-list"]');
+  if (!activeList) return;
+  const listKey = activeList.id?.replace(/-list$/, '');
+  if (!_listSelections[listKey]) return;
+
+  if (ev.key === 'Escape') {
+    if (_listSelections[listKey].selectedIds.size > 0) {
+      ev.preventDefault();
+      _clearSelection(listKey);
+    }
+  } else if ((ev.metaKey || ev.ctrlKey) && (ev.key === 'a' || ev.key === 'A')) {
+    ev.preventDefault();
+    const sel = _listSelections[listKey];
+    activeList.querySelectorAll('.saved-area-row[data-id]').forEach(r => sel.selectedIds.add(r.dataset.id));
+    _refreshSelectionUI(listKey);
+  }
+});
 
 function renderSavedAreasList() {
   const areasTokens = _savedAreasSearchQuery.trim().toLowerCase().split(/\s+/).filter(Boolean);
@@ -8293,6 +8524,7 @@ function _scheduleViewportRender() {
 function renderSidebar(counts, markers) {
   document.getElementById("sidebar-loading").classList.add("hidden");
   document.getElementById("sidebar-results").classList.remove("hidden");
+  document.getElementById("active-item-actions")?.classList.remove("hidden");
   const visibleCounts = Array.isArray(allAnalysisFeatures) && allAnalysisFeatures.length
     ? getVisibleFeatureCounts(allAnalysisFeatures, { ignoreBucketToggles: true })
     : {
@@ -8902,6 +9134,7 @@ map.on("draw:created", async (e) => {
   targetBadgeMarkers.clear();
   // Instructions section removed; results manage visibility
   document.getElementById("sidebar-results").classList.add("hidden");
+  document.getElementById("active-item-actions")?.classList.add("hidden");
   document.getElementById("sidebar-loading").classList.remove("hidden");
   const includeRedfin = Boolean(filterState.active);
   const includeSold = Boolean(filterState.sold);
@@ -9082,6 +9315,7 @@ function clearDrawResults() {
   document.getElementById("redfin-toggle-status").textContent = "";
   document.getElementById("sold-toggle-status").textContent = "";
   document.getElementById("sidebar-results")?.classList.add("hidden");
+  document.getElementById("active-item-actions")?.classList.add("hidden");
   document.getElementById("sidebar-loading")?.classList.add("hidden");
   document.getElementById("btn-drawd-area-clear")?.classList.add("hidden");
   // NOTE: clearActiveItem is intentionally NOT called here. Callers that

@@ -43,18 +43,15 @@
           <strong class="active-item-name" id="active-item-name">—</strong>
           <button id="active-item-rename" class="active-item-rename-btn hidden" type="button" title="Rename workspace" aria-label="Rename workspace">✎</button>
         </div>
+        <div id="active-item-actions" class="sidebar-actions hidden">
+          <button id="btn-save-area" class="btn-primary">Copy Area As</button>
+          <button id="btn-download" class="btn-secondary">Download CSV</button>
+          <button id="btn-update-saved-area" class="btn-secondary hidden">Update</button>
+          <button id="btn-clear" class="btn-tertiary">Clear</button>
+        </div>
       </div>
       <div id="sidebar-results" class="sidebar-section hidden">
         <p id="session-cache-note" class="sidebar-note hidden"></p>
-        <div class="sidebar-actions">
-          <button id="btn-save-area" class="btn-primary">Save Area</button>
-          <button id="btn-download" class="btn-secondary">Download CSV</button>
-          <button id="btn-update-saved-area" class="btn-secondary hidden">Update</button>
-        </div>
-        <div class="sidebar-actions actions-secondary">
-          <button id="btn-save-session" class="btn-tertiary" disabled>Save Snapshot</button>
-          <button id="btn-clear" class="btn-tertiary">Deselect</button>
-        </div>
       </div>
       <div id="sidebar-loading" class="sidebar-section hidden">
         <div class="spinner"></div>
@@ -143,8 +140,16 @@
                required (2026-05-11 relocation per KK). -->
         </div>
         <div id="saved-areas-body" class="collapsible-body hidden">
+          <div class="saved-list-head">
+            <button id="saved-areas-select-mode-btn" class="select-mode-toggle hidden" type="button" data-list="saved-areas">Select</button>
+          </div>
           <input type="text" id="saved-areas-search" class="saved-list-search-input" placeholder="Search areas..." autocomplete="off">
           <div id="saved-areas-list"></div>
+          <div id="saved-areas-bulk-toolbar" class="bulk-action-toolbar hidden" role="toolbar" aria-label="Bulk actions for selected saved areas">
+            <span class="bulk-action-count" id="saved-areas-bulk-count" aria-live="polite">0 selected</span>
+            <button type="button" class="bulk-action-btn bulk-action-delete" data-action="delete-selected" data-list="saved-areas" title="Delete selected">🗑 Delete</button>
+            <button type="button" class="bulk-action-btn bulk-action-clear" data-action="clear-selection" data-list="saved-areas" aria-label="Clear selection">✕</button>
+          </div>
         </div>
       </div>
       <div id="saved-parcels" class="sidebar-section hidden collapsible-section">
@@ -154,8 +159,16 @@
           </button>
         </div>
         <div id="saved-parcels-body" class="collapsible-body hidden">
+          <div class="saved-list-head">
+            <button id="saved-parcels-select-mode-btn" class="select-mode-toggle hidden" type="button" data-list="saved-parcels">Select</button>
+          </div>
           <input type="text" id="saved-parcels-search" class="saved-list-search-input" placeholder="Search targets..." autocomplete="off">
           <div id="saved-parcels-list"></div>
+          <div id="saved-parcels-bulk-toolbar" class="bulk-action-toolbar hidden" role="toolbar" aria-label="Bulk actions for selected targets">
+            <span class="bulk-action-count" id="saved-parcels-bulk-count" aria-live="polite">0 selected</span>
+            <button type="button" class="bulk-action-btn bulk-action-delete" data-action="delete-selected" data-list="saved-parcels" title="Delete selected">🗑 Delete</button>
+            <button type="button" class="bulk-action-btn bulk-action-clear" data-action="clear-selection" data-list="saved-parcels" aria-label="Clear selection">✕</button>
+          </div>
         </div>
       </div>
       <div id="map-filters" class="filter-card collapsible-section">
