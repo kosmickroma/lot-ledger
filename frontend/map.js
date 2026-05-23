@@ -4066,6 +4066,10 @@ function _renderList(sectionId, listId, items, options = {}) {
           _currentLoadedAreaId = cloned.area_id;
           _syncTabTitle();
           _storedValueOnAreaChange(_currentLoadedAreaId);
+          // Refresh Good Comps section visibility — fork bypasses the
+          // normal restoreSavedArea path, so applyPropelioClientFilters
+          // isn't called automatically. Per spec v2 §Risk #1.
+          if (typeof _renderGoodCompsSection === "function") _renderGoodCompsSection();
           _selectedSavedItemId = cloned.area_id;
           // Carry the originator TARGET star through the fork.
           if (normalizedFork.originator_parcel_county && normalizedFork.originator_parcel_account_num) {
@@ -5920,6 +5924,7 @@ function applyPropelioClientFilters() {
     const countEl = document.getElementById("propelio-filter-count");
     if (countEl) countEl.textContent = "";
     renderPropelioCompList([]);
+    _renderGoodCompsSection();  // hides section when no comp cache
     return;
   }
   propelioFilterState = readPropelioFiltersFromUI();
@@ -5948,6 +5953,11 @@ function applyPropelioClientFilters() {
       ? `${all.length}`
       : `${visibleOnMapForRender.length} / ${all.length}`;
   }
+  // Good Comps section — sibling list inside #comps-list-block-body. Per
+  // SAVED_AREA_GOOD_COMPS_BLOCK_SPEC.md v2 §Goal #7: always shows ALL good-
+  // rated comps in the workspace, IGNORING active filter chips. We read
+  // from the unfiltered `all` array (not visibleOnMap).
+  _renderGoodCompsSection();
   _updateUpdateAreaButtonVisibility();
 }
 
@@ -6039,6 +6049,157 @@ function _findPropelioCompByKey(key) {
   if (!Array.isArray(all)) return null;
   return all.find((c) => String(c?.comp_address_key || "").trim() === k) || null;
 }
+
+// ─── Good Comps section (saved-area-bonded, filter-independent) ─────────
+// Per SAVED_AREA_GOOD_COMPS_BLOCK_SPEC.md v2. Sibling section inside
+// #comps-list-block-body between the Subject card and the main comp list.
+// Renders one rich card per comp with user_rating === "good" in the
+// current workspace. Always shows ALL good comps regardless of active
+// filter chips. Click row body → fly to the comp on the map. Per-card
+// × Remove clears the rating; Bad flips good → bad. Both use optimistic
+// UI with revert + toast on server failure.
+
+function _propelioGoodCompCardHtml(comp) {
+  const fmtPrice = (n) => Number.isFinite(n) ? `$${Math.round(n).toLocaleString()}` : "—";
+  const fmtNum = (n) => Number.isFinite(n) ? Number(n).toLocaleString() : null;
+  const ex = comp?.extra || {};
+  const status = String(comp?.status || "").trim();
+  const sqft = fmtNum(Number(comp?.sqft));
+  const yr = Number.isFinite(comp?.year_built) ? comp.year_built : null;
+  const beds = ex.beds;
+  const baths = ex.baths;
+  const lotSqft = Number(comp?.lot_size);
+  const lotAcres = Number.isFinite(lotSqft) && lotSqft > 0 ? (lotSqft / 43560) : null;
+  const lotAcresStr = lotAcres != null ? `${lotAcres.toFixed(lotAcres < 1 ? 2 : 1)} ac lot` : null;
+  const neighborhood = String(comp?.neighborhood || "").trim();
+  const soldDate = String(comp?.sold_date || comp?.close_date || "").trim();
+  const dom = Number.isFinite(comp?.dom) ? comp.dom : null;
+  const distance = Number.isFinite(comp?.distance_mi) ? comp.distance_mi : null;
+  const priceNum = Number(comp?.price);
+  const sqftNum = Number(comp?.sqft);
+  const ppsf = (Number.isFinite(priceNum) && Number.isFinite(sqftNum) && sqftNum > 0)
+    ? `$${Math.round(priceNum / sqftNum)}/sqft` : null;
+
+  const meta1 = [sqft ? `${sqft} sqft` : null, lotAcresStr, yr ? `${yr}` : null,
+                 (beds != null ? `${beds}bd` : null), (baths != null ? `${baths}ba` : null)]
+                .filter(Boolean).join(" · ");
+  const meta2 = [soldDate || null, (dom != null ? `${dom} DOM` : null), status || null]
+                .filter(Boolean).join(" · ");
+  const meta3 = [(distance != null ? `${distance.toFixed(2)} mi` : null), ppsf]
+                .filter(Boolean).join(" · ");
+
+  const compKey = String(comp?.comp_address_key || "").trim();
+  const keyAttr = _propelioEscape(compKey);
+  const addr = _propelioEscape(comp?.address || "");
+  const nbhd = _propelioEscape(neighborhood);
+
+  return `
+    <article class="propelio-good-comp-card" tabindex="0" role="button" data-comp-key="${keyAttr}" aria-label="Good comp: ${addr}. Press Enter to focus on map.">
+      <div class="propelio-good-comp-card-top">
+        <span class="propelio-good-comp-card-price">${fmtPrice(priceNum)}</span>
+        <span class="propelio-good-comp-card-badge">Good</span>
+        <div class="propelio-good-comp-card-actions">
+          <button type="button" class="propelio-good-comp-action-btn remove" data-action="remove" data-comp-key="${keyAttr}" aria-label="Remove Good rating from this comp">×</button>
+          <button type="button" class="propelio-good-comp-action-btn bad" data-action="bad" data-comp-key="${keyAttr}" aria-label="Change rating to Bad">Bad</button>
+        </div>
+      </div>
+      <div class="propelio-good-comp-card-addr">${addr}</div>
+      <div class="propelio-good-comp-card-nbhd">${nbhd}</div>
+      <div class="propelio-good-comp-card-meta">${_propelioEscape(meta1)}</div>
+      <div class="propelio-good-comp-card-meta2">${_propelioEscape(meta2)}</div>
+      <div class="propelio-good-comp-card-meta3">${_propelioEscape(meta3)}</div>
+    </article>`;
+}
+
+function _renderGoodCompsSection() {
+  const section = document.getElementById("propelio-good-comps-section");
+  const list = document.getElementById("propelio-good-comps-list");
+  const countEl = document.getElementById("propelio-good-comps-count");
+  const emptyEl = document.getElementById("propelio-good-comps-empty");
+  if (!section || !list) return;
+
+  // Visibility: only when a saved area is loaded. No saved area =
+  // ratings aren't meaningful (comp_ratings is workspace-scoped).
+  if (!_currentLoadedAreaId) {
+    section.classList.add("hidden");
+    list.innerHTML = "";
+    if (countEl) countEl.textContent = "0";
+    if (emptyEl) emptyEl.classList.add("hidden");
+    return;
+  }
+  section.classList.remove("hidden");
+
+  // Source: ALL comps in the workspace cache with user_rating === "good".
+  // NOT visibleOnMap — filter chips are intentionally ignored here per
+  // spec §Goal #7 (good comps are a curated bookmark; filters are for
+  // hunting new comps).
+  const all = Array.isArray(window._propelioLast?.comps) ? window._propelioLast.comps : [];
+  const goodComps = all.filter((c) => c?.user_rating === "good");
+  // Sort using the same sort selection as the main comp list — single
+  // source of truth (propelioCompSortMode + _sortPropelioComps).
+  const sorted = _sortPropelioComps(goodComps, propelioCompSortMode);
+
+  if (countEl) countEl.textContent = String(sorted.length);
+  if (sorted.length === 0) {
+    list.innerHTML = "";
+    if (emptyEl) emptyEl.classList.remove("hidden");
+    return;
+  }
+  if (emptyEl) emptyEl.classList.add("hidden");
+  list.innerHTML = sorted.map(_propelioGoodCompCardHtml).join("");
+}
+
+// Optimistic rating mutation: update local cache immediately + re-render
+// so the card disappears from the good list instantly, then persist to
+// the server in the background. Revert on failure with a toast.
+async function _setGoodCompRatingOptimistic(compKey, newRating) {
+  const comp = _findPropelioCompByKey(compKey);
+  if (!comp) return;
+  const oldRating = comp.user_rating;
+  comp.user_rating = newRating;
+  _renderGoodCompsSection();
+  const ok = await ratePropelioComp(compKey, newRating);
+  if (!ok) {
+    comp.user_rating = oldRating;
+    _renderGoodCompsSection();
+    _showToast("Rating update failed — reverted", "error");
+  }
+}
+
+// Document-level delegation — matches the existing rating-button pattern
+// at line ~6338. Works regardless of when map.js runs vs DOMContentLoaded,
+// and survives every re-render of the good-comps list innerHTML.
+document.addEventListener("click", (ev) => {
+  const card = ev.target.closest(".propelio-good-comp-card");
+  if (!card) return;
+  // Action button (Remove × or Bad) inside the card — stopProp so the
+  // card's fly-to behavior doesn't ALSO fire.
+  const actionEl = ev.target.closest(".propelio-good-comp-action-btn[data-action]");
+  if (actionEl) {
+    ev.stopPropagation();
+    const compKey = actionEl.getAttribute("data-comp-key");
+    const action = actionEl.getAttribute("data-action");
+    if (!compKey) return;
+    if (action === "remove") void _setGoodCompRatingOptimistic(compKey, null);
+    else if (action === "bad") void _setGoodCompRatingOptimistic(compKey, "bad");
+    return;
+  }
+  // Row body click → fly to comp on map.
+  const k = card.getAttribute("data-comp-key");
+  if (k) flyToAndOpenPropelioComp(k);
+});
+
+document.addEventListener("keydown", (ev) => {
+  if (ev.key !== "Enter" && ev.key !== " ") return;
+  const card = ev.target.closest(".propelio-good-comp-card");
+  if (!card) return;
+  // Don't intercept Enter/Space when focus is on an action button — let
+  // the native button handle it (which fires a click event we delegate).
+  if (ev.target.closest(".propelio-good-comp-action-btn")) return;
+  ev.preventDefault();
+  const k = card.getAttribute("data-comp-key");
+  if (k) flyToAndOpenPropelioComp(k);
+});
 
 async function flyToAndOpenPropelioComp(compKey) {
   const layer = propelioCompLayerByKey.get(String(compKey || "").trim());
