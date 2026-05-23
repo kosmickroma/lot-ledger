@@ -167,12 +167,19 @@ body.is-not-power-user .power-user-only {
 #saved-areas-list {
   max-height: 300px;
   overflow-y: auto;
-  padding-right: 2px;
+  /* Reserve scrollbar gutter always so the right-edge action buttons
+     (trash, share) never sit under the scrollbar. 2px right padding
+     was nowhere near the actual scrollbar width (~12-15px on Chrome/
+     Firefox). Per Copilot deep-dive 2026-05-23. */
+  scrollbar-gutter: stable;
+  padding-right: 6px;
 }
 
 #saved-parcels-list {
   max-height: 300px;
   overflow-y: auto;
+  scrollbar-gutter: stable;
+  padding-right: 6px;
 }
 
 .section-toggle::after {
@@ -2152,15 +2159,9 @@ body.is-not-power-user .power-user-only {
   opacity: 0.8;
 }
 
-.saved-area-name {
-  font-size: 12px;
-  color: #d5d8df;
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
+/* Duplicate .saved-area-name block removed 2026-05-23 — it was overriding
+   the authoritative rule above (~line 1874) with single-line nowrap +
+   ellipsis, defeating the 2-line line-clamp wrap. Per Copilot deep-dive. */
 
 .save-area-inline,
 .save-session-inline {
