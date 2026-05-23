@@ -3617,6 +3617,7 @@ async function restoreSavedArea(area, options = {}) {
   const includeRedfin = Boolean(filterState.active);
   const includeSold = Boolean(filterState.sold);
   document.getElementById("sidebar-results")?.classList.add("hidden");
+  document.getElementById("active-item-actions")?.classList.add("hidden");
   document.getElementById("sidebar-loading")?.classList.remove("hidden");
   document.getElementById("redfin-status").textContent = "Loading area analysis...";
   const analysisRequest = beginLatestAnalysisRequest();
@@ -8293,6 +8294,7 @@ function _scheduleViewportRender() {
 function renderSidebar(counts, markers) {
   document.getElementById("sidebar-loading").classList.add("hidden");
   document.getElementById("sidebar-results").classList.remove("hidden");
+  document.getElementById("active-item-actions")?.classList.remove("hidden");
   const visibleCounts = Array.isArray(allAnalysisFeatures) && allAnalysisFeatures.length
     ? getVisibleFeatureCounts(allAnalysisFeatures, { ignoreBucketToggles: true })
     : {
@@ -8902,6 +8904,7 @@ map.on("draw:created", async (e) => {
   targetBadgeMarkers.clear();
   // Instructions section removed; results manage visibility
   document.getElementById("sidebar-results").classList.add("hidden");
+  document.getElementById("active-item-actions")?.classList.add("hidden");
   document.getElementById("sidebar-loading").classList.remove("hidden");
   const includeRedfin = Boolean(filterState.active);
   const includeSold = Boolean(filterState.sold);
@@ -9082,6 +9085,7 @@ function clearDrawResults() {
   document.getElementById("redfin-toggle-status").textContent = "";
   document.getElementById("sold-toggle-status").textContent = "";
   document.getElementById("sidebar-results")?.classList.add("hidden");
+  document.getElementById("active-item-actions")?.classList.add("hidden");
   document.getElementById("sidebar-loading")?.classList.add("hidden");
   document.getElementById("btn-drawd-area-clear")?.classList.add("hidden");
   // NOTE: clearActiveItem is intentionally NOT called here. Callers that

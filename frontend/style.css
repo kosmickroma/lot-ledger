@@ -689,6 +689,11 @@ body.is-not-power-user .power-user-only {
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
 
+#active-item-actions {
+  margin-top: 12px;
+  margin-bottom: 0;
+}
+
 .active-item-target-row {
   display: block;
   margin-bottom: 8px;

@@ -43,18 +43,15 @@
           <strong class="active-item-name" id="active-item-name">—</strong>
           <button id="active-item-rename" class="active-item-rename-btn hidden" type="button" title="Rename workspace" aria-label="Rename workspace">✎</button>
         </div>
+        <div id="active-item-actions" class="sidebar-actions hidden">
+          <button id="btn-save-area" class="btn-primary">Copy Area As</button>
+          <button id="btn-download" class="btn-secondary">Download CSV</button>
+          <button id="btn-update-saved-area" class="btn-secondary hidden">Update</button>
+          <button id="btn-clear" class="btn-tertiary">Clear</button>
+        </div>
       </div>
       <div id="sidebar-results" class="sidebar-section hidden">
         <p id="session-cache-note" class="sidebar-note hidden"></p>
-        <div class="sidebar-actions">
-          <button id="btn-save-area" class="btn-primary">Save Area</button>
-          <button id="btn-download" class="btn-secondary">Download CSV</button>
-          <button id="btn-update-saved-area" class="btn-secondary hidden">Update</button>
-        </div>
-        <div class="sidebar-actions actions-secondary">
-          <button id="btn-save-session" class="btn-tertiary" disabled>Save Snapshot</button>
-          <button id="btn-clear" class="btn-tertiary">Deselect</button>
-        </div>
       </div>
       <div id="sidebar-loading" class="sidebar-section hidden">
         <div class="spinner"></div>
