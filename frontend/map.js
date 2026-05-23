@@ -3999,7 +3999,6 @@ function _renderList(sectionId, listId, items, options = {}) {
       <div class="saved-area-row${activeClass}" tabindex="0" data-id="${area.id}" data-type="${area.type}">
         <div class="saved-area-main">
           <input type="checkbox" class="saved-area-checkbox" data-action="toggle-selection" data-id="${area.id}" aria-labelledby="${nameId}">
-          <span class="saved-area-icon" aria-hidden="true">${icon}</span>
           <span class="visually-hidden">${typeLabel}</span>
           <span class="saved-area-name-wrap"><span class="saved-area-name" id="${nameId}">${displayName}</span></span>
           ${canShare ? `<button type="button" class="saved-area-action-btn saved-area-share-btn" data-action="share" data-share-id="${_esc(area.share_id)}" title="Share">🔗</button>` : ""}

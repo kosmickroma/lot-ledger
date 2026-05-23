@@ -2128,12 +2128,9 @@ body.is-not-power-user .power-user-only {
   cursor: pointer;
 }
 
-.saved-area-icon {
-  font-size: 11px;
-  flex-shrink: 0;
-  margin-right: 2px;
-  opacity: 0.8;
-}
+/* .saved-area-icon rule removed 2026-05-23 — visible type emoji was
+   reclaiming pixels per KK; screen-reader semantics still carried by
+   the .visually-hidden sibling next to .saved-area-name-wrap. */
 
 /* ───────── Multi-select + bulk actions (spec v3 — 2026-05-23) ─────────
    Hover-revealed checkbox per row; bulk-action toolbar at end of each
@@ -2144,6 +2141,10 @@ body.is-not-power-user .power-user-only {
   flex-shrink: 0;
   width: 18px;
   height: 18px;
+  /* 6px left margin pushes the checkbox off the inset gold bar
+     (box-shadow: inset 3px 0 0 var(--gold)) that lights up on hover /
+     :is-selected, giving the checkbox breathing room from the bar. */
+  margin-left: 6px;
   margin-right: 8px;
   opacity: 0;
   pointer-events: none;
@@ -2157,8 +2158,11 @@ body.is-not-power-user .power-user-only {
   position: relative;
 }
 
+/* Checked state: keep the dark/transparent box, strengthen the border
+   to solid gold, and overlay a BOLD gold ✓. Per KK 2026-05-23 — the
+   prior solid-gold fill with dark check was too subtle on the small
+   18px box. */
 .saved-area-checkbox:checked {
-  background: var(--gold);
   border-color: var(--gold);
 }
 
@@ -2168,10 +2172,11 @@ body.is-not-power-user .power-user-only {
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  color: #0d372a;
-  font-size: 13px;
-  font-weight: 700;
+  color: var(--gold);
+  font-size: 15px;
+  font-weight: 900;
   line-height: 1;
+  text-shadow: 0 0 1px rgba(201, 162, 79, 0.7);
 }
 
 .saved-area-checkbox:focus-visible {
