@@ -3517,6 +3517,39 @@ body.is-not-power-user .power-user-only {
     0 0 6px rgba(220, 38, 38, 0.7);
 }
 
+/* ─── Parcel (CAD) rating marks + popup buttons (spec v2 2026-05-24) ───
+   Workspace-scoped Good/Bad ratings on CAD parcels — parallel to comp
+   ratings. Good marker mirrors .propelio-good-mark visually (red ✓);
+   Bad marker is a new black ✗ centered on the parcel polygon. Both
+   fixed 16px. Popup buttons + section labels match the comp pattern. */
+.cad-good-mark-wrap,
+.cad-bad-mark-wrap {
+  background: transparent;
+  border: 0;
+  pointer-events: none;
+}
+.cad-good-mark {
+  width: 16px; height: 16px; border-radius: 50%;
+  background: #ffffff; color: #dc2626;
+  font-size: 12px; font-weight: 800; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 0 0 2px #dc2626, 0 0 6px rgba(220, 38, 38, 0.7);
+}
+.cad-bad-mark {
+  width: 16px; height: 16px; border-radius: 50%;
+  background: #ffffff; color: #111111;
+  font-size: 13px; font-weight: 800; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 0 0 2px #111111, 0 0 6px rgba(0, 0, 0, 0.65);
+}
+
+/* Note: the .cad-rate-btn / .cad-popup-rating / .cad-rate-section-label
+   classes were removed 2026-05-24. Parcel rating buttons now reuse the
+   existing .propelio-rate-btn class for visual consistency — see
+   _buildRatingButtonsHtml(comp, parcel) in map.js. The .cad-good-mark /
+   .cad-bad-mark map markers above remain — those are the on-map visual
+   for parcel ratings (red ✓ / black ✗). */
+
 /* Good Comps section — appears between Subject card and main comp list
    inside #comps-list-block-body. Always-visible mini-section (not its
    own collapsible). */

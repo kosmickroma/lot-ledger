@@ -1108,7 +1108,15 @@ async def rate_comp(
     Writes to comp_ratings (Phase 2 canonical store) keyed on
     (workspace_id, comp_id). Comp must exist in the global propelio_comps
     cache (comp_address_key UNIQUE index) — returns 404 otherwise.
+
+    Per PARCEL_RATINGS_SPEC.md v2: verifies the calling user owns the
+    saved area before mutating. Closes the pre-existing weakness where
+    any logged-in user could mutate any workspace's ratings if they knew
+    the area_id. Late-import to avoid api.main ↔ api.propelio.routes
+    circular-import at module load.
     """
+    from api.main import _assert_user_owns_area
+    _assert_user_owns_area(str(request.saved_area_id or "").strip(), int(user.get("id") or 0))
     try:
         updated = set_comp_rating(
             saved_area_id=request.saved_area_id,

@@ -412,6 +412,30 @@ def _ensure_session_schema() -> None:
                     ON comp_ratings (workspace_id)
                 """
             )
+            # parcel_ratings — workspace-scoped Good/Bad ratings on CAD parcels,
+            # parallel to comp_ratings but keyed by (county, account_num) since
+            # parcels exist independently of propelio_comps. Per
+            # docs/PARCEL_RATINGS_SPEC.md v2.
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS parcel_ratings (
+                    rating_id BIGSERIAL PRIMARY KEY,
+                    workspace_id TEXT NOT NULL REFERENCES saved_areas(area_id) ON DELETE CASCADE,
+                    county TEXT NOT NULL,
+                    account_num TEXT NOT NULL,
+                    rating TEXT NOT NULL CHECK (rating IN ('good', 'bad')),
+                    rated_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    rated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    UNIQUE (workspace_id, county, account_num)
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_parcel_ratings_workspace
+                    ON parcel_ratings (workspace_id)
+                """
+            )
             # One-shot migration: copy legacy propelio_comp_archive.user_rating into
             # comp_ratings so existing ratings remain visible after the canonical store
             # cutover. Idempotent — re-runs are safe and a no-op for rows already
@@ -787,6 +811,54 @@ def _saved_area_exists(area_id: str) -> bool:
         release_session_conn(conn)
 
 
+# ─── Workspace ownership + parcel rating helpers (spec v2 2026-05-24) ──
+
+def _assert_user_owns_area(area_id: str, user_id: int) -> None:
+    """Raise 403 if the calling user doesn't own the saved area. Used by
+    both /api/parcels/rate and /api/propelio/comp/rate to prevent
+    cross-workspace rating mutation by anyone who knows an area_id.
+    Per PARCEL_RATINGS_SPEC.md v2 §2A."""
+    if not area_id or not user_id:
+        raise HTTPException(status_code=400, detail="Missing area_id or user")
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM saved_areas WHERE area_id = %s AND user_id = %s LIMIT 1",
+                (area_id, int(user_id)),
+            )
+            if cur.fetchone() is None:
+                raise HTTPException(status_code=403, detail="You don't own this workspace")
+    finally:
+        release_session_conn(conn)
+
+
+def _load_parcel_ratings_for_workspace(workspace_id: str | None) -> dict[tuple[str, str], str]:
+    """Return {(county_lower, account_num): rating} for the workspace, or
+    {} if no workspace. Single SQL query — apply to features in-memory to
+    avoid per-row joins across county-specific parcel tables.
+    Per PARCEL_RATINGS_SPEC.md v2 §2D."""
+    if not workspace_id:
+        return {}
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT county, account_num, rating FROM parcel_ratings WHERE workspace_id = %s",
+                (workspace_id,),
+            )
+            return {(str(c).lower(), str(a)): str(r) for c, a, r in cur.fetchall()}
+    finally:
+        release_session_conn(conn)
+
+
+class ParcelRateRequest(BaseModel):
+    saved_area_id: str
+    county: str
+    account_num: str
+    rating: str | None = None  # 'good', 'bad', or None to clear
+
+
 def _job_share_id(job_id: str, fallback_saved_area_id: str | None = None) -> str:
     saved_area_id = str(fallback_saved_area_id or "").strip()
     conn = get_session_conn()
@@ -984,15 +1056,23 @@ def _session_exists(session_id: str, user_id: int) -> bool:
         release_session_conn(conn)
 
 
-def _build_features_from_rows(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, int]]:
+def _build_features_from_rows(
+    rows: list[dict[str, Any]],
+    area_id: str | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
     """Rebuild GeoJSON features from cached raw parcel rows.
 
     Used when loading a pinned session from cached_jobs — avoids a fresh CAD
     query while still returning the same feature shape as /api/analyze.
     Redfin signal is not available from cache, so on_redfin=False for all rows.
+
+    Per PARCEL_RATINGS_SPEC.md v2 §2E: when area_id is provided, hydrate
+    user_rating on each feature from parcel_ratings. Backwards-compatible —
+    callers that don't pass area_id get no rating hydrate (None default).
     """
     exempt_set: set[str] = set()
     features: list[dict[str, Any]] = []
+    parcel_ratings_map: dict[tuple[str, str], str] = _load_parcel_ratings_for_workspace(area_id)
     counts: dict[str, int] = {
         "active": 0, "off_market": 0, "multifamily": 0,
         "vacant": 0, "commercial": 0, "exempt": 0, "total": len(rows),
@@ -1025,6 +1105,11 @@ def _build_features_from_rows(rows: list[dict[str, Any]]) -> tuple[list[dict[str
                 else "denton" if division_cd == "DENTON"
                 else "dcad"
             )
+            _rating_key = (
+                feature["properties"]["source_county"],
+                str(feature["properties"].get("account_num", "") or "").strip(),
+            )
+            feature["properties"]["user_rating"] = parcel_ratings_map.get(_rating_key)
             features.append(feature)
         except Exception:
             continue
@@ -3133,6 +3218,12 @@ async def analyze(request: AnalyzeRequest, req: Request, user: dict[str, Any] = 
     # to exclude brand-new pipeline parcels that clutter Mike's workflow. DCAD will no-op.
     rows = [r for r in rows if not _is_truly_empty_parcel(r)]
     features: list[dict[str, Any]] = []
+    # Per PARCEL_RATINGS_SPEC.md v2 §2E: hydrate user_rating on each
+    # parcel feature when the analyze request is for a saved area. Single
+    # SQL query, applied in-memory below to avoid per-row joins across
+    # county-specific parcel tables. Public/unauth endpoints intentionally
+    # skip this hydrate (security boundary per KK product call).
+    parcel_ratings_map: dict[tuple[str, str], str] = _load_parcel_ratings_for_workspace(area_id)
     counts = {
         "active": 0,
         "off_market": 0,
@@ -3186,6 +3277,13 @@ async def analyze(request: AnalyzeRequest, req: Request, user: dict[str, Any] = 
                 feature["properties"]["source_county"] = "denton"
             else:
                 feature["properties"]["source_county"] = "dcad"
+            # Hydrate user_rating from parcel_ratings (workspace-scoped).
+            # None for parcels with no rating; "good"/"bad" otherwise.
+            _rating_key = (
+                feature["properties"]["source_county"],
+                str(feature["properties"].get("account_num", "") or "").strip(),
+            )
+            feature["properties"]["user_rating"] = parcel_ratings_map.get(_rating_key)
             features.append(feature)
         except ValueError:
             continue
@@ -3696,6 +3794,11 @@ async def _run_download_csv(
     # See docs/COMP_RATING_EXPORT_SPEC.md §3.3 File 3.
     rating_by_comp_id: dict[int, str] = {}
     parcel_rating_by_key: dict[tuple[str, str], str] = {}
+    # parcel_rating_direct_by_key: DIRECT parcel ratings (new feature per
+    # PARCEL_RATINGS_SPEC.md v2). Distinct from parcel_rating_by_key above
+    # which is comp-derived. Used in COMP-WINS-ABSOLUTE exclusion: direct
+    # rating only applies when there's no comp rating for that parcel.
+    parcel_rating_direct_by_key: dict[tuple[str, str], str] = _load_parcel_ratings_for_workspace(job_saved_area_id)
     if job_saved_area_id:
         _conn = get_session_conn()
         try:
@@ -4130,9 +4233,23 @@ async def _run_download_csv(
             # propelio_comps (analyze, Quick Sweep, deep pull, strip runner)
             # counts. bad-wins / good-otherwise conflict resolution applied
             # at pre-fetch time. See docs/COMP_RATING_EXPORT_SPEC.md §3.1.
+            #
+            # COMP-WINS-ABSOLUTE (per PARCEL_RATINGS_SPEC.md v2 §2F + KK
+            # product call): when a comp rating exists for this parcel,
+            # that determines row inclusion regardless of the direct parcel
+            # rating. Direct parcel rating only applies when no comp rating
+            # exists. Net effect:
+            #   comp=bad → exclude (regardless of direct)
+            #   comp=good → include (regardless of direct)
+            #   no comp + direct=bad → exclude
+            #   otherwise → include
             _parcel_rating = parcel_rating_by_key.get(row_key)
             if _parcel_rating == "bad":
                 continue
+            if _parcel_rating is None:
+                _direct_rating = parcel_rating_direct_by_key.get(row_key)
+                if _direct_rating == "bad":
+                    continue
             rf_comp = comp_by_parcel_key.get(str(row.get("account_num", "") or ""))
 
             _is_intended_target = (
@@ -4721,11 +4838,12 @@ async def get_session_data(session_id: str, user: dict[str, Any] = Depends(get_c
     session_name: str | None = None
     originator_county: str | None = None
     originator_account: str | None = None
+    session_saved_area_id: str | None = None
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT s.name, sa.originator_parcel_county, sa.originator_parcel_account_num
+                SELECT s.name, sa.originator_parcel_county, sa.originator_parcel_account_num, s.saved_area_id
                 FROM analysis_sessions s
                 LEFT JOIN saved_areas sa ON sa.area_id = s.saved_area_id
                 WHERE s.session_id = %s AND s.user_id = %s AND s.name IS NOT NULL
@@ -4738,6 +4856,7 @@ async def get_session_data(session_id: str, user: dict[str, Any] = Depends(get_c
             session_name = str(row[0] or "").strip() or None
             originator_county = str(row[1] or "").strip().lower() or None
             originator_account = str(row[2] or "").strip() or None
+            session_saved_area_id = str(row[3] or "").strip() or None
     finally:
         release_session_conn(conn)
 
@@ -4748,7 +4867,8 @@ async def get_session_data(session_id: str, user: dict[str, Any] = Depends(get_c
     rows = list(cached.get("rows", []))
     sold_points = list(cached.get("sold_points", []))
     _apply_session_tags(session_id, uid, rows)
-    features, counts = _build_features_from_rows(rows)
+    # Pass area_id so parcel ratings hydrate per PARCEL_RATINGS_SPEC.md v2.
+    features, counts = _build_features_from_rows(rows, area_id=session_saved_area_id)
     return {
         "type": "FeatureCollection",
         "session_id": session_id,
@@ -5498,6 +5618,19 @@ async def fork_saved_area(
                 """,
                 (row[0], source_area_id),
             )
+
+            # parcel_ratings — per PARCEL_RATINGS_SPEC.md v2 §2G. Fork
+            # copies direct parcel ratings parallel to comp ratings so
+            # the forked workspace inherits the source's judgment.
+            cur.execute(
+                """
+                INSERT INTO parcel_ratings (workspace_id, county, account_num, rating, rated_by_user_id, rated_at)
+                SELECT %s, county, account_num, rating, rated_by_user_id, rated_at
+                FROM parcel_ratings
+                WHERE workspace_id = %s
+                """,
+                (row[0], source_area_id),
+            )
         conn.commit()
     except HTTPException:
         conn.rollback()
@@ -5754,6 +5887,54 @@ async def delete_saved_parcel(county: str, account_num: str, req: Request, user:
     if not deleted:
         raise HTTPException(status_code=404, detail="Saved parcel not found")
     return {"ok": True, "deleted": int(deleted)}
+
+
+@app.post("/api/parcels/rate")
+async def rate_parcel(request: ParcelRateRequest, req: Request, user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
+    """Workspace-scoped Good/Bad/Clear rating for a CAD parcel. Parallel
+    to /api/propelio/comp/rate but keyed by (county, account_num) since
+    parcels exist independently of comps. Per PARCEL_RATINGS_SPEC.md v2."""
+    require_csrf(req)
+    area_id = str(request.saved_area_id or "").strip()
+    county = str(request.county or "").strip().lower()
+    account_num = str(request.account_num or "").strip()
+    rating = request.rating
+    if not area_id or not county or not account_num:
+        raise HTTPException(status_code=400, detail="saved_area_id, county, account_num all required")
+    if rating not in (None, "good", "bad"):
+        raise HTTPException(status_code=400, detail="rating must be 'good', 'bad', or null")
+    _assert_user_owns_area(area_id, int(user["id"]))
+
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            if rating is None:
+                cur.execute(
+                    "DELETE FROM parcel_ratings WHERE workspace_id = %s AND county = %s AND account_num = %s",
+                    (area_id, county, account_num),
+                )
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO parcel_ratings (workspace_id, county, account_num, rating, rated_by_user_id)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (workspace_id, county, account_num) DO UPDATE
+                    SET rating = EXCLUDED.rating,
+                        rated_by_user_id = EXCLUDED.rated_by_user_id,
+                        rated_at = NOW()
+                    """,
+                    (area_id, county, account_num, rating, int(user["id"])),
+                )
+        conn.commit()
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        release_session_conn(conn)
+    return {"ok": True, "rating": rating}
 
 
 @app.get("/", include_in_schema=False)
