@@ -7952,6 +7952,10 @@ function _buildParcelDetailPanelHtml(p, matchedComp) {
   const headerDelta = compDelta || listingDelta;
   const compDetails = _getParcelPanelCompDetails(effectiveMatchedComp);
   const ratingButtonsHtml = effectiveMatchedComp ? _buildRatingButtonsHtml(effectiveMatchedComp) : "";
+  // Parcel rating block on the side panel — same component used by
+  // makePopupHtml inline popups. Section label hidden in parcel-only
+  // mode (no matched comp), shown when both blocks exist.
+  const parcelRatingButtonsHtml = _buildParcelRatingButtonsHtml(p, Boolean(effectiveMatchedComp));
   const realtorLinkHtml = compDetails?.mls
     ? `<a class="propelio-popup-realtor-link" href="https://www.realtor.com/realestateandhomes-search/MLSID-${encodeURIComponent(compDetails.mls)}" target="_blank" rel="noopener noreferrer">Look up MLS# ${_propelioEscape(compDetails.mls)} on Realtor.com</a>`
     : "";
@@ -8115,6 +8119,9 @@ function _buildParcelDetailPanelHtml(p, matchedComp) {
         </section>
       </div>
       <section class="parcel-panel-actions">
+        <div class="parcel-panel-action-slot parcel-panel-action-parcel-rating">
+          ${parcelRatingButtonsHtml}
+        </div>
         <div class="parcel-panel-action-slot parcel-panel-action-ratings">
           ${ratingButtonsHtml || '<span class="parcel-panel-action-muted">No MLS comp to rate</span>'}
         </div>
