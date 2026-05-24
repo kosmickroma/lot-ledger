@@ -5551,6 +5551,17 @@ let propelioPriceMarkers = [];
 // the badge on top of the dot's latlng.
 function _maybeAddGoodCompMark(comp, footprint, fallbackLatLng) {
   if (comp?.user_rating !== "good") return;
+  // Dedup: if the comp's matched parcel ALSO has its own rating, skip
+  // the comp checkmark — the parcel mark will render on the same spot
+  // via _maybeAddParcelRatingMark and we don't want two stacked ✓s.
+  // Per KK 2026-05-24: "I am seeing two check marks on good comps...
+  // They should visually only get one bud."
+  const matchedCounty = String(comp?.parcel_county || "").trim().toLowerCase();
+  const matchedAccount = String(comp?.parcel_account_num || "").trim();
+  if (matchedCounty && matchedAccount) {
+    const parcelRating = _getCachedParcelRating(matchedCounty, matchedAccount);
+    if (parcelRating === "good" || parcelRating === "bad") return;
+  }
   let target = null;
   if (footprint && typeof footprint.getBounds === "function") {
     try {
@@ -6813,7 +6824,12 @@ let propelioStickyBtn = null;
 
     if (hasComp) {
       _bumpMutationSeq("comp", compKey);
-      _setCompRatingMarkOptimistic(compKey, newRating);
+      // Suppress comp optimistic mark when a parcel rating is ALSO being
+      // written this click — the parcel mark covers the same spot and
+      // two stacked ✓s is the bug KK reported 2026-05-24.
+      if (!hasParcel) {
+        _setCompRatingMarkOptimistic(compKey, newRating);
+      }
       void ratePropelioComp(compKey, newRating);
     }
 
