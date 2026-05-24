@@ -552,6 +552,10 @@ const measureLayer = L.layerGroup().addTo(map);
 // Parcel geometry is preferred (purple glowing footprints); missing geometry
 // falls back to compact purple dots.
 const propelioCompLayer = L.layerGroup().addTo(map);
+// Parcel (CAD) rating marks layer. Independent from propelioCompLayer
+// so the marks survive comp re-renders. Per PARCEL_RATINGS_SPEC.md v2.
+const cadRatingLayer = L.layerGroup().addTo(map);
+const cadRatingLayerByKey = new Map();  // "county:account_num" → leaflet marker
 // (Old marker-based "Get Comps" button retired. The sticky DOM-based
 // version lives in propelioStickyAnchor / propelioStickyBtn declared
 // near _ensureStickyPropelioButton.)
@@ -2851,6 +2855,8 @@ async function _hydratePropelioFromArchive(savedAreaId) {
   window._propelioLast = null;
   _updatePropelioStatusCounts();
   propelioCompLayer.clearLayers();
+  cadRatingLayer.clearLayers();
+  cadRatingLayerByKey.clear();
   propelioCompLayerByKey.clear();
   renderPropelioCompList([]);
   propelioCmaChip.hide();
@@ -3647,6 +3653,7 @@ async function restoreSavedArea(area, options = {}) {
   const includeRedfin = Boolean(filterState.active);
   const includeSold = Boolean(filterState.sold);
   document.getElementById("sidebar-results")?.classList.add("hidden");
+  document.getElementById("active-item-actions")?.classList.add("hidden");
   document.getElementById("sidebar-loading")?.classList.remove("hidden");
   document.getElementById("redfin-status").textContent = "Loading area analysis...";
   const analysisRequest = beginLatestAnalysisRequest();
@@ -3969,11 +3976,29 @@ async function _renameSavedItemInline(item, rowEl) {
   input.addEventListener("blur", cancel);
 }
 
+// ─── Multi-select selection state (spec v3 2026-05-23) ─────────────────
+// Per-list selection. Keyed by the listKey extracted from the list
+// container id ("saved-areas" or "saved-parcels"). Each entry tracks:
+//   selectedIds        — Set of currently-selected row ids
+//   lastAnchorId       — id of last clicked checkbox (for shift+range)
+//   selectModeActive   — touch-mode: explicit Select toggle is on
+const _listSelections = {
+  "saved-areas":   { selectedIds: new Set(), lastAnchorId: null, selectModeActive: false },
+  "saved-parcels": { selectedIds: new Set(), lastAnchorId: null, selectModeActive: false },
+};
+
+function _typeLabel(t) {
+  if (t === "parcel") return "Parcel";
+  if (t === "location") return "Location";
+  return "Workspace";
+}
+
 function _renderList(sectionId, listId, items, options = {}) {
   const section = document.getElementById(sectionId);
   const list = document.getElementById(listId);
   if (!section || !list) return;
   const searchActive = Boolean(options.searchActive);
+  const listKey = listId.replace(/-list$/, "");  // "saved-areas-list" → "saved-areas"
   // 2026-05-22 bugfix: only hide the section when the list is empty AND
   // the user is NOT actively searching. Previously, an unmatched search
   // hid the entire section (including the search input itself), forcing
@@ -3982,6 +4007,7 @@ function _renderList(sectionId, listId, items, options = {}) {
   section.classList.toggle("hidden", items.length === 0 && !searchActive);
   if (items.length === 0 && searchActive) {
     list.innerHTML = `<div class="saved-list-empty-state">No matches for current search.</div>`;
+    _refreshSelectionUI(listKey);
     return;
   }
   list.innerHTML = items.map((area) => {
@@ -3997,18 +4023,20 @@ function _renderList(sectionId, listId, items, options = {}) {
     const activeClass = isActiveRow ? " saved-area-row-active" : "";
     const secondaryLine = [chip, `saved ${date}`].filter(Boolean).join(" · ");
 
-    // Ownership + role gating for Rename / Delete / Fork
+    // Ownership + role gating for Rename / Fork
     const isOwn = area.user_id != null
       ? String(area.user_id) === String(_currentUser?.id || "")
       : true; // no user_id on row → treat as own (legacy safe)
     const showFullControls = isOwn || _canEditAnyArea();
+    const nameId = `name-${listKey}-${area.id}`;
+    const typeLabel = _typeLabel(area.type);
 
     return `
       <div class="saved-area-row${activeClass}" tabindex="0" data-id="${area.id}" data-type="${area.type}">
         <div class="saved-area-main">
-          <span class="saved-area-icon">${icon}</span>
-          <span class="saved-area-name-wrap" data-tooltip="${_esc(displayName)}"><span class="saved-area-name">${displayName}</span></span>
-          ${showFullControls ? `<button type="button" class="saved-area-quick-delete-btn" data-action="delete" title="Delete">🗑</button>` : ""}
+          <input type="checkbox" class="saved-area-checkbox" data-action="toggle-selection" data-id="${area.id}" aria-labelledby="${nameId}">
+          <span class="visually-hidden">${typeLabel}</span>
+          <span class="saved-area-name-wrap"><span class="saved-area-name" id="${nameId}">${displayName}</span></span>
           ${canShare ? `<button type="button" class="saved-area-action-btn saved-area-share-btn" data-action="share" data-share-id="${_esc(area.share_id)}" title="Share">🔗</button>` : ""}
         </div>
         <div class="saved-area-secondary-line">${secondaryLine}</div>
@@ -4028,6 +4056,19 @@ function _renderList(sectionId, listId, items, options = {}) {
       const all = [..._savedAreasCache, ..._savedParcelsCache];
       const area = all.find((a) => a.id === id);
       if (!area) return;
+      // Multi-select checkbox toggle — let native toggle handle the
+      // instant visual feedback (:checked::after needs the property
+      // change to fire from the native click default action; setting
+      // .checked programmatically before native toggle caused the
+      // "doesn't register until next click" bug 2026-05-23). Defer
+      // state sync to after the toggle via rAF.
+      if (actionEl?.dataset.action === "toggle-selection") {
+        e.stopPropagation();
+        const cb = e.target.closest('.saved-area-checkbox');
+        const shiftKey = e.shiftKey;
+        requestAnimationFrame(() => _handleCheckboxClickDeferred(cb, row, shiftKey));
+        return;
+      }
       if (actionEl?.dataset.action === "share") {
         e.stopPropagation();
         const shareId = String(actionEl.dataset.shareId || "").trim();
@@ -4061,6 +4102,10 @@ function _renderList(sectionId, listId, items, options = {}) {
           _currentLoadedAreaId = cloned.area_id;
           _syncTabTitle();
           _storedValueOnAreaChange(_currentLoadedAreaId);
+          // Refresh Good Comps section visibility — fork bypasses the
+          // normal restoreSavedArea path, so applyPropelioClientFilters
+          // isn't called automatically. Per spec v2 §Risk #1.
+          if (typeof _renderGoodCompsSection === "function") _renderGoodCompsSection();
           _selectedSavedItemId = cloned.area_id;
           // Carry the originator TARGET star through the fork.
           if (normalizedFork.originator_parcel_county && normalizedFork.originator_parcel_account_num) {
@@ -4078,11 +4123,6 @@ function _renderList(sectionId, listId, items, options = {}) {
         } catch {
           _showToast("Could not fork area", "error");
         }
-        return;
-      }
-      if (actionEl?.dataset.action === "delete") {
-        e.stopPropagation();
-        await deleteSavedArea(area);
         return;
       }
       if (actionEl?.dataset.action === "rename") {
@@ -4115,7 +4155,208 @@ function _renderList(sectionId, listId, items, options = {}) {
       _showUndoPill(snapshot, restoredCount);
     });
   });
+  // After every render: intersect selectedIds with currently-rendered ids
+  // (handles search-filter + server-side deletion), sync .is-selected +
+  // checkbox.checked state, update bulk toolbar count + visibility.
+  if (_listSelections[listKey]) _refreshSelectionUI(listKey);
 }
+
+// ─── Multi-select handlers (spec v3 2026-05-23) ────────────────────────
+
+// Deferred state sync — runs after the native checkbox toggle has completed
+// (via requestAnimationFrame in the row click handler), so cb.checked
+// reflects the new state. Reads from cb.checked instead of toggling
+// selectedIds independently — keeps DOM ↔ state in lockstep with whatever
+// the browser just did.
+function _handleCheckboxClickDeferred(checkbox, row, shiftKey) {
+  if (!checkbox || !row) return;
+  const listEl = row.closest('[id$="-list"]');
+  const listKey = listEl?.id?.replace(/-list$/, '');
+  if (!listKey || !_listSelections[listKey]) return;
+  const sel = _listSelections[listKey];
+  const id = checkbox.dataset.id;
+
+  if (shiftKey && sel.lastAnchorId) {
+    // Defensive: kill any stray text-selection the shift+click may have
+    // extended across rows before we got here. user-select:none on
+    // .saved-area-row prevents new text selection, but an existing
+    // selection from a prior text-click can still be extended.
+    try { window.getSelection()?.removeAllRanges(); } catch (_) { /* tolerate */ }
+    // Range select from anchor to current. Compute DOM order at click
+    // time — robust against cache mutations between clicks.
+    const allRows = Array.from(listEl.querySelectorAll('.saved-area-row[data-id]'));
+    const ids = allRows.map(r => r.dataset.id);
+    const anchorIdx = ids.indexOf(sel.lastAnchorId);
+    const currentIdx = ids.indexOf(id);
+    if (anchorIdx >= 0 && currentIdx >= 0) {
+      const lo = Math.min(anchorIdx, currentIdx);
+      const hi = Math.max(anchorIdx, currentIdx);
+      // Range adds (matches Linear/Gmail convention). _refreshSelectionUI
+      // below will re-sync cb.checked for any rows the native click missed.
+      for (let i = lo; i <= hi; i++) sel.selectedIds.add(ids[i]);
+    } else {
+      // Anchor lost — fall back: sync from native toggle on this one.
+      if (checkbox.checked) sel.selectedIds.add(id);
+      else sel.selectedIds.delete(id);
+    }
+    sel.lastAnchorId = id;
+  } else {
+    // Sync from native toggle — cb.checked is the new (post-toggle) state.
+    if (checkbox.checked) sel.selectedIds.add(id);
+    else sel.selectedIds.delete(id);
+    sel.lastAnchorId = id;
+  }
+  _refreshSelectionUI(listKey);
+}
+
+function _refreshSelectionUI(listKey) {
+  const sel = _listSelections[listKey];
+  if (!sel) return;
+  const listEl = document.getElementById(`${listKey}-list`);
+  if (!listEl) return;
+  const renderedRows = Array.from(listEl.querySelectorAll('.saved-area-row[data-id]'));
+  const renderedIds = new Set(renderedRows.map(r => r.dataset.id));
+  // Intersect selectedIds with currently-rendered (handles both server-side
+  // deletion AND search-filter narrowing — visible-only selection per v3).
+  const beforeSize = sel.selectedIds.size;
+  for (const id of Array.from(sel.selectedIds)) {
+    if (!renderedIds.has(id)) sel.selectedIds.delete(id);
+  }
+  const removed = beforeSize - sel.selectedIds.size;
+  if (sel.lastAnchorId && !renderedIds.has(sel.lastAnchorId)) {
+    sel.lastAnchorId = null;
+  }
+  // Sync DOM
+  renderedRows.forEach(r => {
+    const id = r.dataset.id;
+    const isSelected = sel.selectedIds.has(id);
+    r.classList.toggle('is-selected', isSelected);
+    const cb = r.querySelector('.saved-area-checkbox');
+    if (cb) cb.checked = isSelected;
+  });
+  listEl.classList.toggle('has-selection', sel.selectedIds.size > 0);
+  // Toolbar count + visibility
+  const toolbar = document.getElementById(`${listKey}-bulk-toolbar`);
+  const countEl = document.getElementById(`${listKey}-bulk-count`);
+  const n = sel.selectedIds.size;
+  if (toolbar) toolbar.classList.toggle('hidden', n === 0);
+  if (countEl) countEl.textContent = `${n} selected`;
+  // Don't toast on the silent search-filter narrow; only when we suspect
+  // server-side deletion (heuristic: items removed but search isn't
+  // narrowing — i.e., a refresh happened without a search-text change).
+  // For v3, keep this silent; future enhancement can add precise detection.
+  void removed;
+}
+
+function _clearSelection(listKey) {
+  const sel = _listSelections[listKey];
+  if (!sel) return;
+  sel.selectedIds.clear();
+  sel.lastAnchorId = null;
+  _refreshSelectionUI(listKey);
+}
+
+function _toggleSelectMode(listKey) {
+  const sel = _listSelections[listKey];
+  if (!sel) return;
+  sel.selectModeActive = !sel.selectModeActive;
+  const listEl = document.getElementById(`${listKey}-list`);
+  listEl?.classList.toggle('select-mode-active', sel.selectModeActive);
+  const btn = document.getElementById(`${listKey}-select-mode-btn`);
+  btn?.classList.toggle('is-active', sel.selectModeActive);
+  if (btn) btn.textContent = sel.selectModeActive ? 'Done' : 'Select';
+  if (!sel.selectModeActive) _clearSelection(listKey);
+}
+
+async function _handleBulkDelete(listKey) {
+  const sel = _listSelections[listKey];
+  if (!sel || sel.selectedIds.size === 0) return;
+  const n = sel.selectedIds.size;
+  const noun = (listKey === 'saved-areas') ? 'saved area' : 'target';
+  const ok = window.confirm(`Delete ${n} ${noun}${n > 1 ? 's' : ''}? This cannot be undone.`);
+  if (!ok) return;
+  const ids = Array.from(sel.selectedIds);
+  const all = [..._savedAreasCache, ..._savedParcelsCache];
+  const items = ids.map(id => all.find(a => a.id === id)).filter(Boolean);
+  // Bounded-concurrency pool of 4 workers
+  const queue = [...items];
+  let successCount = 0;
+  const failed = [];
+  const alreadyDeleted = [];
+  const workers = Array.from({ length: Math.min(4, queue.length) }).map(async () => {
+    while (queue.length) {
+      const item = queue.shift();
+      try {
+        await deleteSavedArea(item);
+        successCount++;
+      } catch (err) {
+        const status = err && (err.status || err?.response?.status);
+        if (status === 404) alreadyDeleted.push(item.id);
+        else failed.push({ id: item.id, err });
+      }
+    }
+  });
+  await Promise.allSettled(workers);
+  // Reset selection state — deleteSavedArea already mutated caches; re-render to sync UI.
+  sel.selectedIds.clear();
+  sel.lastAnchorId = null;
+  try { renderSavedAreasList(); } catch (_) { /* tolerate */ }
+  if (failed.length > 0) {
+    _showToast(`Deleted ${successCount}. ${failed.length} failed — check console.`, "error");
+    console.error("bulk delete failures", failed);
+  } else if (alreadyDeleted.length > 0) {
+    _showToast(`Deleted ${successCount}. ${alreadyDeleted.length} were already removed.`);
+  } else {
+    _showToast(`Deleted ${successCount} ${noun}${successCount > 1 ? 's' : ''}.`);
+  }
+}
+
+// Bulk-toolbar + Select-mode click wiring (delegated on document for
+// simplicity; targets are stable id-based elements).
+document.addEventListener('click', (ev) => {
+  const t = ev.target.closest('[data-action]');
+  if (!t) return;
+  const action = t.dataset.action;
+  if (action === 'delete-selected') {
+    const listKey = t.dataset.list;
+    if (listKey) void _handleBulkDelete(listKey);
+  } else if (action === 'clear-selection') {
+    const listKey = t.dataset.list;
+    if (listKey) _clearSelection(listKey);
+  }
+});
+
+document.querySelectorAll('.select-mode-toggle[data-list]').forEach(btn => {
+  btn.addEventListener('click', (ev) => {
+    ev.preventDefault();
+    _toggleSelectMode(btn.dataset.list);
+  });
+});
+
+// Scoped keyboard handlers — Esc clears, Cmd/Ctrl+A selects all visible.
+// Bail when target is an input/textarea/contenteditable so we don't steal
+// keystrokes from search input or rename input.
+document.addEventListener('keydown', (ev) => {
+  const t = ev.target;
+  if (t && t.matches && t.matches('input, textarea, [contenteditable=true]')) return;
+  // Find which list (if any) has keyboard focus inside it
+  const activeList = document.activeElement?.closest('[id$="-list"]');
+  if (!activeList) return;
+  const listKey = activeList.id?.replace(/-list$/, '');
+  if (!_listSelections[listKey]) return;
+
+  if (ev.key === 'Escape') {
+    if (_listSelections[listKey].selectedIds.size > 0) {
+      ev.preventDefault();
+      _clearSelection(listKey);
+    }
+  } else if ((ev.metaKey || ev.ctrlKey) && (ev.key === 'a' || ev.key === 'A')) {
+    ev.preventDefault();
+    const sel = _listSelections[listKey];
+    activeList.querySelectorAll('.saved-area-row[data-id]').forEach(r => sel.selectedIds.add(r.dataset.id));
+    _refreshSelectionUI(listKey);
+  }
+});
 
 function renderSavedAreasList() {
   const areasTokens = _savedAreasSearchQuery.trim().toLowerCase().split(/\s+/).filter(Boolean);
@@ -4582,25 +4823,44 @@ function _findMatchedCompForAccount(accountNum) {
   return comps.find((c) => String(c?.parcel_account_num || "").trim() === account) || null;
 }
 
-// Render the Good / Bad / Clear rating button row for a comp. Always
-// renders the row so the affordance is visible; when no saved area is
-// loaded or the comp lacks a stable archive key, the buttons are
-// disabled and a "Save area to enable ratings" hint is shown beneath.
-function _buildRatingButtonsHtml(comp) {
+// Render the Good / Bad / Clear rating button row. Used for both
+// standalone-comp contexts (e.g., sidebar comp list — pass comp only)
+// AND unified parcel-popup contexts where a parcel + optional matched
+// comp BOTH get rated by the same click (pass both). Per the 2026-05-24
+// design call: ONE button row per popup, not two — even when both a
+// parcel and a matched comp exist. The click handler at the bottom of
+// this file reads the emitted data attrs and writes to whichever rating
+// tables apply (parcel_ratings + comp_ratings together when both keys
+// are present; just one when only one is present).
+function _buildRatingButtonsHtml(comp, parcel) {
   const compKey = String(comp?.comp_address_key || "").trim();
-  const currentRating = comp?.user_rating === "good" || comp?.user_rating === "bad" ? comp.user_rating : null;
-  const ratingsEnabled = Boolean(_currentLoadedAreaId && compKey);
+  const parcelCounty = String(parcel?.source_county || parcel?.county || "").trim().toLowerCase();
+  const parcelAccount = String(parcel?.account_num || "").trim();
+  const hasComp = Boolean(compKey);
+  const hasParcel = Boolean(parcelCounty && parcelAccount);
+  if (!hasComp && !hasParcel) return "";
+  // Active rating reflected from whichever source we have. When both are
+  // present, parcel rating takes priority for display (since the button
+  // primarily reflects the parcel-level user judgment).
+  const sourceRating = hasParcel
+    ? parcel?.user_rating
+    : comp?.user_rating;
+  const currentRating = sourceRating === "good" || sourceRating === "bad" ? sourceRating : null;
+  const ratingsEnabled = Boolean(_currentLoadedAreaId && (hasComp || hasParcel));
   const goodActive = ratingsEnabled && currentRating === "good" ? " is-active" : "";
   const badActive = ratingsEnabled && currentRating === "bad" ? " is-active" : "";
-  const keyAttr = _propelioEscape(compKey);
+  const compAttr = hasComp ? ` data-comp-key="${_propelioEscape(compKey)}"` : "";
+  const parcelAttrs = hasParcel
+    ? ` data-county="${_propelioEscape(parcelCounty)}" data-account-num="${_propelioEscape(parcelAccount)}"`
+    : "";
   const disabledAttr = ratingsEnabled ? "" : " disabled";
   const wrapTitle = ratingsEnabled ? "" : ' title="Save this area to enable ratings"';
   const hintHtml = ratingsEnabled ? "" : `<div class="propelio-rate-hint">Save area to enable ratings</div>`;
   return `
-      <div class="propelio-popup-rating${ratingsEnabled ? "" : " is-disabled"}" data-comp-key="${keyAttr}"${wrapTitle}>
-        <button type="button" class="propelio-rate-btn good${goodActive}" data-rating="good" data-comp-key="${keyAttr}"${disabledAttr}>Good</button>
-        <button type="button" class="propelio-rate-btn bad${badActive}" data-rating="bad" data-comp-key="${keyAttr}"${disabledAttr}>Bad</button>
-        <button type="button" class="propelio-rate-btn clear" data-rating="clear" data-comp-key="${keyAttr}"${disabledAttr}>Clear</button>
+      <div class="propelio-popup-rating${ratingsEnabled ? "" : " is-disabled"}"${compAttr}${parcelAttrs}${wrapTitle}>
+        <button type="button" class="propelio-rate-btn good${goodActive}" data-rating="good"${compAttr}${parcelAttrs}${disabledAttr}>Good</button>
+        <button type="button" class="propelio-rate-btn bad${badActive}" data-rating="bad"${compAttr}${parcelAttrs}${disabledAttr}>Bad</button>
+        <button type="button" class="propelio-rate-btn clear" data-rating="clear"${compAttr}${parcelAttrs}${disabledAttr}>Clear</button>
       </div>${hintHtml}`;
 }
 
@@ -5316,8 +5576,225 @@ function _maybeAddGoodCompMark(comp, footprint, fallbackLatLng) {
   goodMarker.addTo(propelioCompLayer);
 }
 
+// ─── Parcel (CAD) rating support (spec v2 2026-05-24) ─────────────────
+// Workspace-scoped Good/Bad/Clear ratings on CAD parcels, parallel to
+// comp ratings. Bundled race-condition fix uses optimistic UI: synchronous
+// map mark on click + per-key mutation versioning for safe rollback.
+
+// Per-key mutation sequence — prevents stale rollbacks from rapid clicks.
+// Key format: `${kind}:${id}` where kind ∈ {comp, parcel}.
+const _ratingMutationSeq = new Map();
+function _bumpMutationSeq(kind, id) {
+  const key = `${kind}:${id}`;
+  const next = (_ratingMutationSeq.get(key) || 0) + 1;
+  _ratingMutationSeq.set(key, next);
+  return next;
+}
+function _isLatestMutation(kind, id, capturedSeq) {
+  return _ratingMutationSeq.get(`${kind}:${id}`) === capturedSeq;
+}
+
+function _resolveParcelAnchor(county, accountNum) {
+  // Find a centroid lat/lng for the parcel via the analysis features cache.
+  // Chain: rendered polygon bounds (if we have a registered layer) →
+  // featureCentroidLngLat → properties.lat/lng. Per spec §4B.
+  if (!Array.isArray(allAnalysisFeatures)) return null;
+  const c = String(county || "").toLowerCase();
+  const a = String(accountNum || "").trim();
+  for (const f of allAnalysisFeatures) {
+    const fp = f?.properties || {};
+    if (String(fp.source_county || "").toLowerCase() !== c) continue;
+    if (String(fp.account_num || "").trim() !== a) continue;
+    // Try featureCentroidLngLat (exists at map.js:~8832; returns [lng, lat]
+    // for the polygon/multipolygon — handles weird geometries cleanly).
+    try {
+      const lngLat = featureCentroidLngLat(f);
+      if (Array.isArray(lngLat) && Number.isFinite(lngLat[0]) && Number.isFinite(lngLat[1])) {
+        return L.latLng(lngLat[1], lngLat[0]);
+      }
+    } catch (_) { /* fall through */ }
+    // Last resort: properties.lat/lng
+    if (Number.isFinite(fp.lat) && Number.isFinite(fp.lng)) {
+      return L.latLng(fp.lat, fp.lng);
+    }
+    return null;
+  }
+  return null;
+}
+
+function _getCachedParcelRating(county, accountNum) {
+  if (!Array.isArray(allAnalysisFeatures)) return null;
+  const c = String(county || "").toLowerCase();
+  const a = String(accountNum || "").trim();
+  for (const f of allAnalysisFeatures) {
+    const fp = f?.properties || {};
+    if (String(fp.source_county || "").toLowerCase() === c && String(fp.account_num || "").trim() === a) {
+      const r = fp.user_rating;
+      return r === "good" || r === "bad" ? r : null;
+    }
+  }
+  return null;
+}
+
+function _updateParcelUserRatingInCache(county, accountNum, rating) {
+  if (!Array.isArray(allAnalysisFeatures)) return;
+  const c = String(county || "").toLowerCase();
+  const a = String(accountNum || "").trim();
+  for (const f of allAnalysisFeatures) {
+    const fp = f?.properties || {};
+    if (String(fp.source_county || "").toLowerCase() === c && String(fp.account_num || "").trim() === a) {
+      fp.user_rating = rating;
+      return;
+    }
+  }
+}
+
+function _setParcelRatingMarkOptimistic(county, accountNum, rating) {
+  // Remove any existing mark for this parcel.
+  const key = `${String(county || "").toLowerCase()}:${String(accountNum || "").trim()}`;
+  const existing = cadRatingLayerByKey.get(key);
+  if (existing) {
+    cadRatingLayer.removeLayer(existing);
+    cadRatingLayerByKey.delete(key);
+  }
+  if (rating !== "good" && rating !== "bad") return;
+  const target = _resolveParcelAnchor(county, accountNum);
+  if (!target) return;
+  const isGood = rating === "good";
+  const icon = L.divIcon({
+    className: isGood ? "cad-good-mark-wrap" : "cad-bad-mark-wrap",
+    html: isGood
+      ? `<div class="cad-good-mark">&#10003;</div>`
+      : `<div class="cad-bad-mark">&#10007;</div>`,
+    iconSize: [16, 16],
+    iconAnchor: [8, 8],
+  });
+  const marker = L.marker(target, { icon, interactive: false, keyboard: false });
+  marker.addTo(cadRatingLayer);
+  cadRatingLayerByKey.set(key, marker);
+}
+
+function _maybeAddParcelRatingMark(parcel, footprint, fallbackLatLng) {
+  const rating = parcel?.user_rating;
+  if (rating !== "good" && rating !== "bad") return;
+  const county = String(parcel?.source_county || "").trim().toLowerCase();
+  const accountNum = String(parcel?.account_num || "").trim();
+  if (!county || !accountNum) return;
+  // Use footprint bounds if available, else _resolveParcelAnchor's chain.
+  let target = null;
+  if (footprint && typeof footprint.getBounds === "function") {
+    try {
+      const b = footprint.getBounds();
+      if (b && b.isValid()) target = b.getCenter();
+    } catch (_) { /* noop */ }
+  }
+  if (!target) {
+    target = _resolveParcelAnchor(county, accountNum) || fallbackLatLng;
+  }
+  if (!target) return;
+  const key = `${county}:${accountNum}`;
+  // Remove stale mark if one exists (e.g., re-render after rating change).
+  const existing = cadRatingLayerByKey.get(key);
+  if (existing) {
+    cadRatingLayer.removeLayer(existing);
+    cadRatingLayerByKey.delete(key);
+  }
+  const isGood = rating === "good";
+  const icon = L.divIcon({
+    className: isGood ? "cad-good-mark-wrap" : "cad-bad-mark-wrap",
+    html: isGood
+      ? `<div class="cad-good-mark">&#10003;</div>`
+      : `<div class="cad-bad-mark">&#10007;</div>`,
+    iconSize: [16, 16],
+    iconAnchor: [8, 8],
+  });
+  const marker = L.marker(target, { icon, interactive: false, keyboard: false });
+  marker.addTo(cadRatingLayer);
+  cadRatingLayerByKey.set(key, marker);
+}
+
+// (_buildParcelRatingButtonsHtml removed 2026-05-24 — replaced by
+// _buildRatingButtonsHtml accepting an optional `parcel` arg, which
+// emits a SINGLE button row with both data-comp-key + data-county +
+// data-account-num and writes to both rating tables on click.)
+
+async function rateParcel(county, accountNum, rating) {
+  const areaId = (typeof _currentLoadedAreaId === "string" ? _currentLoadedAreaId : "") || "";
+  if (!areaId || !county || !accountNum) return false;
+  const body = {
+    saved_area_id: areaId,
+    county,
+    account_num: accountNum,
+    rating: rating === "good" || rating === "bad" ? rating : null,
+  };
+  try {
+    const resp = await fetch("/api/parcels/rate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) {
+      console.warn("[cad] rate parcel failed:", resp.status);
+      return false;
+    }
+    _updateParcelUserRatingInCache(county, accountNum, body.rating);
+    return true;
+  } catch (err) {
+    console.error("[cad] rate parcel error:", err);
+    return false;
+  }
+}
+
+// Comp optimistic mark — companion to _setParcelRatingMarkOptimistic.
+// Bundled race-fix per PARCEL_RATINGS_SPEC.md v2 §5: addresses the "first
+// Good Comp checkmark slow" lag KK observed. Synchronous; no server wait.
+function _setCompRatingMarkOptimistic(compKey, rating) {
+  // Comp goods render with a checkmark; comp bads have no mark (they're
+  // dimmed via the bad-comp visual treatment elsewhere — we mirror that
+  // by simply not rendering a mark for "bad" or "null").
+  const layer = propelioCompLayer;
+  // propelioCompLayerByKey holds the footprint OR fallback marker per
+  // compKey. We compute the anchor from it.
+  const existingLayer = propelioCompLayerByKey.get(String(compKey || "").trim());
+  let anchor = null;
+  if (existingLayer) {
+    if (typeof existingLayer.getBounds === "function") {
+      try {
+        const b = existingLayer.getBounds();
+        if (b && b.isValid()) anchor = b.getCenter();
+      } catch (_) { /* noop */ }
+    }
+    if (!anchor && typeof existingLayer.getLatLng === "function") {
+      anchor = existingLayer.getLatLng();
+    }
+  }
+  if (rating !== "good") return;  // no synchronous mark for bad/null on comps
+  if (!anchor) return;
+  // Tagged key for the optimistic checkmark so re-renders + clear paths
+  // can find it. Reuses propelioCompLayer.
+  const goodIcon = L.divIcon({
+    className: "propelio-good-mark-wrap",
+    html: `<div class="propelio-good-mark">&#10003;</div>`,
+    iconSize: [16, 16],
+    iconAnchor: [8, 8],
+  });
+  const marker = L.marker(anchor, { icon: goodIcon, interactive: false, keyboard: false });
+  marker.addTo(layer);
+  // No keymap registration — the subsequent applyPropelioClientFilters
+  // re-render will rebuild the canonical good marks from cache and clear
+  // this optimistic one along with the rest of the layer. The user sees
+  // immediate feedback; canonical render takes over within ~150-500ms.
+}
+
+// (Old .cad-rate-btn handler removed 2026-05-24 — replaced by unified
+// .propelio-rate-btn handler below, which now reads both data-comp-key
+// AND data-county/data-account-num and writes to whichever rating tables
+// apply on a single click.)
+
 function _renderPropelioComps(data) {
   propelioCompLayer.clearLayers();
+  cadRatingLayer.clearLayers();
+  cadRatingLayerByKey.clear();
   propelioCompLayerByKey.clear();
   propelioPriceMarkers = [];
   if (!data || !Array.isArray(data.comps)) return { total: 0, footprintCount: 0, fallbackCount: 0 };
@@ -5719,6 +6196,7 @@ function applyPropelioClientFilters() {
     const countEl = document.getElementById("propelio-filter-count");
     if (countEl) countEl.textContent = "";
     renderPropelioCompList([]);
+    _renderGoodCompsSection();  // hides section when no comp cache
     return;
   }
   propelioFilterState = readPropelioFiltersFromUI();
@@ -5747,6 +6225,11 @@ function applyPropelioClientFilters() {
       ? `${all.length}`
       : `${visibleOnMapForRender.length} / ${all.length}`;
   }
+  // Good Comps section — sibling list inside #comps-list-block-body. Per
+  // SAVED_AREA_GOOD_COMPS_BLOCK_SPEC.md v2 §Goal #7: always shows ALL good-
+  // rated comps in the workspace, IGNORING active filter chips. We read
+  // from the unfiltered `all` array (not visibleOnMap).
+  _renderGoodCompsSection();
   _updateUpdateAreaButtonVisibility();
 }
 
@@ -5838,6 +6321,157 @@ function _findPropelioCompByKey(key) {
   if (!Array.isArray(all)) return null;
   return all.find((c) => String(c?.comp_address_key || "").trim() === k) || null;
 }
+
+// ─── Good Comps section (saved-area-bonded, filter-independent) ─────────
+// Per SAVED_AREA_GOOD_COMPS_BLOCK_SPEC.md v2. Sibling section inside
+// #comps-list-block-body between the Subject card and the main comp list.
+// Renders one rich card per comp with user_rating === "good" in the
+// current workspace. Always shows ALL good comps regardless of active
+// filter chips. Click row body → fly to the comp on the map. Per-card
+// × Remove clears the rating; Bad flips good → bad. Both use optimistic
+// UI with revert + toast on server failure.
+
+function _propelioGoodCompCardHtml(comp) {
+  const fmtPrice = (n) => Number.isFinite(n) ? `$${Math.round(n).toLocaleString()}` : "—";
+  const fmtNum = (n) => Number.isFinite(n) ? Number(n).toLocaleString() : null;
+  const ex = comp?.extra || {};
+  const status = String(comp?.status || "").trim();
+  const sqft = fmtNum(Number(comp?.sqft));
+  const yr = Number.isFinite(comp?.year_built) ? comp.year_built : null;
+  const beds = ex.beds;
+  const baths = ex.baths;
+  const lotSqft = Number(comp?.lot_size);
+  const lotAcres = Number.isFinite(lotSqft) && lotSqft > 0 ? (lotSqft / 43560) : null;
+  const lotAcresStr = lotAcres != null ? `${lotAcres.toFixed(lotAcres < 1 ? 2 : 1)} ac lot` : null;
+  const neighborhood = String(comp?.neighborhood || "").trim();
+  const soldDate = String(comp?.sold_date || comp?.close_date || "").trim();
+  const dom = Number.isFinite(comp?.dom) ? comp.dom : null;
+  const distance = Number.isFinite(comp?.distance_mi) ? comp.distance_mi : null;
+  const priceNum = Number(comp?.price);
+  const sqftNum = Number(comp?.sqft);
+  const ppsf = (Number.isFinite(priceNum) && Number.isFinite(sqftNum) && sqftNum > 0)
+    ? `$${Math.round(priceNum / sqftNum)}/sqft` : null;
+
+  const meta1 = [sqft ? `${sqft} sqft` : null, lotAcresStr, yr ? `${yr}` : null,
+                 (beds != null ? `${beds}bd` : null), (baths != null ? `${baths}ba` : null)]
+                .filter(Boolean).join(" · ");
+  const meta2 = [soldDate || null, (dom != null ? `${dom} DOM` : null), status || null]
+                .filter(Boolean).join(" · ");
+  const meta3 = [(distance != null ? `${distance.toFixed(2)} mi` : null), ppsf]
+                .filter(Boolean).join(" · ");
+
+  const compKey = String(comp?.comp_address_key || "").trim();
+  const keyAttr = _propelioEscape(compKey);
+  const addr = _propelioEscape(comp?.address || "");
+  const nbhd = _propelioEscape(neighborhood);
+
+  return `
+    <article class="propelio-good-comp-card" tabindex="0" role="button" data-comp-key="${keyAttr}" aria-label="Good comp: ${addr}. Press Enter to focus on map.">
+      <div class="propelio-good-comp-card-top">
+        <span class="propelio-good-comp-card-price">${fmtPrice(priceNum)}</span>
+        <span class="propelio-good-comp-card-badge">Good</span>
+        <div class="propelio-good-comp-card-actions">
+          <button type="button" class="propelio-good-comp-action-btn remove" data-action="remove" data-comp-key="${keyAttr}" aria-label="Remove Good rating from this comp">×</button>
+          <button type="button" class="propelio-good-comp-action-btn bad" data-action="bad" data-comp-key="${keyAttr}" aria-label="Change rating to Bad">Bad</button>
+        </div>
+      </div>
+      <div class="propelio-good-comp-card-addr">${addr}</div>
+      <div class="propelio-good-comp-card-nbhd">${nbhd}</div>
+      <div class="propelio-good-comp-card-meta">${_propelioEscape(meta1)}</div>
+      <div class="propelio-good-comp-card-meta2">${_propelioEscape(meta2)}</div>
+      <div class="propelio-good-comp-card-meta3">${_propelioEscape(meta3)}</div>
+    </article>`;
+}
+
+function _renderGoodCompsSection() {
+  const section = document.getElementById("propelio-good-comps-section");
+  const list = document.getElementById("propelio-good-comps-list");
+  const countEl = document.getElementById("propelio-good-comps-count");
+  const emptyEl = document.getElementById("propelio-good-comps-empty");
+  if (!section || !list) return;
+
+  // Visibility: only when a saved area is loaded. No saved area =
+  // ratings aren't meaningful (comp_ratings is workspace-scoped).
+  if (!_currentLoadedAreaId) {
+    section.classList.add("hidden");
+    list.innerHTML = "";
+    if (countEl) countEl.textContent = "0";
+    if (emptyEl) emptyEl.classList.add("hidden");
+    return;
+  }
+  section.classList.remove("hidden");
+
+  // Source: ALL comps in the workspace cache with user_rating === "good".
+  // NOT visibleOnMap — filter chips are intentionally ignored here per
+  // spec §Goal #7 (good comps are a curated bookmark; filters are for
+  // hunting new comps).
+  const all = Array.isArray(window._propelioLast?.comps) ? window._propelioLast.comps : [];
+  const goodComps = all.filter((c) => c?.user_rating === "good");
+  // Sort using the same sort selection as the main comp list — single
+  // source of truth (propelioCompSortMode + _sortPropelioComps).
+  const sorted = _sortPropelioComps(goodComps, propelioCompSortMode);
+
+  if (countEl) countEl.textContent = String(sorted.length);
+  if (sorted.length === 0) {
+    list.innerHTML = "";
+    if (emptyEl) emptyEl.classList.remove("hidden");
+    return;
+  }
+  if (emptyEl) emptyEl.classList.add("hidden");
+  list.innerHTML = sorted.map(_propelioGoodCompCardHtml).join("");
+}
+
+// Optimistic rating mutation: update local cache immediately + re-render
+// so the card disappears from the good list instantly, then persist to
+// the server in the background. Revert on failure with a toast.
+async function _setGoodCompRatingOptimistic(compKey, newRating) {
+  const comp = _findPropelioCompByKey(compKey);
+  if (!comp) return;
+  const oldRating = comp.user_rating;
+  comp.user_rating = newRating;
+  _renderGoodCompsSection();
+  const ok = await ratePropelioComp(compKey, newRating);
+  if (!ok) {
+    comp.user_rating = oldRating;
+    _renderGoodCompsSection();
+    _showToast("Rating update failed — reverted", "error");
+  }
+}
+
+// Document-level delegation — matches the existing rating-button pattern
+// at line ~6338. Works regardless of when map.js runs vs DOMContentLoaded,
+// and survives every re-render of the good-comps list innerHTML.
+document.addEventListener("click", (ev) => {
+  const card = ev.target.closest(".propelio-good-comp-card");
+  if (!card) return;
+  // Action button (Remove × or Bad) inside the card — stopProp so the
+  // card's fly-to behavior doesn't ALSO fire.
+  const actionEl = ev.target.closest(".propelio-good-comp-action-btn[data-action]");
+  if (actionEl) {
+    ev.stopPropagation();
+    const compKey = actionEl.getAttribute("data-comp-key");
+    const action = actionEl.getAttribute("data-action");
+    if (!compKey) return;
+    if (action === "remove") void _setGoodCompRatingOptimistic(compKey, null);
+    else if (action === "bad") void _setGoodCompRatingOptimistic(compKey, "bad");
+    return;
+  }
+  // Row body click → fly to comp on map.
+  const k = card.getAttribute("data-comp-key");
+  if (k) flyToAndOpenPropelioComp(k);
+});
+
+document.addEventListener("keydown", (ev) => {
+  if (ev.key !== "Enter" && ev.key !== " ") return;
+  const card = ev.target.closest(".propelio-good-comp-card");
+  if (!card) return;
+  // Don't intercept Enter/Space when focus is on an action button — let
+  // the native button handle it (which fires a click event we delegate).
+  if (ev.target.closest(".propelio-good-comp-action-btn")) return;
+  ev.preventDefault();
+  const k = card.getAttribute("data-comp-key");
+  if (k) flyToAndOpenPropelioComp(k);
+});
 
 async function flyToAndOpenPropelioComp(compKey) {
   const layer = propelioCompLayerByKey.get(String(compKey || "").trim());
@@ -6134,18 +6768,28 @@ let propelioStickyBtn = null;
   // Document-level delegation for popup rating buttons. Popups are recreated
   // on every render so a single delegated listener is simpler than per-popup
   // wiring.
+  //
+  // Bundled race-fix per PARCEL_RATINGS_SPEC.md v2 §5: optimistic map
+  // mark (synchronous) BEFORE the async ratePropelioComp POST. Eliminates
+  // the "first Good Comp checkmark slow" lag — the mark now appears the
+  // instant the user clicks Good, not after the server round-trip + full
+  // re-render. The eventual applyPropelioClientFilters re-render
+  // re-establishes the canonical mark from cache (briefly removes +
+  // re-adds the optimistic mark, but the visual gap is sub-frame). Per-
+  // key mutation versioning prevents stale rollback from rapid clicks.
   document.addEventListener("click", (ev) => {
     const btn = ev.target.closest(".propelio-rate-btn");
     if (!btn) return;
-    const key = btn.getAttribute("data-comp-key");
+    const compKey = btn.getAttribute("data-comp-key") || "";
+    const parcelCounty = (btn.getAttribute("data-county") || "").trim().toLowerCase();
+    const parcelAccount = (btn.getAttribute("data-account-num") || "").trim();
     const rating = btn.getAttribute("data-rating");
-    if (!key) return;
-    // Optimistically toggle is-active classes on sibling buttons so the
-    // popup/panel shows the new rating's highlight immediately. The async
-    // ratePropelioComp call below persists + propagates to the in-memory
-    // comp, but the popup HTML isn't re-rendered until next open — without
-    // this optimistic update the user would have to close + reopen the
-    // popup to see their click registered.
+    const hasComp = Boolean(compKey);
+    const hasParcel = Boolean(parcelCounty && parcelAccount);
+    if (!hasComp && !hasParcel) return;
+    const newRating = rating === "clear" ? null : rating;
+
+    // Optimistic popup button highlighting — instant feedback
     const container = btn.parentElement;
     if (container) {
       container.querySelectorAll(".propelio-rate-btn").forEach((b) => {
@@ -6158,7 +6802,30 @@ let propelioStickyBtn = null;
         }
       });
     }
-    void ratePropelioComp(key, rating === "clear" ? null : rating);
+
+    // Per the 2026-05-24 design call: one click writes to BOTH
+    // parcel_ratings AND comp_ratings when both keys are present.
+    // Independent versioning per (kind, id) so a comp-only fast retry
+    // doesn't roll back a parcel-only mark and vice versa.
+
+    if (hasComp) {
+      _bumpMutationSeq("comp", compKey);
+      _setCompRatingMarkOptimistic(compKey, newRating);
+      void ratePropelioComp(compKey, newRating);
+    }
+
+    if (hasParcel) {
+      const mutId = `${parcelCounty}:${parcelAccount}`;
+      const seq = _bumpMutationSeq("parcel", mutId);
+      const previousRating = _getCachedParcelRating(parcelCounty, parcelAccount);
+      _setParcelRatingMarkOptimistic(parcelCounty, parcelAccount, newRating);
+      void rateParcel(parcelCounty, parcelAccount, newRating).then((ok) => {
+        if (!ok && _isLatestMutation("parcel", mutId, seq)) {
+          _setParcelRatingMarkOptimistic(parcelCounty, parcelAccount, previousRating);
+          _showToast("Rating update failed — reverted", "error");
+        }
+      });
+    }
   });
 })();
 
@@ -6417,6 +7084,8 @@ function _showPropelioPolygonButton(_latlngs) {
 async function firePropelioFetch(addressString) {
   if (!addressString || typeof addressString !== "string") return;
   propelioCompLayer.clearLayers();
+  cadRatingLayer.clearLayers();
+  cadRatingLayerByKey.clear();
   propelioCmaChip.hide();
   try {
     const resp = await fetch(`/api/propelio/by-address?address=${encodeURIComponent(addressString)}`);
@@ -7295,7 +7964,12 @@ function _buildParcelDetailPanelHtml(p, matchedComp) {
     : null;
   const headerDelta = compDelta || listingDelta;
   const compDetails = _getParcelPanelCompDetails(effectiveMatchedComp);
-  const ratingButtonsHtml = effectiveMatchedComp ? _buildRatingButtonsHtml(effectiveMatchedComp) : "";
+  // Unified rating buttons — one row that rates BOTH the parcel AND the
+  // matched comp (when present) on click. Per 2026-05-24 design call:
+  // single set of buttons, comp-style visual, dual-write semantics.
+  // _buildRatingButtonsHtml renders even when there's no matched comp
+  // as long as the parcel has identifying fields (county + account_num).
+  const ratingButtonsHtml = _buildRatingButtonsHtml(effectiveMatchedComp, p);
   const realtorLinkHtml = compDetails?.mls
     ? `<a class="propelio-popup-realtor-link" href="https://www.realtor.com/realestateandhomes-search/MLSID-${encodeURIComponent(compDetails.mls)}" target="_blank" rel="noopener noreferrer">Look up MLS# ${_propelioEscape(compDetails.mls)} on Realtor.com</a>`
     : "";
@@ -7460,7 +8134,7 @@ function _buildParcelDetailPanelHtml(p, matchedComp) {
       </div>
       <section class="parcel-panel-actions">
         <div class="parcel-panel-action-slot parcel-panel-action-ratings">
-          ${ratingButtonsHtml || '<span class="parcel-panel-action-muted">No MLS comp to rate</span>'}
+          ${ratingButtonsHtml || '<span class="parcel-panel-action-muted">Save area to rate</span>'}
         </div>
         <div class="parcel-panel-action-slot parcel-panel-action-save">
           ${saveLinkHtml}
@@ -7684,7 +8358,9 @@ function makePopupHtml(p) {
 
   // matchedComp resolved above (drives both the header recolor and these).
   const propelioSectionHtml = matchedComp ? _buildPropelioCompSectionHtml(matchedComp) : "";
-  const ratingButtonsHtml = matchedComp ? _buildRatingButtonsHtml(matchedComp) : "";
+  // Unified rating buttons (dual-write parcel + matched-comp). Per
+  // 2026-05-24 design call.
+  const ratingButtonsHtml = _buildRatingButtonsHtml(matchedComp, p);
 
   return `
       <div class="popup">
@@ -8015,6 +8691,10 @@ function renderFeatures(geojson) {
   targetBadgeLayer.clearLayers();
   verificationBadgeMarkers.clear();
   targetBadgeMarkers.clear();
+  // Clear stale parcel rating marks — they get re-added below from the
+  // fresh feature data (per PARCEL_RATINGS_SPEC.md v2 §4D lifecycle).
+  cadRatingLayer.clearLayers();
+  cadRatingLayerByKey.clear();
   const polygonGeometrySeen = new Set();
   const condoOutlineSeen = new Set();
   const accountRenderedAsPolygon = new Set(); // accounts that got a polygon fill — no dot needed
@@ -8165,6 +8845,20 @@ function renderFeatures(geojson) {
   // by zoom/pan events).
   renderSoldPoints();
   renderRedfinPoints();
+
+  // Parcel rating marks (red ✓ / black ✗) — per PARCEL_RATINGS_SPEC.md v2.
+  // Single post-loop pass over the rendered features; uses cached polygon
+  // bounds via _resolveParcelAnchor's chain. cadRatingLayer was cleared at
+  // the top of this function so this rebuilds the full set cleanly.
+  geojson.features.forEach((feature) => {
+    const p = feature?.properties;
+    if (!p) return;
+    if (p.user_rating !== "good" && p.user_rating !== "bad") return;
+    const fallbackLatLng = (Number.isFinite(p.lat) && Number.isFinite(p.lng))
+      ? L.latLng(p.lat, p.lng)
+      : null;
+    _maybeAddParcelRatingMark(p, null, fallbackLatLng);
+  });
   return markers;
 }
 
@@ -8323,6 +9017,7 @@ function _scheduleViewportRender() {
 function renderSidebar(counts, markers) {
   document.getElementById("sidebar-loading").classList.add("hidden");
   document.getElementById("sidebar-results").classList.remove("hidden");
+  document.getElementById("active-item-actions")?.classList.remove("hidden");
   const visibleCounts = Array.isArray(allAnalysisFeatures) && allAnalysisFeatures.length
     ? getVisibleFeatureCounts(allAnalysisFeatures, { ignoreBucketToggles: true })
     : {
@@ -8932,6 +9627,7 @@ map.on("draw:created", async (e) => {
   targetBadgeMarkers.clear();
   // Instructions section removed; results manage visibility
   document.getElementById("sidebar-results").classList.add("hidden");
+  document.getElementById("active-item-actions")?.classList.add("hidden");
   document.getElementById("sidebar-loading").classList.remove("hidden");
   const includeRedfin = Boolean(filterState.active);
   const includeSold = Boolean(filterState.sold);
@@ -8956,6 +9652,8 @@ map.on("draw:created", async (e) => {
   // were filtered to a different shape and shouldn't linger when the
   // user redraws.
   propelioCompLayer.clearLayers();
+  cadRatingLayer.clearLayers();
+  cadRatingLayerByKey.clear();
   propelioCompLayerByKey.clear();
   renderPropelioCompList([]);
   propelioCmaChip.hide();
@@ -9076,6 +9774,8 @@ function clearDrawResults() {
   // header. The archive in the DB is untouched — clicking the saved
   // workspace again rehydrates everything exactly as it was.
   propelioCompLayer.clearLayers();
+  cadRatingLayer.clearLayers();
+  cadRatingLayerByKey.clear();
   propelioCompLayerByKey.clear();
   window._propelioLast = null;
   _updatePropelioStatusCounts();
@@ -9112,6 +9812,7 @@ function clearDrawResults() {
   document.getElementById("redfin-toggle-status").textContent = "";
   document.getElementById("sold-toggle-status").textContent = "";
   document.getElementById("sidebar-results")?.classList.add("hidden");
+  document.getElementById("active-item-actions")?.classList.add("hidden");
   document.getElementById("sidebar-loading")?.classList.add("hidden");
   document.getElementById("btn-drawd-area-clear")?.classList.add("hidden");
   // NOTE: clearActiveItem is intentionally NOT called here. Callers that
@@ -9247,7 +9948,17 @@ document.getElementById("btn-download").addEventListener("click", async () => {
     const resp = await fetch(`/api/download/${currentJobId}`, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...authHeaders() },
-      body: JSON.stringify({ filter_ids: filterIds, filename }),
+      // loaded_area_id: 2026-05-24 fix for the Copy Area As share_id
+      // bug — after copy, cached_jobs.saved_area_id stays pinned to the
+      // SOURCE area, so the backend's _job_share_id lookup returns the
+      // source's share_id for the CSV column. Sending the currently-
+      // loaded area_id makes the backend use the active workspace's
+      // share_id instead.
+      body: JSON.stringify({
+        filter_ids: filterIds,
+        filename,
+        loaded_area_id: _currentLoadedAreaId || null,
+      }),
     });
     if (!resp.ok) {
       const errText = await resp.text().catch(() => "");
