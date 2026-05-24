@@ -1,6 +1,6 @@
 ---
 created: 2026-05-24
-status: v1 draft — pending Copilot deep-dive critique
+status: v2 — Copilot deep-dive + KK product calls incorporated; LOCKED, ready for implementation
 updated: 2026-05-24
 ---
 
@@ -8,32 +8,44 @@ updated: 2026-05-24
 
 ## Changelog
 
-- **v1 (this draft):** Initial spec for adding Good/Bad/Clear ratings to CAD parcels, mirroring the existing comp ratings pattern. Includes bundled fix for the "first Good Comp checkmark slow to appear" race condition.
+- **v1 (initial draft):** Parcel ratings table mirroring comp_ratings + popup buttons + map markers + bundled race-condition fix. Either-bad-wins for CSV exclusion. Public endpoint user_rating hydrate assumed safe. No ownership enforcement on rate endpoints.
+
+- **v2 (THIS, post-Copilot deep-dive + KK product calls):**
+  - **CSV exclusion semantics changed: comp rating ALWAYS wins.** Per KK product call. If a matched comp has a rating (good or bad), that determines inclusion regardless of direct parcel rating. Direct parcel rating only applies when no comp rating exists. NOT either-bad-wins.
+  - **No `user_rating` hydrate on public/unauth parcel endpoints.** Per KK product call. `/api/parcel/{county}/{account_num}` (main.py:2911) and `/api/parcel/near` (main.py:2861) stay as-is. The rating data only flows through authenticated, workspace-scoped read paths. Popup buttons gracefully degrade to "Save area to enable ratings" hint when no `_currentLoadedAreaId` (mirrors existing comp pattern).
+  - **Ownership check on BOTH rate endpoints.** Per KK product call. Closes the pre-existing weakness in `/api/propelio/comp/rate` (archive.py:189-267 currently writes any workspace_id without auth check) AND secures the new `/api/parcels/rate`. Both endpoints verify `saved_areas.user_id = current_user.id` before mutating, return 403 otherwise.
+  - **Per-key mutation versioning for optimistic rollback.** Per Copilot Critical-3. Naive `oldRating` capture loses to rapid repeat clicks. New `_ratingMutationSeq` Map keyed by `${kind}:${key}` (kind ∈ {comp, parcel}) increments on each click; rollback only applies if the in-flight seq matches the current seq.
+  - **Reuse the existing comp optimistic helper at map.js:5249.** Per Copilot anti-pattern note #14. There's already a `_setCompRatingMarkOptimistic`-like helper at map.js:5249 that's currently unused — the popup click path at map.js:5487 still calls ratePropelioComp directly. v2 adopts the helper for both comp + parcel paths; resolves the split logic.
+  - **`cadRatingLayer` lifecycle wiring.** Per Copilot Medium-5. Must call `cadRatingLayer.clearLayers()` + `cadRatingLayerByKey.clear()` at every parcel-redraw boundary (map.js:7179-7186) and draw-clear path (map.js:8234). Otherwise stale marks survive across workspace/filter transitions.
+  - **Single workspace rating-map prefetch** (not per-row joins). Per Copilot Recommendation-2. New `_load_parcel_ratings_for_workspace(workspace_id) -> dict[(county, account_num), rating]` runs ONCE per analyze/CSV request, results applied in-memory to each feature.
+  - **Section labels conditional.** Per Copilot Open-item-7 + Recommendation. Show "Parcel rating" label only when matched comp section also renders (dual-section popup). Hide it in parcel-only popups for visual balance.
+  - **Multipolygon centroid fallback chain.** Per Copilot Low-6. Use `featureCentroidLngLat` at map.js:7637 (existing helper) as the second-tier fallback before properties.lat/lng.
+  - **Updated all file:line refs to current code.** v1's references were stale relative to current develop. Copilot's audit corrected them: `makePopupHtml` is at 6751 (not 7951+), popup click delegation at 5463 (not 6499), `ratePropelioComp` at 5487 (not 6273), comp click handler debounce theory was wrong — there is NO debounce on the click path (debounce only on filter inputs at 5274/5408).
 
 ## Problem
 
-Today the team can rate Propelio COMPS as Good/Bad/Clear (the `comp_ratings` table at `api/main.py:398-406`, mutation via `ratePropelioComp` at `frontend/map.js:6273-6301`, visual checkmark via `_maybeAddGoodCompMark` at `frontend/map.js:5499-5522`). The rating ships with the saved area, drives map visualization, and excludes bad-rated parcels from CSV export.
+Today the team can rate Propelio COMPS as Good/Bad/Clear (the `comp_ratings` table at `api/main.py:398-406`, mutation via `ratePropelioComp` at `frontend/map.js:5487`, visual checkmark via `_maybeAddGoodCompMark` at `frontend/map.js:4601`). The rating ships with the saved area, drives map visualization, and excludes bad-rated parcels from CSV export.
 
 But the same affordance doesn't exist for the underlying CAD PARCELS themselves. The team currently can only rate comps, even when they want to flag a parcel as good or bad independent of any matched comp (e.g., the parcel may have no comp match at all, or the team wants to express judgment on the parcel as a target rather than as a comparable).
 
-Plus a related bug: the first time a user clicks Good on a comp in a workspace, the checkmark takes noticeably longer to appear on the map than subsequent clicks. Diagnosis: the click handler at `map.js:6499-6524` awaits the server POST round-trip BEFORE rendering the mark; subsequent clicks feel faster because the user's attention has shifted to the next action. Mirror-feature for parcels would inherit the same lag without a fix.
+Plus a related bug: the first time a user clicks Good on a comp in a workspace, the checkmark takes noticeably longer to appear on the map than subsequent clicks. Diagnosis (v2 corrected): the click handler at `map.js:5463-5487` awaits the server POST round-trip BEFORE rendering the mark via the full `applyPropelioClientFilters` re-render. There is NO debounce on the click path (only filter inputs at 5274/5408 are debounced). Server round-trip + full layer clear+rebuild is the actual lag source. Subsequent clicks feel faster because attention has shifted. Mirror-feature for parcels would inherit the same lag without a fix.
 
 ## Goal
 
 1. New `parcel_ratings` table, parallel to `comp_ratings`, keyed by `(workspace_id, county, account_num)`.
-2. New backend endpoint `POST /api/parcels/rate` accepting `{saved_area_id, county, account_num, rating}` with `rating ∈ {"good", "bad", null}` (null = clear).
-3. Parcel features rehydrate with `user_rating` on every server-side read (LEFT JOIN parcel_ratings on workspace_id + county + account_num).
-4. New popup affordance: when a CAD parcel popup opens AND a saved area is loaded, render a "Parcel rating" mini-section with `[Good] [Bad] [Clear]` buttons mirroring the existing comp rating buttons. When the parcel ALSO has a matched comp, both sections appear stacked (Parcel rating above, Comp rating below) with explicit section headers to disambiguate.
-5. Map markers:
+2. New backend endpoint `POST /api/parcels/rate` accepting `{saved_area_id, county, account_num, rating}` with `rating ∈ {"good", "bad", null}` (null = clear). Endpoint enforces saved_area ownership.
+3. Parcel features hydrate with `user_rating` on AUTHENTICATED, workspace-scoped server-side read paths ONLY. Public/unauth endpoints do not carry rating data.
+4. Existing `/api/propelio/comp/rate` ALSO gets ownership enforcement (fixes pre-existing weakness).
+5. New popup affordance: when a CAD parcel popup opens AND a saved area is loaded, render a "Parcel rating" mini-section with `[Good] [Bad] [Clear]` buttons mirroring the existing comp rating buttons. When the parcel ALSO has a matched comp, both sections appear stacked (Parcel rating above, Comp rating below) with section header labels for disambiguation. Hide the "Parcel rating" label when only the parcel rating section renders (no matched comp).
+6. Map markers:
    - `.cad-good-mark` — white circle + red ✓ + red glow (visually identical to `.propelio-good-mark`)
-   - `.cad-bad-mark` — white circle + black ✗ + black border + dark shadow (new visual)
+   - `.cad-bad-mark` — white circle + black ✗ + black border + dark shadow
    - Both fixed 16px (no zoom scaling) and rendered at the parcel polygon's centroid
    - Both added to a new `cadRatingLayer` `L.layerGroup()`
-6. Bad parcel rating EXCLUDES that parcel row from CSV export. Either-bad-wins union with the existing bad-comp exclusion at `api/main.py:4133-4135`.
-7. Saved-area binding: parcel_ratings.workspace_id REFERENCES saved_areas.area_id ON DELETE CASCADE. Ratings ship with the saved area, restore on load, copy on fork.
-8. Race-condition fix bundled: optimistic UI on rating clicks. The rating mark renders on the map IMMEDIATELY (synchronously, no server wait), with revert + toast on server failure. Applies to BOTH comp and parcel ratings — one fix, both paths.
-
-NO sidebar list for parcel ratings (KK call). The visual state on the map IS the list.
+7. **CSV exclusion: comp rating ALWAYS wins.** When a matched comp has a rating, that determines inclusion regardless of direct parcel rating. Direct parcel rating only matters when no comp rating exists.
+8. Saved-area binding: `parcel_ratings.workspace_id REFERENCES saved_areas.area_id ON DELETE CASCADE`. Ratings ship with the saved area, restore on load, copy on fork.
+9. Race-condition fix bundled: optimistic UI on rating clicks via the existing helper at map.js:5249 (extended for parcels). The rating mark renders on the map IMMEDIATELY (synchronously, no server wait), with per-key mutation versioning and revert + toast on server failure. Applies to BOTH comp and parcel ratings.
+10. **No sidebar list for parcel ratings.** The visual state on the map IS the list.
 
 ## Non-goals
 
@@ -44,7 +56,9 @@ NO sidebar list for parcel ratings (KK call). The visual state on the map IS the
 - Multi-state ratings beyond good/bad/null (no "neutral", no numeric scoring)
 - Re-coloring the parcel polygon based on rating (KK explicitly said NOT to dim the polygon; just add the X marker)
 - Backfill historical ratings (no source data; users start fresh)
-- Rating data in propelio CSV columns (rating affects ROW INCLUSION via bad-exclusion, not new columns)
+- Rating data in propelio CSV columns (rating affects ROW INCLUSION via comp-rating-wins, not new columns)
+- Public-endpoint rating hydrate (per KK call — security boundary)
+- Shared workspace WRITE access for non-owners (use fork-then-rate instead)
 
 ## Changes (5 files)
 
@@ -75,11 +89,33 @@ cur.execute(
 )
 ```
 
-Idempotent (CREATE IF NOT EXISTS). Runs at startup like the rest of the schema bootstrap.
+Idempotent. `saved_areas` (line 235) and `users` (line 201) exist before this point — FK-safe.
 
-### 2. Backend — `api/main.py` new endpoint + CSV exclusion + fork copy + hydrate join
+### 2. Backend — `api/main.py` new endpoint + hydrate + CSV exclusion + fork copy + comp endpoint hardening
 
-**A. New endpoint** `POST /api/parcels/rate` (new function, similar shape to the comp/rate route at `api/propelio/routes.py:1101-1126`):
+**A. Ownership-check helper** (new, reusable by both rate endpoints):
+
+```python
+def _assert_user_owns_area(area_id: str, user_id: int) -> None:
+    """Raise 403 if the calling user doesn't own the saved area. Used by
+    both /api/parcels/rate and /api/propelio/comp/rate to prevent
+    cross-workspace rating mutation by anyone who knows an area_id."""
+    if not area_id or not user_id:
+        raise HTTPException(status_code=400, detail="Missing area_id or user")
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM saved_areas WHERE area_id = %s AND user_id = %s LIMIT 1",
+                (area_id, int(user_id)),
+            )
+            if cur.fetchone() is None:
+                raise HTTPException(status_code=403, detail="You don't own this workspace")
+    finally:
+        release_session_conn(conn)
+```
+
+**B. New endpoint** `POST /api/parcels/rate`:
 
 ```python
 class ParcelRateRequest(BaseModel):
@@ -99,6 +135,7 @@ async def rate_parcel(request: ParcelRateRequest, req: Request, user: dict[str, 
         raise HTTPException(status_code=400, detail="saved_area_id, county, account_num all required")
     if rating not in (None, "good", "bad"):
         raise HTTPException(status_code=400, detail="rating must be 'good', 'bad', or null")
+    _assert_user_owns_area(area_id, int(user["id"]))
 
     conn = get_session_conn()
     try:
@@ -126,7 +163,11 @@ async def rate_parcel(request: ParcelRateRequest, req: Request, user: dict[str, 
     return {"ok": True, "rating": rating}
 ```
 
-**B. Hydrate `user_rating` on parcel reads.** Wherever parcel features are returned to the frontend, LEFT JOIN parcel_ratings to emit `user_rating`. Specifically the analyze/by-polygon endpoint(s) and the saved-area restore. New helper:
+**C. Existing comp rate endpoint hardening** at `api/propelio/routes.py:1101-1126`:
+
+Add `_assert_user_owns_area(saved_area_id, int(user["id"]))` call right after the input validation, before `set_comp_rating()`. Closes the existing weakness where any logged-in user could mutate any workspace's ratings by knowing the area_id.
+
+**D. Workspace rating-map prefetch helper** (single SQL query, in-memory join):
 
 ```python
 def _load_parcel_ratings_for_workspace(workspace_id: str) -> dict[tuple[str, str], str]:
@@ -145,22 +186,50 @@ def _load_parcel_ratings_for_workspace(workspace_id: str) -> dict[tuple[str, str
         release_session_conn(conn)
 ```
 
-Then at each parcel-emitting site, attach `feature.properties.user_rating` from the lookup dict.
+**E. Hydrate `user_rating` on AUTHENTICATED parcel emit paths only** (per KK product call — public endpoints intentionally not hydrated):
 
-**C. CSV exclusion extension** at `api/main.py:4133-4135`. Today: bad-rated comps cause the matched parcel row to be excluded. New: also exclude when a parcel_ratings row marks it bad.
+Audit-confirmed sites needing hydrate:
+- `api/main.py:2964` — main analyze response (draw + saved-area payload)
+- `api/main.py:987` — session feature rebuild on restore
+- `api/main.py:4709` — session cached payload rebuild
+
+At each site, before serializing features:
+1. Compute `workspace_id` from request context (saved_area_id from request body / current_loaded area)
+2. Call `parcel_ratings_map = _load_parcel_ratings_for_workspace(workspace_id)` ONCE
+3. In the feature-build loop, attach `feature.properties["user_rating"] = parcel_ratings_map.get((county_lower, account_num))`
+
+**Sites that DO NOT get hydrate** (per KK product call):
+- `api/main.py:2911` — `/api/parcel/{county}/{account_num}` (public, no auth)
+- `api/main.py:2861` — `/api/parcel/near` (public, no auth)
+
+These remain unchanged. Popup rendering on the frontend already gates rating buttons via `_currentLoadedAreaId`, so the absence of user_rating in these paths is invisible to the user.
+
+**F. CSV exclusion logic — comp-wins-absolute** at `api/main.py:4133-4135`:
+
+Compute the parcel direct ratings prefetch alongside the existing comp-derived map at line 3686-3734:
 
 ```python
-# Existing comp-based bad-exclusion
-_parcel_rating_via_comp = parcel_rating_by_key.get(row_key)
-# NEW: direct parcel rating
-_parcel_rating_direct = parcel_rating_direct_by_key.get(row_key)
-if _parcel_rating_via_comp == "bad" or _parcel_rating_direct == "bad":
-    continue
+parcel_rating_direct_by_key = _load_parcel_ratings_for_workspace(job_saved_area_id) if job_saved_area_id else {}
 ```
 
-`parcel_rating_direct_by_key` populated from `_load_parcel_ratings_for_workspace(job_saved_area_id)` at the top of `_run_download_csv`, alongside the existing `parcel_rating_by_key` build at line 3699-3736.
+Modified exclusion gate at line 4133-4135:
 
-**D. Fork copy** at `api/main.py:5492-5500`. After the existing comp_ratings copy block, add:
+```python
+_parcel_rating_via_comp = parcel_rating_by_key.get(row_key)  # existing (comp-derived)
+_parcel_rating_direct = parcel_rating_direct_by_key.get(row_key)  # new (direct parcel rating)
+
+# Comp rating WINS when present (KK product call v2). Direct parcel
+# rating only applies when no comp rating exists for that parcel.
+if _parcel_rating_via_comp == "bad":
+    continue  # comp says bad → row excluded regardless of direct parcel rating
+if _parcel_rating_via_comp == "good":
+    pass  # comp says good → row included regardless of direct parcel rating
+elif _parcel_rating_direct == "bad":
+    continue  # no comp rating, direct parcel rating is bad → excluded
+# else: included (no signal, or direct=good with no comp)
+```
+
+**G. Fork copy** at `api/main.py:5492-5500` (extend the existing comp_ratings fork block). Add parallel INSERT…SELECT for parcel_ratings using the same `new_area_id` / `source_area_id` already in scope:
 
 ```python
 cur.execute(
@@ -174,15 +243,15 @@ cur.execute(
 )
 ```
 
-Forked workspaces inherit the source's parcel ratings.
+Forked workspaces inherit the source's parcel ratings (parallel to comp_ratings inheritance).
 
 ### 3. Frontend — popup buttons + click delegation — `frontend/map.js`
 
-**A. New `_buildParcelRatingButtonsHtml(parcel)` helper**, parallel to `_buildRatingButtonsHtml(comp)` at `map.js:4794-4809`:
+**A. New `_buildParcelRatingButtonsHtml(parcel, hasMatchedComp)` helper**, parallel to `_buildRatingButtonsHtml(comp)` at `map.js:3948`. The `hasMatchedComp` flag controls whether the section label renders:
 
 ```js
-function _buildParcelRatingButtonsHtml(parcel) {
-  const county = String(parcel?.source_county || parcel?.county || "").trim().toLowerCase();
+function _buildParcelRatingButtonsHtml(parcel, hasMatchedComp) {
+  const county = String(parcel?.source_county || "").trim().toLowerCase();
   const accountNum = String(parcel?.account_num || "").trim();
   const ratingsEnabled = Boolean(_currentLoadedAreaId && county && accountNum);
   const currentRating = parcel?.user_rating === "good" || parcel?.user_rating === "bad" ? parcel.user_rating : null;
@@ -192,9 +261,11 @@ function _buildParcelRatingButtonsHtml(parcel) {
   const acctAttr = _propelioEscape(accountNum);
   const disabledAttr = ratingsEnabled ? "" : " disabled";
   const hintHtml = ratingsEnabled ? "" : `<div class="cad-rate-hint">Save area to enable ratings</div>`;
+  // Per spec v2: section label only renders when dual-section popup (matched comp also present).
+  const labelHtml = hasMatchedComp ? `<div class="cad-rate-section-label">Parcel rating</div>` : "";
   return `
     <div class="cad-popup-rating${ratingsEnabled ? "" : " is-disabled"}" data-county="${countyAttr}" data-account-num="${acctAttr}">
-      <div class="cad-rate-section-label">Parcel rating</div>
+      ${labelHtml}
       <div class="cad-rate-buttons">
         <button type="button" class="cad-rate-btn good${goodActive}" data-rating="good" data-county="${countyAttr}" data-account-num="${acctAttr}"${disabledAttr}>Good</button>
         <button type="button" class="cad-rate-btn bad${badActive}" data-rating="bad" data-county="${countyAttr}" data-account-num="${acctAttr}"${disabledAttr}>Bad</button>
@@ -205,9 +276,9 @@ function _buildParcelRatingButtonsHtml(parcel) {
 }
 ```
 
-Insert it into the parcel popup HTML (built by `makePopupHtml(p)` at `map.js:7951+`) — placed at the top of the popup BEFORE the matched-comp section. When matched comp section also renders, the existing comp rating row gets a matching `Comp rating` section label for visual symmetry.
+Inserted into the parcel popup HTML built by `makePopupHtml(p)` at `map.js:6751`, AFTER the CAD parcel data table and BEFORE the matched-comp section/actions block. When the matched-comp section renders below it, also wrap the existing comp rating with a matching "Comp rating" label (new — adds visual symmetry).
 
-**B. New mutation function** `rateParcel(county, accountNum, rating)`, parallel to `ratePropelioComp` at `map.js:6273-6301`:
+**B. New mutation function** `rateParcel(county, accountNum, rating)`, parallel to `ratePropelioComp` at `map.js:5487`:
 
 ```js
 async function rateParcel(county, accountNum, rating) {
@@ -229,7 +300,6 @@ async function rateParcel(county, accountNum, rating) {
       console.warn("[cad] rate parcel failed:", resp.status);
       return false;
     }
-    // Sync in-memory parcel cache so re-renders reflect the rating
     _updateParcelUserRatingInCache(county, accountNum, body.rating);
     return true;
   } catch (err) {
@@ -239,8 +309,9 @@ async function rateParcel(county, accountNum, rating) {
 }
 
 function _updateParcelUserRatingInCache(county, accountNum, rating) {
-  // Walk allAnalysisFeatures and update the matching feature's properties.user_rating.
-  // The next render pass picks it up via _maybeAddParcelRatingMark.
+  // Walk allAnalysisFeatures (map.js:573 — confirmed canonical) and
+  // update the matching feature's properties.user_rating. The next
+  // render pass picks it up via _maybeAddParcelRatingMark.
   if (!Array.isArray(allAnalysisFeatures)) return;
   const c = String(county || "").toLowerCase();
   const a = String(accountNum || "").trim();
@@ -254,9 +325,25 @@ function _updateParcelUserRatingInCache(county, accountNum, rating) {
 }
 ```
 
-**C. Document-level click delegation** for `.cad-rate-btn`, parallel to the existing `.propelio-rate-btn` handler at `map.js:6499-6524`:
+**C. Per-key mutation versioning + document-level click delegation** parallel to the existing `.propelio-rate-btn` handler at `map.js:5463-5487`. Address the rapid-repeat-click race per Copilot Critical-3:
 
 ```js
+// Module-level counter — increments on every rating click to make
+// stale rollbacks idempotent.
+const _ratingMutationSeq = new Map();  // key: `${kind}:${id}` → integer
+
+function _bumpMutationSeq(kind, id) {
+  const key = `${kind}:${id}`;
+  const next = (_ratingMutationSeq.get(key) || 0) + 1;
+  _ratingMutationSeq.set(key, next);
+  return next;
+}
+
+function _isLatestMutation(kind, id, capturedSeq) {
+  const key = `${kind}:${id}`;
+  return _ratingMutationSeq.get(key) === capturedSeq;
+}
+
 document.addEventListener("click", (ev) => {
   const btn = ev.target.closest(".cad-rate-btn");
   if (!btn) return;
@@ -264,7 +351,12 @@ document.addEventListener("click", (ev) => {
   const accountNum = btn.getAttribute("data-account-num");
   const rating = btn.getAttribute("data-rating");
   if (!county || !accountNum) return;
-  // Optimistic popup button styling (mirrors comp pattern)
+  const newRating = rating === "clear" ? null : rating;
+  const mutKey = `${county}:${accountNum}`;
+  const seq = _bumpMutationSeq("parcel", mutKey);
+  const previousRating = _getCachedParcelRating(county, accountNum);
+
+  // Optimistic popup button styling
   const container = btn.parentElement;
   if (container) {
     container.querySelectorAll(".cad-rate-btn").forEach((b) => {
@@ -273,46 +365,76 @@ document.addEventListener("click", (ev) => {
       else b.classList.remove("is-active");
     });
   }
-  // OPTIMISTIC map mark (race-condition fix — see §4 in spec)
-  const newRating = rating === "clear" ? null : rating;
+
+  // Optimistic map mark (synchronous — fixes the "first checkmark slow" lag)
   _setParcelRatingMarkOptimistic(county, accountNum, newRating);
+
   void rateParcel(county, accountNum, newRating).then(ok => {
-    if (!ok) {
-      // Revert: re-read the previous rating from cache (already restored by _setParcelRatingMarkOptimistic on failure)
-      _setParcelRatingMarkOptimistic(county, accountNum, _getCachedParcelRating(county, accountNum));
+    if (!ok && _isLatestMutation("parcel", mutKey, seq)) {
+      // Revert only if this is still the latest mutation for this key.
+      // Rapid repeat-click would have bumped seq again; the LATER click's
+      // state is the user's actual intent, not this stale revert.
+      _setParcelRatingMarkOptimistic(county, accountNum, previousRating);
       _showToast("Rating update failed — reverted", "error");
     }
   });
 });
 ```
 
+**D. Extend the existing comp optimistic helper at `map.js:5249`** (currently unused) for parcels. The helper signature becomes `_setRatingMarkOptimistic(layer, layerByKey, kind, key, rating, anchorFn)` and is called from both comp and parcel click paths:
+
+```js
+// Pre-existing at map.js:5249 (currently unused). v2 adopts it.
+function _setRatingMarkOptimistic(layer, layerByKey, kind, key, rating, anchorFn) {
+  // Remove existing mark for this key
+  const existing = layerByKey.get(key);
+  if (existing) {
+    layer.removeLayer(existing);
+    layerByKey.delete(key);
+  }
+  if (rating !== "good" && rating !== "bad") return;
+  const target = anchorFn();
+  if (!target) return;
+  const className = kind === "comp" ? "propelio-good-mark-wrap" :
+                    (rating === "good" ? "cad-good-mark-wrap" : "cad-bad-mark-wrap");
+  const innerHtml = kind === "comp" ? `<div class="propelio-good-mark">&#10003;</div>` :
+                    (rating === "good" ? `<div class="cad-good-mark">&#10003;</div>` :
+                                          `<div class="cad-bad-mark">&#10007;</div>`);
+  const icon = L.divIcon({ className, html: innerHtml, iconSize: [16, 16], iconAnchor: [8, 8] });
+  const marker = L.marker(target, { icon, interactive: false, keyboard: false });
+  marker.addTo(layer);
+  layerByKey.set(key, marker);
+}
+```
+
+Thin wrappers:
+- `_setCompRatingMarkOptimistic(compKey, rating)` → calls `_setRatingMarkOptimistic(propelioCompLayer, propelioCompLayerByKey, "comp", compKey, rating, () => _resolveCompAnchor(compKey))`
+- `_setParcelRatingMarkOptimistic(county, accountNum, rating)` → calls with cadRatingLayer + cadRatingLayerByKey + `${county}:${accountNum}` key
+
 ### 4. Map rendering — markers + race-condition fix — `frontend/map.js` + `frontend/style.css`
 
-**A. New `cadRatingLayer`** initialized at module load alongside `propelioCompLayer` (around `map.js:554`):
+**A. New layer + key map** initialized at module load alongside `propelioCompLayer`:
 ```js
 const cadRatingLayer = L.layerGroup().addTo(map);
 const cadRatingLayerByKey = new Map();  // "county:account_num" → leaflet marker
 ```
 
-**B. New `_maybeAddParcelRatingMark(parcel, footprint, fallbackLatLng)`** parallel to `_maybeAddGoodCompMark` at `map.js:5499-5522`. Routes by `parcel.user_rating`:
-- `"good"` → red ✓ divIcon, class `.cad-good-mark`
-- `"bad"` → black ✗ divIcon, class `.cad-bad-mark`
-- anything else → no mark
+**B. New `_maybeAddParcelRatingMark(parcel, footprint, fallbackLatLng)`** parallel to `_maybeAddGoodCompMark` at `map.js:4601`. Centroid resolution chain (per Copilot Low-6):
+1. `footprint.getBounds().getCenter()` (most accurate for polygons)
+2. `featureCentroidLngLat(parcel)` (existing helper at map.js:7637 — handles multipolygons cleanly)
+3. `fallbackLatLng` (last resort)
 
-Adds to `cadRatingLayer` and registers in `cadRatingLayerByKey` for later updates.
+Adds to `cadRatingLayer` via the shared `_setRatingMarkOptimistic` helper from §3D.
 
-**C. New `_setParcelRatingMarkOptimistic(county, accountNum, rating)`** — the race-condition fix:
-- Looks up existing marker in `cadRatingLayerByKey`
-- If present, removes it
-- If `rating ∈ {"good", "bad"}`, creates new marker + adds to layer + registers in map
-- If `rating === null`, leaves the slot empty
-- SYNCHRONOUS — no server wait. Called from click handler BEFORE the async POST.
+**C. Render integration** at `map.js:7175` (per Copilot Open-item-5 — confirmed this is the per-feature parcel render slot, where verification badges and polygons get created). After polygon creation, call `_maybeAddParcelRatingMark(parcel, polygon, fallbackLatLng)`. Marks survive subsequent redraws because the layer is independent.
 
-**D. Same optimistic mechanism for COMP rating** (bundled per KK). New `_setCompRatingMarkOptimistic(compKey, rating)` parallel to the parcel version, called from the existing comp click handler at `map.js:6499-6524` BEFORE `ratePropelioComp`. Removes the current 150ms+ debounce delay perceived as "first click slow."
+**D. cadRatingLayer lifecycle wiring** (per Copilot Medium-5 — critical, otherwise stale marks survive transitions). Clear the layer + key map at:
+- Parcel redraw boundary at `map.js:7179-7186` (currently clears parcel layers + badges)
+- Draw-clear path at `map.js:8234`
+- Workspace switch (wherever `_currentLoadedAreaId` changes — including the fork flow that bypasses standard restore)
 
-**E. Render integration.** Wherever parcels render (e.g., in the main analyze-render pass that draws parcel polygons), after rendering a polygon call `_maybeAddParcelRatingMark(parcel, polygon, fallbackLatLng)`. Also call on saved-area restore.
+**E. CSS** — add to `frontend/style.css` near the existing `.propelio-good-mark` at line ~3497:
 
-**F. CSS** — add to `frontend/style.css` near the existing `.propelio-good-mark` at line ~3497:
 ```css
 .cad-good-mark-wrap, .cad-bad-mark-wrap {
   background: transparent;
@@ -320,58 +442,30 @@ Adds to `cadRatingLayer` and registers in `cadRatingLayerByKey` for later update
   pointer-events: none;
 }
 .cad-good-mark {
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  background: #ffffff;
-  color: #dc2626;
-  font-size: 12px;
-  font-weight: 800;
-  line-height: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  width: 16px; height: 16px; border-radius: 50%;
+  background: #ffffff; color: #dc2626;
+  font-size: 12px; font-weight: 800; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
   box-shadow: 0 0 0 2px #dc2626, 0 0 6px rgba(220, 38, 38, 0.7);
 }
 .cad-bad-mark {
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  background: #ffffff;
-  color: #111111;
-  font-size: 12px;
-  font-weight: 800;
-  line-height: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  width: 16px; height: 16px; border-radius: 50%;
+  background: #ffffff; color: #111111;
+  font-size: 12px; font-weight: 800; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
   box-shadow: 0 0 0 2px #111111, 0 0 6px rgba(0, 0, 0, 0.7);
 }
-.cad-rate-section-label {
-  font-size: 11px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--text-soft);
-  margin-bottom: 4px;
+.cad-rate-section-label, .propelio-rate-section-label {
+  font-size: 11px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.04em; color: var(--text-soft); margin-bottom: 4px;
 }
-.cad-popup-rating {
-  margin: 6px 0;
-}
-.cad-rate-buttons {
-  display: flex;
-  gap: 4px;
-}
+.cad-popup-rating { margin: 6px 0; }
+.cad-rate-buttons { display: flex; gap: 4px; }
 .cad-rate-btn {
-  /* mirrors .propelio-rate-btn styling */
-  padding: 4px 8px;
-  font-size: 11px;
-  font-weight: 600;
-  border-radius: 3px;
-  cursor: pointer;
+  padding: 4px 8px; font-size: 11px; font-weight: 600;
+  border-radius: 3px; cursor: pointer;
   border: 1px solid rgba(255, 255, 255, 0.14);
-  background: transparent;
-  color: var(--text-soft);
+  background: transparent; color: var(--text-soft);
 }
 .cad-rate-btn.good.is-active { background: rgba(220, 38, 38, 0.15); color: #ff6b6b; border-color: #dc2626; }
 .cad-rate-btn.bad.is-active { background: rgba(17, 17, 17, 0.35); color: #f5e9c8; border-color: #111111; }
@@ -379,81 +473,91 @@ Adds to `cadRatingLayer` and registers in `cadRatingLayerByKey` for later update
 .cad-rate-hint { font-size: 10px; color: var(--text-soft); font-style: italic; margin-top: 2px; }
 ```
 
-Also: mirror the same `.propelio-rate-section-label` class for the COMP rating section (visual symmetry in popups that show both).
+### 5. Comp click path update — `frontend/map.js`
 
-### 5. No changes (intentional)
+Update the existing popup click delegation at `map.js:5463-5487` to ALSO use:
+- `_setCompRatingMarkOptimistic` BEFORE the async `ratePropelioComp` call
+- Per-key mutation versioning (kind = "comp", key = `compKey`)
+- Same revert-only-if-still-latest pattern as parcels
 
-- No new sidebar block (per KK)
-- No filter chip integration (per non-goals)
-- No new CSV columns (rating affects row inclusion only)
+Verification: Good Comps sidebar block (just-shipped, commit `cc7ee14`) subscribes to `applyPropelioClientFilters` re-render. Since the optimistic helper mutates the cache + the subsequent successful `ratePropelioComp` still triggers `applyPropelioClientFilters`, the Good Comps section continues to reflect changes correctly. No regression.
 
 ## Sequencing
 
-1. Schema first (idempotent CREATE) — safe to deploy without any code changes
-2. Backend endpoint + hydrate join + CSV exclusion + fork copy — all backend, can ship in one commit
-3. Frontend popup HTML + click delegation + map markers + optimistic UI — all frontend, ships together
+1. Schema (idempotent CREATE) — safe to deploy alone
+2. Backend: ownership helper + rate endpoint + hardening of existing comp rate + hydrate + CSV exclusion + fork copy — backend commit
+3. Frontend: popup HTML + rate function + click delegation + optimistic helper extension + cadRatingLayer + lifecycle wiring + CSS — frontend commit
+4. Comp click path update (use optimistic helper + versioning) — bundled in the frontend commit
 
-Three commits within one PR is reasonable.
+Three commits in one PR is reasonable.
 
 ## Verification plan
 
 ### Visual / behavior
 
-1. Open a CAD parcel popup with a saved area loaded → "Parcel rating" section visible with [Good] [Bad] [Clear] buttons.
-2. Open the same parcel popup with no saved area loaded → buttons disabled, hint shows "Save area to enable ratings".
-3. Click Good on a parcel → red ✓ appears INSTANTLY at parcel centroid (no perceptible lag). Popup button highlights as active.
-4. Refresh the page, reload the saved area → red ✓ still visible on the parcel.
-5. Click Bad on a different parcel → black ✗ appears INSTANTLY at parcel centroid. Polygon NOT dimmed (per spec — only the X marker).
+1. Open CAD parcel popup with saved area loaded → "Parcel rating" buttons render. If matched comp also present → both sections appear with explicit section labels.
+2. Open parcel popup with saved area loaded but NO matched comp → "Parcel rating" buttons render WITHOUT a label (single-block).
+3. Open parcel popup with NO saved area loaded → buttons disabled with "Save area to enable ratings" hint.
+4. Click Good on a parcel → red ✓ appears INSTANTLY at parcel centroid. Popup Good button highlights.
+5. Click Bad on a different parcel → black ✗ appears INSTANTLY. Parcel polygon NOT dimmed (only the marker).
 6. Click Clear on a rated parcel → marker disappears INSTANTLY.
-7. Open a parcel popup with a matched comp → BOTH "Parcel rating" and "Comp rating" sections visible, each with their own [Good] [Bad] [Clear] row. Rating one does NOT affect the other.
+7. Refresh page, reload saved area → ratings restore correctly on the map.
 
 ### Race-condition (bundled fix)
 
-8. Fresh page load, fresh saved area, click Good on a comp → checkmark appears INSTANTLY (not after 200-500ms lag).
-9. Same for parcel Good — instant.
-10. Disconnect network in DevTools → click Good on a parcel → mark appears optimistically, then reverts within a second + toast: "Rating update failed — reverted".
+8. Fresh page load, click Good on a comp for the first time → checkmark appears INSTANTLY (not after ~300-500ms lag).
+9. Same for first parcel Good → instant.
+10. DevTools throttle network to slow 3G → click Good → mark appears immediately, server resolves in background, marker stays (server success).
+11. DevTools disconnect network → click Good → mark appears immediately, then reverts within ~1s + toast "Rating update failed — reverted".
+12. Rapid 3-click sequence on same parcel (good → bad → clear within 200ms) → final state matches the LAST click; no flickering or wrong-state revert. Tests the per-key mutation versioning.
 
-### CSV exclusion
+### CSV exclusion — comp-wins-absolute
 
-11. Rate a parcel Bad → download CSV → that parcel's row is NOT present.
-12. Rate a parcel Good → CSV row IS present.
-13. Parcel rated Good but has a matched bad-rated comp → row NOT present (either-bad-wins).
-14. Parcel rated Bad but no comp link → row NOT present.
+13. Parcel with NO matched comp, rated Good → CSV row present.
+14. Parcel with NO matched comp, rated Bad → CSV row NOT present.
+15. Parcel with matched Bad comp, rated Good directly → CSV row NOT present (comp wins).
+16. Parcel with matched Good comp, rated Bad directly → CSV row PRESENT (comp wins).
+17. Parcel with no rating at all → CSV row present.
 
 ### Saved-area lifecycle
 
-15. Save area → rate some parcels → close + reopen → ratings restore correctly.
-16. Fork the saved area → forked area shows the same parcel ratings (per fork-copy block).
-17. Delete the saved area → all parcel_ratings rows for that workspace are deleted (CASCADE).
+18. Save area → rate some parcels → close + reopen → ratings restore.
+19. Fork the saved area → forked area shows the same parcel ratings (per fork-copy block).
+20. Delete the saved area → all parcel_ratings rows for that workspace cascade-deleted.
+
+### Security / access control
+
+21. User A creates workspace, rates a parcel → User B (logged in, different account) calls POST /api/parcels/rate with A's area_id → 403 Forbidden.
+22. Same test for /api/propelio/comp/rate → 403 Forbidden (NEW — fixes existing weakness).
+23. Public parcel endpoint /api/parcel/{county}/{account_num} → response has NO user_rating field (verified). Popup opened in browse mode shows no rating buttons (or disabled).
 
 ### Multi-county
 
-18. Test parcel ratings in all 4 counties (DCAD, TAD, Collin, Denton) — confirm county is properly normalized in the FK key.
+24. Test parcel ratings in all 4 counties (DCAD, TAD, Collin, Denton) — confirm county lowercase normalization in the FK key.
 
 ### Cleanup gates (merge-gate)
 
-19. `git grep _showBanner` returns zero results (must use `_showToast`).
-20. No unintentional changes to `comp_ratings` schema or endpoint behavior.
-21. No new sidebar elements added.
+25. `git grep _showBanner` returns zero results.
+26. `git grep "comp_rating_via_comp"` returns expected refs only (no shadowed old logic).
+27. No unintentional changes to comp_ratings schema or endpoint behavior beyond the ownership check addition.
+28. cadRatingLayer cleared on workspace switch (no stale markers from previous workspace).
 
 ## Risk
 
 | Risk | Severity | Mitigation |
 |---|---|---|
-| Optimistic UI mark gets out of sync if server denies the rating | Medium | On failure: revert the mark by reading the pre-click rating from cache + showing toast |
-| Multiple polygon-shapes for same parcel (duplicate rows) → multiple markers stack | Low | `cadRatingLayerByKey` keyed on `${county}:${account_num}` ensures one marker per parcel even if rendered multiple times |
-| Parcel centroid calculation fails on degenerate polygons → marker appears at wrong location | Low | Reuse existing centroid logic from `_maybeAddGoodCompMark`'s footprint.getBounds().getCenter() fallback chain |
-| Fork copy adds parcel_ratings rows BEFORE the new workspace_id row exists → FK violation | Medium | Sequence: INSERT saved_area → capture new_area_id → INSERT parcel_ratings in same transaction (same pattern as comp_ratings fork copy at line 5492) |
-| CSV exclusion double-counts bad rows (a row excluded once by comp-bad, then again by parcel-bad) | Low | `continue` exits the row loop early; either-bad-wins is naturally idempotent |
-| Optimistic mark survives a failed POST if revert path errors | Medium | Wrap revert in its own try/catch; toast even if revert fails silently |
-| New cadRatingLayer obscures click-targets if z-index isn't right | Medium | Match z-index pattern of propelioCompLayer; markers are non-interactive (`interactive: false, keyboard: false`) |
-| Bad-X marker overlaps a tagged Good ✓ marker on the same parcel center (mid-toggle) | Low | Optimistic update REMOVES previous mark before adding new one; visual gap is sub-frame |
-| Existing `_buildRatingButtonsHtml` for comps doesn't have a section label — adding "Comp rating" header to it MIGHT shift unrelated layouts | Low | Cautious change: add the label inside `.propelio-popup-rating` wrapper; doesn't affect existing CSS dimensions |
-| Hydrating user_rating on every parcel read adds a DB roundtrip per request | Low | One small lookup table per workspace per request; cheap with the indexed `idx_parcel_ratings_workspace` |
+| Existing comp rate endpoint suddenly returns 403 for users who were rating shared workspaces (non-owners) | High | If any production usage exists where non-owners rate shared workspaces, the ownership check would break it. Mitigation: check Mike's user table — only one user account is "owner" (Mike); VAs may be on different role. If VAs are accessing shared workspaces and need to rate, we may need a shared-write policy. Confirm via prod query before deploying. |
+| Public endpoint hydrate gap causes a visual regression in browse-mode popups (no rating buttons where they previously appeared) | Low | Per investigation, browse-mode popups currently DON'T have parcel rating buttons (those are new). Comp rating buttons only appear when matched comp present, which requires a workspace. Confirmed no regression. |
+| Optimistic mark survives a failed POST if revert path errors | Medium | Wrap revert in try/catch; the user-facing toast still fires. Marker simply remains in optimistic state — fine because mutation versioning prevents double-revert. |
+| cadRatingLayer not cleared on workspace switch → stale marks persist | High | EXPLICIT lifecycle wiring at all relevant transition points (verification step 28). Easy to verify by smoke-test. |
+| Multipolygon centroel calculation: featureCentroidLngLat returns null on degenerate geometry | Low | Fallback chain: bounds.getCenter → featureCentroidLngLat → properties.lat/lng → null (no marker). Marker absence is graceful. |
+| Per-key mutation versioning races with applyPropelioClientFilters full re-render | Medium | applyPropelioClientFilters re-creates the comp layer from cache via clearLayers() + re-add. cadRatingLayer is INDEPENDENT — it's NOT cleared by applyPropelioClientFilters. Comp layer's optimistic mark may briefly flicker during re-render but re-appears immediately from cache. Acceptable. |
+| Schema migration fails if saved_areas.area_id has any orphaned cached_jobs/etc referencing it | Low | CREATE TABLE has nothing to migrate from. FK reference to saved_areas just means parcel_ratings can't insert non-existent workspace_id — no migration issue. |
+| Fork copy fails if source workspace has zero parcel_ratings (INSERT…SELECT returns 0 rows) | Low | Acceptable behavior — 0 rows copied is correct for a fresh source area. |
 
 ## Rollback
 
-Single-PR revert. The schema migration (`CREATE TABLE IF NOT EXISTS`) is idempotent and safe to leave in place; rollback only reverts the code paths. Data in parcel_ratings is orphaned but inert until the feature reships.
+Single-PR revert. The schema migration is idempotent and safe to leave in place; rollback only reverts code. Data in parcel_ratings becomes orphaned but inert. The ownership check addition to the comp rate endpoint is a one-line change — easy to revert if it breaks Mike's workflow.
 
 ## Out of scope
 
@@ -464,48 +568,35 @@ Single-PR revert. The schema migration (`CREATE TABLE IF NOT EXISTS`) is idempot
 - CSV columns for parcel rating value
 - Polygon recoloring based on rating
 - Animations on mark add/remove
-- Notification when a rating changes elsewhere
-- Sound effects (just in case)
+- Shared workspace WRITE access (use fork)
+- Public endpoint user_rating hydrate (security)
+- Backfill historical ratings
 
-## Open items for Copilot deep-dive critique
+## Open items for second-round Copilot critique (optional)
 
-1. **`_load_parcel_ratings_for_workspace` placement.** Does it belong in `api/main.py` next to the existing `_job_share_id` helpers, or in a new module? What's the cleanest hydrate-on-parcel-read pattern?
+1. **Prod check on multi-user ratings.** Before deploying the comp rate endpoint ownership check, confirm Mike's user table: is there any current non-owner rating activity that would break? Run `SELECT DISTINCT rated_by_user_id, COUNT(*) FROM comp_ratings WHERE workspace_id NOT IN (SELECT area_id FROM saved_areas WHERE user_id = rated_by_user_id) GROUP BY 1;`. If non-zero, the check breaks an existing workflow.
 
-2. **All parcel-emitting endpoints.** Audit: where do parcel features get serialized? `/api/analyze`, `/api/areas/{area_id}` GET, `/api/area/by-share-id/{share_id}`, polygon analyze endpoint, more? Each needs the `user_rating` hydrate. List the full set with file:line.
+2. **All authenticated parcel-emit sites covered?** Spec lists `main.py:2964, 987, 4709`. Confirm no other authenticated endpoint emits parcel features that should hydrate rating data.
 
-3. **The "all parcels" cache on frontend.** `_updateParcelUserRatingInCache` assumes `allAnalysisFeatures` is the canonical client-side parcel cache. Confirm name + structure. Also confirm whether the cache survives re-render or gets rebuilt.
+3. **Optimistic helper extraction.** Spec extracts `_setRatingMarkOptimistic` as a shared helper with a `kind` parameter. Alternative: two parallel functions (comp + parcel) with no shared base. Worth the extraction or keep separate?
 
-4. **`makePopupHtml(p)` mutation site.** Where exactly to insert `_buildParcelRatingButtonsHtml(parcel)`? Before the matched-comp section, after? Should it be in a different visual position when the popup is for a parcel-only vs parcel-with-comp scenario?
+4. **Lifecycle wiring depth.** cadRatingLayer must clear on: parcel redraw (7179-7186), draw-clear (8234), workspace switch (multiple sites). Any more transitions to wire? Specifically: search-area-changed? Pan/zoom-driven viewport refresh in browse mode (probably no — browse mode doesn't show ratings)?
 
-5. **`_maybeAddParcelRatingMark` invocation sites.** Where is the parcel-polygon render loop that should call this? Per-feature on geoJSON layer creation? Or a separate post-render pass?
+5. **CSV semantics edge case.** Comp-wins-absolute means a Bad comp excludes a parcel even if the user explicitly rated the parcel Good (overriding the comp). Surface to the user somehow (a "comp-overridden" indicator)?
 
-6. **Comp rating optimistic fix collision.** If we apply optimistic UI to comp rating clicks too, does the existing `applyPropelioClientFilters` post-server full re-render conflict (e.g., briefly removes the optimistic mark and re-adds it)? Need to confirm idempotent re-add — `cadRatingLayerByKey` / `propelioCompLayerByKey` handle this but verify.
+6. **Frontend cache name confirmation.** Spec assumes `allAnalysisFeatures` at map.js:573 is canonical. Copilot confirmed. Any edge case where ratings should hydrate into a DIFFERENT cache (e.g., a secondary cache for browse mode)?
 
-7. **Edge case: race between optimistic mark and server-confirm full re-render.** User clicks Good → optimistic mark added → server responds 200 → applyPropelioClientFilters re-renders → during the clearLayers(), the optimistic mark is wiped → re-added when render reaches the rated comp. Brief visual flicker possible. Acceptable? Or should optimistic marks register in a side-layer that survives the comp layer's clearLayers()?
-
-8. **Section labels for parcel-only popups.** When the popup is for a parcel WITHOUT a matched comp, the "Parcel rating" label might feel redundant (the only rating block). Better: show the label only when both sections coexist, otherwise hide it?
-
-9. **`_buildParcelRatingButtonsHtml` parcel field name.** Is `source_county` or `county` the canonical name on the parcel object? Spec hedges with `parcel?.source_county || parcel?.county`. Confirm via the parcel data shape.
-
-10. **County normalization.** Spec says `.toLowerCase()` everywhere county is keyed. Confirm all the parcel-feature emit paths normalize the same way.
-
-11. **CSV `parcel_rating_direct_by_key` build.** Spec proposes building it at `_run_download_csv` top alongside the existing `parcel_rating_by_key`. Confirm there's a clean insertion point and the dict's lookup pattern at line 4133 will work without restructuring the loop.
-
-12. **Schema migration ordering.** New table references `saved_areas(area_id)` and `users(id)`. Confirm both tables exist at the bootstrap point where the new CREATE will live.
-
-13. **Bonus race-condition fix scope.** Spec applies optimistic UI to both parcel AND comp ratings. Does the existing comp rating fix introduce regressions in the Good Comps sidebar section (just shipped) that subscribes to `applyPropelioClientFilters`? It should still work since the section re-renders from cache + the cache updates synchronously, but verify.
-
-14. **Anything else** — anti-patterns, missed scope, file:line cleanup we should bundle. Specifically: if the existing comp click handler at `map.js:6499-6524` has any subtleties (e.g., already-active button toggle behavior), make sure the parcel handler mirrors them faithfully.
+7. **Anything else.**
 
 ## Implementation effort estimate
 
 - Schema migration: 0.25 day
-- Backend endpoint + hydrate + CSV exclusion + fork copy: 1 day
-- Frontend popup HTML + click delegation + cadRatingLayer + markers: 0.75 day
-- Race-condition optimistic fix (parcel + comp): 0.5 day
+- Backend ownership helper + new rate endpoint + comp endpoint hardening + hydrate + CSV exclusion + fork copy: 1 day
+- Frontend popup HTML + rate function + click delegation + optimistic helper extension + cadRatingLayer + lifecycle wiring + CSS: 1 day
+- Comp click path update + race-fix bundled: 0.25 day
 - Verification + preview iterate: 0.5 day
 - **Total: ~3 days**
 
 ## Status
 
-**v1 draft.** Pending Copilot deep-dive critique. After Copilot's response and KK product calls on any open items → v2 lock → implementation.
+**v2 LOCKED.** Pending final KK review of the spec file. After approval → implementation (Claude codes; Copilot reviews; per the workflow override KK chose earlier).
