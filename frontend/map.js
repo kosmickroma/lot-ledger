@@ -4793,25 +4793,44 @@ function _findMatchedCompForAccount(accountNum) {
   return comps.find((c) => String(c?.parcel_account_num || "").trim() === account) || null;
 }
 
-// Render the Good / Bad / Clear rating button row for a comp. Always
-// renders the row so the affordance is visible; when no saved area is
-// loaded or the comp lacks a stable archive key, the buttons are
-// disabled and a "Save area to enable ratings" hint is shown beneath.
-function _buildRatingButtonsHtml(comp) {
+// Render the Good / Bad / Clear rating button row. Used for both
+// standalone-comp contexts (e.g., sidebar comp list — pass comp only)
+// AND unified parcel-popup contexts where a parcel + optional matched
+// comp BOTH get rated by the same click (pass both). Per the 2026-05-24
+// design call: ONE button row per popup, not two — even when both a
+// parcel and a matched comp exist. The click handler at the bottom of
+// this file reads the emitted data attrs and writes to whichever rating
+// tables apply (parcel_ratings + comp_ratings together when both keys
+// are present; just one when only one is present).
+function _buildRatingButtonsHtml(comp, parcel) {
   const compKey = String(comp?.comp_address_key || "").trim();
-  const currentRating = comp?.user_rating === "good" || comp?.user_rating === "bad" ? comp.user_rating : null;
-  const ratingsEnabled = Boolean(_currentLoadedAreaId && compKey);
+  const parcelCounty = String(parcel?.source_county || parcel?.county || "").trim().toLowerCase();
+  const parcelAccount = String(parcel?.account_num || "").trim();
+  const hasComp = Boolean(compKey);
+  const hasParcel = Boolean(parcelCounty && parcelAccount);
+  if (!hasComp && !hasParcel) return "";
+  // Active rating reflected from whichever source we have. When both are
+  // present, parcel rating takes priority for display (since the button
+  // primarily reflects the parcel-level user judgment).
+  const sourceRating = hasParcel
+    ? parcel?.user_rating
+    : comp?.user_rating;
+  const currentRating = sourceRating === "good" || sourceRating === "bad" ? sourceRating : null;
+  const ratingsEnabled = Boolean(_currentLoadedAreaId && (hasComp || hasParcel));
   const goodActive = ratingsEnabled && currentRating === "good" ? " is-active" : "";
   const badActive = ratingsEnabled && currentRating === "bad" ? " is-active" : "";
-  const keyAttr = _propelioEscape(compKey);
+  const compAttr = hasComp ? ` data-comp-key="${_propelioEscape(compKey)}"` : "";
+  const parcelAttrs = hasParcel
+    ? ` data-county="${_propelioEscape(parcelCounty)}" data-account-num="${_propelioEscape(parcelAccount)}"`
+    : "";
   const disabledAttr = ratingsEnabled ? "" : " disabled";
   const wrapTitle = ratingsEnabled ? "" : ' title="Save this area to enable ratings"';
   const hintHtml = ratingsEnabled ? "" : `<div class="propelio-rate-hint">Save area to enable ratings</div>`;
   return `
-      <div class="propelio-popup-rating${ratingsEnabled ? "" : " is-disabled"}" data-comp-key="${keyAttr}"${wrapTitle}>
-        <button type="button" class="propelio-rate-btn good${goodActive}" data-rating="good" data-comp-key="${keyAttr}"${disabledAttr}>Good</button>
-        <button type="button" class="propelio-rate-btn bad${badActive}" data-rating="bad" data-comp-key="${keyAttr}"${disabledAttr}>Bad</button>
-        <button type="button" class="propelio-rate-btn clear" data-rating="clear" data-comp-key="${keyAttr}"${disabledAttr}>Clear</button>
+      <div class="propelio-popup-rating${ratingsEnabled ? "" : " is-disabled"}"${compAttr}${parcelAttrs}${wrapTitle}>
+        <button type="button" class="propelio-rate-btn good${goodActive}" data-rating="good"${compAttr}${parcelAttrs}${disabledAttr}>Good</button>
+        <button type="button" class="propelio-rate-btn bad${badActive}" data-rating="bad"${compAttr}${parcelAttrs}${disabledAttr}>Bad</button>
+        <button type="button" class="propelio-rate-btn clear" data-rating="clear"${compAttr}${parcelAttrs}${disabledAttr}>Clear</button>
       </div>${hintHtml}`;
 }
 
@@ -5664,31 +5683,10 @@ function _maybeAddParcelRatingMark(parcel, footprint, fallbackLatLng) {
   cadRatingLayerByKey.set(key, marker);
 }
 
-function _buildParcelRatingButtonsHtml(parcel, hasMatchedComp) {
-  const county = String(parcel?.source_county || parcel?.county || "").trim().toLowerCase();
-  const accountNum = String(parcel?.account_num || "").trim();
-  const ratingsEnabled = Boolean(_currentLoadedAreaId && county && accountNum);
-  const currentRating = parcel?.user_rating === "good" || parcel?.user_rating === "bad" ? parcel.user_rating : null;
-  const goodActive = ratingsEnabled && currentRating === "good" ? " is-active" : "";
-  const badActive = ratingsEnabled && currentRating === "bad" ? " is-active" : "";
-  const countyAttr = _propelioEscape(county);
-  const acctAttr = _propelioEscape(accountNum);
-  const disabledAttr = ratingsEnabled ? "" : " disabled";
-  const hintHtml = ratingsEnabled ? "" : `<div class="cad-rate-hint">Save area to enable ratings</div>`;
-  // Section label only when popup has BOTH parcel + matched-comp blocks
-  // (visual symmetry). Hidden in parcel-only popups (per spec §3A).
-  const labelHtml = hasMatchedComp ? `<div class="cad-rate-section-label">Parcel rating</div>` : "";
-  return `
-    <div class="cad-popup-rating${ratingsEnabled ? "" : " is-disabled"}" data-county="${countyAttr}" data-account-num="${acctAttr}">
-      ${labelHtml}
-      <div class="cad-rate-buttons">
-        <button type="button" class="cad-rate-btn good${goodActive}" data-rating="good" data-county="${countyAttr}" data-account-num="${acctAttr}"${disabledAttr}>Good</button>
-        <button type="button" class="cad-rate-btn bad${badActive}" data-rating="bad" data-county="${countyAttr}" data-account-num="${acctAttr}"${disabledAttr}>Bad</button>
-        <button type="button" class="cad-rate-btn clear" data-rating="clear" data-county="${countyAttr}" data-account-num="${acctAttr}"${disabledAttr}>Clear</button>
-      </div>
-      ${hintHtml}
-    </div>`;
-}
+// (_buildParcelRatingButtonsHtml removed 2026-05-24 — replaced by
+// _buildRatingButtonsHtml accepting an optional `parcel` arg, which
+// emits a SINGLE button row with both data-comp-key + data-county +
+// data-account-num and writes to both rating tables on click.)
 
 async function rateParcel(county, accountNum, rating) {
   const areaId = (typeof _currentLoadedAreaId === "string" ? _currentLoadedAreaId : "") || "";
@@ -5758,43 +5756,10 @@ function _setCompRatingMarkOptimistic(compKey, rating) {
   // immediate feedback; canonical render takes over within ~150-500ms.
 }
 
-// Document-level click delegation for parcel rating buttons. Mirrors the
-// existing comp rating handler at ~line 6499, with per-key mutation
-// versioning for safe rollback on rapid clicks (spec v2 §3C).
-document.addEventListener("click", (ev) => {
-  const btn = ev.target.closest(".cad-rate-btn");
-  if (!btn) return;
-  const county = btn.getAttribute("data-county");
-  const accountNum = btn.getAttribute("data-account-num");
-  const rating = btn.getAttribute("data-rating");
-  if (!county || !accountNum) return;
-  const newRating = rating === "clear" ? null : rating;
-  const mutId = `${county}:${accountNum}`;
-  const seq = _bumpMutationSeq("parcel", mutId);
-  const previousRating = _getCachedParcelRating(county, accountNum);
-
-  // Optimistic popup button styling
-  const container = btn.parentElement;
-  if (container) {
-    container.querySelectorAll(".cad-rate-btn").forEach((b) => {
-      if (rating === "good") b.classList.toggle("is-active", b.classList.contains("good"));
-      else if (rating === "bad") b.classList.toggle("is-active", b.classList.contains("bad"));
-      else b.classList.remove("is-active");
-    });
-  }
-
-  // Optimistic map mark (synchronous — fixes the "first checkmark slow" lag)
-  _setParcelRatingMarkOptimistic(county, accountNum, newRating);
-
-  void rateParcel(county, accountNum, newRating).then((ok) => {
-    if (!ok && _isLatestMutation("parcel", mutId, seq)) {
-      // Revert only if this is still the latest mutation. Rapid repeat
-      // clicks bump seq; later click's state wins.
-      _setParcelRatingMarkOptimistic(county, accountNum, previousRating);
-      _showToast("Rating update failed — reverted", "error");
-    }
-  });
-});
+// (Old .cad-rate-btn handler removed 2026-05-24 — replaced by unified
+// .propelio-rate-btn handler below, which now reads both data-comp-key
+// AND data-county/data-account-num and writes to whichever rating tables
+// apply on a single click.)
 
 function _renderPropelioComps(data) {
   propelioCompLayer.clearLayers();
@@ -6785,16 +6750,16 @@ let propelioStickyBtn = null;
   document.addEventListener("click", (ev) => {
     const btn = ev.target.closest(".propelio-rate-btn");
     if (!btn) return;
-    const key = btn.getAttribute("data-comp-key");
+    const compKey = btn.getAttribute("data-comp-key") || "";
+    const parcelCounty = (btn.getAttribute("data-county") || "").trim().toLowerCase();
+    const parcelAccount = (btn.getAttribute("data-account-num") || "").trim();
     const rating = btn.getAttribute("data-rating");
-    if (!key) return;
+    const hasComp = Boolean(compKey);
+    const hasParcel = Boolean(parcelCounty && parcelAccount);
+    if (!hasComp && !hasParcel) return;
     const newRating = rating === "clear" ? null : rating;
-    // Versioned mutation — rapid repeat clicks bump seq so a stale
-    // failure rollback doesn't overwrite the user's latest intent.
-    _bumpMutationSeq("comp", key);
 
-    // Optimistically toggle is-active classes on sibling buttons so the
-    // popup/panel shows the new rating's highlight immediately.
+    // Optimistic popup button highlighting — instant feedback
     const container = btn.parentElement;
     if (container) {
       container.querySelectorAll(".propelio-rate-btn").forEach((b) => {
@@ -6808,11 +6773,29 @@ let propelioStickyBtn = null;
       });
     }
 
-    // Synchronous map mark — the actual race-fix. User sees the ✓ before
-    // the async POST resolves.
-    _setCompRatingMarkOptimistic(key, newRating);
+    // Per the 2026-05-24 design call: one click writes to BOTH
+    // parcel_ratings AND comp_ratings when both keys are present.
+    // Independent versioning per (kind, id) so a comp-only fast retry
+    // doesn't roll back a parcel-only mark and vice versa.
 
-    void ratePropelioComp(key, newRating);
+    if (hasComp) {
+      _bumpMutationSeq("comp", compKey);
+      _setCompRatingMarkOptimistic(compKey, newRating);
+      void ratePropelioComp(compKey, newRating);
+    }
+
+    if (hasParcel) {
+      const mutId = `${parcelCounty}:${parcelAccount}`;
+      const seq = _bumpMutationSeq("parcel", mutId);
+      const previousRating = _getCachedParcelRating(parcelCounty, parcelAccount);
+      _setParcelRatingMarkOptimistic(parcelCounty, parcelAccount, newRating);
+      void rateParcel(parcelCounty, parcelAccount, newRating).then((ok) => {
+        if (!ok && _isLatestMutation("parcel", mutId, seq)) {
+          _setParcelRatingMarkOptimistic(parcelCounty, parcelAccount, previousRating);
+          _showToast("Rating update failed — reverted", "error");
+        }
+      });
+    }
   });
 })();
 
@@ -7951,11 +7934,12 @@ function _buildParcelDetailPanelHtml(p, matchedComp) {
     : null;
   const headerDelta = compDelta || listingDelta;
   const compDetails = _getParcelPanelCompDetails(effectiveMatchedComp);
-  const ratingButtonsHtml = effectiveMatchedComp ? _buildRatingButtonsHtml(effectiveMatchedComp) : "";
-  // Parcel rating block on the side panel — same component used by
-  // makePopupHtml inline popups. Section label hidden in parcel-only
-  // mode (no matched comp), shown when both blocks exist.
-  const parcelRatingButtonsHtml = _buildParcelRatingButtonsHtml(p, Boolean(effectiveMatchedComp));
+  // Unified rating buttons — one row that rates BOTH the parcel AND the
+  // matched comp (when present) on click. Per 2026-05-24 design call:
+  // single set of buttons, comp-style visual, dual-write semantics.
+  // _buildRatingButtonsHtml renders even when there's no matched comp
+  // as long as the parcel has identifying fields (county + account_num).
+  const ratingButtonsHtml = _buildRatingButtonsHtml(effectiveMatchedComp, p);
   const realtorLinkHtml = compDetails?.mls
     ? `<a class="propelio-popup-realtor-link" href="https://www.realtor.com/realestateandhomes-search/MLSID-${encodeURIComponent(compDetails.mls)}" target="_blank" rel="noopener noreferrer">Look up MLS# ${_propelioEscape(compDetails.mls)} on Realtor.com</a>`
     : "";
@@ -8119,11 +8103,8 @@ function _buildParcelDetailPanelHtml(p, matchedComp) {
         </section>
       </div>
       <section class="parcel-panel-actions">
-        <div class="parcel-panel-action-slot parcel-panel-action-parcel-rating">
-          ${parcelRatingButtonsHtml}
-        </div>
         <div class="parcel-panel-action-slot parcel-panel-action-ratings">
-          ${ratingButtonsHtml || '<span class="parcel-panel-action-muted">No MLS comp to rate</span>'}
+          ${ratingButtonsHtml || '<span class="parcel-panel-action-muted">Save area to rate</span>'}
         </div>
         <div class="parcel-panel-action-slot parcel-panel-action-save">
           ${saveLinkHtml}
@@ -8347,11 +8328,9 @@ function makePopupHtml(p) {
 
   // matchedComp resolved above (drives both the header recolor and these).
   const propelioSectionHtml = matchedComp ? _buildPropelioCompSectionHtml(matchedComp) : "";
-  const ratingButtonsHtml = matchedComp ? _buildRatingButtonsHtml(matchedComp) : "";
-  // Parcel rating block — workspace-scoped Good/Bad/Clear on the CAD
-  // parcel itself, independent of any matched comp. Section label hidden
-  // in parcel-only popups (no matched comp) per spec v2 §3A.
-  const parcelRatingButtonsHtml = _buildParcelRatingButtonsHtml(p, Boolean(matchedComp));
+  // Unified rating buttons (dual-write parcel + matched-comp). Per
+  // 2026-05-24 design call.
+  const ratingButtonsHtml = _buildRatingButtonsHtml(matchedComp, p);
 
   return `
       <div class="popup">
@@ -8389,7 +8368,6 @@ function makePopupHtml(p) {
           ${redfinListingRow}
           ${soldCompRows}
         </table>
-        ${parcelRatingButtonsHtml}
         ${propelioSectionHtml}
         ${ratingButtonsHtml}
         ${p.account_num ? `<div style="margin-top:8px;display:flex;gap:6px;align-items:center;justify-content:flex-end;font-size:11px;padding-top:6px;border-top:1px solid #e2e8f0;">
