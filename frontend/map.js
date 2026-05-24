@@ -2855,8 +2855,6 @@ async function _hydratePropelioFromArchive(savedAreaId) {
   window._propelioLast = null;
   _updatePropelioStatusCounts();
   propelioCompLayer.clearLayers();
-  cadRatingLayer.clearLayers();
-  cadRatingLayerByKey.clear();
   propelioCompLayerByKey.clear();
   renderPropelioCompList([]);
   propelioCmaChip.hide();
@@ -5553,6 +5551,17 @@ let propelioPriceMarkers = [];
 // the badge on top of the dot's latlng.
 function _maybeAddGoodCompMark(comp, footprint, fallbackLatLng) {
   if (comp?.user_rating !== "good") return;
+  // Dedup: if the comp's matched parcel ALSO has its own rating, skip
+  // the comp checkmark — the parcel mark will render on the same spot
+  // via _maybeAddParcelRatingMark and we don't want two stacked ✓s.
+  // Per KK 2026-05-24: "I am seeing two check marks on good comps...
+  // They should visually only get one bud."
+  const matchedCounty = String(comp?.parcel_county || "").trim().toLowerCase();
+  const matchedAccount = String(comp?.parcel_account_num || "").trim();
+  if (matchedCounty && matchedAccount) {
+    const parcelRating = _getCachedParcelRating(matchedCounty, matchedAccount);
+    if (parcelRating === "good" || parcelRating === "bad") return;
+  }
   let target = null;
   if (footprint && typeof footprint.getBounds === "function") {
     try {
@@ -5792,9 +5801,14 @@ function _setCompRatingMarkOptimistic(compKey, rating) {
 // apply on a single click.)
 
 function _renderPropelioComps(data) {
+  // NOTE 2026-05-24: do NOT clear cadRatingLayer here. _renderPropelioComps
+  // is a comp-only re-render path (fires on every rating click + filter
+  // change). Clearing the parcel rating layer here wipes the on-screen
+  // marks the user just set on OTHER parcels — KK's "marked a comp bad
+  // and it wiped out all the other stuff" bug. Parcel layer lifecycle is
+  // owned by renderFeatures (line ~8606) and the clear-all-map-layers
+  // path near line 9776, NOT by comp re-renders.
   propelioCompLayer.clearLayers();
-  cadRatingLayer.clearLayers();
-  cadRatingLayerByKey.clear();
   propelioCompLayerByKey.clear();
   propelioPriceMarkers = [];
   if (!data || !Array.isArray(data.comps)) return { total: 0, footprintCount: 0, fallbackCount: 0 };
@@ -6810,7 +6824,12 @@ let propelioStickyBtn = null;
 
     if (hasComp) {
       _bumpMutationSeq("comp", compKey);
-      _setCompRatingMarkOptimistic(compKey, newRating);
+      // Suppress comp optimistic mark when a parcel rating is ALSO being
+      // written this click — the parcel mark covers the same spot and
+      // two stacked ✓s is the bug KK reported 2026-05-24.
+      if (!hasParcel) {
+        _setCompRatingMarkOptimistic(compKey, newRating);
+      }
       void ratePropelioComp(compKey, newRating);
     }
 
@@ -7084,8 +7103,6 @@ function _showPropelioPolygonButton(_latlngs) {
 async function firePropelioFetch(addressString) {
   if (!addressString || typeof addressString !== "string") return;
   propelioCompLayer.clearLayers();
-  cadRatingLayer.clearLayers();
-  cadRatingLayerByKey.clear();
   propelioCmaChip.hide();
   try {
     const resp = await fetch(`/api/propelio/by-address?address=${encodeURIComponent(addressString)}`);
@@ -9650,10 +9667,9 @@ map.on("draw:created", async (e) => {
   lastPolygon = polygon;
   // Clear any Propelio comps + chip from a prior polygon — those comps
   // were filtered to a different shape and shouldn't linger when the
-  // user redraws.
+  // user redraws. Parcel rating layer is left alone here — renderFeatures
+  // will reconcile it once the new analyze response lands.
   propelioCompLayer.clearLayers();
-  cadRatingLayer.clearLayers();
-  cadRatingLayerByKey.clear();
   propelioCompLayerByKey.clear();
   renderPropelioCompList([]);
   propelioCmaChip.hide();
