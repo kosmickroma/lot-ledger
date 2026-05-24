@@ -674,10 +674,16 @@ function _sameParcelIdentity(a, b) {
 //
 // TAD + DCAD will appear without a city until KK lands a city-resolver
 // for those two (memory: project_save_vs_update_model notes scope).
-function _formatPropertyAddress(county, rawAddr, rawCity) {
+function _formatPropertyAddress(county, rawAddr, rawCity, _rawOwnerCity) {
   const addr = String(rawAddr || "").trim();
   if (!addr) return "";
-  const city = String(rawCity || "").trim();
+  // 2026-05-22: filter 'NO CITY' (TAD unincorporated marker) / NONE / N/A
+  // placeholders. owner_city fallback REMOVED 2026-05-22 — confirmed wrong
+  // for absentee owners (e.g. Houston resident owning Fort Worth area
+  // parcel would show 'HOUSTON' as property city). Until TIGER Places
+  // spatial-join backfill lands (master_todo: 'TIGER Places + PostGIS
+  // city resolution'), unincorporated parcels just omit the city.
+  const city = _normalizeCityForDisplay(rawCity);
   const c = String(county || "").trim().toLowerCase();
 
   switch (c) {
@@ -843,6 +849,25 @@ function _popupHeaderAddress(props) {
   return _formatFullPropertyAddress(county, props);
 }
 
+// City placeholder strings that mean "no incorporated city" in source data.
+// TAD encodes unincorporated Tarrant County parcels with city_code='000' which
+// the lookup table maps to the literal "NO CITY". DCAD uses blank. Anything
+// that matches this set should display as if there's no city at all.
+const _CITY_PLACEHOLDER_VALUES = new Set([
+  "NO CITY",
+  "NONE",
+  "N/A",
+  "UNKNOWN",
+  "UNINCORPORATED",
+]);
+
+function _normalizeCityForDisplay(rawCity) {
+  const city = String(rawCity || "").trim();
+  if (!city) return "";
+  if (_CITY_PLACEHOLDER_VALUES.has(city.toUpperCase())) return "";
+  return city;
+}
+
 function _formatFullPropertyAddress(county, props) {
   // Full USPS-style address for the Subject Property card:
   //   "STREET, CITY, TX ZIP"
@@ -858,7 +883,12 @@ function _formatFullPropertyAddress(county, props) {
   //   - dcad / tad:     addr is street-only — use as-is.
   const c = String(county || "").trim().toLowerCase();
   const rawAddr = String(props?.addr || "").trim();
-  const city = String(props?.city || "").trim();
+  // 2026-05-22: treat 'NO CITY' (TAD's unincorporated-county marker) /
+  // NONE / N/A as empty. owner_city fallback REMOVED — absentee owners
+  // would inject the WRONG city (e.g. Houston resident with Fort Worth
+  // area parcel). Until TIGER Places spatial-join backfill lands (see
+  // master_todo), unincorporated parcels simply omit the city portion.
+  const city = _normalizeCityForDisplay(props?.city);
   const zip = String(props?.property_zip || "").trim();
 
   let street = rawAddr;
@@ -1136,7 +1166,7 @@ async function _refreshOriginatorTargetLabel(county, account) {
     return;
   }
 
-  const formattedAddr = _formatPropertyAddress(c, props.addr, props.city);
+  const formattedAddr = _formatPropertyAddress(c, props.addr, props.city, props.owner_city);
   _setOriginatorTargetLabel(formattedAddr);
   _populateSubjectPropertyCard(props, c);
 }
@@ -2825,8 +2855,6 @@ async function _hydratePropelioFromArchive(savedAreaId) {
   window._propelioLast = null;
   _updatePropelioStatusCounts();
   propelioCompLayer.clearLayers();
-  cadRatingLayer.clearLayers();
-  cadRatingLayerByKey.clear();
   propelioCompLayerByKey.clear();
   renderPropelioCompList([]);
   propelioCmaChip.hide();
@@ -3344,7 +3372,7 @@ async function _rightClickSaveParcel(p, knownGeometry) {
         // Normalize per-county to "STREET CITY" (no comma/state/zip/dupe).
         // Always rebuild from raw props rather than trusting the incoming
         // `addr` arg, since it can be pre-concatenated upstream.
-        addr = _formatPropertyAddress(county, props.addr || addr, props.city);
+        addr = _formatPropertyAddress(county, props.addr || addr, props.city, props.owner_city);
         if (!Number.isFinite(lat) && Number.isFinite(Number(props.lat))) lat = Number(props.lat);
         if (!Number.isFinite(lng) && Number.isFinite(Number(props.lng))) lng = Number(props.lng);
         if (!geometry && (detail.geometry?.type === "Polygon" || detail.geometry?.type === "MultiPolygon")) {
@@ -5523,6 +5551,17 @@ let propelioPriceMarkers = [];
 // the badge on top of the dot's latlng.
 function _maybeAddGoodCompMark(comp, footprint, fallbackLatLng) {
   if (comp?.user_rating !== "good") return;
+  // Dedup: if the comp's matched parcel ALSO has its own rating, skip
+  // the comp checkmark — the parcel mark will render on the same spot
+  // via _maybeAddParcelRatingMark and we don't want two stacked ✓s.
+  // Per KK 2026-05-24: "I am seeing two check marks on good comps...
+  // They should visually only get one bud."
+  const matchedCounty = String(comp?.parcel_county || "").trim().toLowerCase();
+  const matchedAccount = String(comp?.parcel_account_num || "").trim();
+  if (matchedCounty && matchedAccount) {
+    const parcelRating = _getCachedParcelRating(matchedCounty, matchedAccount);
+    if (parcelRating === "good" || parcelRating === "bad") return;
+  }
   let target = null;
   if (footprint && typeof footprint.getBounds === "function") {
     try {
@@ -5762,9 +5801,14 @@ function _setCompRatingMarkOptimistic(compKey, rating) {
 // apply on a single click.)
 
 function _renderPropelioComps(data) {
+  // NOTE 2026-05-24: do NOT clear cadRatingLayer here. _renderPropelioComps
+  // is a comp-only re-render path (fires on every rating click + filter
+  // change). Clearing the parcel rating layer here wipes the on-screen
+  // marks the user just set on OTHER parcels — KK's "marked a comp bad
+  // and it wiped out all the other stuff" bug. Parcel layer lifecycle is
+  // owned by renderFeatures (line ~8606) and the clear-all-map-layers
+  // path near line 9776, NOT by comp re-renders.
   propelioCompLayer.clearLayers();
-  cadRatingLayer.clearLayers();
-  cadRatingLayerByKey.clear();
   propelioCompLayerByKey.clear();
   propelioPriceMarkers = [];
   if (!data || !Array.isArray(data.comps)) return { total: 0, footprintCount: 0, fallbackCount: 0 };
@@ -6780,7 +6824,12 @@ let propelioStickyBtn = null;
 
     if (hasComp) {
       _bumpMutationSeq("comp", compKey);
-      _setCompRatingMarkOptimistic(compKey, newRating);
+      // Suppress comp optimistic mark when a parcel rating is ALSO being
+      // written this click — the parcel mark covers the same spot and
+      // two stacked ✓s is the bug KK reported 2026-05-24.
+      if (!hasParcel) {
+        _setCompRatingMarkOptimistic(compKey, newRating);
+      }
       void ratePropelioComp(compKey, newRating);
     }
 
@@ -7054,8 +7103,6 @@ function _showPropelioPolygonButton(_latlngs) {
 async function firePropelioFetch(addressString) {
   if (!addressString || typeof addressString !== "string") return;
   propelioCompLayer.clearLayers();
-  cadRatingLayer.clearLayers();
-  cadRatingLayerByKey.clear();
   propelioCmaChip.hide();
   try {
     const resp = await fetch(`/api/propelio/by-address?address=${encodeURIComponent(addressString)}`);
@@ -9620,10 +9667,9 @@ map.on("draw:created", async (e) => {
   lastPolygon = polygon;
   // Clear any Propelio comps + chip from a prior polygon — those comps
   // were filtered to a different shape and shouldn't linger when the
-  // user redraws.
+  // user redraws. Parcel rating layer is left alone here — renderFeatures
+  // will reconcile it once the new analyze response lands.
   propelioCompLayer.clearLayers();
-  cadRatingLayer.clearLayers();
-  cadRatingLayerByKey.clear();
   propelioCompLayerByKey.clear();
   renderPropelioCompList([]);
   propelioCmaChip.hide();
@@ -10424,8 +10470,10 @@ function _wireParcelInteractiveUi(root, options = {}) {
   if (saveLink) {
     saveLink.addEventListener("click", async (ev) => {
       ev.preventDefault();
-      const { account, county, addr, city, lat, lng } = saveLink.dataset;
-      const fullName = _formatPropertyAddress(county, addr, city);
+      const { account, county, addr, city, lat, lng, ownerCity } = saveLink.dataset;
+      // ownerCity may be undefined on older popup renders — falls back to ""
+      // and _formatPropertyAddress handles empty fallback gracefully.
+      const fullName = _formatPropertyAddress(county, addr, city, ownerCity || "");
       let geometry = null;
       try {
         const resp = await fetch(`/api/parcel/${county}/${account}`);
