@@ -552,6 +552,10 @@ const measureLayer = L.layerGroup().addTo(map);
 // Parcel geometry is preferred (purple glowing footprints); missing geometry
 // falls back to compact purple dots.
 const propelioCompLayer = L.layerGroup().addTo(map);
+// Parcel (CAD) rating marks layer. Independent from propelioCompLayer
+// so the marks survive comp re-renders. Per PARCEL_RATINGS_SPEC.md v2.
+const cadRatingLayer = L.layerGroup().addTo(map);
+const cadRatingLayerByKey = new Map();  // "county:account_num" → leaflet marker
 // (Old marker-based "Get Comps" button retired. The sticky DOM-based
 // version lives in propelioStickyAnchor / propelioStickyBtn declared
 // near _ensureStickyPropelioButton.)
@@ -2821,6 +2825,8 @@ async function _hydratePropelioFromArchive(savedAreaId) {
   window._propelioLast = null;
   _updatePropelioStatusCounts();
   propelioCompLayer.clearLayers();
+  cadRatingLayer.clearLayers();
+  cadRatingLayerByKey.clear();
   propelioCompLayerByKey.clear();
   renderPropelioCompList([]);
   propelioCmaChip.hide();
@@ -5521,8 +5527,279 @@ function _maybeAddGoodCompMark(comp, footprint, fallbackLatLng) {
   goodMarker.addTo(propelioCompLayer);
 }
 
+// ─── Parcel (CAD) rating support (spec v2 2026-05-24) ─────────────────
+// Workspace-scoped Good/Bad/Clear ratings on CAD parcels, parallel to
+// comp ratings. Bundled race-condition fix uses optimistic UI: synchronous
+// map mark on click + per-key mutation versioning for safe rollback.
+
+// Per-key mutation sequence — prevents stale rollbacks from rapid clicks.
+// Key format: `${kind}:${id}` where kind ∈ {comp, parcel}.
+const _ratingMutationSeq = new Map();
+function _bumpMutationSeq(kind, id) {
+  const key = `${kind}:${id}`;
+  const next = (_ratingMutationSeq.get(key) || 0) + 1;
+  _ratingMutationSeq.set(key, next);
+  return next;
+}
+function _isLatestMutation(kind, id, capturedSeq) {
+  return _ratingMutationSeq.get(`${kind}:${id}`) === capturedSeq;
+}
+
+function _resolveParcelAnchor(county, accountNum) {
+  // Find a centroid lat/lng for the parcel via the analysis features cache.
+  // Chain: rendered polygon bounds (if we have a registered layer) →
+  // featureCentroidLngLat → properties.lat/lng. Per spec §4B.
+  if (!Array.isArray(allAnalysisFeatures)) return null;
+  const c = String(county || "").toLowerCase();
+  const a = String(accountNum || "").trim();
+  for (const f of allAnalysisFeatures) {
+    const fp = f?.properties || {};
+    if (String(fp.source_county || "").toLowerCase() !== c) continue;
+    if (String(fp.account_num || "").trim() !== a) continue;
+    // Try featureCentroidLngLat (exists at map.js:~8832; returns [lng, lat]
+    // for the polygon/multipolygon — handles weird geometries cleanly).
+    try {
+      const lngLat = featureCentroidLngLat(f);
+      if (Array.isArray(lngLat) && Number.isFinite(lngLat[0]) && Number.isFinite(lngLat[1])) {
+        return L.latLng(lngLat[1], lngLat[0]);
+      }
+    } catch (_) { /* fall through */ }
+    // Last resort: properties.lat/lng
+    if (Number.isFinite(fp.lat) && Number.isFinite(fp.lng)) {
+      return L.latLng(fp.lat, fp.lng);
+    }
+    return null;
+  }
+  return null;
+}
+
+function _getCachedParcelRating(county, accountNum) {
+  if (!Array.isArray(allAnalysisFeatures)) return null;
+  const c = String(county || "").toLowerCase();
+  const a = String(accountNum || "").trim();
+  for (const f of allAnalysisFeatures) {
+    const fp = f?.properties || {};
+    if (String(fp.source_county || "").toLowerCase() === c && String(fp.account_num || "").trim() === a) {
+      const r = fp.user_rating;
+      return r === "good" || r === "bad" ? r : null;
+    }
+  }
+  return null;
+}
+
+function _updateParcelUserRatingInCache(county, accountNum, rating) {
+  if (!Array.isArray(allAnalysisFeatures)) return;
+  const c = String(county || "").toLowerCase();
+  const a = String(accountNum || "").trim();
+  for (const f of allAnalysisFeatures) {
+    const fp = f?.properties || {};
+    if (String(fp.source_county || "").toLowerCase() === c && String(fp.account_num || "").trim() === a) {
+      fp.user_rating = rating;
+      return;
+    }
+  }
+}
+
+function _setParcelRatingMarkOptimistic(county, accountNum, rating) {
+  // Remove any existing mark for this parcel.
+  const key = `${String(county || "").toLowerCase()}:${String(accountNum || "").trim()}`;
+  const existing = cadRatingLayerByKey.get(key);
+  if (existing) {
+    cadRatingLayer.removeLayer(existing);
+    cadRatingLayerByKey.delete(key);
+  }
+  if (rating !== "good" && rating !== "bad") return;
+  const target = _resolveParcelAnchor(county, accountNum);
+  if (!target) return;
+  const isGood = rating === "good";
+  const icon = L.divIcon({
+    className: isGood ? "cad-good-mark-wrap" : "cad-bad-mark-wrap",
+    html: isGood
+      ? `<div class="cad-good-mark">&#10003;</div>`
+      : `<div class="cad-bad-mark">&#10007;</div>`,
+    iconSize: [16, 16],
+    iconAnchor: [8, 8],
+  });
+  const marker = L.marker(target, { icon, interactive: false, keyboard: false });
+  marker.addTo(cadRatingLayer);
+  cadRatingLayerByKey.set(key, marker);
+}
+
+function _maybeAddParcelRatingMark(parcel, footprint, fallbackLatLng) {
+  const rating = parcel?.user_rating;
+  if (rating !== "good" && rating !== "bad") return;
+  const county = String(parcel?.source_county || "").trim().toLowerCase();
+  const accountNum = String(parcel?.account_num || "").trim();
+  if (!county || !accountNum) return;
+  // Use footprint bounds if available, else _resolveParcelAnchor's chain.
+  let target = null;
+  if (footprint && typeof footprint.getBounds === "function") {
+    try {
+      const b = footprint.getBounds();
+      if (b && b.isValid()) target = b.getCenter();
+    } catch (_) { /* noop */ }
+  }
+  if (!target) {
+    target = _resolveParcelAnchor(county, accountNum) || fallbackLatLng;
+  }
+  if (!target) return;
+  const key = `${county}:${accountNum}`;
+  // Remove stale mark if one exists (e.g., re-render after rating change).
+  const existing = cadRatingLayerByKey.get(key);
+  if (existing) {
+    cadRatingLayer.removeLayer(existing);
+    cadRatingLayerByKey.delete(key);
+  }
+  const isGood = rating === "good";
+  const icon = L.divIcon({
+    className: isGood ? "cad-good-mark-wrap" : "cad-bad-mark-wrap",
+    html: isGood
+      ? `<div class="cad-good-mark">&#10003;</div>`
+      : `<div class="cad-bad-mark">&#10007;</div>`,
+    iconSize: [16, 16],
+    iconAnchor: [8, 8],
+  });
+  const marker = L.marker(target, { icon, interactive: false, keyboard: false });
+  marker.addTo(cadRatingLayer);
+  cadRatingLayerByKey.set(key, marker);
+}
+
+function _buildParcelRatingButtonsHtml(parcel, hasMatchedComp) {
+  const county = String(parcel?.source_county || parcel?.county || "").trim().toLowerCase();
+  const accountNum = String(parcel?.account_num || "").trim();
+  const ratingsEnabled = Boolean(_currentLoadedAreaId && county && accountNum);
+  const currentRating = parcel?.user_rating === "good" || parcel?.user_rating === "bad" ? parcel.user_rating : null;
+  const goodActive = ratingsEnabled && currentRating === "good" ? " is-active" : "";
+  const badActive = ratingsEnabled && currentRating === "bad" ? " is-active" : "";
+  const countyAttr = _propelioEscape(county);
+  const acctAttr = _propelioEscape(accountNum);
+  const disabledAttr = ratingsEnabled ? "" : " disabled";
+  const hintHtml = ratingsEnabled ? "" : `<div class="cad-rate-hint">Save area to enable ratings</div>`;
+  // Section label only when popup has BOTH parcel + matched-comp blocks
+  // (visual symmetry). Hidden in parcel-only popups (per spec §3A).
+  const labelHtml = hasMatchedComp ? `<div class="cad-rate-section-label">Parcel rating</div>` : "";
+  return `
+    <div class="cad-popup-rating${ratingsEnabled ? "" : " is-disabled"}" data-county="${countyAttr}" data-account-num="${acctAttr}">
+      ${labelHtml}
+      <div class="cad-rate-buttons">
+        <button type="button" class="cad-rate-btn good${goodActive}" data-rating="good" data-county="${countyAttr}" data-account-num="${acctAttr}"${disabledAttr}>Good</button>
+        <button type="button" class="cad-rate-btn bad${badActive}" data-rating="bad" data-county="${countyAttr}" data-account-num="${acctAttr}"${disabledAttr}>Bad</button>
+        <button type="button" class="cad-rate-btn clear" data-rating="clear" data-county="${countyAttr}" data-account-num="${acctAttr}"${disabledAttr}>Clear</button>
+      </div>
+      ${hintHtml}
+    </div>`;
+}
+
+async function rateParcel(county, accountNum, rating) {
+  const areaId = (typeof _currentLoadedAreaId === "string" ? _currentLoadedAreaId : "") || "";
+  if (!areaId || !county || !accountNum) return false;
+  const body = {
+    saved_area_id: areaId,
+    county,
+    account_num: accountNum,
+    rating: rating === "good" || rating === "bad" ? rating : null,
+  };
+  try {
+    const resp = await fetch("/api/parcels/rate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) {
+      console.warn("[cad] rate parcel failed:", resp.status);
+      return false;
+    }
+    _updateParcelUserRatingInCache(county, accountNum, body.rating);
+    return true;
+  } catch (err) {
+    console.error("[cad] rate parcel error:", err);
+    return false;
+  }
+}
+
+// Comp optimistic mark — companion to _setParcelRatingMarkOptimistic.
+// Bundled race-fix per PARCEL_RATINGS_SPEC.md v2 §5: addresses the "first
+// Good Comp checkmark slow" lag KK observed. Synchronous; no server wait.
+function _setCompRatingMarkOptimistic(compKey, rating) {
+  // Comp goods render with a checkmark; comp bads have no mark (they're
+  // dimmed via the bad-comp visual treatment elsewhere — we mirror that
+  // by simply not rendering a mark for "bad" or "null").
+  const layer = propelioCompLayer;
+  // propelioCompLayerByKey holds the footprint OR fallback marker per
+  // compKey. We compute the anchor from it.
+  const existingLayer = propelioCompLayerByKey.get(String(compKey || "").trim());
+  let anchor = null;
+  if (existingLayer) {
+    if (typeof existingLayer.getBounds === "function") {
+      try {
+        const b = existingLayer.getBounds();
+        if (b && b.isValid()) anchor = b.getCenter();
+      } catch (_) { /* noop */ }
+    }
+    if (!anchor && typeof existingLayer.getLatLng === "function") {
+      anchor = existingLayer.getLatLng();
+    }
+  }
+  if (rating !== "good") return;  // no synchronous mark for bad/null on comps
+  if (!anchor) return;
+  // Tagged key for the optimistic checkmark so re-renders + clear paths
+  // can find it. Reuses propelioCompLayer.
+  const goodIcon = L.divIcon({
+    className: "propelio-good-mark-wrap",
+    html: `<div class="propelio-good-mark">&#10003;</div>`,
+    iconSize: [16, 16],
+    iconAnchor: [8, 8],
+  });
+  const marker = L.marker(anchor, { icon: goodIcon, interactive: false, keyboard: false });
+  marker.addTo(layer);
+  // No keymap registration — the subsequent applyPropelioClientFilters
+  // re-render will rebuild the canonical good marks from cache and clear
+  // this optimistic one along with the rest of the layer. The user sees
+  // immediate feedback; canonical render takes over within ~150-500ms.
+}
+
+// Document-level click delegation for parcel rating buttons. Mirrors the
+// existing comp rating handler at ~line 6499, with per-key mutation
+// versioning for safe rollback on rapid clicks (spec v2 §3C).
+document.addEventListener("click", (ev) => {
+  const btn = ev.target.closest(".cad-rate-btn");
+  if (!btn) return;
+  const county = btn.getAttribute("data-county");
+  const accountNum = btn.getAttribute("data-account-num");
+  const rating = btn.getAttribute("data-rating");
+  if (!county || !accountNum) return;
+  const newRating = rating === "clear" ? null : rating;
+  const mutId = `${county}:${accountNum}`;
+  const seq = _bumpMutationSeq("parcel", mutId);
+  const previousRating = _getCachedParcelRating(county, accountNum);
+
+  // Optimistic popup button styling
+  const container = btn.parentElement;
+  if (container) {
+    container.querySelectorAll(".cad-rate-btn").forEach((b) => {
+      if (rating === "good") b.classList.toggle("is-active", b.classList.contains("good"));
+      else if (rating === "bad") b.classList.toggle("is-active", b.classList.contains("bad"));
+      else b.classList.remove("is-active");
+    });
+  }
+
+  // Optimistic map mark (synchronous — fixes the "first checkmark slow" lag)
+  _setParcelRatingMarkOptimistic(county, accountNum, newRating);
+
+  void rateParcel(county, accountNum, newRating).then((ok) => {
+    if (!ok && _isLatestMutation("parcel", mutId, seq)) {
+      // Revert only if this is still the latest mutation. Rapid repeat
+      // clicks bump seq; later click's state wins.
+      _setParcelRatingMarkOptimistic(county, accountNum, previousRating);
+      _showToast("Rating update failed — reverted", "error");
+    }
+  });
+});
+
 function _renderPropelioComps(data) {
   propelioCompLayer.clearLayers();
+  cadRatingLayer.clearLayers();
+  cadRatingLayerByKey.clear();
   propelioCompLayerByKey.clear();
   propelioPriceMarkers = [];
   if (!data || !Array.isArray(data.comps)) return { total: 0, footprintCount: 0, fallbackCount: 0 };
@@ -6496,18 +6773,28 @@ let propelioStickyBtn = null;
   // Document-level delegation for popup rating buttons. Popups are recreated
   // on every render so a single delegated listener is simpler than per-popup
   // wiring.
+  //
+  // Bundled race-fix per PARCEL_RATINGS_SPEC.md v2 §5: optimistic map
+  // mark (synchronous) BEFORE the async ratePropelioComp POST. Eliminates
+  // the "first Good Comp checkmark slow" lag — the mark now appears the
+  // instant the user clicks Good, not after the server round-trip + full
+  // re-render. The eventual applyPropelioClientFilters re-render
+  // re-establishes the canonical mark from cache (briefly removes +
+  // re-adds the optimistic mark, but the visual gap is sub-frame). Per-
+  // key mutation versioning prevents stale rollback from rapid clicks.
   document.addEventListener("click", (ev) => {
     const btn = ev.target.closest(".propelio-rate-btn");
     if (!btn) return;
     const key = btn.getAttribute("data-comp-key");
     const rating = btn.getAttribute("data-rating");
     if (!key) return;
+    const newRating = rating === "clear" ? null : rating;
+    // Versioned mutation — rapid repeat clicks bump seq so a stale
+    // failure rollback doesn't overwrite the user's latest intent.
+    _bumpMutationSeq("comp", key);
+
     // Optimistically toggle is-active classes on sibling buttons so the
-    // popup/panel shows the new rating's highlight immediately. The async
-    // ratePropelioComp call below persists + propagates to the in-memory
-    // comp, but the popup HTML isn't re-rendered until next open — without
-    // this optimistic update the user would have to close + reopen the
-    // popup to see their click registered.
+    // popup/panel shows the new rating's highlight immediately.
     const container = btn.parentElement;
     if (container) {
       container.querySelectorAll(".propelio-rate-btn").forEach((b) => {
@@ -6520,7 +6807,12 @@ let propelioStickyBtn = null;
         }
       });
     }
-    void ratePropelioComp(key, rating === "clear" ? null : rating);
+
+    // Synchronous map mark — the actual race-fix. User sees the ✓ before
+    // the async POST resolves.
+    _setCompRatingMarkOptimistic(key, newRating);
+
+    void ratePropelioComp(key, newRating);
   });
 })();
 
@@ -6779,6 +7071,8 @@ function _showPropelioPolygonButton(_latlngs) {
 async function firePropelioFetch(addressString) {
   if (!addressString || typeof addressString !== "string") return;
   propelioCompLayer.clearLayers();
+  cadRatingLayer.clearLayers();
+  cadRatingLayerByKey.clear();
   propelioCmaChip.hide();
   try {
     const resp = await fetch(`/api/propelio/by-address?address=${encodeURIComponent(addressString)}`);
@@ -8047,6 +8341,10 @@ function makePopupHtml(p) {
   // matchedComp resolved above (drives both the header recolor and these).
   const propelioSectionHtml = matchedComp ? _buildPropelioCompSectionHtml(matchedComp) : "";
   const ratingButtonsHtml = matchedComp ? _buildRatingButtonsHtml(matchedComp) : "";
+  // Parcel rating block — workspace-scoped Good/Bad/Clear on the CAD
+  // parcel itself, independent of any matched comp. Section label hidden
+  // in parcel-only popups (no matched comp) per spec v2 §3A.
+  const parcelRatingButtonsHtml = _buildParcelRatingButtonsHtml(p, Boolean(matchedComp));
 
   return `
       <div class="popup">
@@ -8084,6 +8382,7 @@ function makePopupHtml(p) {
           ${redfinListingRow}
           ${soldCompRows}
         </table>
+        ${parcelRatingButtonsHtml}
         ${propelioSectionHtml}
         ${ratingButtonsHtml}
         ${p.account_num ? `<div style="margin-top:8px;display:flex;gap:6px;align-items:center;justify-content:flex-end;font-size:11px;padding-top:6px;border-top:1px solid #e2e8f0;">
@@ -8377,6 +8676,10 @@ function renderFeatures(geojson) {
   targetBadgeLayer.clearLayers();
   verificationBadgeMarkers.clear();
   targetBadgeMarkers.clear();
+  // Clear stale parcel rating marks — they get re-added below from the
+  // fresh feature data (per PARCEL_RATINGS_SPEC.md v2 §4D lifecycle).
+  cadRatingLayer.clearLayers();
+  cadRatingLayerByKey.clear();
   const polygonGeometrySeen = new Set();
   const condoOutlineSeen = new Set();
   const accountRenderedAsPolygon = new Set(); // accounts that got a polygon fill — no dot needed
@@ -8527,6 +8830,20 @@ function renderFeatures(geojson) {
   // by zoom/pan events).
   renderSoldPoints();
   renderRedfinPoints();
+
+  // Parcel rating marks (red ✓ / black ✗) — per PARCEL_RATINGS_SPEC.md v2.
+  // Single post-loop pass over the rendered features; uses cached polygon
+  // bounds via _resolveParcelAnchor's chain. cadRatingLayer was cleared at
+  // the top of this function so this rebuilds the full set cleanly.
+  geojson.features.forEach((feature) => {
+    const p = feature?.properties;
+    if (!p) return;
+    if (p.user_rating !== "good" && p.user_rating !== "bad") return;
+    const fallbackLatLng = (Number.isFinite(p.lat) && Number.isFinite(p.lng))
+      ? L.latLng(p.lat, p.lng)
+      : null;
+    _maybeAddParcelRatingMark(p, null, fallbackLatLng);
+  });
   return markers;
 }
 
@@ -9320,6 +9637,8 @@ map.on("draw:created", async (e) => {
   // were filtered to a different shape and shouldn't linger when the
   // user redraws.
   propelioCompLayer.clearLayers();
+  cadRatingLayer.clearLayers();
+  cadRatingLayerByKey.clear();
   propelioCompLayerByKey.clear();
   renderPropelioCompList([]);
   propelioCmaChip.hide();
@@ -9440,6 +9759,8 @@ function clearDrawResults() {
   // header. The archive in the DB is untouched — clicking the saved
   // workspace again rehydrates everything exactly as it was.
   propelioCompLayer.clearLayers();
+  cadRatingLayer.clearLayers();
+  cadRatingLayerByKey.clear();
   propelioCompLayerByKey.clear();
   window._propelioLast = null;
   _updatePropelioStatusCounts();

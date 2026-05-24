@@ -3517,6 +3517,92 @@ body.is-not-power-user .power-user-only {
     0 0 6px rgba(220, 38, 38, 0.7);
 }
 
+/* ─── Parcel (CAD) rating marks + popup buttons (spec v2 2026-05-24) ───
+   Workspace-scoped Good/Bad ratings on CAD parcels — parallel to comp
+   ratings. Good marker mirrors .propelio-good-mark visually (red ✓);
+   Bad marker is a new black ✗ centered on the parcel polygon. Both
+   fixed 16px. Popup buttons + section labels match the comp pattern. */
+.cad-good-mark-wrap,
+.cad-bad-mark-wrap {
+  background: transparent;
+  border: 0;
+  pointer-events: none;
+}
+.cad-good-mark {
+  width: 16px; height: 16px; border-radius: 50%;
+  background: #ffffff; color: #dc2626;
+  font-size: 12px; font-weight: 800; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 0 0 2px #dc2626, 0 0 6px rgba(220, 38, 38, 0.7);
+}
+.cad-bad-mark {
+  width: 16px; height: 16px; border-radius: 50%;
+  background: #ffffff; color: #111111;
+  font-size: 13px; font-weight: 800; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 0 0 2px #111111, 0 0 6px rgba(0, 0, 0, 0.65);
+}
+
+/* Popup rating block — parcel rating section.
+   When the popup also has a matched-comp section, a section label
+   ("Parcel rating") renders above the buttons to disambiguate from
+   the comp rating block. In parcel-only popups, the label is omitted
+   (per spec v2 §3A — Copilot recommendation). */
+.cad-popup-rating {
+  margin: 6px 0;
+}
+.cad-popup-rating.is-disabled {
+  opacity: 0.7;
+}
+.cad-rate-section-label,
+.propelio-rate-section-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-soft);
+  margin-bottom: 4px;
+}
+.cad-rate-buttons {
+  display: flex;
+  gap: 4px;
+}
+.cad-rate-btn {
+  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 3px;
+  cursor: pointer;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: transparent;
+  color: var(--text-soft);
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.cad-rate-btn:hover:not(:disabled) {
+  border-color: rgba(255, 255, 255, 0.3);
+  color: var(--text-main);
+}
+.cad-rate-btn.good.is-active {
+  background: rgba(220, 38, 38, 0.18);
+  color: #ff8a92;
+  border-color: #dc2626;
+}
+.cad-rate-btn.bad.is-active {
+  background: rgba(17, 17, 17, 0.5);
+  color: #f5e9c8;
+  border-color: #111111;
+}
+.cad-rate-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.cad-rate-hint {
+  font-size: 10px;
+  color: var(--text-soft);
+  font-style: italic;
+  margin-top: 3px;
+}
+
 /* Good Comps section — appears between Subject card and main comp list
    inside #comps-list-block-body. Always-visible mini-section (not its
    own collapsible). */
