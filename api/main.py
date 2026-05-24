@@ -3544,6 +3544,12 @@ class DownloadFilterRequest(BaseModel):
     filter_ids: dict[str, Any] | None = None
     filter_state: dict[str, Any] | None = None
     filename: str | None = None
+    # 2026-05-24: passed by frontend to override the share_id source.
+    # Without this, _job_share_id reads cached_jobs.saved_area_id which
+    # stays pinned to the ORIGINAL area after a Copy Area As → the CSV's
+    # share_id column would point back at the source area, not the active
+    # copy. When this field is set, it wins over the cached_jobs fallback.
+    loaded_area_id: str | None = None
 
 
 @app.get("/api/download/{job_id}")
@@ -3589,6 +3595,7 @@ async def download_filtered(
         comp_ids_filter=comp_ids_filter,
         # filter_state and bad_comp_ids params reserved for Phase C2.
         filter_state=body.filter_state,
+        loaded_area_id=body.loaded_area_id,
     )
 
 
@@ -3600,6 +3607,7 @@ async def _run_download_csv(
     comp_ids_filter: set[str] | None = None,
     filter_state: dict[str, Any] | None = None,
     bad_comp_ids: set[int] | None = None,
+    loaded_area_id: str | None = None,
 ) -> StreamingResponse:
     if str(user.get("role") or "").strip().lower() == "user":
         raise HTTPException(status_code=403, detail="CSV export not available for this role")
@@ -3612,7 +3620,14 @@ async def _run_download_csv(
     redfin_data: dict[str, dict] = job.get("redfin_data", {})
     sold_points: list[dict[str, Any]] = job.get("sold_points", []) or []
     propelio_sold_points: list[dict[str, Any]] = _load_propelio_sold_points(job_id) or []
-    job_saved_area_id = str(job.get("saved_area_id") or "").strip() or None
+    # 2026-05-24 bug fix: prefer the frontend's currently-loaded area_id
+    # over the job's cached saved_area_id. After Copy Area As, the job
+    # stays pinned to the SOURCE area (the create-area UPDATE on
+    # cached_jobs is guarded by `saved_area_id IS NULL`), so without this
+    # override the CSV's share_id column would resolve to the original
+    # area, not the active copy the user is exporting from.
+    override_area_id = str(loaded_area_id or "").strip() or None
+    job_saved_area_id = override_area_id or (str(job.get("saved_area_id") or "").strip() or None)
     csv_share_id = _job_share_id(job_id, job_saved_area_id)
     logger.info("Download job %s: %d parcel rows, %d sold points", job_id, len(rows), len(sold_points))
 

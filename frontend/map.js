@@ -9612,7 +9612,17 @@ document.getElementById("btn-download").addEventListener("click", async () => {
     const resp = await fetch(`/api/download/${currentJobId}`, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...authHeaders() },
-      body: JSON.stringify({ filter_ids: filterIds, filename }),
+      // loaded_area_id: 2026-05-24 fix for the Copy Area As share_id
+      // bug — after copy, cached_jobs.saved_area_id stays pinned to the
+      // SOURCE area, so the backend's _job_share_id lookup returns the
+      // source's share_id for the CSV column. Sending the currently-
+      // loaded area_id makes the backend use the active workspace's
+      // share_id instead.
+      body: JSON.stringify({
+        filter_ids: filterIds,
+        filename,
+        loaded_area_id: _currentLoadedAreaId || null,
+      }),
     });
     if (!resp.ok) {
       const errText = await resp.text().catch(() => "");
