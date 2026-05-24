@@ -3629,6 +3629,10 @@ async def _run_download_csv(
     override_area_id = str(loaded_area_id or "").strip() or None
     job_saved_area_id = override_area_id or (str(job.get("saved_area_id") or "").strip() or None)
     csv_share_id = _job_share_id(job_id, job_saved_area_id)
+    # csv_workspace_name populated below from the saved_areas lookup that
+    # also resolves the originator parcel. Empty string when no area is
+    # linked (analysis-only export, no saved workspace).
+    csv_workspace_name = ""
     logger.info("Download job %s: %d parcel rows, %d sold points", job_id, len(rows), len(sold_points))
 
     # Look up bonded seed-target account_nums for this area (if any), so the
@@ -3648,11 +3652,13 @@ async def _run_download_csv(
                 )
                 seed_account_nums = {str(r[0]) for r in _cur.fetchall() if r and r[0]}
                 _cur.execute(
-                    "SELECT originator_parcel_county, originator_parcel_account_num"
+                    "SELECT originator_parcel_county, originator_parcel_account_num, name"
                     " FROM saved_areas WHERE area_id = %s",
                     (job_saved_area_id,),
                 )
                 _orow = _cur.fetchone()
+                if _orow:
+                    csv_workspace_name = str(_orow[2] or "")
                 if _orow and _orow[0] and _orow[1]:
                     originator_key = (
                         str(_orow[0]).strip().lower(),
@@ -4028,6 +4034,7 @@ async def _run_download_csv(
                 "RF_Comp Listing URL",
                 "Seed Target",
                 "share_id",
+                "Workspace Name",
                 "Stored ARV",
                 "Stored ARV Comment",
                 "Stored TDPP",
@@ -4294,6 +4301,7 @@ async def _run_download_csv(
                     (rf_comp.get("listing_url", "") or "") if rf_comp else "",
                     "yes" if str(row.get("account_num", "") or "") in seed_account_nums else "",
                     csv_share_id,
+                    csv_workspace_name,
                     *stored_value_export_cells,
                 ]
             )
@@ -4594,7 +4602,8 @@ async def _run_download_csv(
                     "",                                                                                          # 107 RF_Comp Listing URL
                     "",                                                                                          # 108 Seed Target
                     csv_share_id,                                                                                # 109 share_id
-                    *stored_value_export_cells,                                                                   # 110-119 stored values snapshot
+                    csv_workspace_name,                                                                          # 110 Workspace Name
+                    *stored_value_export_cells,                                                                   # 111-120 stored values snapshot
                 ]
             )
             buffer.seek(0)
