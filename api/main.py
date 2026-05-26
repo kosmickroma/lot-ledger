@@ -23,13 +23,15 @@ import os
 import re
 import secrets
 import string
+import subprocess
+import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import quote_plus
+from urllib.parse import parse_qs, quote_plus
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Path as FastAPIPath, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
@@ -81,6 +83,47 @@ TILES_BASE_URL = os.environ.get(
     "https://storage.googleapis.com/lot-ledger-tiles/parcels.pmtiles",
 ).strip()
 _INDEX_HTML_CACHE: str | None = None
+
+
+def _resolve_build_id() -> str:
+    env_val = os.getenv("BUILD_ID", "").strip()
+    if env_val:
+        return env_val
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            timeout=2,
+            check=False,
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+        )
+        sha = result.stdout.decode().strip()
+        if sha:
+            return sha
+    except Exception:
+        pass
+    return "dev"
+
+
+BUILD_ID = _resolve_build_id()
+
+_STALE_LOG_COOLDOWN_S = 300
+_stale_log_seen: dict[tuple[str, str], float] = {}
+_stale_log_lock = threading.Lock()
+
+
+def _should_log_stale(user_id: str, client_version: str) -> bool:
+    key = (user_id, client_version)
+    now = time.monotonic()
+    with _stale_log_lock:
+        last = _stale_log_seen.get(key, 0.0)
+        if now - last < _STALE_LOG_COOLDOWN_S:
+            return False
+        _stale_log_seen[key] = now
+        if len(_stale_log_seen) > 1000:
+            _stale_log_seen.clear()
+            _stale_log_seen[key] = now
+        return True
 
 _job_store: dict[str, dict[str, Any]] = {}
 _JOB_TTL_SECONDS = 7200    # 2-hour sliding-window TTL per session
@@ -1775,7 +1818,7 @@ _FORCE_PASSWORD_CHANGE_ALLOWED_PATHS = {
 
 
 def _is_public_path(path: str) -> bool:
-    if path in {"/", "/health", "/health/db", "/auth/login"}:
+    if path in {"/", "/health", "/health/db", "/version", "/auth/login"}:
         return True
     if path.startswith("/auth/"):
         return False
@@ -1838,8 +1881,16 @@ async def auth_gate(request: Request, call_next):
     if user and path not in {"/auth/logout", "/auth/change-password", "/auth/login"}:
         refresh_session_cookie(response, user, request)
 
-    if request.url.path.endswith((".js", ".css", ".html")):
-        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+    path_only = request.url.path
+    query_str = request.url.query or ""
+    if path_only == "/" or path_only.endswith(".html"):
+        response.headers["Cache-Control"] = "no-store"
+    elif path_only.endswith((".js", ".css")):
+        parsed_v = parse_qs(query_str).get("v", [""])[0].strip()
+        if parsed_v:
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        else:
+            response.headers["Cache-Control"] = "no-cache, must-revalidate"
     if not request.cookies.get("ll_csrf"):
         response.set_cookie(
             "ll_csrf",
@@ -1854,8 +1905,30 @@ async def auth_gate(request: Request, call_next):
 
 
 @app.middleware("http")
-async def no_cache_frontend(request: Request, call_next):
-    return await call_next(request)
+async def version_header(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Version"] = BUILD_ID
+
+    client_version = request.headers.get("X-Client-Version", "").strip()
+    if client_version and client_version != BUILD_ID:
+        user_id = "anonymous"
+        try:
+            user = getattr(request.state, "current_user", None)
+            if user:
+                user_id = str(user.get("id") or user.get("username") or "unknown")
+        except Exception:
+            pass
+        if _should_log_stale(user_id, client_version):
+            print(json.dumps({
+                "severity": "WARNING",
+                "message": "stale_client",
+                "clientVersion": client_version,
+                "serverVersion": BUILD_ID,
+                "path": request.url.path,
+                "userId": user_id,
+            }), flush=True)
+
+    return response
 
 
 @app.post("/auth/login")
@@ -2203,6 +2276,11 @@ async def admin_delete_user(
 @app.get("/health")
 async def health_check() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/version", include_in_schema=False)
+async def version_endpoint() -> dict[str, str]:
+    return {"build_id": BUILD_ID}
 
 
 @app.get("/api/hoa")
@@ -5942,7 +6020,9 @@ async def index() -> HTMLResponse:
     global _INDEX_HTML_CACHE
     if _INDEX_HTML_CACHE is None:
         html = (FRONTEND_DIR / "index.html").read_text()
-        _INDEX_HTML_CACHE = html.replace("__TILES_URL__", TILES_BASE_URL)
+        html = html.replace("__TILES_URL__", TILES_BASE_URL)
+        html = html.replace("__BUILD_ID__", BUILD_ID)
+        _INDEX_HTML_CACHE = html
     return HTMLResponse(_INDEX_HTML_CACHE)
 
 
