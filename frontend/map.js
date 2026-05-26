@@ -710,6 +710,16 @@ const _subjectPropertyGeometryCache = new Map();
 // Track in-flight geometry fetches so we don't fire duplicates.
 const _subjectPropertyGeometryInFlight = new Set();
 
+// Bonded saved-parcels of the currently-loaded area. Populated by
+// restoreSavedArea via GET /api/areas/{id} → seed_parcels. Cleared when no
+// area is loaded. These render bold gold outlines (no star) at zoom >= 14
+// alongside the subject-property outlines so the user sees:
+//   - the area's CURRENT staged subject (star + glow, follows _currentTargetParcel)
+//   - the area's persisted subject (glow only, from subject_properties)
+//   - every other parcel they saved in this area (glow only)
+// Keyed by `${county}::${account_num}`.
+let _loadedAreaSeedParcelsByKey = new Map();
+
 function _subjectPropertyKey(county, accountNum) {
   const c = String(county || "").trim().toLowerCase();
   const a = String(accountNum || "").trim();
@@ -2992,28 +3002,78 @@ function _syncTabTitle() {
 function _isLoadedAreaWithFilterDrift(area) {
   if (!area || area.type !== "area") return false;
   if (area.id !== _currentLoadedAreaId) return false;
-  return !_filterStatesEqual(captureFilterState(), area.filter_state);
+  if (!_filterStatesEqual(captureFilterState(), area.filter_state)) return true;
+  // Originator drift: user staged a new subject via Save Parcel inside the
+  // loaded area. Update button should appear so they can commit it without
+  // doing a Copy Area As.
+  const staged = _currentTargetParcel
+    ? {
+        c: String(_currentTargetParcel.county || "").trim().toLowerCase(),
+        a: String(_currentTargetParcel.account || "").trim(),
+      }
+    : { c: "", a: "" };
+  const persisted = {
+    c: String(area.originator_parcel_county || "").trim().toLowerCase(),
+    a: String(area.originator_parcel_account_num || "").trim(),
+  };
+  return staged.c !== persisted.c || staged.a !== persisted.a;
 }
 
 async function _updateSavedAreaFilters(area, actionBtn) {
   if (!area || area.type !== "area") return;
   const nextState = captureFilterState();
-  if (_filterStatesEqual(nextState, area.filter_state)) {
+  const filterChanged = !_filterStatesEqual(nextState, area.filter_state);
+
+  // Originator drift: if the user staged a different subject parcel via
+  // Save Parcel inside this loaded area, commit that change to the
+  // persisted area too. Same Update button serves both kinds of drift.
+  const stagedCounty = _currentTargetParcel
+    ? String(_currentTargetParcel.county || "").trim().toLowerCase() || null
+    : null;
+  const stagedAccount = _currentTargetParcel
+    ? String(_currentTargetParcel.account || "").trim() || null
+    : null;
+  const persistedCounty = String(area.originator_parcel_county || "").trim().toLowerCase() || null;
+  const persistedAccount = String(area.originator_parcel_account_num || "").trim() || null;
+  const originatorChanged = stagedCounty !== persistedCounty || stagedAccount !== persistedAccount;
+
+  if (!filterChanged && !originatorChanged) {
     renderSavedAreasList();
     return;
   }
+
   bumpUndoPillVersion();
   if (actionBtn) {
     actionBtn.disabled = true;
     actionBtn.textContent = "Saving...";
   }
   try {
+    const body = {};
+    if (filterChanged) body.filter_state = nextState;
+    if (originatorChanged) {
+      // The PUT endpoint requires county+account together (or neither).
+      // When staged is "(none, none)" — user cleared the target —
+      // current backend doesn't accept clearing the originator
+      // (rejects with 400). Skip the originator update in that case
+      // to keep Update working for filter-only drift.
+      if (stagedCounty && stagedAccount) {
+        body.originator_parcel_county = stagedCounty;
+        body.originator_parcel_account_num = stagedAccount;
+      }
+    }
     await _apiJson(`/api/areas/${encodeURIComponent(area.id)}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json", ...authHeaders() },
-      body: JSON.stringify({ filter_state: nextState }),
+      body: JSON.stringify(body),
     });
-    area.filter_state = _normalizeFilterStateForCompare(nextState);
+    if (filterChanged) area.filter_state = _normalizeFilterStateForCompare(nextState);
+    if (originatorChanged && stagedCounty && stagedAccount) {
+      area.originator_parcel_county = stagedCounty;
+      area.originator_parcel_account_num = stagedAccount;
+      // Subject_properties payload needs a refetch so the new layer
+      // picks up the persisted-originator change.
+      await _reloadSavedResources().catch(() => {});
+    }
     if (actionBtn) actionBtn.textContent = "✓ Updated";
     setTimeout(() => {
       if (actionBtn) actionBtn.disabled = false;
@@ -3334,9 +3394,15 @@ function _clearOriginatorStar() {
     _ORIGINATOR_STAR_LAYER.removeLayer(_originatorStarMarker);
     _originatorStarMarker = null;
   }
+  // Clear bonded-saved-parcels cache too. If the caller is about to load a
+  // different area, _renderOriginatorTargetStar will fire and re-populate.
+  // If the caller is clearing the workspace entirely, this leaves the
+  // bonded-glow layer empty as desired.
+  if (typeof _loadedAreaSeedParcelsByKey !== "undefined") {
+    _loadedAreaSeedParcelsByKey = new Map();
+  }
   // Refresh subject-property layer in case the loaded area changed. Cheap —
-  // just rebuilds from cached data. (Chunk 2 minimal wiring; chunk 3 will
-  // replace _renderOriginatorTargetStar entirely with the new layer.)
+  // just rebuilds from cached data.
   if (typeof _renderSubjectProperties === "function") _renderSubjectProperties();
 }
 
@@ -3353,6 +3419,13 @@ async function _renderOriginatorTargetStar(_county, _account, _lat, _lng) {
     _originatorStarMarker = null;
   }
   if (typeof _renderSubjectProperties === "function") _renderSubjectProperties();
+  // Refresh bonded-saved-parcels-of-loaded-area cache too. This function
+  // is the canonical "loaded area changed" hook — it fires after
+  // _currentLoadedAreaId has been set in restoreSavedArea/saveCurrentArea
+  // /fork paths, so it always sees the new ID.
+  if (typeof _loadAreaSeedParcelsByKey === "function") {
+    void _loadAreaSeedParcelsByKey(_currentLoadedAreaId);
+  }
 }
 
 function _updateSavedTargetStarVisibility() {
@@ -3383,6 +3456,55 @@ function _isSubjectPropertyLoaded(entry) {
   return entry.areas.some(a => String(a.area_id) === String(_currentLoadedAreaId));
 }
 
+// Returns the (county, account) of the currently-staged subject — the parcel
+// whose star carries the `is-loaded` modifier. Tracks _currentTargetParcel
+// (which the user can stage by hitting Save Parcel inside a loaded area)
+// rather than the area's persisted originator. The Update button commits
+// any drift; Copy Area As ships the staged value as the new area's
+// originator.
+function _stagedSubjectIdentity() {
+  if (!_currentTargetParcel) return null;
+  const c = String(_currentTargetParcel.county || "").trim().toLowerCase();
+  const a = String(_currentTargetParcel.account || "").trim();
+  if (!c || !a) return null;
+  return { county: c, account_num: a, lat: _currentTargetParcel.lat, lng: _currentTargetParcel.lng };
+}
+
+// Fetch GET /api/areas/{id} for its seed_parcels (bonded saved_parcels of
+// that area) and populate _loadedAreaSeedParcelsByKey. Renders an extra
+// pass of subject-property outlines so these parcels show gold at zoom
+// >= 14 alongside the persisted originator. Called from area-load paths.
+async function _loadAreaSeedParcelsByKey(areaId) {
+  _loadedAreaSeedParcelsByKey = new Map();
+  if (!areaId) return;
+  try {
+    const detail = await _apiJson(`/api/areas/${encodeURIComponent(areaId)}`);
+    const seedParcels = Array.isArray(detail?.seed_parcels) ? detail.seed_parcels : [];
+    for (const sp of seedParcels) {
+      const payload = sp?.payload && typeof sp.payload === "object" ? sp.payload : {};
+      const county = String(sp?.county || payload.county || "dcad").trim().toLowerCase();
+      const account = String(sp?.account_num || "").trim();
+      const key = _subjectPropertyKey(county, account);
+      if (!key) continue;
+      const lat = Number(payload.lat);
+      const lng = Number(payload.lng);
+      _loadedAreaSeedParcelsByKey.set(key, {
+        county,
+        account_num: account,
+        lat: Number.isFinite(lat) ? lat : NaN,
+        lng: Number.isFinite(lng) ? lng : NaN,
+        // Synthetic areas[] keyed to the loaded area so the click handler
+        // can still surface the Load Area popup section with that area's
+        // name as the hover label.
+        areas: [{ area_id: areaId, name: "", updated_at: "" }],
+      });
+    }
+  } catch (err) {
+    console.warn("[loadAreaSeedParcels] fetch failed for", areaId, err);
+  }
+  if (typeof _renderSubjectProperties === "function") _renderSubjectProperties();
+}
+
 function _subjectPropertyHoverLabel(entry) {
   // Backend pre-sorts entry.areas by updated_at DESC, so areas[0] is the
   // most-recently-updated area whose subject this is. Per spec, hover shows
@@ -3394,8 +3516,8 @@ function _subjectPropertyHoverLabel(entry) {
 
 function _renderSubjectProperties() {
   // Full rebuild — clears existing markers + outlines and re-renders from
-  // current data + zoom + loaded-area state. Geometry cache survives clears
-  // so outline re-renders don't refetch.
+  // current data + zoom + loaded-area state + staged target. Geometry
+  // cache survives clears so outline re-renders don't refetch.
   subjectPropertyStarLayer.clearLayers();
   subjectPropertyOutlineLayer.clearLayers();
   _subjectPropertyStarMarkers.clear();
@@ -3406,27 +3528,76 @@ function _renderSubjectProperties() {
   // Viewport gate at high zoom: only fetch + render outlines for parcels
   // whose centroid falls inside the current viewport. Without this, a user
   // with 200+ saved areas arriving at zoom 14+ would trigger 200+
-  // /api/parcel fetches on a single render — exactly the startup N+1 the
-  // spec told us to avoid (Copilot audit H3).
+  // /api/parcel fetches on a single render.
   const bounds = !lowZoom ? map.getBounds() : null;
 
+  // Staged subject — the parcel whose star carries `is-loaded`. Tracks
+  // _currentTargetParcel so Save Parcel inside a loaded area moves the
+  // star visually, even before the change is committed via Update (or
+  // shipped via Copy Area As).
+  const staged = _stagedSubjectIdentity();
+  const stagedKey = staged ? _subjectPropertyKey(staged.county, staged.account_num) : null;
+
+  // Outlines: every persisted subject_property in viewport gets one.
   for (const entry of _subjectPropertiesByKey.values()) {
-    const isLoaded = _isSubjectPropertyLoaded(entry);
-
-    // Star: at low zoom render every subject; at high zoom only the loaded one.
-    if (lowZoom || isLoaded) {
-      _renderSubjectPropertyStarMarker(entry, isLoaded);
-    }
-
-    // Outline: only at high zoom, only for entries whose centroid is in
-    // the current viewport. Pan-triggered moveend rebuilds will bring in
-    // new outlines as parcels enter view; geometry cache survives so
-    // panning back over a previously-fetched parcel hits no network.
     if (!lowZoom && bounds
         && Number.isFinite(entry.lat) && Number.isFinite(entry.lng)
         && bounds.contains([entry.lat, entry.lng])) {
       _renderSubjectPropertyOutlineLazy(entry);
     }
+  }
+
+  // Outlines: every bonded saved-parcel of the currently-loaded area in
+  // viewport also gets one. Covers the "old subject still gold" case
+  // after the user stages a new target via Save Parcel.
+  if (!lowZoom && _currentLoadedAreaId) {
+    for (const sp of _loadedAreaSeedParcelsByKey.values()) {
+      if (!bounds) continue;
+      if (!Number.isFinite(sp.lat) || !Number.isFinite(sp.lng)) continue;
+      if (!bounds.contains([sp.lat, sp.lng])) continue;
+      // Dedupe against any subject_property already rendered at this key.
+      const key = _subjectPropertyKey(sp.county, sp.account_num);
+      if (key && _subjectPropertyOutlineLayers.has(key)) continue;
+      _renderSubjectPropertyOutlineLazy(sp);
+    }
+  }
+
+  // Stars at low zoom: every persisted subject_property gets a regular star.
+  // The staged target (if it's not already a persisted subject) gets its own
+  // star with `is-loaded` so the user sees their pending change.
+  if (lowZoom) {
+    for (const entry of _subjectPropertiesByKey.values()) {
+      const isStaged = stagedKey != null && _subjectPropertyKey(entry.county, entry.account_num) === stagedKey;
+      _renderSubjectPropertyStarMarker(entry, isStaged);
+    }
+    if (staged && stagedKey && !_subjectPropertiesByKey.has(stagedKey)) {
+      _renderSubjectPropertyStarMarker({
+        county: staged.county,
+        account_num: staged.account_num,
+        lat: staged.lat,
+        lng: staged.lng,
+        areas: [],
+      }, true);
+    }
+    return;
+  }
+
+  // Stars at high zoom: ONLY the staged target gets a star (with is-loaded).
+  // Persisted subject_properties of other areas stay outline-only at this
+  // zoom — visual focus is on the loaded area.
+  if (staged && Number.isFinite(staged.lat) && Number.isFinite(staged.lng)) {
+    // Use the persisted entry if present (so the click handler has the
+    // full areas[] for the Load Area dropdown); otherwise synthesize a
+    // minimal entry so the marker renders.
+    const persistedEntry = stagedKey ? _subjectPropertiesByKey.get(stagedKey) : null;
+    const entryForMarker = persistedEntry || {
+      county: staged.county,
+      account_num: staged.account_num,
+      lat: staged.lat,
+      lng: staged.lng,
+      areas: [],
+    };
+    _renderSubjectPropertyStarMarker(entryForMarker, true);
   }
 }
 
@@ -3497,10 +3668,20 @@ function _renderSubjectPropertyOutlineFromGeometry(entry, geometry) {
   if (_subjectPropertyOutlineLayers.has(key)) return;
   if (!geometry || (geometry.type !== "Polygon" && geometry.type !== "MultiPolygon")) return;
 
+  // Match the bold .saved-parcel-glow look from main (weight 6 + gold fill
+  // at 16% alpha) so subject-property outlines are clearly visible from
+  // zoom 14 onward, not a faint stroke. Per KK 2026-05-26 UX call.
   const layer = L.geoJSON({ type: "Feature", geometry, properties: {} }, {
     pane: "subjectPropertyOutlinePane",
     className: "subject-property-outline",
-    style: { color: "#e2c075", weight: 2, fill: false, fillOpacity: 0, interactive: true },
+    style: {
+      color: SAVED_PARCEL_COLOR,
+      weight: 6,
+      fill: true,
+      fillColor: SAVED_PARCEL_COLOR,
+      fillOpacity: 0.16,
+      interactive: true,
+    },
     interactive: true,
   });
 
