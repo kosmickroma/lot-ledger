@@ -2904,6 +2904,49 @@ body.is-not-power-user .power-user-only {
     drop-shadow(0 1px 2px rgba(0, 0, 0, 0.55));
 }
 
+/* === Subject Property visual redesign (see docs/SUBJECT_PROPERTY_VISUAL_REDESIGN_SPEC.md) === */
+/* New visual language: gold = subject property of a saved area (not just "saved parcel"). */
+/* Star at zoom < 14 (all subjects, for nav) + zoom >= 14 (loaded area's subject only). */
+/* Gold outline at zoom >= 14 (all subjects). */
+/* .is-loaded modifier marks the currently-loaded area's subject star for stronger glow. */
+
+.subject-property-star {
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  filter:
+    drop-shadow(0 0 4px rgba(120, 90, 30, 0.55))
+    drop-shadow(0 1px 2px rgba(0, 0, 0, 0.45));
+  transition: transform 0.12s ease;
+}
+
+.subject-property-star:hover {
+  transform: scale(1.06);
+}
+
+.subject-property-star.is-loaded svg {
+  filter:
+    drop-shadow(0 0 6px rgba(226, 192, 117, 0.95))
+    drop-shadow(0 1px 2px rgba(0, 0, 0, 0.55));
+}
+
+/* Gold outline for subject-property parcels at zoom >= 14. Stroke only, no fill,
+   so the underlying CAD classification color still reads through. */
+.subject-property-outline path {
+  stroke: #e2c075;
+  stroke-width: 2;
+  fill: transparent;
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.subject-property-outline path:hover {
+  stroke-width: 3;
+}
+
 @keyframes savedParcelPulse {
   0%, 100% {
     filter:
