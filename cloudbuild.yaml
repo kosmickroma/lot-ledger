@@ -8,6 +8,10 @@ steps:
   - name: 'gcr.io/cloud-builders/docker'
     args:
       - build
+      - '--build-arg'
+      - 'BUILD_ID=$BUILD_ID'
+      - '--build-arg'
+      - 'APP_VERSION=${_APP_VERSION}'
       - '-t'
       - 'us-central1-docker.pkg.dev/lot-ledger/lot-ledger-api/api:$COMMIT_SHA'
       - '-t'
@@ -32,8 +36,11 @@ steps:
       - '--project=lot-ledger'
       - '--timeout=3600'
       - '--memory=1Gi'
-      - '--update-env-vars=DEEP_PULL_EXPERIMENT=true,PHASE_2_CACHE_READ=true'
+      - '--update-env-vars=DEEP_PULL_EXPERIMENT=true,PHASE_2_CACHE_READ=true,BUILD_ID=$BUILD_ID,APP_VERSION=${_APP_VERSION}'
       - '--quiet'
+
+substitutions:
+  _APP_VERSION: 'dev'
 
 options:
   logging: CLOUD_LOGGING_ONLY
