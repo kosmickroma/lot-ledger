@@ -52,6 +52,17 @@ const BUILD_ID = (window.LL_CONFIG && window.LL_CONFIG.buildId && window.LL_CONF
   ? window.LL_CONFIG.buildId
   : "dev";
 
+const APP_VERSION = (window.LL_CONFIG && window.LL_CONFIG.appVersion && window.LL_CONFIG.appVersion !== "__APP_VERSION__")
+  ? window.LL_CONFIG.appVersion
+  : "dev";
+
+(function _renderAppVersionPill() {
+  const el = document.getElementById("ll-app-version");
+  if (!el) return;
+  el.textContent = `v${APP_VERSION}`;
+  el.title = `LotLedger v${APP_VERSION} (build ${BUILD_ID})`;
+})();
+
 let _serverVersionBaseline = null;
 let _pendingMismatchVersion = null;
 let _updateAvailable = false;
