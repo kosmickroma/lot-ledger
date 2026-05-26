@@ -919,7 +919,11 @@ function _sameParcelIdentity(a, b) {
 // TAD + DCAD will appear without a city until KK lands a city-resolver
 // for those two (memory: project_save_vs_update_model notes scope).
 function _formatPropertyAddress(county, rawAddr, rawCity, _rawOwnerCity) {
-  const addr = String(rawAddr || "").trim();
+  // Normalize internal whitespace (Collin source ships some addrs with a
+  // literal CRLF between street + city — see _formatFullPropertyAddress
+  // for the longer comment). Done once at the top so every branch below
+  // sees a clean single-space-delimited string.
+  const addr = String(rawAddr || "").replace(/\s+/g, " ").trim();
   if (!addr) return "";
   // 2026-05-22: filter 'NO CITY' (TAD unincorporated marker) / NONE / N/A
   // placeholders. owner_city fallback REMOVED 2026-05-22 — confirmed wrong
@@ -1139,11 +1143,24 @@ function _formatFullPropertyAddress(county, props) {
   if (c === "collin" || c === "denton") {
     street = rawAddr.split(",")[0].trim();
   }
+  // Normalize internal whitespace — some Collin source rows have a
+  // literal CRLF between street and city ("4416 QUERIDA AVE \r\nMCKINNEY")
+  // which renders visually as a space (CSS whitespace collapse) but
+  // breaks the endsWith(" CITY") strip below since the char before
+  // the city is \n not " ". Collapse any \s+ run to a single space so
+  // the strip can detect the city suffix reliably.
+  street = street.replace(/\s+/g, " ").trim();
   // For all counties: if the extracted street ends with the city
   // (Collin's bundled format does this), trim it so we don't show
-  // "1713 N COLLEGE ST MCKINNEY, MCKINNEY, TX 75069".
-  if (city && street.toUpperCase().endsWith(" " + city.toUpperCase())) {
-    street = street.slice(0, -(city.length + 1)).trim();
+  // "1713 N COLLEGE ST MCKINNEY, MCKINNEY, TX 75069". Loop the strip
+  // for the rare case the city is literally repeated in the source
+  // ("STREET CITY CITY") — defensive, single-iteration is the common path.
+  if (city) {
+    const cityUpperWithSpace = " " + city.toUpperCase();
+    while (street.toUpperCase().endsWith(cityUpperWithSpace)) {
+      street = street.slice(0, -(city.length + 1)).trim();
+      if (!street) break;
+    }
   }
 
   const parts = [];
