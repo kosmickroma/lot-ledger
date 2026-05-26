@@ -20,6 +20,8 @@ steps:
   - name: 'gcr.io/cloud-builders/docker'
     args:
       - build
+      - '--build-arg'
+      - 'BUILD_ID=$BUILD_ID'
       - '-t'
       - 'us-central1-docker.pkg.dev/lot-ledger/lot-ledger-api/api:preview-$BUILD_ID'
       - '-t'
@@ -44,7 +46,8 @@ steps:
       - '--project=lot-ledger'
       - '--timeout=3600'
       - '--memory=1Gi'
-      - '--update-env-vars=DEEP_PULL_EXPERIMENT=true,PHASE_2_CACHE_READ=true'
+      - '--min-instances=1'
+      - '--update-env-vars=DEEP_PULL_EXPERIMENT=true,PHASE_2_CACHE_READ=true,BUILD_ID=$BUILD_ID'
       - '--quiet'
 
 options:

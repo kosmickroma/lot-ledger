@@ -48,6 +48,114 @@ const PMTILES_URL = (window.LL_CONFIG && window.LL_CONFIG.tilesUrl && window.LL_
   ? window.LL_CONFIG.tilesUrl
   : "https://storage.googleapis.com/lot-ledger-tiles/parcels.pmtiles";
 
+const BUILD_ID = (window.LL_CONFIG && window.LL_CONFIG.buildId && window.LL_CONFIG.buildId !== "__BUILD_ID__")
+  ? window.LL_CONFIG.buildId
+  : "dev";
+
+let _serverVersionBaseline = null;
+let _pendingMismatchVersion = null;
+let _updateAvailable = false;
+let _appShellReady = false;
+let _bannerShown = false;
+
+function _isSameOriginRequest(input) {
+  try {
+    let urlStr;
+    if (typeof input === "string") {
+      urlStr = input;
+    } else if (input instanceof Request) {
+      urlStr = input.url;
+    } else if (input instanceof URL) {
+      urlStr = input.href;
+    } else {
+      return true;
+    }
+    if (urlStr.startsWith("/")) return true;
+    const url = new URL(urlStr, window.location.origin);
+    return url.origin === window.location.origin;
+  } catch (e) {
+    return false;
+  }
+}
+
+const _originalFetch = window.fetch.bind(window);
+window.fetch = async function(input, init) {
+  init = init || {};
+  const headers = new Headers(init.headers || {});
+  if (_isSameOriginRequest(input) && !headers.has("X-Client-Version")) {
+    headers.set("X-Client-Version", BUILD_ID);
+  }
+  init.headers = headers;
+
+  const response = await _originalFetch(input, init);
+
+  if (_isSameOriginRequest(input)) {
+    const serverVersion = response.headers.get("X-Version");
+    if (serverVersion) {
+      if (_serverVersionBaseline === null) {
+        _serverVersionBaseline = serverVersion;
+      } else if (serverVersion !== _serverVersionBaseline && !_updateAvailable) {
+        if (_pendingMismatchVersion === serverVersion) {
+          _updateAvailable = true;
+          _maybeShowUpdateBanner();
+        } else {
+          _pendingMismatchVersion = serverVersion;
+        }
+      } else if (serverVersion === _serverVersionBaseline) {
+        _pendingMismatchVersion = null;
+      }
+    }
+  }
+  return response;
+};
+
+function _maybeShowUpdateBanner() {
+  if (_bannerShown) return;
+  if (!_updateAvailable) return;
+  if (!_appShellReady) return;
+  try {
+    if (typeof _currentUser === "undefined" || !_currentUser) return;
+  } catch (e) {
+    return;
+  }
+  _renderUpdateBanner();
+}
+
+function _renderUpdateBanner() {
+  if (document.getElementById("ll-update-banner")) return;
+  _bannerShown = true;
+  const banner = document.createElement("div");
+  banner.id = "ll-update-banner";
+  banner.style.cssText = [
+    "position:fixed",
+    "top:0",
+    "left:0",
+    "right:0",
+    "background:#2a7",
+    "color:#fff",
+    "padding:10px 16px",
+    "text-align:center",
+    "z-index:100000",
+    "cursor:pointer",
+    "font-family:inherit",
+    "font-size:14px",
+    "box-shadow:0 2px 8px rgba(0,0,0,.2)",
+  ].join(";");
+  banner.innerHTML = 'A new version is available &mdash; <strong>click to refresh</strong>';
+  banner.addEventListener("click", () => window.location.reload());
+  document.body.appendChild(banner);
+}
+
+setInterval(() => {
+  fetch("/version", { cache: "no-store" }).catch(() => {});
+}, 60000);
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") {
+    fetch("/version", { cache: "no-store" }).catch(() => {});
+  }
+});
+
 const TYPE_LABELS = {
   single_family: "Off-Market SFR",
   vacant: "Vacant Lot",
@@ -10667,6 +10775,8 @@ function _showLoginForm(errorMsg = "") {
         _currentUser = data.user || data;
         _renderUserBar(_currentUser);
         _applyRoleVisibility();
+        _appShellReady = true;
+        _maybeShowUpdateBanner();
         await _reloadSavedResources().catch((err) => console.error("load saved resources failed", err));
         _maybeShowImportBanner();
         const pendingShareId = _pendingAreaShareId;
@@ -11172,6 +11282,8 @@ async function _loadAreaFromShareId(shareId) {
       _currentUser = data.user || data;
       _renderUserBar(_currentUser);
       _applyRoleVisibility();
+      _appShellReady = true;
+      _maybeShowUpdateBanner();
       await _reloadSavedResources().catch((err) => console.error("load saved resources failed", err));
       _maybeShowImportBanner();
       const pendingShareId = _pendingAreaShareId;
