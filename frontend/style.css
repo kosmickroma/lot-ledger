@@ -1306,7 +1306,7 @@ body.is-not-power-user .power-user-only {
 }
 
 .parcel-panel-action-ratings {
-  flex: 1 1 260px;
+  flex: 1 1 200px;
 }
 
 .parcel-panel-action-ratings .propelio-popup-rating {
@@ -1330,15 +1330,15 @@ body.is-not-power-user .power-user-only {
 .parcel-panel-save-link {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  min-height: 34px;
-  padding: 7px 12px;
+  gap: 5px;
+  min-height: 30px;
+  padding: 5px 9px;
   border: 1px solid rgba(183, 140, 53, 0.45);
-  border-radius: 8px;
+  border-radius: 6px;
   color: #b78c35;
   background: #fffbeb;
   text-decoration: none;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 700;
 }
 
@@ -2948,13 +2948,19 @@ body.is-not-power-user .power-user-only {
 }
 
 /* "Load Area" section appended to parcel popups + sidebar panel when the
-   parcel is a Subject Property of one or more saved areas. */
+   parcel is a Subject Property of one or more saved areas. Inside the
+   sidebar panel's parcel-panel-actions (flex row with the rating buttons +
+   Save Parcel), the section claims a guaranteed minimum width so longer
+   area names get room. Inside Leaflet map popups it just sits on its own
+   line via the popup's natural block flow (margin-top + border-top above). */
 .subject-property-load-section {
   margin-top: 10px;
   padding-top: 8px;
   border-top: 1px solid #e2e8f0;
   font-size: 12px;
   color: #334155;
+  flex: 1 1 240px;
+  min-width: 0;
 }
 
 .subject-property-load-label {
@@ -2965,7 +2971,7 @@ body.is-not-power-user .power-user-only {
 
 .subject-property-load-row {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 6px;
   flex-wrap: wrap;
 }
@@ -2973,11 +2979,16 @@ body.is-not-power-user .power-user-only {
 .subject-property-load-name {
   flex: 1 1 auto;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   font-weight: 500;
   color: #0f172a;
+  line-height: 1.3;
+  /* Wrap to up to two lines for longer area names. Third line + becomes
+     ellipsis (modern WebKit / Chromium / Firefox 68+). */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
 }
 
 .subject-property-load-select {
@@ -4000,7 +4011,7 @@ body.is-not-power-user .power-user-only {
   color: #333;
   font-size: 11px;
   font-weight: 600;
-  padding: 4px 6px;
+  padding: 3px 5px;
   border-radius: 4px;
   cursor: pointer;
   transition: background 0.14s ease, color 0.14s ease;
