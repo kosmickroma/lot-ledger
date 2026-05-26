@@ -5155,6 +5155,63 @@ async def delete_session(
     return {"ok": True}
 
 
+def _resolve_originator_coords_batch(
+    cur: Any,
+    originators: list[tuple[str, str]],
+) -> dict[tuple[str, str], tuple[float, float]]:
+    """Bulk-resolve parcel centroids for a list of (county, account_num) pairs.
+
+    Groups by county and runs one query per county so the cost is O(counties)
+    instead of O(originators). Returns a dict keyed by (lowercased_county,
+    stripped_account_num) → (lat, lng) for each pair that resolved. Missing
+    pairs are absent (caller treats absence as "originator unresolved").
+    """
+    if not originators:
+        return {}
+
+    by_county: dict[str, set[str]] = {}
+    for county, account in originators:
+        c = str(county or "").strip().lower()
+        a = str(account or "").strip()
+        if not c or not a:
+            continue
+        by_county.setdefault(c, set()).add(a)
+
+    table_for: dict[str, str] = {
+        "dcad": "parcels",
+        "tad": "tad_parcels",
+        "collin": "collin_parcels",
+        "denton": "denton_parcels",
+    }
+
+    out: dict[tuple[str, str], tuple[float, float]] = {}
+    for county, accounts in by_county.items():
+        table = table_for.get(county)
+        if not table:
+            continue
+        cur.execute(
+            f"""
+            SELECT account_num,
+                   ST_Y(centroid) AS lat,
+                   ST_X(centroid) AS lng
+            FROM {table}
+            WHERE account_num = ANY(%s) AND centroid IS NOT NULL
+            """,
+            (list(accounts),),
+        )
+        for r in cur.fetchall():
+            acct = str(r[0]).strip()
+            lat_raw = r[1]
+            lng_raw = r[2]
+            if lat_raw is None or lng_raw is None:
+                continue
+            try:
+                out[(county, acct)] = (float(lat_raw), float(lng_raw))
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
 @app.get("/api/areas")
 async def list_saved_areas(user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
     conn = get_session_conn()
@@ -5171,26 +5228,73 @@ async def list_saved_areas(user: dict[str, Any] = Depends(get_current_user)) -> 
                 """,
                 (int(user["id"]),)
             )
-            areas = [
-                {
+            rows = cur.fetchall()
+
+            originators_to_resolve: list[tuple[str, str]] = []
+            for row in rows:
+                c = str(row[6] or "").strip().lower()
+                a = str(row[7] or "").strip()
+                if c and a:
+                    originators_to_resolve.append((c, a))
+            resolved_coords = _resolve_originator_coords_batch(cur, originators_to_resolve)
+
+            areas: list[dict[str, Any]] = []
+            subject_props_acc: dict[tuple[str, str], dict[str, Any]] = {}
+
+            for row in rows:
+                area_type = str(row[4] or "area")
+                county = str(row[6] or "").strip().lower() or None
+                account = str(row[7] or "").strip() or None
+
+                originator_unresolved = bool(
+                    county and account and (county, account) not in resolved_coords
+                )
+
+                created_at_iso = row[8].isoformat() if row[8] else None
+                updated_at_iso = row[9].isoformat() if row[9] else None
+
+                areas.append({
                     "area_id": row[0],
                     "name": row[1],
                     "polygon": _to_leaflet_polygon(row[2]),
                     "filter_state": row[3] if isinstance(row[3], dict) else None,
-                    "type": str(row[4] or "area"),
+                    "type": area_type,
                     "share_id": str(row[5] or ""),
-                    "originator_parcel_county": str(row[6] or "").strip().lower() or None,
-                    "originator_parcel_account_num": str(row[7] or "").strip() or None,
-                    "lat": (float(row[2][0][1]) if isinstance(row[2], list) and row[2] and len(row[2][0]) >= 2 else None) if str(row[4] or "area") == "location" else None,
-                    "lng": (float(row[2][0][0]) if isinstance(row[2], list) and row[2] and len(row[2][0]) >= 2 else None) if str(row[4] or "area") == "location" else None,
-                    "created_at": row[8].isoformat() if row[8] else None,
-                    "updated_at": row[9].isoformat() if row[9] else None,
-                }
-                for row in cur.fetchall()
-            ]
+                    "originator_parcel_county": county,
+                    "originator_parcel_account_num": account,
+                    "originator_unresolved": originator_unresolved,
+                    "lat": (float(row[2][0][1]) if isinstance(row[2], list) and row[2] and len(row[2][0]) >= 2 else None) if area_type == "location" else None,
+                    "lng": (float(row[2][0][0]) if isinstance(row[2], list) and row[2] and len(row[2][0]) >= 2 else None) if area_type == "location" else None,
+                    "created_at": created_at_iso,
+                    "updated_at": updated_at_iso,
+                })
+
+                if county and account and not originator_unresolved:
+                    coord = resolved_coords[(county, account)]
+                    key = (county, account)
+                    entry = subject_props_acc.get(key)
+                    if entry is None:
+                        entry = {
+                            "county": county,
+                            "account_num": account,
+                            "lat": coord[0],
+                            "lng": coord[1],
+                            "areas": [],
+                        }
+                        subject_props_acc[key] = entry
+                    entry["areas"].append({
+                        "area_id": row[0],
+                        "name": row[1],
+                        "updated_at": updated_at_iso,
+                    })
+
+            subject_properties: list[dict[str, Any]] = []
+            for entry in subject_props_acc.values():
+                entry["areas"].sort(key=lambda a: a["updated_at"] or "", reverse=True)
+                subject_properties.append(entry)
     finally:
         release_session_conn(conn)
-    return {"areas": areas}
+    return {"areas": areas, "subject_properties": subject_properties}
 
 
 def _point_in_polygon(lat: float, lng: float, polygon: list[list[float]]) -> bool:
