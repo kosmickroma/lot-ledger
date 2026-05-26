@@ -107,6 +107,29 @@ def _resolve_build_id() -> str:
 
 BUILD_ID = _resolve_build_id()
 
+
+def _resolve_app_version() -> str:
+    env_val = os.getenv("APP_VERSION", "").strip()
+    if env_val:
+        return env_val
+    try:
+        result = subprocess.run(
+            ["git", "rev-list", "--count", "--merges", "--first-parent", "main"],
+            capture_output=True,
+            timeout=2,
+            check=False,
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+        )
+        count = result.stdout.decode().strip()
+        if count.isdigit():
+            return f"0.{count}"
+    except Exception:
+        pass
+    return "dev"
+
+
+APP_VERSION = _resolve_app_version()
+
 _STALE_LOG_COOLDOWN_S = 300
 _stale_log_seen: dict[tuple[str, str], float] = {}
 _stale_log_lock = threading.Lock()
@@ -2280,7 +2303,7 @@ async def health_check() -> dict[str, str]:
 
 @app.get("/version", include_in_schema=False)
 async def version_endpoint() -> dict[str, str]:
-    return {"build_id": BUILD_ID}
+    return {"build_id": BUILD_ID, "app_version": APP_VERSION}
 
 
 @app.get("/api/hoa")
@@ -6022,6 +6045,7 @@ async def index() -> HTMLResponse:
         html = (FRONTEND_DIR / "index.html").read_text()
         html = html.replace("__TILES_URL__", TILES_BASE_URL)
         html = html.replace("__BUILD_ID__", BUILD_ID)
+        html = html.replace("__APP_VERSION__", APP_VERSION)
         _INDEX_HTML_CACHE = html
     return HTMLResponse(_INDEX_HTML_CACHE)
 
