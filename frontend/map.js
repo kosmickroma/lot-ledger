@@ -9315,6 +9315,42 @@ function renderRedfinPoints() {
   refreshRedfinPriceLabels();
 }
 
+// Shared click handler for in-area parcel clicks (polygon + circle marker
+// variants both go through this). Fetches a fresh /api/parcel detail
+// before opening the side panel so the panel shows the latest CAD data
+// (city in particular) regardless of how stale the cached_jobs.rows are
+// for this workspace. Falls back to the cached feature props if the
+// fetch fails so the panel still opens — just with whatever was in
+// analyze's response.
+//
+// Background: analyze responses come from cached_jobs (a snapshot
+// taken at workspace-save time). When a row's source data was updated
+// later (e.g. the DCAD property_city backfill), the cache still holds
+// the old shape. Polygon render is fine — it only needs geometry +
+// classification — but the side panel reads address + city + every
+// CAD field from props directly, so stale cache → wrong popup.
+async function _openParcelDetailFromFeature(p, ev, feature) {
+  if (ev && ev.originalEvent) L.DomEvent.stopPropagation(ev);
+  const county = String(p?.source_county || "").trim();
+  const account = String(p?.account_num || "").trim();
+  if (county && account) {
+    try {
+      const resp = await fetch(`/api/parcel/${encodeURIComponent(county)}/${encodeURIComponent(account)}`);
+      if (resp.ok) {
+        const detail = await resp.json();
+        openParcelDetailPanel(detail.properties || detail, {
+          latlng: ev?.latlng,
+          geometry: detail.geometry || feature?.geometry || null,
+        });
+        return;
+      }
+    } catch (err) {
+      console.warn("[in-area-click] fresh /api/parcel fetch failed; falling back to cached props:", err);
+    }
+  }
+  openParcelDetailPanel(p, { latlng: ev?.latlng, geometry: feature?.geometry || null });
+}
+
 function renderFeatures(geojson) {
   const shouldRestorePopup = Boolean(_activeParcelPopupState?.accountNum);
   _isRefreshingParcelLayers = shouldRestorePopup;
@@ -9420,10 +9456,7 @@ function renderFeatures(geojson) {
           opacity: 0.85,
         },
       });
-      layer.on("click", (ev) => {
-        L.DomEvent.stopPropagation(ev);
-        openParcelDetailPanel(p, { latlng: ev.latlng, geometry: feature.geometry });
-      });
+      layer.on("click", (ev) => _openParcelDetailFromFeature(p, ev, feature));
       // L.geoJSON returns a FeatureGroup wrapper; click events fire on inner child layers,
       // so popup._source is the child, not the wrapper. Propagate metadata to children
       // so the popupopen handler can find it for suspend/restore protection.
@@ -9457,10 +9490,7 @@ function renderFeatures(geojson) {
         fillOpacity: 0.9,
         bubblingMouseEvents: false,
       });
-      layer.on("click", (ev) => {
-        L.DomEvent.stopPropagation(ev);
-        openParcelDetailPanel(p, { latlng: ev.latlng, geometry: feature.geometry });
-      });
+      layer.on("click", (ev) => _openParcelDetailFromFeature(p, ev, feature));
       layer._lotLedgerPopupMeta = { type: "parcel", accountNum: String(p.account_num || "") };
       layer.addTo(circleLayer);
       if (p.account_num) {
