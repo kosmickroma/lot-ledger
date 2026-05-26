@@ -56,10 +56,24 @@ const APP_VERSION = (window.LL_CONFIG && window.LL_CONFIG.appVersion && window.L
   ? window.LL_CONFIG.appVersion
   : "dev";
 
+function _formatAppVersionForDisplay(raw) {
+  // Pill is white-space:nowrap and shares the sidebar header row with the
+  // user dropdown. Long preview APP_VERSION (e.g. "0.28-feat-foo-bar-pre")
+  // overflows and pushes the user bar off-screen. Strip the branch suffix
+  // for display; keep "-pre" as the preview marker. Tooltip carries the
+  // full string so the full build identity stays available.
+  if (!raw || raw === "dev") return raw || "dev";
+  if (raw.endsWith("-pre")) {
+    const firstDash = raw.indexOf("-");
+    if (firstDash > 0) return `${raw.slice(0, firstDash)}-pre`;
+  }
+  return raw;
+}
+
 (function _renderAppVersionPill() {
   const el = document.getElementById("ll-app-version");
   if (!el) return;
-  el.textContent = `v${APP_VERSION}`;
+  el.textContent = `v${_formatAppVersionForDisplay(APP_VERSION)}`;
   el.title = `LotLedger v${APP_VERSION} (build ${BUILD_ID})`;
 })();
 
@@ -164,6 +178,17 @@ setInterval(() => {
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") {
     fetch("/version", { cache: "no-store" }).catch(() => {});
+  }
+});
+
+// Cross-tab coherence (see SUBJECT_PROPERTY_VISUAL_REDESIGN_SPEC.md):
+// on tab refocus, refetch saved resources so renames/deletes/forks done in
+// another tab propagate here. _reloadSavedResources defined later in the
+// file; lookup is dynamic so this listener can register early.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState !== "visible") return;
+  if (typeof _reloadSavedResources === "function") {
+    _reloadSavedResources().catch((err) => console.warn("[visibilitychange] _reloadSavedResources failed:", err));
   }
 });
 
@@ -501,6 +526,14 @@ map.createPane("savedTargetStarPane");
 map.getPane("savedTargetStarPane").style.zIndex = "635";
 map.getPane("savedTargetStarPane").style.pointerEvents = "auto";
 
+// Subject-property gold outline pane. Above savedParcelPane (cyan halo for
+// orphan saved parcels, going away in chunk 3) but below selectedOutlinePane
+// (purple selection wins visually). Pointer events enabled so outlines are
+// clickable to open the popup with Load Area section.
+map.createPane("subjectPropertyOutlinePane");
+map.getPane("subjectPropertyOutlinePane").style.zIndex = "622";
+map.getPane("subjectPropertyOutlinePane").style.pointerEvents = "auto";
+
 // Selected-item outline pane — sits above the gold-halo savedParcelPane
 // so when a saved target is also the current selection, the crisp purple
 // line stays visible on top of the gold halo's diffuse glow. Decorative
@@ -656,6 +689,88 @@ const savedTargetStarLayer = L.layerGroup().addTo(map);
 const savedTargetStarMarkers = {};
 const _ORIGINATOR_STAR_LAYER = L.layerGroup().addTo(map);
 let _originatorStarMarker = null;
+
+// === Subject Property layers (see docs/SUBJECT_PROPERTY_VISUAL_REDESIGN_SPEC.md) ===
+// New visual language. Gold = subject property of a saved area. Stars at low zoom
+// for nav (all subjects), stars at high zoom only on loaded area's subject,
+// gold outlines at high zoom for all subjects.
+// Keyed by `${county}::${account_num}` per county-aware identity rule (Copilot
+// critique: account_num alone collides across counties).
+const SUBJECT_PROPERTY_STAR_MAX_ZOOM = 14;
+const subjectPropertyStarLayer = L.layerGroup().addTo(map);
+const subjectPropertyOutlineLayer = L.layerGroup().addTo(map);
+// Map: `${county}::${account_num}` -> {county, account_num, lat, lng, areas[]}
+let _subjectPropertiesByKey = new Map();
+// Map: `${county}::${account_num}` -> Leaflet marker (star)
+const _subjectPropertyStarMarkers = new Map();
+// Map: `${county}::${account_num}` -> Leaflet geoJSON layer (outline polygon)
+const _subjectPropertyOutlineLayers = new Map();
+// Geometry cache to avoid refetching the same parcel polygon. Keyed same way.
+const _subjectPropertyGeometryCache = new Map();
+// Track in-flight geometry fetches so we don't fire duplicates.
+const _subjectPropertyGeometryInFlight = new Set();
+
+function _subjectPropertyKey(county, accountNum) {
+  const c = String(county || "").trim().toLowerCase();
+  const a = String(accountNum || "").trim();
+  if (!c || !a) return null;
+  return `${c}::${a}`;
+}
+
+function _subjectPropertyEscape(s) {
+  return String(s ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+// Shared "Load Area" popup section. Consumed by BOTH _buildParcelDetailPanelHtml
+// AND makePopupHtml so the popup and sidebar panel render identical Load Area
+// affordances. Returns empty string when the parcel is NOT a Subject Property
+// of any of the user's saved areas.
+function _buildSubjectPropertyLoadAreaHtml(parcelProps) {
+  if (!parcelProps || !parcelProps.account_num) return "";
+  const county = String(parcelProps.source_county || "dcad").trim().toLowerCase();
+  const key = _subjectPropertyKey(county, parcelProps.account_num);
+  if (!key) return "";
+  const entry = _subjectPropertiesByKey.get(key);
+  if (!entry || !Array.isArray(entry.areas) || entry.areas.length === 0) return "";
+
+  const loadedId = String(_currentLoadedAreaId || "");
+
+  if (entry.areas.length === 1) {
+    const a = entry.areas[0];
+    const isLoaded = String(a.area_id) === loadedId;
+    const buttonHtml = isLoaded
+      ? `<button type="button" class="subject-property-load-btn" disabled>Currently loaded</button>`
+      : `<button type="button" class="subject-property-load-btn" data-area-id="${_subjectPropertyEscape(a.area_id)}">Load Area</button>`;
+    return `<div class="subject-property-load-section" data-mode="single">
+      <div class="subject-property-load-label">Subject of saved area:</div>
+      <div class="subject-property-load-row">
+        <span class="subject-property-load-name">${_subjectPropertyEscape(a.name)}</span>
+        ${buttonHtml}
+      </div>
+    </div>`;
+  }
+
+  // Multi-area: dropdown defaults to most-recent (areas[0]).
+  const options = entry.areas
+    .map(a => `<option value="${_subjectPropertyEscape(a.area_id)}">${_subjectPropertyEscape(a.name)}</option>`)
+    .join("");
+  const firstId = String(entry.areas[0].area_id);
+  const firstIsLoaded = firstId === loadedId;
+  return `<div class="subject-property-load-section" data-mode="multi">
+    <div class="subject-property-load-label">Subject of saved area:</div>
+    <div class="subject-property-load-row">
+      <select class="subject-property-load-select" aria-label="Select saved area">${options}</select>
+      <button type="button" class="subject-property-load-btn"
+        data-area-id="${_subjectPropertyEscape(firstId)}"
+        ${firstIsLoaded ? "disabled" : ""}>${firstIsLoaded ? "Currently loaded" : "Load Area"}</button>
+    </div>
+  </div>`;
+}
 // Invisible click-catcher polygons that mirror saved-parcel outlines. The
 // decorative halo on `savedParcelPane` is pointer-events:none so its drop-shadow
 // bleed doesn't catch stray clicks; this parallel layer (default overlay pane)
@@ -2779,6 +2894,7 @@ function _normalizeSavedAreaRow(area) {
     lng: Number.isFinite(Number(area.lng)) ? Number(area.lng) : null,
     originator_parcel_county: String(area.originator_parcel_county || "").trim().toLowerCase() || null,
     originator_parcel_account_num: String(area.originator_parcel_account_num || "").trim() || null,
+    originator_unresolved: Boolean(area.originator_unresolved),
     shared_by_username: area.shared_by_username || null,
   };
 }
@@ -2833,9 +2949,32 @@ async function _reloadSavedResources() {
   _savedAreasCache = Array.isArray(areasData.areas) ? areasData.areas.map(_normalizeSavedAreaRow) : [];
   _savedParcelsCache = Array.isArray(parcelsData.parcels) ? parcelsData.parcels.map(_normalizeSavedParcelRow) : [];
   _savedSessionsCache = Array.isArray(sessionsData.sessions) ? sessionsData.sessions.map(_normalizeSessionRow) : [];
+
+  // Subject-property data: rebuild from API payload (county-aware keying).
+  // Geometry cache survives — same parcel doesn't need a fresh /api/parcel fetch.
+  const nextSubjectsByKey = new Map();
+  const incomingSubjects = Array.isArray(areasData.subject_properties) ? areasData.subject_properties : [];
+  for (const sp of incomingSubjects) {
+    const key = _subjectPropertyKey(sp?.county, sp?.account_num);
+    if (!key) continue;
+    nextSubjectsByKey.set(key, {
+      county: String(sp.county || "").trim().toLowerCase(),
+      account_num: String(sp.account_num || "").trim(),
+      lat: Number(sp.lat),
+      lng: Number(sp.lng),
+      areas: Array.isArray(sp.areas) ? sp.areas.map(a => ({
+        area_id: String(a?.area_id || ""),
+        name: String(a?.name || ""),
+        updated_at: String(a?.updated_at || ""),
+      })) : [],
+    });
+  }
+  _subjectPropertiesByKey = nextSubjectsByKey;
+
   _restoreAllSavedParcelOutlines();
   renderSavedAreasList();
   renderSavedSessionsList();
+  _renderSubjectProperties();
 }
 
 // Sync the browser tab title to the active workspace name.
@@ -2960,6 +3099,15 @@ async function saveCurrentArea(name) {
   if (window._propelioLast && Array.isArray(window._propelioLast.comps) && window._propelioLast.comps.length) {
     await _reattachPropelioToSavedArea(normalized.id);
   }
+  // Refetch saved resources so subject_properties picks up the new area's
+  // originator. POST /api/areas only returns the new area — it doesn't
+  // recompute the user's subject-property aggregate, so without this
+  // refetch the new copy's gold outline + star wouldn't appear (and
+  // wouldn't appear on the original either after a Copy Area As, since
+  // the new copy shares the same originator and is now most-recent).
+  await _reloadSavedResources().catch((err) =>
+    console.warn("[saveCurrentArea] post-save resource reload failed:", err)
+  );
 }
 
 // On saved-area load: pull the archived comps for that workspace from
@@ -3062,6 +3210,12 @@ async function deleteSavedArea(item) {
       _syncTabTitle();
       _storedValueOnAreaChange(null);
     }
+    // Refetch subject_properties so the deleted area's originator drops
+    // off the gold-outline / star layer (if it was the only area for that
+    // parcel) or is removed from the popup's area dropdown (if multi).
+    await _reloadSavedResources().catch((err) =>
+      console.warn("[deleteSavedArea] post-delete resource reload failed:", err)
+    );
   }
   if (_selectedSavedItemId === item.id) _selectedSavedItemId = null;
   renderSavedAreasList();
@@ -3180,64 +3334,25 @@ function _clearOriginatorStar() {
     _ORIGINATOR_STAR_LAYER.removeLayer(_originatorStarMarker);
     _originatorStarMarker = null;
   }
+  // Refresh subject-property layer in case the loaded area changed. Cheap —
+  // just rebuilds from cached data. (Chunk 2 minimal wiring; chunk 3 will
+  // replace _renderOriginatorTargetStar entirely with the new layer.)
+  if (typeof _renderSubjectProperties === "function") _renderSubjectProperties();
 }
 
-async function _renderOriginatorTargetStar(county, account, lat, lng) {
+async function _renderOriginatorTargetStar(_county, _account, _lat, _lng) {
+  // Legacy entry point retained for the 6+ call sites that fire on
+  // saveParcel / restoreSavedArea / fork / session-restore. In the
+  // subject-property redesign, the loaded area's star is rendered by
+  // _renderSubjectProperties() via the `is-loaded` modifier, driven by the
+  // payload's lat/lng — so this function no longer creates a Leaflet marker
+  // itself. It only triggers a layer refresh so the loaded-state changes
+  // propagate immediately rather than waiting for the next zoom/reload.
   if (_originatorStarMarker) {
     _ORIGINATOR_STAR_LAYER.removeLayer(_originatorStarMarker);
     _originatorStarMarker = null;
   }
-  const c = String(county || "").trim().toLowerCase();
-  const a = String(account || "").trim();
-  if (!c || !a) return;
-
-  let resolvedLat = Number(lat);
-  let resolvedLng = Number(lng);
-  if (!Number.isFinite(resolvedLat) || !Number.isFinite(resolvedLng)) {
-    try {
-      const resp = await fetch(`/api/parcel/${encodeURIComponent(c)}/${encodeURIComponent(a)}`);
-      if (!resp.ok) return;
-      const detail = await resp.json();
-      const props = detail.properties || detail;
-      resolvedLat = Number(props.lat);
-      resolvedLng = Number(props.lng);
-      if (!Number.isFinite(resolvedLat) || !Number.isFinite(resolvedLng)) return;
-    } catch (err) {
-      console.warn("[target-star] fetch failed:", err);
-      return;
-    }
-  }
-
-  if (_sameParcelIdentity(_currentTargetParcel, { county: c, account: a })) {
-    _currentTargetParcel.lat = resolvedLat;
-    _currentTargetParcel.lng = resolvedLng;
-  }
-
-  const icon = L.divIcon({
-    className: "saved-target-star is-originator",
-    html: `<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false">
-        <path d="M12 1.8l3.16 6.4 7.06 1.03-5.11 4.98 1.2 7.04L12 17.93 5.69 21.25l1.2-7.04-5.11-4.98 7.06-1.03L12 1.8z"
-              fill="#e2c075" stroke="#8b6b1f" stroke-width="1.2"/>
-      </svg>`,
-    iconSize: [22, 22],
-    iconAnchor: [11, 11],
-  });
-  _originatorStarMarker = L.marker([resolvedLat, resolvedLng], {
-    icon,
-    pane: "savedTargetStarPane",
-  }).addTo(_ORIGINATOR_STAR_LAYER);
-  _originatorStarMarker.on("click", async (ev) => {
-    L.DomEvent.stopPropagation(ev);
-    if (_handleMeasureInteraction(ev.latlng, { county: c, account_num: a })) return;
-    try {
-      const resp = await fetch(`/api/parcel/${encodeURIComponent(c)}/${encodeURIComponent(a)}`);
-      if (!resp.ok) return;
-      const detail = await resp.json();
-      openParcelDetailPanel(detail.properties || detail, { latlng: ev.latlng, geometry: detail.geometry });
-    } catch (err) {
-      console.error("[originator-star] popup open failed:", err);
-    }
-  });
+  if (typeof _renderSubjectProperties === "function") _renderSubjectProperties();
 }
 
 function _updateSavedTargetStarVisibility() {
@@ -3257,6 +3372,231 @@ function _updateSavedTargetStarVisibility() {
   if (!map.hasLayer(_ORIGINATOR_STAR_LAYER)) map.addLayer(_ORIGINATOR_STAR_LAYER);
 }
 
+// === Subject Property render functions ===
+// Single entry point: _renderSubjectProperties() rebuilds stars + outlines
+// from _subjectPropertiesByKey based on current zoom and _currentLoadedAreaId.
+// Called from _reloadSavedResources, zoomend, and area-load mutation sites.
+// Cheap to rerun — geometry is cached so no extra fetches on simple rerender.
+
+function _isSubjectPropertyLoaded(entry) {
+  if (!_currentLoadedAreaId || !entry || !Array.isArray(entry.areas)) return false;
+  return entry.areas.some(a => String(a.area_id) === String(_currentLoadedAreaId));
+}
+
+function _subjectPropertyHoverLabel(entry) {
+  // Backend pre-sorts entry.areas by updated_at DESC, so areas[0] is the
+  // most-recently-updated area whose subject this is. Per spec, hover shows
+  // that one's name only.
+  if (!entry || !Array.isArray(entry.areas) || entry.areas.length === 0) return "";
+  const top = entry.areas[0];
+  return String(top?.name || "").trim() || "Saved area";
+}
+
+function _renderSubjectProperties() {
+  // Full rebuild — clears existing markers + outlines and re-renders from
+  // current data + zoom + loaded-area state. Geometry cache survives clears
+  // so outline re-renders don't refetch.
+  subjectPropertyStarLayer.clearLayers();
+  subjectPropertyOutlineLayer.clearLayers();
+  _subjectPropertyStarMarkers.clear();
+  _subjectPropertyOutlineLayers.clear();
+
+  const zoom = map.getZoom();
+  const lowZoom = zoom < SUBJECT_PROPERTY_STAR_MAX_ZOOM;
+  // Viewport gate at high zoom: only fetch + render outlines for parcels
+  // whose centroid falls inside the current viewport. Without this, a user
+  // with 200+ saved areas arriving at zoom 14+ would trigger 200+
+  // /api/parcel fetches on a single render — exactly the startup N+1 the
+  // spec told us to avoid (Copilot audit H3).
+  const bounds = !lowZoom ? map.getBounds() : null;
+
+  for (const entry of _subjectPropertiesByKey.values()) {
+    const isLoaded = _isSubjectPropertyLoaded(entry);
+
+    // Star: at low zoom render every subject; at high zoom only the loaded one.
+    if (lowZoom || isLoaded) {
+      _renderSubjectPropertyStarMarker(entry, isLoaded);
+    }
+
+    // Outline: only at high zoom, only for entries whose centroid is in
+    // the current viewport. Pan-triggered moveend rebuilds will bring in
+    // new outlines as parcels enter view; geometry cache survives so
+    // panning back over a previously-fetched parcel hits no network.
+    if (!lowZoom && bounds
+        && Number.isFinite(entry.lat) && Number.isFinite(entry.lng)
+        && bounds.contains([entry.lat, entry.lng])) {
+      _renderSubjectPropertyOutlineLazy(entry);
+    }
+  }
+}
+
+function _renderSubjectPropertyStarMarker(entry, isLoaded) {
+  const key = _subjectPropertyKey(entry.county, entry.account_num);
+  if (!key) return;
+  if (!Number.isFinite(entry.lat) || !Number.isFinite(entry.lng)) return;
+
+  const className = isLoaded
+    ? "subject-property-star is-loaded"
+    : "subject-property-star";
+
+  const icon = L.divIcon({
+    className,
+    html: '<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false"><path d="M12 1.8l3.16 6.4 7.06 1.03-5.11 4.98 1.2 7.04L12 17.93 5.69 21.25l1.2-7.04-5.11-4.98 7.06-1.03L12 1.8z" fill="#e2c075" stroke="#8b6b1f" stroke-width="1.2"/></svg>',
+    iconSize: [22, 22],
+    iconAnchor: [11, 11],
+  });
+
+  const marker = L.marker([entry.lat, entry.lng], {
+    icon,
+    pane: "savedTargetStarPane",
+  });
+
+  const hoverLabel = _subjectPropertyHoverLabel(entry);
+  if (hoverLabel) {
+    marker.bindTooltip(hoverLabel, { direction: "top", offset: [0, -10] });
+  }
+
+  marker.on("click", (ev) => _onSubjectPropertyClick(entry, ev));
+  marker.addTo(subjectPropertyStarLayer);
+  _subjectPropertyStarMarkers.set(key, marker);
+}
+
+function _renderSubjectPropertyOutlineLazy(entry) {
+  const key = _subjectPropertyKey(entry.county, entry.account_num);
+  if (!key) return;
+  if (_subjectPropertyOutlineLayers.has(key)) return;
+
+  const cached = _subjectPropertyGeometryCache.get(key);
+  if (cached) {
+    _renderSubjectPropertyOutlineFromGeometry(entry, cached);
+    return;
+  }
+
+  if (_subjectPropertyGeometryInFlight.has(key)) return;
+  _subjectPropertyGeometryInFlight.add(key);
+
+  fetch(`/api/parcel/${encodeURIComponent(entry.county)}/${encodeURIComponent(entry.account_num)}`)
+    .then(resp => resp.ok ? resp.json() : null)
+    .then(detail => {
+      _subjectPropertyGeometryInFlight.delete(key);
+      if (!detail || !detail.geometry) return;
+      _subjectPropertyGeometryCache.set(key, detail.geometry);
+      if (map.getZoom() < SUBJECT_PROPERTY_STAR_MAX_ZOOM) return;
+      if (!_subjectPropertiesByKey.has(key)) return;
+      _renderSubjectPropertyOutlineFromGeometry(entry, detail.geometry);
+    })
+    .catch(err => {
+      _subjectPropertyGeometryInFlight.delete(key);
+      console.warn("[subject-property] geometry fetch failed", key, err);
+    });
+}
+
+function _renderSubjectPropertyOutlineFromGeometry(entry, geometry) {
+  const key = _subjectPropertyKey(entry.county, entry.account_num);
+  if (!key) return;
+  if (_subjectPropertyOutlineLayers.has(key)) return;
+  if (!geometry || (geometry.type !== "Polygon" && geometry.type !== "MultiPolygon")) return;
+
+  const layer = L.geoJSON({ type: "Feature", geometry, properties: {} }, {
+    pane: "subjectPropertyOutlinePane",
+    className: "subject-property-outline",
+    style: { color: "#e2c075", weight: 2, fill: false, fillOpacity: 0, interactive: true },
+    interactive: true,
+  });
+
+  const hoverLabel = _subjectPropertyHoverLabel(entry);
+  if (hoverLabel) {
+    layer.bindTooltip(hoverLabel, { sticky: true, direction: "top" });
+  }
+
+  layer.on("click", (ev) => _onSubjectPropertyClick(entry, ev));
+  layer.addTo(subjectPropertyOutlineLayer);
+  _subjectPropertyOutlineLayers.set(key, layer);
+}
+
+async function _onSubjectPropertyClick(entry, ev) {
+  if (ev && ev.originalEvent) L.DomEvent.stopPropagation(ev);
+  const c = entry.county;
+  const a = entry.account_num;
+  if (_handleMeasureInteraction(ev?.latlng, { county: c, account_num: a })) return;
+
+  // Honor btn-zoom-toggle (jump mode flies to parcel first).
+  if (currentClickMode === "jump" && map.getZoom() < 16) {
+    map.flyTo([entry.lat, entry.lng], 16, { duration: 0.35 });
+  }
+
+  try {
+    const resp = await fetch(`/api/parcel/${encodeURIComponent(c)}/${encodeURIComponent(a)}`);
+    if (!resp.ok) return;
+    const detail = await resp.json();
+    openParcelDetailPanel(detail.properties || detail, {
+      latlng: ev?.latlng,
+      geometry: detail.geometry,
+      subjectPropertyEntry: entry,
+    });
+  } catch (err) {
+    console.error("[subject-property] popup open failed:", err);
+  }
+}
+
+// Load Area button delegation — works for both panel + popup since both
+// render the same .subject-property-load-btn markup via the shared helper.
+document.addEventListener("click", async (ev) => {
+  const btn = ev.target.closest(".subject-property-load-btn");
+  if (!btn || btn.disabled) return;
+  ev.preventDefault();
+  ev.stopPropagation();
+  const areaId = btn.getAttribute("data-area-id") || "";
+  if (!areaId) return;
+  const area = _savedAreasCache.find(a => String(a.id) === areaId);
+  if (!area) {
+    console.warn("[subject-property] Load Area clicked but area not in cache:", areaId);
+    return;
+  }
+  // Mirror the guarded sidebar-row-click workspace-switch path. Copilot
+  // audit flagged that calling restoreSavedArea directly skipped the
+  // deep-pull guard, undo snapshot, and undo pill — silent footgun if a
+  // user clicks Load Area mid-Quick-Sweep.
+  if (!_navigationGuardForActiveDeepPull("switch workspaces")) {
+    return;
+  }
+  _selectedSavedItemId = area.id;
+  _clearSelectedOutline();
+  document.querySelectorAll(".saved-area-row-active").forEach((el) => el.classList.remove("saved-area-row-active"));
+  const matchingRow = document.querySelector(`.saved-area-row[data-id="${CSS.escape(area.id)}"]`);
+  if (matchingRow) matchingRow.classList.add("saved-area-row-active");
+  bumpUndoPillVersion();
+  const snapshot = _createUndoSnapshot();
+  try {
+    await restoreSavedArea(area, { rowEl: matchingRow || null, undoSnapshot: snapshot });
+    const restoredCount = _countRestoredFilterKeys(area.filter_state);
+    _showUndoPill(snapshot, restoredCount);
+  } catch (err) {
+    console.error("[subject-property] restoreSavedArea failed:", err);
+  }
+});
+
+// Multi-area dropdown change — sync button state + data-area-id to whichever
+// area is currently selected.
+document.addEventListener("change", (ev) => {
+  const sel = ev.target.closest(".subject-property-load-select");
+  if (!sel) return;
+  const section = sel.closest(".subject-property-load-section");
+  if (!section) return;
+  const btn = section.querySelector(".subject-property-load-btn");
+  if (!btn) return;
+  const selectedId = String(sel.value || "");
+  const loadedId = String(_currentLoadedAreaId || "");
+  btn.setAttribute("data-area-id", selectedId);
+  if (selectedId && selectedId === loadedId) {
+    btn.disabled = true;
+    btn.textContent = "Currently loaded";
+  } else {
+    btn.disabled = false;
+    btn.textContent = "Load Area";
+  }
+});
+
 function _removeSavedTargetStar(accountNum) {
   const key = String(accountNum || "");
   if (!key) return;
@@ -3266,123 +3606,24 @@ function _removeSavedTargetStar(accountNum) {
   delete savedTargetStarMarkers[key];
 }
 
-function _renderSavedTargetStar(area) {
-  const accountNum = String(area?.account_num || "").trim();
-  if (!accountNum) return;
-  if (savedTargetStarMarkers[accountNum]) return;
-
-  const lat = Number(area?.lat);
-  const lng = Number(area?.lng);
-  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
-
-  const marker = L.marker([lat, lng], { icon: savedTargetStarIcon, pane: "savedTargetStarPane" });
-  marker.on("click", async (ev) => {
-    L.DomEvent.stopPropagation(ev);
-    if (_handleMeasureInteraction(ev.latlng, area)) return;
-    const county = String(area.county || "dcad").trim().toLowerCase();
-    const account = String(area.account_num || "").trim();
-    if (!account) return;
-    try {
-      const resp = await fetch(`/api/parcel/${encodeURIComponent(county)}/${encodeURIComponent(account)}`);
-      if (!resp.ok) return;
-      const detail = await resp.json();
-      openParcelDetailPanel(detail.properties || detail, { latlng: ev.latlng, geometry: detail.geometry });
-    } catch (err) {
-      console.error("[saved-target-star] open failed", err);
-    }
-  });
-  marker.addTo(savedTargetStarLayer);
-  savedTargetStarMarkers[accountNum] = marker;
+function _renderSavedTargetStar(_area) {
+  // Subject-property redesign: orphan saved parcels no longer get a map
+  // visual. The Saved Targets sidebar list is the only way to see them;
+  // clicking a list row pans + applies the purple selection highlight (see
+  // the bookmark click branch in _renderList). Function kept as a no-op so
+  // the 4 call sites (saveParcel, _restoreAllSavedParcelOutlines, restore
+  // paths) don't need touching.
 }
 
-function _renderSavedParcelOutline(area) {
-  // Dedup against BOTH layer buckets: the polygon path populates both
-  // savedParcelLayers + savedParcelClickLayers; the point-fallback path only
-  // populates savedParcelClickLayers, so a check on savedParcelLayers alone
-  // would let the fallback add duplicate circle-markers on re-render.
-  if (savedParcelLayers[area.account_num] || savedParcelClickLayers[area.account_num]) return;
-
-  const hasPolygonGeometry = area.geometry
-    && ["Polygon", "MultiPolygon"].includes(area.geometry.type);
-
-  if (hasPolygonGeometry) {
-    // === existing path: render cyan halo + invisible polygon click-catcher ===
-    const layer = L.geoJSON({ type: "Feature", geometry: area.geometry, properties: {} }, {
-      pane: "savedParcelPane",
-      className: "saved-parcel-glow",
-      style: {
-        color: SAVED_PARCEL_COLOR,
-        weight: 6,
-        fill: true,
-        fillColor: SAVED_PARCEL_COLOR,
-        fillOpacity: 0.16,
-        interactive: false,
-      },
-      interactive: false,
-    }).addTo(savedParcelLayer);
-    savedParcelLayers[area.account_num] = layer;
-
-    // Sibling click-catcher on the default overlay pane. Transparent fill, no
-    // stroke — exists only to make the gold target reliably clickable even when
-    // an active draw has set lastAnalysisGeojson (which makes the browse-layer
-    // click handler bail), or when the target sits outside the draw polygon and
-    // therefore has no entry in parcelTypeLayers.
-    const county = area.county || "dcad";
-    const accountNum = area.account_num;
-    const clickLayer = L.geoJSON({ type: "Feature", geometry: area.geometry, properties: {} }, {
-      style: { stroke: false, fill: true, fillOpacity: 0, fillColor: SAVED_PARCEL_COLOR },
-      interactive: true,
-    });
-    clickLayer.on("click", async (ev) => {
-      L.DomEvent.stopPropagation(ev);
-      if (_handleMeasureInteraction(ev.latlng, area)) return;
-      try {
-        const resp = await fetch(`/api/parcel/${county}/${accountNum}`);
-        if (!resp.ok) return;
-        const detail = await resp.json();
-        openParcelDetailPanel(detail.properties || detail, { latlng: ev.latlng, geometry: detail.geometry });
-      } catch (e) {
-        console.error("Saved-target popup failed", e);
-      }
-    });
-    clickLayer.addTo(savedParcelClickLayer);
-    savedParcelClickLayers[accountNum] = clickLayer;
-    return;
-  }
-
-  // === NEW: point-based fallback for location-only saved parcels ===
-  // No parcel polygon stored, so render an invisible circle-marker click-catcher
-  // at the saved lat/lng. Same savedParcelClickLayer + savedParcelClickLayers
-  // bookkeeping so cleanup paths stay consistent.
-  const lat = Number(area.lat);
-  const lng = Number(area.lng);
-  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
-
-  const county = area.county || "dcad";
-  const accountNum = area.account_num;
-
-  const pointClickLayer = L.circleMarker([lat, lng], {
-    radius: 24,         // pixel-based; stays clickable at any zoom
-    stroke: false,
-    fill: true,
-    fillOpacity: 0,     // invisible
-    interactive: true,
-    bubblingMouseEvents: false,
-  });
-  pointClickLayer.on("click", async (ev) => {
-    L.DomEvent.stopPropagation(ev);
-    if (_handleMeasureInteraction(ev.latlng, area)) return;
-    try {
-      const resp = await fetch(`/api/parcel/${encodeURIComponent(county)}/${encodeURIComponent(accountNum)}`);
-      if (!resp.ok) return;
-      const detail = await resp.json();
-      openParcelDetailPanel(detail.properties || detail, { latlng: ev.latlng, geometry: detail.geometry });
-    } catch (e) {
-      console.error("Saved-target (point fallback) popup failed", e);
-    }
-  });
-  pointClickLayer.addTo(savedParcelClickLayer);
-  savedParcelClickLayers[accountNum] = pointClickLayer;
+function _renderSavedParcelOutline(_area) {
+  // Subject-property redesign: orphan saved parcels no longer get a map
+  // visual (cyan halo + click-catcher). Gold outlines on the map now belong
+  // exclusively to Subject Properties of saved areas, rendered by
+  // subjectPropertyOutlineLayer at zoom >= 14. The Saved Targets sidebar
+  // list remains the entry point for bookmark-style navigation (pan +
+  // purple highlight via the bookmark click branch in _renderList).
+  // Function kept as a no-op so call sites (saveParcel, restoreSavedArea,
+  // _restoreAllSavedParcelOutlines, fork paths) don't need touching.
 }
 
 function _clearSelectedOutline() {
@@ -3524,6 +3765,14 @@ function _restoreAllSavedParcelOutlines() {
 
 map.on("zoomend", _updateSavedTargetStarVisibility);
 _updateSavedTargetStarVisibility();
+
+// Subject-property layer rebuilds on any view change (pan OR zoom) so the
+// viewport-gated outline rendering picks up parcels that entered view, and
+// the star/outline visibility rules switch at the zoom threshold. moveend
+// fires after both pan + zoom completions, so a single listener covers
+// both. Geometry cache survives rebuilds — panning back over previously-
+// fetched parcels hits no network.
+map.on("moveend", _renderSubjectProperties);
 
 function _createUndoSnapshot() {
   return {
@@ -4154,6 +4403,7 @@ function _renderList(sectionId, listId, items, options = {}) {
           <input type="checkbox" class="saved-area-checkbox" data-action="toggle-selection" data-id="${area.id}" aria-labelledby="${nameId}">
           <span class="visually-hidden">${typeLabel}</span>
           <span class="saved-area-name-wrap"><span class="saved-area-name" id="${nameId}">${displayName}</span></span>
+          ${area.originator_unresolved ? `<span class="saved-area-originator-unresolved" title="The originator parcel for this area is no longer in CAD (deleted or renumbered). The gold outline/star won't render.">Originator unresolved</span>` : ""}
           ${canShare ? `<button type="button" class="saved-area-action-btn saved-area-share-btn" data-action="share" data-share-id="${_esc(area.share_id)}" title="Share">🔗</button>` : ""}
         </div>
         <div class="saved-area-secondary-line">${secondaryLine}</div>
@@ -4236,6 +4486,11 @@ function _renderList(sectionId, listId, items, options = {}) {
             );
           }
           renderSavedAreasList();
+          // Refetch subject_properties so the forked area's originator
+          // shows the gold outline + star (subject-property redesign).
+          await _reloadSavedResources().catch((err) =>
+            console.warn("[fork] post-clone resource reload failed:", err)
+          );
           _showToast(`Forked → "${cloned.name}"`);
         } catch {
           _showToast("Could not fork area", "error");
@@ -4265,6 +4520,25 @@ function _renderList(sectionId, listId, items, options = {}) {
         if (el !== row) el.classList.remove("saved-area-row-active");
       });
       row.classList.add("saved-area-row-active");
+
+      // Bookmark click branch (subject-property redesign): a click on a
+      // type="parcel" row should JUST select with purple + pan to it. No
+      // popup auto-opens, no workspace restore. User clicks the parcel
+      // itself on the map if they want the popup.
+      if (area.type === "parcel") {
+        const lat = Number(area.lat);
+        const lng = Number(area.lng);
+        if (Number.isFinite(lat) && Number.isFinite(lng)) {
+          const clickMode = (typeof getClickMode === "function" ? getClickMode() : "stay");
+          if (clickMode === "jump") {
+            map.flyTo([lat, lng], Math.max(map.getZoom(), 16), { duration: 0.35 });
+          } else if (!isPointInViewport([lat, lng])) {
+            map.setView([lat, lng], Math.max(map.getZoom(), 15));
+          }
+        }
+        return;
+      }
+
       bumpUndoPillVersion();
       const snapshot = _createUndoSnapshot();
       await restoreSavedArea(area, { rowEl: row, undoSnapshot: snapshot });
@@ -8275,6 +8549,7 @@ function _buildParcelDetailPanelHtml(p, matchedComp) {
         <div class="parcel-panel-action-slot parcel-panel-action-save">
           ${saveLinkHtml}
         </div>
+        ${_buildSubjectPropertyLoadAreaHtml(p)}
       </section>`,
   };
 }
@@ -8536,6 +8811,7 @@ function makePopupHtml(p) {
         </table>
         ${propelioSectionHtml}
         ${ratingButtonsHtml}
+        ${_buildSubjectPropertyLoadAreaHtml(p)}
         ${p.account_num ? `<div style="margin-top:8px;display:flex;gap:6px;align-items:center;justify-content:flex-end;font-size:11px;padding-top:6px;border-top:1px solid #e2e8f0;">
           <a href="#" class="parcel-save-link"
             data-account="${p.account_num}"
@@ -11253,6 +11529,11 @@ async function _loadAreaFromShareId(shareId) {
           );
         }
         renderSavedAreasList();
+        // Refetch subject_properties so the auto-forked area's originator
+        // shows the gold outline + star (subject-property redesign).
+        await _reloadSavedResources().catch((err) =>
+          console.warn("[auto-fork] post-clone resource reload failed:", err)
+        );
         _showToast(`Added to your saved areas: ${cloned.name}`);
       } catch (forkErr) {
         console.warn("auto-fork failed; keeping read-only view", forkErr);
