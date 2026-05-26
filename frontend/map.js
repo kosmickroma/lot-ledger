@@ -3099,6 +3099,15 @@ async function saveCurrentArea(name) {
   if (window._propelioLast && Array.isArray(window._propelioLast.comps) && window._propelioLast.comps.length) {
     await _reattachPropelioToSavedArea(normalized.id);
   }
+  // Refetch saved resources so subject_properties picks up the new area's
+  // originator. POST /api/areas only returns the new area — it doesn't
+  // recompute the user's subject-property aggregate, so without this
+  // refetch the new copy's gold outline + star wouldn't appear (and
+  // wouldn't appear on the original either after a Copy Area As, since
+  // the new copy shares the same originator and is now most-recent).
+  await _reloadSavedResources().catch((err) =>
+    console.warn("[saveCurrentArea] post-save resource reload failed:", err)
+  );
 }
 
 // On saved-area load: pull the archived comps for that workspace from
@@ -3201,6 +3210,12 @@ async function deleteSavedArea(item) {
       _syncTabTitle();
       _storedValueOnAreaChange(null);
     }
+    // Refetch subject_properties so the deleted area's originator drops
+    // off the gold-outline / star layer (if it was the only area for that
+    // parcel) or is removed from the popup's area dropdown (if multi).
+    await _reloadSavedResources().catch((err) =>
+      console.warn("[deleteSavedArea] post-delete resource reload failed:", err)
+    );
   }
   if (_selectedSavedItemId === item.id) _selectedSavedItemId = null;
   renderSavedAreasList();
@@ -4440,6 +4455,11 @@ function _renderList(sectionId, listId, items, options = {}) {
             );
           }
           renderSavedAreasList();
+          // Refetch subject_properties so the forked area's originator
+          // shows the gold outline + star (subject-property redesign).
+          await _reloadSavedResources().catch((err) =>
+            console.warn("[fork] post-clone resource reload failed:", err)
+          );
           _showToast(`Forked → "${cloned.name}"`);
         } catch {
           _showToast("Could not fork area", "error");
@@ -11478,6 +11498,11 @@ async function _loadAreaFromShareId(shareId) {
           );
         }
         renderSavedAreasList();
+        // Refetch subject_properties so the auto-forked area's originator
+        // shows the gold outline + star (subject-property redesign).
+        await _reloadSavedResources().catch((err) =>
+          console.warn("[auto-fork] post-clone resource reload failed:", err)
+        );
         _showToast(`Added to your saved areas: ${cloned.name}`);
       } catch (forkErr) {
         console.warn("auto-fork failed; keeping read-only view", forkErr);
