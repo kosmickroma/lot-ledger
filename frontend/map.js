@@ -56,10 +56,24 @@ const APP_VERSION = (window.LL_CONFIG && window.LL_CONFIG.appVersion && window.L
   ? window.LL_CONFIG.appVersion
   : "dev";
 
+function _formatAppVersionForDisplay(raw) {
+  // Pill is white-space:nowrap and shares the sidebar header row with the
+  // user dropdown. Long preview APP_VERSION (e.g. "0.28-feat-foo-bar-pre")
+  // overflows and pushes the user bar off-screen. Strip the branch suffix
+  // for display; keep "-pre" as the preview marker. Tooltip carries the
+  // full string so the full build identity stays available.
+  if (!raw || raw === "dev") return raw || "dev";
+  if (raw.endsWith("-pre")) {
+    const firstDash = raw.indexOf("-");
+    if (firstDash > 0) return `${raw.slice(0, firstDash)}-pre`;
+  }
+  return raw;
+}
+
 (function _renderAppVersionPill() {
   const el = document.getElementById("ll-app-version");
   if (!el) return;
-  el.textContent = `v${APP_VERSION}`;
+  el.textContent = `v${_formatAppVersionForDisplay(APP_VERSION)}`;
   el.title = `LotLedger v${APP_VERSION} (build ${BUILD_ID})`;
 })();
 
