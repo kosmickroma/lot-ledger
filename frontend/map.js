@@ -1141,9 +1141,18 @@ function _formatFullPropertyAddress(county, props) {
   }
   // For all counties: if the extracted street ends with the city
   // (Collin's bundled format does this), trim it so we don't show
-  // "1713 N COLLEGE ST MCKINNEY, MCKINNEY, TX 75069".
-  if (city && street.toUpperCase().endsWith(" " + city.toUpperCase())) {
-    street = street.slice(0, -(city.length + 1)).trim();
+  // "1713 N COLLEGE ST MCKINNEY, MCKINNEY, TX 75069". Loop the strip
+  // because some Collin source rows have the city literally repeated
+  // ("1608 WEST ST MCKINNEY MCKINNEY") — a single strip leaves the
+  // first occurrence intact and produces the same duplication in
+  // the final output. Defensive against any future N-times-repeated
+  // edge cases too.
+  if (city) {
+    const cityUpperWithSpace = " " + city.toUpperCase();
+    while (street.toUpperCase().endsWith(cityUpperWithSpace)) {
+      street = street.slice(0, -(city.length + 1)).trim();
+      if (!street) break;
+    }
   }
 
   const parts = [];
