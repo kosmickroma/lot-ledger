@@ -1838,6 +1838,9 @@ async function _handleActiveItemRenameClick() {
       nameEl.textContent = nextName;
       cleanup();
       renderSavedAreasList();
+      // Active-item pencil rename was missing the tab-title update that the
+      // sidebar-row rename had. Now they match.
+      _syncTabTitle();
     } catch (err) {
       console.error("[rename] active-item rename failed:", err);
       cleanup();
@@ -2987,15 +2990,37 @@ async function _reloadSavedResources() {
   _renderSubjectProperties();
 }
 
-// Sync the browser tab title to the active workspace name.
-// Called after every _currentLoadedAreaId assignment.
+// Sync the browser tab title AND the ?area=<share_id> URL param to the
+// currently-loaded workspace. Called after every _currentLoadedAreaId
+// assignment plus after rename paths (so the title catches up even when
+// the area_id didn't change).
+//
+// URL sync uses history.replaceState — doesn't push a history entry, so
+// the Back button still does what the user expects. When no workspace is
+// loaded, the ?area= param is removed from the URL bar entirely.
 function _syncTabTitle() {
+  let title = "LotLedger";
+  let shareId = "";
   if (_currentLoadedAreaId) {
     const area = _savedAreasCache.find((a) => String(a.id) === String(_currentLoadedAreaId));
-    const name = String(area?.name || "").trim();
-    document.title = name || "LotLedger";
-  } else {
-    document.title = "LotLedger";
+    title = String(area?.name || "").trim() || "LotLedger";
+    shareId = String(area?.share_id || "").trim();
+  }
+  document.title = title;
+  try {
+    const url = new URL(window.location.href);
+    if (shareId) {
+      url.searchParams.set("area", shareId);
+    } else {
+      url.searchParams.delete("area");
+    }
+    const nextRelative = url.pathname + url.search + url.hash;
+    const currentRelative = window.location.pathname + window.location.search + window.location.hash;
+    if (nextRelative !== currentRelative) {
+      window.history.replaceState({}, "", nextRelative);
+    }
+  } catch (err) {
+    console.warn("[syncTabTitle] URL sync failed:", err);
   }
 }
 
