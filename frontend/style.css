@@ -77,6 +77,23 @@ body {
   text-transform: none;
 }
 
+.app-version-pill {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 7px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  vertical-align: 3px;
+  white-space: nowrap;
+  cursor: default;
+  user-select: text;
+}
+
 h1 {
   font-size: 13px;
   font-weight: 600;
