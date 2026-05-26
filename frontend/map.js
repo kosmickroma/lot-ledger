@@ -3403,6 +3403,12 @@ function _renderSubjectProperties() {
 
   const zoom = map.getZoom();
   const lowZoom = zoom < SUBJECT_PROPERTY_STAR_MAX_ZOOM;
+  // Viewport gate at high zoom: only fetch + render outlines for parcels
+  // whose centroid falls inside the current viewport. Without this, a user
+  // with 200+ saved areas arriving at zoom 14+ would trigger 200+
+  // /api/parcel fetches on a single render — exactly the startup N+1 the
+  // spec told us to avoid (Copilot audit H3).
+  const bounds = !lowZoom ? map.getBounds() : null;
 
   for (const entry of _subjectPropertiesByKey.values()) {
     const isLoaded = _isSubjectPropertyLoaded(entry);
@@ -3412,8 +3418,13 @@ function _renderSubjectProperties() {
       _renderSubjectPropertyStarMarker(entry, isLoaded);
     }
 
-    // Outline: only at high zoom, render every subject (lazy geometry).
-    if (!lowZoom) {
+    // Outline: only at high zoom, only for entries whose centroid is in
+    // the current viewport. Pan-triggered moveend rebuilds will bring in
+    // new outlines as parcels enter view; geometry cache survives so
+    // panning back over a previously-fetched parcel hits no network.
+    if (!lowZoom && bounds
+        && Number.isFinite(entry.lat) && Number.isFinite(entry.lng)
+        && bounds.contains([entry.lat, entry.lng])) {
       _renderSubjectPropertyOutlineLazy(entry);
     }
   }
@@ -3542,8 +3553,24 @@ document.addEventListener("click", async (ev) => {
     console.warn("[subject-property] Load Area clicked but area not in cache:", areaId);
     return;
   }
+  // Mirror the guarded sidebar-row-click workspace-switch path. Copilot
+  // audit flagged that calling restoreSavedArea directly skipped the
+  // deep-pull guard, undo snapshot, and undo pill — silent footgun if a
+  // user clicks Load Area mid-Quick-Sweep.
+  if (!_navigationGuardForActiveDeepPull("switch workspaces")) {
+    return;
+  }
+  _selectedSavedItemId = area.id;
+  _clearSelectedOutline();
+  document.querySelectorAll(".saved-area-row-active").forEach((el) => el.classList.remove("saved-area-row-active"));
+  const matchingRow = document.querySelector(`.saved-area-row[data-id="${CSS.escape(area.id)}"]`);
+  if (matchingRow) matchingRow.classList.add("saved-area-row-active");
+  bumpUndoPillVersion();
+  const snapshot = _createUndoSnapshot();
   try {
-    await restoreSavedArea(area);
+    await restoreSavedArea(area, { rowEl: matchingRow || null, undoSnapshot: snapshot });
+    const restoredCount = _countRestoredFilterKeys(area.filter_state);
+    _showUndoPill(snapshot, restoredCount);
   } catch (err) {
     console.error("[subject-property] restoreSavedArea failed:", err);
   }
@@ -3739,9 +3766,13 @@ function _restoreAllSavedParcelOutlines() {
 map.on("zoomend", _updateSavedTargetStarVisibility);
 _updateSavedTargetStarVisibility();
 
-// Subject-property layer rebuilds on zoom crossing the threshold so the
-// star/outline visibility rules switch at the boundary.
-map.on("zoomend", _renderSubjectProperties);
+// Subject-property layer rebuilds on any view change (pan OR zoom) so the
+// viewport-gated outline rendering picks up parcels that entered view, and
+// the star/outline visibility rules switch at the zoom threshold. moveend
+// fires after both pan + zoom completions, so a single listener covers
+// both. Geometry cache survives rebuilds — panning back over previously-
+// fetched parcels hits no network.
+map.on("moveend", _renderSubjectProperties);
 
 function _createUndoSnapshot() {
   return {
