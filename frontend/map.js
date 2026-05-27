@@ -3614,8 +3614,26 @@ function _renderSubjectProperties() {
   const staged = _stagedSubjectIdentity();
   const stagedKey = staged ? _subjectPropertyKey(staged.county, staged.account_num) : null;
 
+  // v1.1 §2.2 — suppression rule: when a saved area is loaded, only THAT
+  // area's subject shows gold + star + parcel highlight globally. All
+  // other saved-area subjects go dormant on the map (sidebar list is
+  // unaffected — separate UI surface). Restored on Clear / area switch
+  // / no-area-loaded.
+  const _loadedAreaId = _currentLoadedAreaId;
+  const _loadedAreaSubjectKey = _loadedAreaId
+    ? (() => {
+        const loaded = _savedAreasCache.find((a) => a.id === _loadedAreaId && a.type === "area");
+        if (!loaded) return null;
+        const c = String(loaded.originator_parcel_county || "").trim().toLowerCase();
+        const a = String(loaded.originator_parcel_account_num || "").trim();
+        return c && a ? _subjectPropertyKey(c, a) : null;
+      })()
+    : null;
+
   // Outlines: every persisted subject_property in viewport gets one.
   for (const entry of _subjectPropertiesByKey.values()) {
+    // Suppression: skip non-loaded-area subjects when an area is loaded.
+    if (_loadedAreaId && _loadedAreaSubjectKey && _subjectPropertyKey(entry.county, entry.account_num) !== _loadedAreaSubjectKey) continue;
     if (!lowZoom && bounds
         && Number.isFinite(entry.lat) && Number.isFinite(entry.lng)
         && bounds.contains([entry.lat, entry.lng])) {
@@ -3643,6 +3661,8 @@ function _renderSubjectProperties() {
   // star with `is-loaded` so the user sees their pending change.
   if (lowZoom) {
     for (const entry of _subjectPropertiesByKey.values()) {
+      // Suppression: skip non-loaded-area subjects when an area is loaded.
+      if (_loadedAreaId && _loadedAreaSubjectKey && _subjectPropertyKey(entry.county, entry.account_num) !== _loadedAreaSubjectKey) continue;
       const isStaged = stagedKey != null && _subjectPropertyKey(entry.county, entry.account_num) === stagedKey;
       _renderSubjectPropertyStarMarker(entry, isStaged);
     }
