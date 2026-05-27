@@ -95,21 +95,19 @@
             <textarea id="sv-comment-nbv" class="sv-comment" rows="2" placeholder="Comment (optional)"></textarea>
           </div>
 
-          <!-- K4 (2026-05-27 roadmap): TDPP is now CALC, driven by NBV × 0.2.
-               sv-row-calc + sv-numeric-readonly + CALC badge match the MAO/
-               TDPP-MAO styling. Backwards-compat: when NBV is null, the
-               displayed value falls back to whatever was previously stored
-               in DB (see _storedValueComputeCalc in map.js). -->
-          <div class="sv-row sv-row-calc" data-field-key="tdpp">
+          <!-- K4 (2026-05-27 — Option B): TDPP stays user-editable.
+               NBV auto-fills it with NBV × 0.2 (see _storedValueOnNumericInput
+               in map.js), but the operator can override by typing in TDPP
+               directly afterward. No CALC badge — it's still manual. -->
+          <div class="sv-row" data-field-key="tdpp">
             <div class="sv-row-head">
               <label class="sv-label" for="sv-input-tdpp">TDPP</label>
               <button type="button" class="sv-tooltip-trigger" aria-describedby="sv-tooltip-tdpp" aria-label="What is TDPP?">?</button>
-              <span id="sv-tooltip-tdpp" role="tooltip" class="sv-tooltip">Tear Down Purchase Price (calc: NBV × 0.2)</span>
-              <span class="sv-calc-badge">calc</span>
+              <span id="sv-tooltip-tdpp" role="tooltip" class="sv-tooltip">Tear Down Purchase Price (NBV × 0.2 by default; you can override)</span>
             </div>
             <div class="sv-input-wrap">
               <span class="sv-input-prefix">$</span>
-              <input id="sv-input-tdpp" class="sv-numeric-input sv-numeric-readonly" type="text" readonly tabindex="-1" placeholder="—">
+              <input id="sv-input-tdpp" class="sv-numeric-input" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="0">
             </div>
             <textarea id="sv-comment-tdpp" class="sv-comment" rows="2" placeholder="Comment (optional)"></textarea>
           </div>

@@ -1439,7 +1439,10 @@ class StoredValueGetResponse(BaseModel):
 
 
 class StoredValuePutRequest(BaseModel):
-    field_key: Literal["arv", "tdpp", "rehab_needed", "mao_arv", "tdpp_minus_mao_arv"]
+    # K4 (2026-05-27): added 'nbv'. 'tdpp' kept in the whitelist (frontend
+    # still PUTs tdpp for comment-only edits even though numeric_value is
+    # now calc-driven — see put_area_stored_value below).
+    field_key: Literal["arv", "nbv", "tdpp", "rehab_needed", "mao_arv", "tdpp_minus_mao_arv"]
     numeric_value: int | None = Field(default=None, ge=0, le=999_999_999)
     comment_text: str | None = None
     client_seq: int
@@ -1572,12 +1575,17 @@ def _normalize_saved_area_payload(request: SavedAreaCreateRequest | SavedAreaUpd
 
 _STORED_VALUE_FIELD_KEYS: tuple[str, ...] = (
     "arv",
+    "nbv",  # K4 (2026-05-27): new manual field; auto-fills tdpp via frontend × 0.2
     "tdpp",
     "rehab_needed",
     "mao_arv",
     "tdpp_minus_mao_arv",
 )
-_STORED_VALUE_MANUAL_FIELD_KEYS: tuple[str, ...] = ("arv", "tdpp", "rehab_needed")
+# K4: 'nbv' added as a regular manual field. tdpp stays manual — NBV is
+# an auto-fill helper on the frontend, not a calc-driver. This keeps
+# Mike's existing TDPP values safe and lets him override TDPP after NBV
+# is set (per Option B product call 2026-05-27).
+_STORED_VALUE_MANUAL_FIELD_KEYS: tuple[str, ...] = ("arv", "nbv", "tdpp", "rehab_needed")
 _STORED_VALUE_CALC_FIELD_KEYS: tuple[str, ...] = ("mao_arv", "tdpp_minus_mao_arv")
 
 
@@ -1634,6 +1642,9 @@ def _stored_value_serialize_payload(rows: list[dict[str, Any]]) -> dict[str, dic
         "arv": payload["arv"]["numeric_value"],
         "tdpp": payload["tdpp"]["numeric_value"],
         "rehab_needed": payload["rehab_needed"]["numeric_value"],
+        # K4 (2026-05-27): nbv is in the manual-field set but not used by
+        # any backend calc — it's purely a stored helper. The frontend
+        # auto-fills tdpp from nbv on the input side.
     }
     calc_fields = compute_calc_fields(manual_map)
     for calc_key in _STORED_VALUE_CALC_FIELD_KEYS:
