@@ -219,3 +219,12 @@ def release_session_conn(conn: psycopg2.extensions.connection) -> None:
             conn.close()
         except Exception:
             pass
+
+
+# Locked at 2026 per docs/DCAD_OWNER_FIELDS_FIX_SPEC.md v4a.2 §2.6.
+# Used by every multi_owner / appraisal_yr year-scoped query and the
+# multi_owner sync script's DELETE NOT EXISTS gate. Do NOT switch to
+# (SELECT MAX(appraisal_yr) FROM multi_owner) — dual-policy invites
+# endpoint/job drift if a partial future-year load lands before all
+# sources are migrated.
+CURRENT_APPRAISAL_YEAR = 2026

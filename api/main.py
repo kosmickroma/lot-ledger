@@ -65,7 +65,7 @@ from api.auth import (
 )
 from api.config import get_conn, get_session_conn, get_settings, release_conn, release_session_conn
 from api.counties.collin import _classify_collin, _normalize_collin_row, query_collin_parcels
-from api.counties.dcad import SPTD_LABELS, _clean_text, _estimate_front_depth, build_feature, classify_parcel, query_parcels
+from api.counties.dcad import SPTD_LABELS, _clean_text, _estimate_front_depth, _fetch_additional_owners, build_feature, classify_parcel, query_parcels
 from api.counties.denton import _classify_denton, _normalize_denton_row, query_denton_parcels
 from api.counties.tad import _normalize_tad_row, _classify_tad, query_tad_parcels
 from api.geo import polygon_bbox
@@ -1746,6 +1746,29 @@ def _enforce_admin_target_rules(actor: dict[str, Any], target: dict[str, Any], a
             raise HTTPException(status_code=403, detail="Cannot disable the last active owner account")
 
 
+def _additional_owner_cells(additional_owners: list[dict] | None) -> tuple[str, str, str, str]:
+    """Return (owner2_name, owner2_pct, owner3_name, owner3_pct) cells.
+
+    Per spec v4a.2 §2.8 — only seqs 2 and 3 surface in CSV. multi_owner
+    can have more, but DCAD caps at seq=3 in practice. Empty strings
+    fill missing seqs so cell count stays fixed.
+    """
+    seqs: dict[int, dict] = {}
+    for entry in (additional_owners or []):
+        seq = entry.get("seq")
+        if isinstance(seq, int):
+            seqs[seq] = entry
+
+    def _name(seq: int) -> str:
+        return (seqs.get(seq, {}).get("name") or "").strip()
+
+    def _pct(seq: int) -> str:
+        v = seqs.get(seq, {}).get("pct")
+        return f"{v:.2f}" if isinstance(v, (int, float)) else ""
+
+    return _name(2), _pct(2), _name(3), _pct(3)
+
+
 def _normalize_csv_filename(raw: str | None) -> str:
     if not raw:
         return "parcels.csv"
@@ -2619,6 +2642,11 @@ def _fetch_dcad_parcel_by_account(account_num: str) -> tuple[dict[str, Any] | No
                 SELECT p.account_num, p.parcel_key, p.gis_parcel_id,
                        p.owner_name, p.owner_address, p.owner_city, p.owner_state,
                        p.owner_zip, p.street_num, p.full_street_name,
+                       p.owner_name2, p.biz_name,
+                       p.owner_address_line1, p.owner_address_line2,
+                       p.owner_address_line3, p.owner_address_line4,
+                       p.owner_country,
+                       p.street_half_num, p.bldg_id, p.unit_id, p.mapsco,
                        p.property_address, p.property_city, p.property_zip, p.division_cd,
                        COALESCE(a.sptd_code, p.sptd_code) AS sptd_code,
                        p.nbhd_cd, p.legal1, p.legal2, p.legal3, p.legal4, p.legal5,
@@ -2645,6 +2673,12 @@ def _fetch_dcad_parcel_by_account(account_num: str) -> tuple[dict[str, Any] | No
                         ELSE NULL
                        END AS envelope_area_sqft,
                        a.land_val, a.impr_val, a.tot_val, a.isd_desc,
+                       a.city_jurisdiction_desc, a.county_jurisdiction_desc,
+                       a.hospital_jurisdiction_desc, a.college_jurisdiction_desc,
+                       a.special_dist_jurisdiction_desc,
+                       a.city_taxable_val, a.county_taxable_val, a.isd_taxable_val,
+                       a.hospital_taxable_val, a.college_taxable_val,
+                       a.special_dist_taxable_val,
                        r.yr_built, r.tot_living_area, r.tot_main_sf,
                        -- v3 residential detail expansion (canonical key aliases
                        -- per CAD_RESIDENTIAL_DETAIL_EXPANSION_SPEC.md).
@@ -2728,6 +2762,10 @@ def _fetch_dcad_parcel_by_account(account_num: str) -> tuple[dict[str, Any] | No
                 parcel["area_estimated"] = area_estimated
             parcel["hoa_name"] = ""
             parcel["hoa_url"] = ""
+
+            parcel["additional_owners"] = _fetch_additional_owners(
+                [account_num]
+            ).get(account_num, [])
 
             exempt_set = {account_num} if parcel.get("is_exempt_account") else set()
             return parcel, exempt_set
@@ -4322,6 +4360,40 @@ async def _run_download_csv(
                 # stored-values header block so existing positions hold.
                 "Stored NBV",
                 "Stored NBV Comment",
+                # === v4a §2.8 — 31 new columns appended at the right edge ===
+                # Existing columns (1..151) are byte-stable. Mike's
+                # column-letter formulas keep working.
+                "Property City",
+                "Property State",
+                "Property Zip",
+                "Property Street Number",
+                "Property Street Half Number",
+                "Property Full Street Name",
+                "Property Building ID",
+                "Property Unit ID",
+                "Property MAPSCO",
+                "Owner Name 2",
+                "Biz Name",
+                "Owner Address Line 1 (raw)",
+                "Owner Address Line 2 (raw)",
+                "Owner Address Line 3 (raw)",
+                "Owner Address Line 4 (raw)",
+                "Owner Country",
+                "City Jurisdiction",
+                "County Jurisdiction",
+                "Hospital Jurisdiction",
+                "College Jurisdiction",
+                "Special District Jurisdiction",
+                "City Taxable Value",
+                "County Taxable Value",
+                "ISD Taxable Value",
+                "Hospital Taxable Value",
+                "College Taxable Value",
+                "Special District Taxable Value",
+                "Owner 2 Name",
+                "Owner 2 %",
+                "Owner 3 Name",
+                "Owner 3 %",
             ]
         )
         buffer.seek(0)
@@ -4594,6 +4666,35 @@ async def _run_download_csv(
                     csv_share_id,
                     csv_workspace_name,
                     *stored_value_export_cells,
+                    # === v4a §2.8 — 31 new cells (mirror header order exactly) ===
+                    row.get("property_city", "") or "",
+                    "TX",
+                    row.get("property_zip", "") or "",
+                    row.get("street_num", "") or "",
+                    row.get("street_half_num", "") or "",
+                    row.get("full_street_name", "") or "",
+                    row.get("bldg_id", "") or "",
+                    row.get("unit_id", "") or "",
+                    row.get("mapsco", "") or "",
+                    row.get("owner_name2", "") or "",
+                    row.get("biz_name", "") or "",
+                    row.get("owner_address_line1", "") or "",
+                    row.get("owner_address_line2", "") or "",
+                    row.get("owner_address_line3", "") or "",
+                    row.get("owner_address_line4", "") or "",
+                    row.get("owner_country", "") or "",
+                    row.get("city_jurisdiction_desc", "") or "",
+                    row.get("county_jurisdiction_desc", "") or "",
+                    row.get("hospital_jurisdiction_desc", "") or "",
+                    row.get("college_jurisdiction_desc", "") or "",
+                    row.get("special_dist_jurisdiction_desc", "") or "",
+                    round(_safe_float(row.get("city_taxable_val")), 0) if _safe_float(row.get("city_taxable_val")) is not None else "",
+                    round(_safe_float(row.get("county_taxable_val")), 0) if _safe_float(row.get("county_taxable_val")) is not None else "",
+                    round(_safe_float(row.get("isd_taxable_val")), 0) if _safe_float(row.get("isd_taxable_val")) is not None else "",
+                    round(_safe_float(row.get("hospital_taxable_val")), 0) if _safe_float(row.get("hospital_taxable_val")) is not None else "",
+                    round(_safe_float(row.get("college_taxable_val")), 0) if _safe_float(row.get("college_taxable_val")) is not None else "",
+                    round(_safe_float(row.get("special_dist_taxable_val")), 0) if _safe_float(row.get("special_dist_taxable_val")) is not None else "",
+                    *_additional_owner_cells(row.get("additional_owners")),
                 ]
             )
             buffer.seek(0)
@@ -4895,6 +4996,35 @@ async def _run_download_csv(
                     csv_share_id,                                                                                # 109 share_id
                     csv_workspace_name,                                                                          # 110 Workspace Name
                     *stored_value_export_cells,                                                                   # 111-120 stored values snapshot
+                    # === v4a §2.8 — 31 new cells (mirror header order) ===
+                    _cad.get("property_city", "") or "",
+                    "TX" if _cad else "",
+                    _cad.get("property_zip", "") or "",
+                    _cad.get("street_num", "") or "",
+                    _cad.get("street_half_num", "") or "",
+                    _cad.get("full_street_name", "") or "",
+                    _cad.get("bldg_id", "") or "",
+                    _cad.get("unit_id", "") or "",
+                    _cad.get("mapsco", "") or "",
+                    _cad.get("owner_name2", "") or "",
+                    _cad.get("biz_name", "") or "",
+                    _cad.get("owner_address_line1", "") or "",
+                    _cad.get("owner_address_line2", "") or "",
+                    _cad.get("owner_address_line3", "") or "",
+                    _cad.get("owner_address_line4", "") or "",
+                    _cad.get("owner_country", "") or "",
+                    _cad.get("city_jurisdiction_desc", "") or "",
+                    _cad.get("county_jurisdiction_desc", "") or "",
+                    _cad.get("hospital_jurisdiction_desc", "") or "",
+                    _cad.get("college_jurisdiction_desc", "") or "",
+                    _cad.get("special_dist_jurisdiction_desc", "") or "",
+                    round(_safe_float(_cad.get("city_taxable_val")), 0) if _cad and _safe_float(_cad.get("city_taxable_val")) is not None else "",
+                    round(_safe_float(_cad.get("county_taxable_val")), 0) if _cad and _safe_float(_cad.get("county_taxable_val")) is not None else "",
+                    round(_safe_float(_cad.get("isd_taxable_val")), 0) if _cad and _safe_float(_cad.get("isd_taxable_val")) is not None else "",
+                    round(_safe_float(_cad.get("hospital_taxable_val")), 0) if _cad and _safe_float(_cad.get("hospital_taxable_val")) is not None else "",
+                    round(_safe_float(_cad.get("college_taxable_val")), 0) if _cad and _safe_float(_cad.get("college_taxable_val")) is not None else "",
+                    round(_safe_float(_cad.get("special_dist_taxable_val")), 0) if _cad and _safe_float(_cad.get("special_dist_taxable_val")) is not None else "",
+                    *_additional_owner_cells(_cad.get("additional_owners") if _cad else []),
                 ]
             )
             buffer.seek(0)

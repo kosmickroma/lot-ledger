@@ -339,6 +339,51 @@ def _fetch_hoa_lookup(parcels: list[dict[str, Any]]) -> dict[str, dict[str, str]
         release_conn(conn)
 
 
+def _fetch_additional_owners(
+    account_nums: list[str],
+) -> dict[str, list[dict[str, Any]]]:
+    """Year-scoped second-step fetch of multi_owner rows for the given accounts.
+
+    Returns a mapping {account_num: [{seq, name, pct}, ...]} sorted by seq.
+    Only rows with owner_seq_num >= 2 (i.e., truly *additional* owners) are
+    returned — seq=1 is the primary owner already on the parcels row.
+
+    Per spec v4a.2 §2.6.a — multi_owner queries always filter by
+    `appraisal_yr = api.config.CURRENT_APPRAISAL_YEAR`.
+    """
+    from api.config import CURRENT_APPRAISAL_YEAR
+    if not account_nums:
+        return {}
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT account_num, owner_seq_num, owner_name, ownership_pct
+                FROM multi_owner
+                WHERE appraisal_yr = %s
+                  AND owner_seq_num >= 2
+                  AND account_num = ANY(%s)
+                ORDER BY account_num, owner_seq_num
+                """,
+                (CURRENT_APPRAISAL_YEAR, list({a for a in account_nums if a})),
+            )
+            rows = cur.fetchall()
+    finally:
+        release_conn(conn)
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for account_num, seq, name, pct in rows:
+        grouped.setdefault(account_num, []).append(
+            {
+                "seq": int(seq) if seq is not None else None,
+                "name": (name or "").strip(),
+                "pct": float(pct) if pct is not None else None,
+            }
+        )
+    return grouped
+
+
 def query_parcels(polygon: list[list[float]]) -> ParcelQueryResult:
     """
     Single-query DCAD fetch: bbox spatial filter + all account table JOINs in one round trip,
@@ -354,6 +399,11 @@ def query_parcels(polygon: list[list[float]]) -> ParcelQueryResult:
                 SELECT DISTINCT ON (p.account_num)
                     p.account_num, p.parcel_key, p.gis_parcel_id,
                     p.owner_name, p.owner_address, p.owner_city, p.owner_state, p.owner_zip,
+                    p.owner_name2, p.biz_name,
+                    p.owner_address_line1, p.owner_address_line2,
+                    p.owner_address_line3, p.owner_address_line4,
+                    p.owner_country,
+                    p.street_half_num, p.bldg_id, p.unit_id, p.mapsco,
                     p.street_num, p.full_street_name, p.property_address, p.property_city, p.property_zip,
                     p.division_cd, p.nbhd_cd,
                     p.legal1, p.legal2, p.legal3, p.legal4, p.legal5,
@@ -380,6 +430,12 @@ def query_parcels(polygon: list[list[float]]) -> ParcelQueryResult:
                     END AS envelope_area_sqft,
                     COALESCE(a.sptd_code, p.sptd_code) AS sptd_code,
                     a.land_val, a.impr_val, a.tot_val, a.isd_desc,
+                    a.city_jurisdiction_desc, a.county_jurisdiction_desc,
+                    a.hospital_jurisdiction_desc, a.college_jurisdiction_desc,
+                    a.special_dist_jurisdiction_desc,
+                    a.city_taxable_val, a.county_taxable_val, a.isd_taxable_val,
+                    a.hospital_taxable_val, a.college_taxable_val,
+                    a.special_dist_taxable_val,
                     r.yr_built, r.tot_living_area, r.tot_main_sf,
                     -- v3 residential detail expansion: aliased into canonical keys
                     -- (see CAD_RESIDENTIAL_DETAIL_EXPANSION_SPEC.md canonical-field
@@ -504,6 +560,17 @@ def query_parcels(polygon: list[list[float]]) -> ParcelQueryResult:
                 "owner_city": _clean_text(row.get("owner_city")),
                 "owner_state": _clean_text(row.get("owner_state")),
                 "owner_zip": _clean_text(row.get("owner_zip")),
+                "owner_name2": _clean_text(row.get("owner_name2")),
+                "biz_name": _clean_text(row.get("biz_name")),
+                "owner_address_line1": _clean_text(row.get("owner_address_line1")),
+                "owner_address_line2": _clean_text(row.get("owner_address_line2")),
+                "owner_address_line3": _clean_text(row.get("owner_address_line3")),
+                "owner_address_line4": _clean_text(row.get("owner_address_line4")),
+                "owner_country": _clean_text(row.get("owner_country")),
+                "street_half_num": _clean_text(row.get("street_half_num")),
+                "bldg_id": _clean_text(row.get("bldg_id")),
+                "unit_id": _clean_text(row.get("unit_id")),
+                "mapsco": _clean_text(row.get("mapsco")),
                 "street_num": _clean_text(row.get("street_num")),
                 "full_street_name": _clean_text(row.get("full_street_name")),
                 "property_address": property_address,
@@ -524,6 +591,17 @@ def query_parcels(polygon: list[list[float]]) -> ParcelQueryResult:
                 "impr_val": _safe_float(row.get("impr_val")),
                 "tot_val": tot_val,
                 "isd_desc": _clean_text(row.get("isd_desc")),
+                "city_jurisdiction_desc": _clean_text(row.get("city_jurisdiction_desc")),
+                "county_jurisdiction_desc": _clean_text(row.get("county_jurisdiction_desc")),
+                "hospital_jurisdiction_desc": _clean_text(row.get("hospital_jurisdiction_desc")),
+                "college_jurisdiction_desc": _clean_text(row.get("college_jurisdiction_desc")),
+                "special_dist_jurisdiction_desc": _clean_text(row.get("special_dist_jurisdiction_desc")),
+                "city_taxable_val": _safe_float(row.get("city_taxable_val")),
+                "county_taxable_val": _safe_float(row.get("county_taxable_val")),
+                "isd_taxable_val": _safe_float(row.get("isd_taxable_val")),
+                "hospital_taxable_val": _safe_float(row.get("hospital_taxable_val")),
+                "college_taxable_val": _safe_float(row.get("college_taxable_val")),
+                "special_dist_taxable_val": _safe_float(row.get("special_dist_taxable_val")),
                 "yr_built": _safe_int(row.get("yr_built")),
                 "tot_living_area": _safe_float(row.get("tot_living_area")),
                 "tot_main_sf": _safe_float(row.get("tot_main_sf")),
@@ -584,6 +662,12 @@ def query_parcels(polygon: list[list[float]]) -> ParcelQueryResult:
         if hoa:
             row["hoa_name"] = hoa["hoa_name"]
             row["hoa_url"] = hoa["hoa_url"]
+
+    additional_by_acct = _fetch_additional_owners(
+        [r["account_num"] for r in merged_rows if r.get("account_num")]
+    )
+    for row in merged_rows:
+        row["additional_owners"] = additional_by_acct.get(row["account_num"], [])
 
     return ParcelQueryResult(parcels=merged_rows, exempt_accounts=exempt_accounts)
 
@@ -769,6 +853,38 @@ def build_feature(row: dict[str, Any], prop_type: str, on_redfin: bool, redfin_l
         "potential_target": _clean_text(row.get("potential_target")),
         "redfin_price": f"${redfin_listing['price']:,}" if redfin_listing and redfin_listing.get("price") else None,
         "redfin_url": redfin_listing.get("url") if redfin_listing else None,
+        # === v4a §2.7 — raw owner-mailing-label + property-side fields ===
+        # All passed through unchanged; CSV writer reads by name. No popup
+        # rendering until v4b.
+        "owner_name2": _clean_text(row.get("owner_name2")),
+        "biz_name": _clean_text(row.get("biz_name")),
+        "owner_address_line1": _clean_text(row.get("owner_address_line1")),
+        "owner_address_line2": _clean_text(row.get("owner_address_line2")),
+        "owner_address_line3": _clean_text(row.get("owner_address_line3")),
+        "owner_address_line4": _clean_text(row.get("owner_address_line4")),
+        "owner_country": _clean_text(row.get("owner_country")),
+        "property_state": "TX",
+        "property_zip": _clean_text(row.get("property_zip")),
+        "property_street_num": _clean_text(row.get("street_num")),
+        "property_street_half_num": _clean_text(row.get("street_half_num")),
+        "property_full_street_name": _clean_text(row.get("full_street_name")),
+        "property_bldg_id": _clean_text(row.get("bldg_id")),
+        "property_unit_id": _clean_text(row.get("unit_id")),
+        "property_mapsco": _clean_text(row.get("mapsco")),
+        # === v4a §2.7 — jurisdiction descriptors + taxable values ===
+        "city_jurisdiction_desc": _clean_text(row.get("city_jurisdiction_desc")),
+        "county_jurisdiction_desc": _clean_text(row.get("county_jurisdiction_desc")),
+        "hospital_jurisdiction_desc": _clean_text(row.get("hospital_jurisdiction_desc")),
+        "college_jurisdiction_desc": _clean_text(row.get("college_jurisdiction_desc")),
+        "special_dist_jurisdiction_desc": _clean_text(row.get("special_dist_jurisdiction_desc")),
+        "city_taxable_val": _safe_float(row.get("city_taxable_val")),
+        "county_taxable_val": _safe_float(row.get("county_taxable_val")),
+        "isd_taxable_val": _safe_float(row.get("isd_taxable_val")),
+        "hospital_taxable_val": _safe_float(row.get("hospital_taxable_val")),
+        "college_taxable_val": _safe_float(row.get("college_taxable_val")),
+        "special_dist_taxable_val": _safe_float(row.get("special_dist_taxable_val")),
+        # === v4a §2.6.c — full additional_owners array (seq>=2) ===
+        "additional_owners": row.get("additional_owners") or [],
         "lat": lat,
         "lng": lng,
     }
