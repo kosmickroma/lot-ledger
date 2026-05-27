@@ -4173,6 +4173,20 @@ body.is-not-power-user .power-user-only {
 .sv-row {
   padding: 10px 0;
   border-top: 1px solid rgba(201, 162, 79, 0.16);
+  /* K3 (2026-05-27 roadmap): inline layout — label/head on the left, input
+     on the right, comment textarea full-width below. K3-fix-fix
+     (2026-05-27 PM): switched from flex to grid. Flex with min-widths
+     was wrapping the input below the head on any sidebar narrower than
+     ~310px — i.e., every sidebar in practice. Grid columns don't wrap;
+     the input column just shrinks to fit. Head column is fixed at
+     150px so every input starts at the same X coordinate (KK's
+     alignment ask) without forcing a width budget the sidebar can't
+     accommodate. */
+  display: grid;
+  grid-template-columns: 150px 1fr;
+  align-items: center;
+  column-gap: 10px;
+  row-gap: 6px;
 }
 
 .sv-row:first-child {
@@ -4185,7 +4199,10 @@ body.is-not-power-user .power-user-only {
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-bottom: 6px;
+  /* K3-fix-fix (2026-05-27 PM): parent .sv-row is now grid; the head
+     occupies grid column 1 (fixed 150px) automatically. No flex sizing
+     needed here. Inner flex stays so the label + ? button + CALC pill
+     still sit on the same line within the head. */
   flex-wrap: wrap;
 }
 
@@ -4197,10 +4214,13 @@ body.is-not-power-user .power-user-only {
 }
 
 .sv-calc-badge {
-  font-size: 10px;
+  /* K3 follow-up: shrunk from 10px / 2px 7px to free a few px of head
+     width so the longest head ("TDPP-MAO (ARV) CALC") fits within the
+     160px head min-width without wrapping. */
+  font-size: 9px;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
-  padding: 2px 7px;
+  letter-spacing: 0.05em;
+  padding: 1px 5px;
   border-radius: 999px;
   background: rgba(0, 0, 0, 0.22);
   border: 1px solid rgba(201, 162, 79, 0.22);
@@ -4255,7 +4275,10 @@ body.is-not-power-user .power-user-only {
 .sv-input-wrap {
   position: relative;
   display: block;
-  margin-bottom: 6px;
+  /* K3-fix-fix (2026-05-27 PM): parent .sv-row is now grid; this
+     occupies grid column 2 (1fr — fills remaining space). No flex /
+     min-width needed; the grid column shrinks gracefully on narrow
+     sidebars instead of wrapping the input below the head. */
 }
 
 .sv-input-prefix {
@@ -4300,6 +4323,10 @@ body.is-not-power-user .power-user-only {
 
 .sv-comment {
   width: 100%;
+  /* K3-fix-fix (2026-05-27 PM): parent .sv-row is now grid. Span both
+     columns so the textarea sits full-width on its own row below the
+     head+input. (Was flex-basis: 100%; same intent, grid syntax.) */
+  grid-column: 1 / -1;
   min-height: 38px;
   padding: 6px 9px;
   font-family: inherit;

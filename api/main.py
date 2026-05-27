@@ -4062,6 +4062,14 @@ async def _run_download_csv(
         if county and account_num:
             propelio_comp_by_parcel_key[(county, account_num)] = comp
 
+    # 2026-05-27 K5: when this CSV belongs to a saved workspace, build the
+    # download filename as `<workspace-name>_<YYYY-MM-DD>_<HHMMSS>.csv` so the
+    # operator can tell at a glance which workspace each download came from.
+    # Falls back to the frontend-provided filename (legacy `lotledger_…`) for
+    # analysis-only exports that have no linked saved area.
+    if csv_workspace_name:
+        from datetime import datetime as _dt
+        filename = f"{csv_workspace_name}_{_dt.now().strftime('%Y-%m-%d_%H%M%S')}.csv"
     download_name = _normalize_csv_filename(filename)
 
     def generate_csv():
