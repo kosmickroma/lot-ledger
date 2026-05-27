@@ -4174,9 +4174,16 @@ body.is-not-power-user .power-user-only {
   padding: 10px 0;
   border-top: 1px solid rgba(201, 162, 79, 0.16);
   /* K3 (2026-05-27 roadmap): inline layout — label/head on the left, input
-     on the right, comment textarea full-width below. Was vertical stack. */
-  display: flex;
-  flex-wrap: wrap;
+     on the right, comment textarea full-width below. K3-fix-fix
+     (2026-05-27 PM): switched from flex to grid. Flex with min-widths
+     was wrapping the input below the head on any sidebar narrower than
+     ~310px — i.e., every sidebar in practice. Grid columns don't wrap;
+     the input column just shrinks to fit. Head column is fixed at
+     150px so every input starts at the same X coordinate (KK's
+     alignment ask) without forcing a width budget the sidebar can't
+     accommodate. */
+  display: grid;
+  grid-template-columns: 150px 1fr;
   align-items: center;
   column-gap: 10px;
   row-gap: 6px;
@@ -4192,17 +4199,11 @@ body.is-not-power-user .power-user-only {
   display: flex;
   align-items: center;
   gap: 6px;
-  /* K3: was `margin-bottom: 6px` when the head sat above the input. Now
-     they're flex siblings in the same row; parent `.sv-row` row-gap
-     handles vertical spacing for the comment line below. */
+  /* K3-fix-fix (2026-05-27 PM): parent .sv-row is now grid; the head
+     occupies grid column 1 (fixed 150px) automatically. No flex sizing
+     needed here. Inner flex stays so the label + ? button + CALC pill
+     still sit on the same line within the head. */
   flex-wrap: wrap;
-  /* K3 follow-up (2026-05-27 PM): every row's head reserves the same
-     min-width so all input columns start at the same X coordinate. The
-     widest head is "TDPP-MAO (ARV) [CALC]" — 160px accommodates it with
-     the now-smaller .sv-calc-badge. Result: every input field ends up
-     the same (shortest) width, which is the alignment KK asked for. */
-  flex: 0 0 160px;
-  min-width: 160px;
 }
 
 .sv-label {
@@ -4274,13 +4275,10 @@ body.is-not-power-user .power-user-only {
 .sv-input-wrap {
   position: relative;
   display: block;
-  /* K3: was `margin-bottom: 6px` and full-width. Now a flex item that
-     fills the remaining horizontal space to the right of the label/head.
-     min-width keeps the dollar amount readable; flex-wrap on the parent
-     row lets the input fall below the head on narrow sidebars rather
-     than crushing the input field. */
-  flex: 1 1 140px;
-  min-width: 140px;
+  /* K3-fix-fix (2026-05-27 PM): parent .sv-row is now grid; this
+     occupies grid column 2 (1fr — fills remaining space). No flex /
+     min-width needed; the grid column shrinks gracefully on narrow
+     sidebars instead of wrapping the input below the head. */
 }
 
 .sv-input-prefix {
@@ -4325,10 +4323,10 @@ body.is-not-power-user .power-user-only {
 
 .sv-comment {
   width: 100%;
-  /* K3: explicit flex-basis: 100% forces the textarea to its own row
-     inside the `.sv-row` flex container — the comment stays full-width
-     below the inline label+input. */
-  flex-basis: 100%;
+  /* K3-fix-fix (2026-05-27 PM): parent .sv-row is now grid. Span both
+     columns so the textarea sits full-width on its own row below the
+     head+input. (Was flex-basis: 100%; same intent, grid syntax.) */
+  grid-column: 1 / -1;
   min-height: 38px;
   padding: 6px 9px;
   font-family: inherit;
