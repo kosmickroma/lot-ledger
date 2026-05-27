@@ -2689,6 +2689,8 @@ function renderSoldCompsPanel() {
     soldCompsFilter.maxPrice = parseShorthand(soldPriceMaxInput?.value);
     applyAndRenderSoldFilters();
     _refreshLoadedAreaUi();
+    // v1 §2.1 — auto-save filter_state after sold-comp filter apply.
+    _filterSaveQueueSave();
   };
 
   const applyCompNumericInputFilters = () => {
@@ -7135,6 +7137,8 @@ function applyPropelioClientFilters() {
   // from the unfiltered `all` array (not visibleOnMap).
   _renderGoodCompsSection();
   _updateUpdateAreaButtonVisibility();
+  // v1 §2.1 — auto-save filter_state after propelio client filter apply.
+  _filterSaveQueueSave();
 }
 
 function _sortPropelioComps(comps, mode) {
@@ -7495,6 +7499,9 @@ async function pullPropelioRefresh() {
   }
   const filters = readPropelioFiltersFromUI();
   propelioFilterState = filters;
+  // v1 §2.1 — auto-save filter_state after propelio refresh
+  // (covers prop-months + prop-range which only get read here).
+  _filterSaveQueueSave();
   const targetAddress = _deriveDeepPullTargetAddress();
   const savedAreaId = (typeof _currentLoadedAreaId === "string" ? _currentLoadedAreaId : "") || "";
   btn.disabled = true;
@@ -7644,6 +7651,8 @@ let propelioStickyBtn = null;
     sortEl.addEventListener("change", () => {
       propelioCompSortMode = sortEl.value || "price_desc";
       applyPropelioClientFilters();
+      // v1 §2.1 — auto-save filter_state after sort mode change.
+      _filterSaveQueueSave();
     });
   }
 
@@ -8467,6 +8476,8 @@ function _applyNumericFilters() {
   // user edits a Property Filter input.
   applyPropelioClientFilters();
   _refreshLoadedAreaUi();
+  // v1 §2.1 — auto-save filter_state after numeric-filter apply.
+  _filterSaveQueueSave();
 }
 
 NUMERIC_FILTER_INPUTS.forEach(({ id }) => {
@@ -8492,6 +8503,7 @@ NUMERIC_FILTER_INPUTS.forEach(({ id }) => {
     bumpUndoPillVersion();
     normalize();
     _applyNumericFilters();
+    void _filterSaveFlushPending();
   });
   inputEl.addEventListener("change", () => {
     bumpUndoPillVersion();
@@ -8516,6 +8528,8 @@ Object.entries(FILTER_INPUT_IDS).forEach(([key, id]) => {
     applyMapVisibilityFilters();
     applyPropelioClientFilters();
     _refreshLoadedAreaUi();
+    // v1 §2.1 — auto-save filter_state after checkbox toggle.
+    _filterSaveQueueSave();
   });
 });
 
@@ -8527,6 +8541,8 @@ document.getElementById("btn-filters-reset")?.addEventListener("click", () => {
   applyMapVisibilityFilters();
   applyPropelioClientFilters();
   _refreshLoadedAreaUi();
+  // v1 §2.1 — auto-save filter_state after filter reset.
+  _filterSaveQueueSave();
 });
 
 // Comp Filters: read from nf-comp-* inputs and apply
@@ -8579,6 +8595,8 @@ function _applyCompNumericFilters() {
   const counts = getVisibleFeatureCounts(lastAnalysisGeojson.features || []);
   if (lastAnalysisCounts) renderSidebar(counts, markers || {});
   _refreshLoadedAreaUi();
+  // v1 §2.1 — auto-save filter_state after comp-numeric apply.
+  _filterSaveQueueSave();
 }
 
 // Comp numeric filter event listeners are wired INSIDE renderSoldCompsPanel
