@@ -3689,14 +3689,23 @@ function _renderSubjectProperties() {
     }
   }
 
-  // Outlines: every bonded saved-parcel of the currently-loaded area in
-  // viewport also gets one. Covers the "old subject still gold" case
-  // after the user stages a new target via Save Parcel.
+  // Outlines: bonded saved-parcels of the currently-loaded area. With
+  // the v1.1 §2.2 suppression rule, ONLY the parcel matching the loaded
+  // area's current subject (originator_parcel_*) gets gold here. Earlier
+  // bonded saved-parcels from prior Save Parcel clicks (now superseded
+  // by auto-save) stay invisible on the map. The first loop already
+  // renders the persisted subject; this loop covers the brief window
+  // before the next _reloadSavedResources lands _subjectPropertiesByKey
+  // for a freshly-set originator.
   if (!lowZoom && _currentLoadedAreaId) {
     for (const sp of _loadedAreaSeedParcelsByKey.values()) {
       if (!bounds) continue;
       if (!Number.isFinite(sp.lat) || !Number.isFinite(sp.lng)) continue;
       if (!bounds.contains([sp.lat, sp.lng])) continue;
+      // Suppression: skip seed parcels that aren't the loaded area's
+      // current subject. Prevents stale-gold pileup when Mike clicks
+      // Save Parcel multiple times in the same loaded area.
+      if (_loadedAreaSubjectKey && _subjectPropertyKey(sp.county, sp.account_num) !== _loadedAreaSubjectKey) continue;
       // Dedupe against any subject_property already rendered at this key.
       const key = _subjectPropertyKey(sp.county, sp.account_num);
       if (key && _subjectPropertyOutlineLayers.has(key)) continue;
