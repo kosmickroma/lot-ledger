@@ -899,6 +899,19 @@ let _currentTargetParcel = null; // { county, account, lat?, lng? } | null
 // subject-saves are in-flight. See TkDodo "Concurrent Optimistic Updates
 // in React Query" pattern. Decremented in finally blocks. Read by SA5.
 let _pendingSubjectSaves = 0;
+
+// v1 §2.1 filter-state auto-save — mirrors stored-values save machinery
+// at frontend/map.js:12183+. _filterSavePending is a single boolean
+// (vs stored-values' per-field Set) because filter_state is one whole
+// JSON blob written by a single PUT. _filterSaveInflight serializes
+// concurrent saves. _pendingFilterSaves counter (parallel to
+// _pendingSubjectSaves) gates the visibilitychange cross-tab refetch.
+const _FILTER_SAVE_DEBOUNCE_MS = 600;
+let _filterSaveDebounceTimer = null;
+let _filterSaveFlashTimer = null;
+let _filterSavePending = false;
+let _filterSaveInflight = false;
+let _pendingFilterSaves = 0;
 // v1.1 §2.6 — 50ms debounce on the popup Save Parcel link. Absorbs
 // event-bubbling and mobile double-tap. Single deliberate clicks
 // (>50ms apart) work normally.
@@ -3153,6 +3166,31 @@ async function _commitOriginatorToArea(area, stagedCounty, stagedAccount) {
   area.originator_parcel_county = stagedCounty;
   area.originator_parcel_account_num = stagedAccount;
   return true;
+}
+
+// Mirror of _storedValueSetStatus (frontend/map.js:12256+). Drives the
+// #filter-save-status chip's data-state + text. Defensive: chip element
+// may not exist yet (FA4 adds it).
+function _filterSaveSetStatus(state, label) {
+  const chip = document.getElementById("filter-save-status");
+  if (!chip) return;
+  if (_filterSaveFlashTimer) {
+    clearTimeout(_filterSaveFlashTimer);
+    _filterSaveFlashTimer = null;
+  }
+  chip.setAttribute("data-state", state);
+  const defaults = { idle: "", saving: "Saving…", flash: "Saved ✓", error: "Retry" };
+  chip.textContent = label || defaults[state] || state;
+  if (state === "flash") {
+    _filterSaveFlashTimer = setTimeout(() => {
+      _filterSaveFlashTimer = null;
+      const c = document.getElementById("filter-save-status");
+      if (c && c.getAttribute("data-state") === "flash") {
+        c.setAttribute("data-state", "idle");
+        c.textContent = "";
+      }
+    }, 1200);
+  }
 }
 
 async function _updateSavedAreaFilters(area, actionBtn) {
