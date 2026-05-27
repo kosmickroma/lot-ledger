@@ -4196,7 +4196,13 @@ body.is-not-power-user .power-user-only {
      they're flex siblings in the same row; parent `.sv-row` row-gap
      handles vertical spacing for the comment line below. */
   flex-wrap: wrap;
-  flex: 0 0 auto;
+  /* K3 follow-up (2026-05-27 PM): every row's head reserves the same
+     min-width so all input columns start at the same X coordinate. The
+     widest head is "TDPP-MAO (ARV) [CALC]" — 160px accommodates it with
+     the now-smaller .sv-calc-badge. Result: every input field ends up
+     the same (shortest) width, which is the alignment KK asked for. */
+  flex: 0 0 160px;
+  min-width: 160px;
 }
 
 .sv-label {
@@ -4207,10 +4213,13 @@ body.is-not-power-user .power-user-only {
 }
 
 .sv-calc-badge {
-  font-size: 10px;
+  /* K3 follow-up: shrunk from 10px / 2px 7px to free a few px of head
+     width so the longest head ("TDPP-MAO (ARV) CALC") fits within the
+     160px head min-width without wrapping. */
+  font-size: 9px;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
-  padding: 2px 7px;
+  letter-spacing: 0.05em;
+  padding: 1px 5px;
   border-radius: 999px;
   background: rgba(0, 0, 0, 0.22);
   border: 1px solid rgba(201, 162, 79, 0.22);
