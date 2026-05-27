@@ -3380,6 +3380,7 @@ async function saveCurrentArea(name) {
   _currentLoadedAreaId = normalized.id;
   _syncTabTitle();
   _storedValueOnAreaChange(_currentLoadedAreaId);
+  void _filterSaveOnAreaChange(_currentLoadedAreaId);
   _selectedSavedItemId = normalized.id;
   // Render the originator star immediately if captured at save time.
   // Use lat/lng from origin (the pre-save _currentTargetParcel) to skip
@@ -3518,6 +3519,7 @@ async function deleteSavedArea(item) {
       _currentLoadedAreaId = null;
       _syncTabTitle();
       _storedValueOnAreaChange(null);
+      void _filterSaveOnAreaChange(null);
     }
     // Refetch subject_properties so the deleted area's originator drops
     // off the gold-outline / star layer (if it was the only area for that
@@ -4588,6 +4590,7 @@ async function restoreSavedArea(area, options = {}) {
     _currentLoadedAreaId = area.id;
     _syncTabTitle();
     _storedValueOnAreaChange(_currentLoadedAreaId);
+    void _filterSaveOnAreaChange(_currentLoadedAreaId);
     if (area.originator_parcel_county && area.originator_parcel_account_num) {
       _setCurrentTargetParcel({
         county: area.originator_parcel_county,
@@ -4645,6 +4648,7 @@ async function restoreNamedSession(session, options = {}) {
   _currentLoadedAreaId = null;
   _syncTabTitle();
   _storedValueOnAreaChange(null);
+  void _filterSaveOnAreaChange(null);
   renderSavedAreasList();
   const savedFilterState = session.filter_state && typeof session.filter_state === "object"
     ? session.filter_state
@@ -4968,6 +4972,7 @@ function _renderList(sectionId, listId, items, options = {}) {
           _currentLoadedAreaId = cloned.area_id;
           _syncTabTitle();
           _storedValueOnAreaChange(_currentLoadedAreaId);
+          void _filterSaveOnAreaChange(_currentLoadedAreaId);
           // Refresh Good Comps section visibility — fork bypasses the
           // normal restoreSavedArea path, so applyPropelioClientFilters
           // isn't called automatically. Per spec v2 §Risk #1.
@@ -10585,6 +10590,7 @@ map.on("draw:created", async (e) => {
   _currentLoadedAreaId = null;
   _syncTabTitle();
   _storedValueOnAreaChange(null);
+  void _filterSaveOnAreaChange(null);
   _selectedSavedItemId = null;
   _setSessionCacheNote("");
   renderSavedAreasList();
@@ -10764,6 +10770,7 @@ function clearDrawResults() {
   _currentLoadedAreaId = null;
   _syncTabTitle();
   _storedValueOnAreaChange(null);
+  void _filterSaveOnAreaChange(null);
   _updateSaveSessionButtonState();
   _setSessionCacheNote("");
   lastAnalysisGeojson = null;
@@ -10814,6 +10821,7 @@ map.on("draw:drawstart", () => {
   _currentLoadedAreaId = null;
   _syncTabTitle();
   _storedValueOnAreaChange(null);
+  void _filterSaveOnAreaChange(null);
   _selectedSavedItemId = null;
   _setSessionCacheNote("");
   renderSavedAreasList();
@@ -12704,3 +12712,9 @@ if (document.readyState === "loading") {
 } else {
   _storedValueWireListeners();
 }
+
+// v1 §2.1 — flush pending filter save on tab close. Mirror of
+// stored-values beforeunload inside _storedValueWireListeners above.
+window.addEventListener("beforeunload", () => {
+  if (_filterSavePending) void _filterSaveProcessQueue();
+});
