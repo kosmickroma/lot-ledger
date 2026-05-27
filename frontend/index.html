@@ -80,11 +80,33 @@
             <textarea id="sv-comment-arv" class="sv-comment" rows="2" placeholder="Comment (optional)"></textarea>
           </div>
 
+          <!-- K4 (2026-05-27 roadmap): NBV (New Build Value) — user input
+               that drives TDPP via NBV × 0.2. Inserted above TDPP. -->
+          <div class="sv-row" data-field-key="nbv">
+            <div class="sv-row-head">
+              <label class="sv-label" for="sv-input-nbv">NBV</label>
+              <button type="button" class="sv-tooltip-trigger" aria-describedby="sv-tooltip-nbv" aria-label="What is NBV?">?</button>
+              <span id="sv-tooltip-nbv" role="tooltip" class="sv-tooltip">New Build Value (× 0.2 → TDPP)</span>
+            </div>
+            <div class="sv-input-wrap">
+              <span class="sv-input-prefix">$</span>
+              <input id="sv-input-nbv" class="sv-numeric-input" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="0">
+            </div>
+            <textarea id="sv-comment-nbv" class="sv-comment" rows="2" placeholder="Comment (optional)"></textarea>
+          </div>
+
+          <!-- K4 (2026-05-27 — Option B): TDPP stays user-editable.
+               NBV auto-fills it with NBV × 0.2 (see _storedValueOnNumericInput
+               in map.js), but the operator can override by typing in TDPP
+               directly afterward. No CALC badge — it's still manual. -->
           <div class="sv-row" data-field-key="tdpp">
             <div class="sv-row-head">
               <label class="sv-label" for="sv-input-tdpp">TDPP</label>
               <button type="button" class="sv-tooltip-trigger" aria-describedby="sv-tooltip-tdpp" aria-label="What is TDPP?">?</button>
-              <span id="sv-tooltip-tdpp" role="tooltip" class="sv-tooltip">Tear Down Purchase Price</span>
+              <span id="sv-tooltip-tdpp" role="tooltip" class="sv-tooltip">Tear Down Purchase Price (NBV × 0.2)</span>
+              <!-- K4: CALC badge signals "auto-filled from NBV" even though
+                   the input itself remains editable (operator can override). -->
+              <span class="sv-calc-badge">calc</span>
             </div>
             <div class="sv-input-wrap">
               <span class="sv-input-prefix">$</span>
