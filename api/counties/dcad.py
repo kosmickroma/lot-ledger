@@ -339,6 +339,51 @@ def _fetch_hoa_lookup(parcels: list[dict[str, Any]]) -> dict[str, dict[str, str]
         release_conn(conn)
 
 
+def _fetch_additional_owners(
+    account_nums: list[str],
+) -> dict[str, list[dict[str, Any]]]:
+    """Year-scoped second-step fetch of multi_owner rows for the given accounts.
+
+    Returns a mapping {account_num: [{seq, name, pct}, ...]} sorted by seq.
+    Only rows with owner_seq_num >= 2 (i.e., truly *additional* owners) are
+    returned — seq=1 is the primary owner already on the parcels row.
+
+    Per spec v4a.2 §2.6.a — multi_owner queries always filter by
+    `appraisal_yr = api.config.CURRENT_APPRAISAL_YEAR`.
+    """
+    from api.config import CURRENT_APPRAISAL_YEAR
+    if not account_nums:
+        return {}
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT account_num, owner_seq_num, owner_name, ownership_pct
+                FROM multi_owner
+                WHERE appraisal_yr = %s
+                  AND owner_seq_num >= 2
+                  AND account_num = ANY(%s)
+                ORDER BY account_num, owner_seq_num
+                """,
+                (CURRENT_APPRAISAL_YEAR, list({a for a in account_nums if a})),
+            )
+            rows = cur.fetchall()
+    finally:
+        release_conn(conn)
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for account_num, seq, name, pct in rows:
+        grouped.setdefault(account_num, []).append(
+            {
+                "seq": int(seq) if seq is not None else None,
+                "name": (name or "").strip(),
+                "pct": float(pct) if pct is not None else None,
+            }
+        )
+    return grouped
+
+
 def query_parcels(polygon: list[list[float]]) -> ParcelQueryResult:
     """
     Single-query DCAD fetch: bbox spatial filter + all account table JOINs in one round trip,
