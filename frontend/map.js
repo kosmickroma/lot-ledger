@@ -3063,6 +3063,35 @@ function _isLoadedAreaWithFilterDrift(area) {
   return staged.c !== persisted.c || staged.a !== persisted.a;
 }
 
+// Commits a subject (originator_parcel_*) change for the loaded area to
+// the backend via PUT /api/areas/{id}. Returns true if a commit happened,
+// false if no drift was detected. Mutates `area` in place on success so
+// subsequent calls see the persisted state.
+//
+// Per spec v1.1 §2.5 + §4.2. Extracted from _updateSavedAreaFilters so
+// saveParcel (auto-save) can call it directly in a later task.
+async function _commitOriginatorToArea(area, stagedCounty, stagedAccount) {
+  if (!area || area.type !== "area") return false;
+  const persistedCounty = String(area.originator_parcel_county || "").trim().toLowerCase() || null;
+  const persistedAccount = String(area.originator_parcel_account_num || "").trim() || null;
+  if (stagedCounty === persistedCounty && stagedAccount === persistedAccount) return false;
+  // Backend requires county + account together (or neither). When staged
+  // is "(none, none)" the user effectively unset the subject — current
+  // backend doesn't accept that, so skip.
+  if (!stagedCounty || !stagedAccount) return false;
+  await _apiJson(`/api/areas/${encodeURIComponent(area.id)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({
+      originator_parcel_county: stagedCounty,
+      originator_parcel_account_num: stagedAccount,
+    }),
+  });
+  area.originator_parcel_county = stagedCounty;
+  area.originator_parcel_account_num = stagedAccount;
+  return true;
+}
+
 async function _updateSavedAreaFilters(area, actionBtn) {
   if (!area || area.type !== "area") return;
   const nextState = captureFilterState();
@@ -3092,30 +3121,18 @@ async function _updateSavedAreaFilters(area, actionBtn) {
     actionBtn.textContent = "Saving...";
   }
   try {
-    const body = {};
-    if (filterChanged) body.filter_state = nextState;
-    if (originatorChanged) {
-      // The PUT endpoint requires county+account together (or neither).
-      // When staged is "(none, none)" — user cleared the target —
-      // current backend doesn't accept clearing the originator
-      // (rejects with 400). Skip the originator update in that case
-      // to keep Update working for filter-only drift.
-      if (stagedCounty && stagedAccount) {
-        body.originator_parcel_county = stagedCounty;
-        body.originator_parcel_account_num = stagedAccount;
-      }
+    // Filter changes go through their own PUT with `filter_state`.
+    if (filterChanged) {
+      await _apiJson(`/api/areas/${encodeURIComponent(area.id)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ filter_state: nextState }),
+      });
+      area.filter_state = _normalizeFilterStateForCompare(nextState);
     }
-    await _apiJson(`/api/areas/${encodeURIComponent(area.id)}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json", ...authHeaders() },
-      body: JSON.stringify(body),
-    });
-    if (filterChanged) area.filter_state = _normalizeFilterStateForCompare(nextState);
-    if (originatorChanged && stagedCounty && stagedAccount) {
-      area.originator_parcel_county = stagedCounty;
-      area.originator_parcel_account_num = stagedAccount;
-      // Subject_properties payload needs a refetch so the new layer
-      // picks up the persisted-originator change.
+    // Originator changes use the shared helper.
+    const originatorCommitted = await _commitOriginatorToArea(area, stagedCounty, stagedAccount);
+    if (originatorCommitted) {
       await _reloadSavedResources().catch(() => {});
     }
     if (actionBtn) actionBtn.textContent = "✓ Updated";
