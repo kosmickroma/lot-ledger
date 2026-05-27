@@ -870,6 +870,10 @@ let _currentSessionIsNamed = false;
 let _savedSessionsCache = [];
 let _currentLoadedAreaId = null;
 let _currentTargetParcel = null; // { county, account, lat?, lng? } | null
+// v1.1 §2.6 — gates cross-tab refetch to prevent flicker when concurrent
+// subject-saves are in-flight. See TkDodo "Concurrent Optimistic Updates
+// in React Query" pattern. Decremented in finally blocks. Read by SA5.
+let _pendingSubjectSaves = 0;
 let _targetCoordsResolvePromise = null;
 let _measureModeEnabled = false;
 let _measurePoints = [];
@@ -3931,6 +3935,46 @@ async function saveParcel(account_num, county, addr, lat, lng, geometry) {
     _setCurrentTargetParcel({ county: targetCounty, account: targetAccount, lat, lng });
     void _renderOriginatorTargetStar(targetCounty, targetAccount, lat, lng);
   }
+  // v1.1 §2.1 — auto-commit subject change when inside a loaded area.
+  // Replaces the v0.29 "stage then Update" two-step. The helper writes
+  // the new originator_parcel_* on the loaded area's row and refreshes
+  // _savedAreasCache. Optimistic UI: _setCurrentTargetParcel above
+  // already updated the in-memory state; if the PUT fails we roll back
+  // to the previously-persisted subject here.
+  if (_currentLoadedAreaId && targetAccount && targetCounty) {
+    const area = _savedAreasCache.find(
+      (a) => a.id === _currentLoadedAreaId && a.type === "area",
+    );
+    if (area) {
+      // Capture rollback state BEFORE the helper mutates `area`.
+      const rollbackCounty = String(area.originator_parcel_county || "").trim().toLowerCase() || null;
+      const rollbackAccount = String(area.originator_parcel_account_num || "").trim() || null;
+      _pendingSubjectSaves++;
+      try {
+        const committed = await _commitOriginatorToArea(area, targetCounty, targetAccount);
+        if (committed) {
+          await _reloadSavedResources().catch(() => {});
+        }
+      } catch (err) {
+        console.error("[saveParcel] originator auto-commit failed", err);
+        // Roll back optimistic UI: restore previous target so the
+        // gold + star migrate back to where they were before the click.
+        if (rollbackAccount && rollbackCounty) {
+          _setCurrentTargetParcel({
+            county: rollbackCounty,
+            account: rollbackAccount,
+          });
+          void _renderOriginatorTargetStar(rollbackCounty, rollbackAccount);
+        } else {
+          _setCurrentTargetParcel(null);
+        }
+        _showToast("Subject save failed — retry via Update", "error");
+      } finally {
+        _pendingSubjectSaves = Math.max(0, _pendingSubjectSaves - 1);
+      }
+    }
+  }
+
   // Only seed the Workspace slot label when there is no loaded workspace.
   // When one is loaded (xyz), saving a different parcel as the new target
   // must NOT rename the workspace — the Target row (updated via
