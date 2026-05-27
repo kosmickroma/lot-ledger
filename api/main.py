@@ -2504,7 +2504,7 @@ async def address_suggest(q: str, limit: int = 8) -> dict[str, Any]:
                         'dcad'::text AS county,
                         p.account_num::text AS account_num,
                         p.property_address::text AS address,
-                        p.owner_city::text AS city,
+                        p.property_city::text AS city,
                         ST_Y(p.centroid) AS lat,
                         ST_X(p.centroid) AS lng
                     FROM parcels p
@@ -2521,7 +2521,7 @@ async def address_suggest(q: str, limit: int = 8) -> dict[str, Any]:
                         'tad'::text AS county,
                         t.account_num::text AS account_num,
                         t.situs_addr::text AS address,
-                        t.owner_city::text AS city,
+                        t.property_city::text AS city,
                         ST_Y(t.centroid) AS lat,
                         ST_X(t.centroid) AS lng
                     FROM tad_parcels t
