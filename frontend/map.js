@@ -9720,15 +9720,31 @@ function renderSidebar(counts, markers) {
 function makeDefaultCsvName() {
   const now = new Date();
   const pad = (n) => String(n).padStart(2, "0");
+
+  // K5 (2026-05-27 roadmap): when a saved workspace is loaded, default
+  // the CSV filename to "<workspace-name>_<YYYY-MM-DD>_<HHMMSS>.csv"
+  // instead of "lotledger_…". Falls back to "lotledger_" for
+  // analysis-only exports (no loaded workspace). User can still edit in
+  // the prompt before confirming.
+  let prefix = "lotledger";
+  if (_currentLoadedAreaId && Array.isArray(_savedAreasCache)) {
+    const loaded = _savedAreasCache.find((a) => String(a.id) === String(_currentLoadedAreaId));
+    const loadedName = String(loaded?.name || "").trim();
+    if (loadedName) prefix = loadedName;
+  }
+
   const stamp = [
     now.getFullYear(),
+    "-",
     pad(now.getMonth() + 1),
+    "-",
     pad(now.getDate()),
     "_",
     pad(now.getHours()),
     pad(now.getMinutes()),
+    pad(now.getSeconds()),
   ].join("");
-  return `lotledger_${stamp}.csv`;
+  return `${prefix}_${stamp}.csv`;
 }
 
 function normalizeCsvFilename(rawName) {

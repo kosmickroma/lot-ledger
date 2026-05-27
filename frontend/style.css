@@ -4173,6 +4173,13 @@ body.is-not-power-user .power-user-only {
 .sv-row {
   padding: 10px 0;
   border-top: 1px solid rgba(201, 162, 79, 0.16);
+  /* K3 (2026-05-27 roadmap): inline layout — label/head on the left, input
+     on the right, comment textarea full-width below. Was vertical stack. */
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: 10px;
+  row-gap: 6px;
 }
 
 .sv-row:first-child {
@@ -4185,8 +4192,11 @@ body.is-not-power-user .power-user-only {
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-bottom: 6px;
+  /* K3: was `margin-bottom: 6px` when the head sat above the input. Now
+     they're flex siblings in the same row; parent `.sv-row` row-gap
+     handles vertical spacing for the comment line below. */
   flex-wrap: wrap;
+  flex: 0 0 auto;
 }
 
 .sv-label {
@@ -4255,7 +4265,13 @@ body.is-not-power-user .power-user-only {
 .sv-input-wrap {
   position: relative;
   display: block;
-  margin-bottom: 6px;
+  /* K3: was `margin-bottom: 6px` and full-width. Now a flex item that
+     fills the remaining horizontal space to the right of the label/head.
+     min-width keeps the dollar amount readable; flex-wrap on the parent
+     row lets the input fall below the head on narrow sidebars rather
+     than crushing the input field. */
+  flex: 1 1 140px;
+  min-width: 140px;
 }
 
 .sv-input-prefix {
@@ -4300,6 +4316,10 @@ body.is-not-power-user .power-user-only {
 
 .sv-comment {
   width: 100%;
+  /* K3: explicit flex-basis: 100% forces the textarea to its own row
+     inside the `.sv-row` flex container — the comment stays full-width
+     below the inline label+input. */
+  flex-basis: 100%;
   min-height: 38px;
   padding: 6px 9px;
   font-family: inherit;
