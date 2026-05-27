@@ -574,6 +574,7 @@ def query_parcels(polygon: list[list[float]]) -> ParcelQueryResult:
                 "street_num": _clean_text(row.get("street_num")),
                 "full_street_name": _clean_text(row.get("full_street_name")),
                 "property_address": property_address,
+                "property_city": _clean_text(row.get("property_city")),
                 "property_zip": _clean_text(row.get("property_zip")),
                 "division_cd": _clean_text(row.get("division_cd")),
                 "sptd_code": sptd_code,
