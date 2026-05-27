@@ -3,6 +3,10 @@
 .env.local
 .env.*.local
 
+# Production scraper runtime artifacts (state file + logs)
+scripts/production_scraper/state/
+scripts/production_scraper/logs/
+
 # Python
 __pycache__/
 *.pyc
@@ -47,6 +51,9 @@ Thumbs.db
 # Text files — passwords, notes, scratch files
 *.txt
 !requirements.txt
+# Production scraper address lists ARE committed (ship-to-client per spec §4)
+!scripts/production_scraper/master_list.txt
+!scripts/production_scraper/pilot_*.txt
 
 # Build script checkpoint — local resume state, not for repo
 .build_checkpoint.json

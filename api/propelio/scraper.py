@@ -416,13 +416,30 @@ class PropelioClient:
 
     # -- Login ---------------------------------------------------------------
 
-    def login(self) -> None:
+    def login(self, force: bool = False) -> None:
         """POST credentials to ``/login`` and capture the resulting auth.
 
         On success, either a bearer token is added to the session's
         ``Authorization`` header or the session's cookie jar carries
         the auth implicitly (Propelio may use either; we accept both).
+
+        Parameters
+        ----------
+        force:
+            When ``False`` (default), an already-logged-in client is a
+            no-op — preserves the original behavior.
+            When ``True``, the cached auth state is cleared first
+            (``_logged_in``, ``_token``, the ``Authorization`` header,
+            and the underlying ``requests.Session.cookies`` jar), then
+            credentials are re-posted. This is the session-expiry
+            recovery path used by the production_scraper's auth handler
+            (see ``docs/propelio/PRODUCTION_SCRAPER_SPEC.md`` §7.5).
         """
+        if force:
+            self._logged_in = False
+            self._token = None
+            self.session.headers.pop("Authorization", None)
+            self.session.cookies.clear()
         if self._logged_in:
             return
 

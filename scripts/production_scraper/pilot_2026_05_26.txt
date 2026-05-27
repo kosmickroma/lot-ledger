@@ -1,0 +1,14 @@
+# Pilot list for production_scraper first-launch validation (2026-05-26).
+# 3 addresses, ETA ~15 min on seed_5y profile (60mo x 5 distances per addr).
+#
+# Untracked (.gitignore'd at the runtime-artifact level only — this file IS
+# committable but you can rm after the pilot passes).
+#
+# Format normalized to "STREET, CITY, TX ZIP" (commas between street/city
+# and city/state) so the parser sees a comma — KK's original had no comma
+# between street and city. Propelio's resolver should be fine either way,
+# but this matches the master_list.txt convention.
+
+STATE HWY 66, ROYSE CITY, TX 75189
+138 COUNTY ROAD 588, ROYSE CITY, TX 75189
+11380 COUNTY ROAD 535, LAVON, TX 75166

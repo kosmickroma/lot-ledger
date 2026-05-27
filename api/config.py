@@ -219,3 +219,25 @@ def release_session_conn(conn: psycopg2.extensions.connection) -> None:
             conn.close()
         except Exception:
             pass
+
+
+def discard_session_conn(conn: psycopg2.extensions.connection) -> None:
+    """Close ``conn`` and remove it from the pool — do NOT put it back.
+
+    Used by the production_scraper's DB-retry wrapper after a
+    connection-liveness failure (psycopg2.OperationalError, socket
+    reset, "server closed the connection unexpectedly"): the broken
+    socket must be evicted from the pool so the next checkout returns
+    a fresh one.
+
+    Equivalent to ``release_session_conn`` followed by closing the
+    socket, but uses ``putconn(close=True)`` so the pool's internal
+    bookkeeping stays consistent.
+    """
+    try:
+        get_session_pool().putconn(conn, close=True)
+    except (psycopg2.pool.PoolError, Exception):
+        try:
+            conn.close()
+        except Exception:
+            pass

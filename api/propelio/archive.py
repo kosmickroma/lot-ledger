@@ -14,7 +14,7 @@ from typing import Any
 
 from psycopg2.extras import Json
 
-from api.config import get_session_conn, release_session_conn
+from api.config import discard_session_conn, get_session_conn, release_session_conn
 from api.geo import haversine_miles, polygon_centroid
 from api.redfin import normalize_addr_key
 
@@ -312,6 +312,105 @@ def merge_comps_into_global(comps: list[dict[str, Any]], source: str) -> dict[st
     Uses the same idempotent ON CONFLICT DO UPDATE pattern as the backfill
     script.  Returns {"inserted": N, "updated": M}.  Caller is responsible
     for wrapping this in try/except so failures are non-fatal.
+
+    Conn lifecycle: owns its own checkout from the session pool and
+    releases on exit (commit + release on success, rollback + release on
+    exception). For a retry-aware variant (close + reacquire on
+    connection-liveness failures, fail-fast on deterministic errors) see
+    :func:`merge_comps_into_global_with_retry`.
+    """
+    if not comps:
+        return {"inserted": 0, "updated": 0}
+    conn = get_session_conn()
+    try:
+        result = _merge_comps_into_global_inner(conn, comps, source)
+        conn.commit()
+        return result
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        release_session_conn(conn)
+
+
+def merge_comps_into_global_with_retry(
+    comps: list[dict[str, Any]],
+    source: str,
+) -> dict[str, int]:
+    """Retry-aware variant of :func:`merge_comps_into_global` for the
+    production_scraper.
+
+    Per ``docs/propelio/PRODUCTION_SCRAPER_SPEC.md`` v1.2 §7.2 + §11:
+
+    * On ``psycopg2.OperationalError`` (or any subclass — "connection
+      closed", socket reset, server-initiated shutdown): discard the
+      broken connection via :func:`api.config.discard_session_conn` so
+      the next checkout returns a fresh socket, then retry **exactly
+      once** on the new connection.
+    * On any other exception (statement_timeout exceedance, syntax
+      error, constraint violation, etc.): treat as a **deterministic
+      failure** — release the conn normally and re-raise without
+      retrying. Retrying a deterministic failure just burns another
+      60s for the same root cause.
+
+    Returns the same ``{"inserted": N, "updated": M}`` shape as
+    ``merge_comps_into_global``. Caller wraps in try/except and
+    classifies the propagated exception as an errored filter (counts
+    toward the burst guard per §7.2).
+    """
+    import psycopg2  # local import to keep top-of-module light
+
+    if not comps:
+        return {"inserted": 0, "updated": 0}
+
+    last_exc: Exception | None = None
+    for attempt in (0, 1):  # at most one retry (2 total attempts)
+        conn = get_session_conn()
+        try:
+            result = _merge_comps_into_global_inner(conn, comps, source)
+            conn.commit()
+        except psycopg2.OperationalError as exc:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            discard_session_conn(conn)
+            last_exc = exc
+            if attempt >= 1:
+                raise
+            # else: loop and retry once on a fresh conn
+            continue
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            release_session_conn(conn)
+            raise
+        else:
+            release_session_conn(conn)
+            return result
+    # Defensive — loop above always returns or raises.
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("merge_comps_into_global_with_retry: unreachable")
+
+
+def _merge_comps_into_global_inner(
+    conn,
+    comps: list[dict[str, Any]],
+    source: str,
+) -> dict[str, int]:
+    """Execute the propelio_comps upsert on ``conn``. Does NOT commit or
+    release the connection — the caller owns the conn lifecycle.
+
+    Sets a per-transaction ``statement_timeout`` of 60s
+    (spec §7.6 — bounds the worst-case stuck-on-Cloud-SQL scenario for
+    the production_scraper path while leaving other callers' query
+    behavior unchanged for the duration of THIS transaction only).
     """
     from datetime import datetime, timezone
 
@@ -319,15 +418,14 @@ def merge_comps_into_global(comps: list[dict[str, Any]], source: str) -> dict[st
 
     inserted = 0
     updated = 0
-
-    if not comps:
-        return {"inserted": 0, "updated": 0}
-
     now_iso = datetime.now(timezone.utc).isoformat()
 
-    conn = get_session_conn()
-    try:
+    if True:
         with conn.cursor() as cur:
+            # Per-transaction statement_timeout — applies only to this
+            # transaction, never leaks to other callers reusing the conn
+            # after it returns to the pool.
+            cur.execute("SET LOCAL statement_timeout = '60s'")
             for comp in comps:
                 if not isinstance(comp, dict):
                     continue
@@ -522,13 +620,6 @@ def merge_comps_into_global(comps: list[dict[str, Any]], source: str) -> dict[st
                     inserted += 1
                 else:
                     updated += 1
-
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        release_session_conn(conn)
 
     return {"inserted": inserted, "updated": updated}
 
