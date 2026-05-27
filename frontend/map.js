@@ -189,6 +189,12 @@ document.addEventListener("visibilitychange", () => {
 // file; lookup is dynamic so this listener can register early.
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState !== "visible") return;
+  // v1.1 §2.6 — skip cross-tab refetch while a subject-save is in-flight.
+  // Otherwise the refetch overwrites the optimistic UI mid-save, causing
+  // a visible gold-swap flicker (A → B → A → B). The final settling
+  // save will trigger its own _reloadSavedResources, so deferring here
+  // is safe — state catches up after the in-flight save resolves.
+  if (_pendingSubjectSaves > 0) return;
   if (typeof _reloadSavedResources === "function") {
     _reloadSavedResources().catch((err) => console.warn("[visibilitychange] _reloadSavedResources failed:", err));
   }
@@ -747,13 +753,32 @@ function _buildSubjectPropertyLoadAreaHtml(parcelProps) {
   const county = String(parcelProps.source_county || "dcad").trim().toLowerCase();
   const key = _subjectPropertyKey(county, parcelProps.account_num);
   if (!key) return "";
-  const entry = _subjectPropertiesByKey.get(key);
-  if (!entry || !Array.isArray(entry.areas) || entry.areas.length === 0) return "";
+
+  // v1.1 §2.4 — re-derive from _savedAreasCache on every popup render.
+  // Eliminates the stale-dropdown bug: when a subject auto-save changes
+  // an area's originator_parcel_*, the cached _subjectPropertiesByKey
+  // view doesn't reflect it until the next _reloadSavedResources cycle.
+  // .filter() is O(N) over N≈dozens; zero perf concern. Also handles
+  // area-delete / rename / copy-as without manual invalidation.
+  const _normCounty = county;  // already lowercased+trimmed above
+  const _normAccount = String(parcelProps.account_num || "").trim();
+  const areas = (_savedAreasCache || [])
+    .filter((a) =>
+      a.type === "area"
+      && String(a.originator_parcel_county || "").trim().toLowerCase() === _normCounty
+      && String(a.originator_parcel_account_num || "").trim() === _normAccount,
+    )
+    .map((a) => ({
+      area_id: a.id,
+      name: a.name || "",
+      updated_at: a.updated_at || "",
+    }));
+  if (areas.length === 0) return "";
 
   const loadedId = String(_currentLoadedAreaId || "");
 
-  if (entry.areas.length === 1) {
-    const a = entry.areas[0];
+  if (areas.length === 1) {
+    const a = areas[0];
     const isLoaded = String(a.area_id) === loadedId;
     const buttonHtml = isLoaded
       ? `<button type="button" class="subject-property-load-btn" disabled>Currently loaded</button>`
@@ -768,10 +793,10 @@ function _buildSubjectPropertyLoadAreaHtml(parcelProps) {
   }
 
   // Multi-area: dropdown defaults to most-recent (areas[0]).
-  const options = entry.areas
+  const options = areas
     .map(a => `<option value="${_subjectPropertyEscape(a.area_id)}">${_subjectPropertyEscape(a.name)}</option>`)
     .join("");
-  const firstId = String(entry.areas[0].area_id);
+  const firstId = String(areas[0].area_id);
   const firstIsLoaded = firstId === loadedId;
   return `<div class="subject-property-load-section" data-mode="multi">
     <div class="subject-property-load-label">Subject of saved area:</div>
@@ -870,6 +895,15 @@ let _currentSessionIsNamed = false;
 let _savedSessionsCache = [];
 let _currentLoadedAreaId = null;
 let _currentTargetParcel = null; // { county, account, lat?, lng? } | null
+// v1.1 §2.6 — gates cross-tab refetch to prevent flicker when concurrent
+// subject-saves are in-flight. See TkDodo "Concurrent Optimistic Updates
+// in React Query" pattern. Decremented in finally blocks. Read by SA5.
+let _pendingSubjectSaves = 0;
+// v1.1 §2.6 — 50ms debounce on the popup Save Parcel link. Absorbs
+// event-bubbling and mobile double-tap. Single deliberate clicks
+// (>50ms apart) work normally.
+const SAVE_PARCEL_DEBOUNCE_MS = 50;
+let _lastSaveParcelClickAt = 0;
 let _targetCoordsResolvePromise = null;
 let _measureModeEnabled = false;
 let _measurePoints = [];
@@ -3007,6 +3041,35 @@ async function _reloadSavedResources() {
   renderSavedAreasList();
   renderSavedSessionsList();
   _renderSubjectProperties();
+
+  // v1.1 §2.3 — when another tab auto-saves a new subject for a loaded
+  // area, _savedAreasCache here gets refreshed by the lines above, but
+  // the sidebar #active-item-target-name text isn't refreshed because
+  // it's only ever written by _setOriginatorTargetLabel (called only
+  // from _setCurrentTargetParcel). Push the loaded area's current
+  // originator through _setCurrentTargetParcel so the sidebar label
+  // catches up. No-op when no area is loaded or loaded area has no
+  // subject.
+  if (_currentLoadedAreaId) {
+    const loaded = _savedAreasCache.find(
+      (a) => a.id === _currentLoadedAreaId && a.type === "area",
+    );
+    if (loaded) {
+      const c = String(loaded.originator_parcel_county || "").trim().toLowerCase();
+      const a = String(loaded.originator_parcel_account_num || "").trim();
+      if (c && a) {
+        // Only push if the staged in-memory state has actually drifted
+        // from the freshly-fetched persisted state. Otherwise this fires
+        // _setOriginatorTargetLabel unnecessarily every visibility flip.
+        const staged = _currentTargetParcel;
+        const stagedC = staged ? String(staged.county || "").trim().toLowerCase() : null;
+        const stagedA = staged ? String(staged.account || "").trim() : null;
+        if (c !== stagedC || a !== stagedA) {
+          _setCurrentTargetParcel({ county: c, account: a });
+        }
+      }
+    }
+  }
 }
 
 // Sync the browser tab title AND the ?area=<share_id> URL param to the
@@ -3063,6 +3126,35 @@ function _isLoadedAreaWithFilterDrift(area) {
   return staged.c !== persisted.c || staged.a !== persisted.a;
 }
 
+// Commits a subject (originator_parcel_*) change for the loaded area to
+// the backend via PUT /api/areas/{id}. Returns true if a commit happened,
+// false if no drift was detected. Mutates `area` in place on success so
+// subsequent calls see the persisted state.
+//
+// Per spec v1.1 §2.5 + §4.2. Extracted from _updateSavedAreaFilters so
+// saveParcel (auto-save) can call it directly in a later task.
+async function _commitOriginatorToArea(area, stagedCounty, stagedAccount) {
+  if (!area || area.type !== "area") return false;
+  const persistedCounty = String(area.originator_parcel_county || "").trim().toLowerCase() || null;
+  const persistedAccount = String(area.originator_parcel_account_num || "").trim() || null;
+  if (stagedCounty === persistedCounty && stagedAccount === persistedAccount) return false;
+  // Backend requires county + account together (or neither). When staged
+  // is "(none, none)" the user effectively unset the subject — current
+  // backend doesn't accept that, so skip.
+  if (!stagedCounty || !stagedAccount) return false;
+  await _apiJson(`/api/areas/${encodeURIComponent(area.id)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({
+      originator_parcel_county: stagedCounty,
+      originator_parcel_account_num: stagedAccount,
+    }),
+  });
+  area.originator_parcel_county = stagedCounty;
+  area.originator_parcel_account_num = stagedAccount;
+  return true;
+}
+
 async function _updateSavedAreaFilters(area, actionBtn) {
   if (!area || area.type !== "area") return;
   const nextState = captureFilterState();
@@ -3092,30 +3184,18 @@ async function _updateSavedAreaFilters(area, actionBtn) {
     actionBtn.textContent = "Saving...";
   }
   try {
-    const body = {};
-    if (filterChanged) body.filter_state = nextState;
-    if (originatorChanged) {
-      // The PUT endpoint requires county+account together (or neither).
-      // When staged is "(none, none)" — user cleared the target —
-      // current backend doesn't accept clearing the originator
-      // (rejects with 400). Skip the originator update in that case
-      // to keep Update working for filter-only drift.
-      if (stagedCounty && stagedAccount) {
-        body.originator_parcel_county = stagedCounty;
-        body.originator_parcel_account_num = stagedAccount;
-      }
+    // Filter changes go through their own PUT with `filter_state`.
+    if (filterChanged) {
+      await _apiJson(`/api/areas/${encodeURIComponent(area.id)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ filter_state: nextState }),
+      });
+      area.filter_state = _normalizeFilterStateForCompare(nextState);
     }
-    await _apiJson(`/api/areas/${encodeURIComponent(area.id)}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json", ...authHeaders() },
-      body: JSON.stringify(body),
-    });
-    if (filterChanged) area.filter_state = _normalizeFilterStateForCompare(nextState);
-    if (originatorChanged && stagedCounty && stagedAccount) {
-      area.originator_parcel_county = stagedCounty;
-      area.originator_parcel_account_num = stagedAccount;
-      // Subject_properties payload needs a refetch so the new layer
-      // picks up the persisted-originator change.
+    // Originator changes use the shared helper.
+    const originatorCommitted = await _commitOriginatorToArea(area, stagedCounty, stagedAccount);
+    if (originatorCommitted) {
       await _reloadSavedResources().catch(() => {});
     }
     if (actionBtn) actionBtn.textContent = "✓ Updated";
@@ -3582,8 +3662,26 @@ function _renderSubjectProperties() {
   const staged = _stagedSubjectIdentity();
   const stagedKey = staged ? _subjectPropertyKey(staged.county, staged.account_num) : null;
 
+  // v1.1 §2.2 — suppression rule: when a saved area is loaded, only THAT
+  // area's subject shows gold + star + parcel highlight globally. All
+  // other saved-area subjects go dormant on the map (sidebar list is
+  // unaffected — separate UI surface). Restored on Clear / area switch
+  // / no-area-loaded.
+  const _loadedAreaId = _currentLoadedAreaId;
+  const _loadedAreaSubjectKey = _loadedAreaId
+    ? (() => {
+        const loaded = _savedAreasCache.find((a) => a.id === _loadedAreaId && a.type === "area");
+        if (!loaded) return null;
+        const c = String(loaded.originator_parcel_county || "").trim().toLowerCase();
+        const a = String(loaded.originator_parcel_account_num || "").trim();
+        return c && a ? _subjectPropertyKey(c, a) : null;
+      })()
+    : null;
+
   // Outlines: every persisted subject_property in viewport gets one.
   for (const entry of _subjectPropertiesByKey.values()) {
+    // Suppression: skip non-loaded-area subjects when an area is loaded.
+    if (_loadedAreaId && _loadedAreaSubjectKey && _subjectPropertyKey(entry.county, entry.account_num) !== _loadedAreaSubjectKey) continue;
     if (!lowZoom && bounds
         && Number.isFinite(entry.lat) && Number.isFinite(entry.lng)
         && bounds.contains([entry.lat, entry.lng])) {
@@ -3591,14 +3689,23 @@ function _renderSubjectProperties() {
     }
   }
 
-  // Outlines: every bonded saved-parcel of the currently-loaded area in
-  // viewport also gets one. Covers the "old subject still gold" case
-  // after the user stages a new target via Save Parcel.
+  // Outlines: bonded saved-parcels of the currently-loaded area. With
+  // the v1.1 §2.2 suppression rule, ONLY the parcel matching the loaded
+  // area's current subject (originator_parcel_*) gets gold here. Earlier
+  // bonded saved-parcels from prior Save Parcel clicks (now superseded
+  // by auto-save) stay invisible on the map. The first loop already
+  // renders the persisted subject; this loop covers the brief window
+  // before the next _reloadSavedResources lands _subjectPropertiesByKey
+  // for a freshly-set originator.
   if (!lowZoom && _currentLoadedAreaId) {
     for (const sp of _loadedAreaSeedParcelsByKey.values()) {
       if (!bounds) continue;
       if (!Number.isFinite(sp.lat) || !Number.isFinite(sp.lng)) continue;
       if (!bounds.contains([sp.lat, sp.lng])) continue;
+      // Suppression: skip seed parcels that aren't the loaded area's
+      // current subject. Prevents stale-gold pileup when Mike clicks
+      // Save Parcel multiple times in the same loaded area.
+      if (_loadedAreaSubjectKey && _subjectPropertyKey(sp.county, sp.account_num) !== _loadedAreaSubjectKey) continue;
       // Dedupe against any subject_property already rendered at this key.
       const key = _subjectPropertyKey(sp.county, sp.account_num);
       if (key && _subjectPropertyOutlineLayers.has(key)) continue;
@@ -3611,6 +3718,8 @@ function _renderSubjectProperties() {
   // star with `is-loaded` so the user sees their pending change.
   if (lowZoom) {
     for (const entry of _subjectPropertiesByKey.values()) {
+      // Suppression: skip non-loaded-area subjects when an area is loaded.
+      if (_loadedAreaId && _loadedAreaSubjectKey && _subjectPropertyKey(entry.county, entry.account_num) !== _loadedAreaSubjectKey) continue;
       const isStaged = stagedKey != null && _subjectPropertyKey(entry.county, entry.account_num) === stagedKey;
       _renderSubjectPropertyStarMarker(entry, isStaged);
     }
@@ -3914,6 +4023,46 @@ async function saveParcel(account_num, county, addr, lat, lng, geometry) {
     _setCurrentTargetParcel({ county: targetCounty, account: targetAccount, lat, lng });
     void _renderOriginatorTargetStar(targetCounty, targetAccount, lat, lng);
   }
+  // v1.1 §2.1 — auto-commit subject change when inside a loaded area.
+  // Replaces the v0.29 "stage then Update" two-step. The helper writes
+  // the new originator_parcel_* on the loaded area's row and refreshes
+  // _savedAreasCache. Optimistic UI: _setCurrentTargetParcel above
+  // already updated the in-memory state; if the PUT fails we roll back
+  // to the previously-persisted subject here.
+  if (_currentLoadedAreaId && targetAccount && targetCounty) {
+    const area = _savedAreasCache.find(
+      (a) => a.id === _currentLoadedAreaId && a.type === "area",
+    );
+    if (area) {
+      // Capture rollback state BEFORE the helper mutates `area`.
+      const rollbackCounty = String(area.originator_parcel_county || "").trim().toLowerCase() || null;
+      const rollbackAccount = String(area.originator_parcel_account_num || "").trim() || null;
+      _pendingSubjectSaves++;
+      try {
+        const committed = await _commitOriginatorToArea(area, targetCounty, targetAccount);
+        if (committed) {
+          await _reloadSavedResources().catch(() => {});
+        }
+      } catch (err) {
+        console.error("[saveParcel] originator auto-commit failed", err);
+        // Roll back optimistic UI: restore previous target so the
+        // gold + star migrate back to where they were before the click.
+        if (rollbackAccount && rollbackCounty) {
+          _setCurrentTargetParcel({
+            county: rollbackCounty,
+            account: rollbackAccount,
+          });
+          void _renderOriginatorTargetStar(rollbackCounty, rollbackAccount);
+        } else {
+          _setCurrentTargetParcel(null);
+        }
+        _showToast("Subject save failed — retry via Update", "error");
+      } finally {
+        _pendingSubjectSaves = Math.max(0, _pendingSubjectSaves - 1);
+      }
+    }
+  }
+
   // Only seed the Workspace slot label when there is no loaded workspace.
   // When one is loaded (xyz), saving a different parcel as the new target
   // must NOT rename the workspace — the Target row (updated via
@@ -11151,6 +11300,9 @@ function _wireParcelInteractiveUi(root, options = {}) {
         }
       } catch {}
       try {
+        const _now = Date.now();
+        if (_now - _lastSaveParcelClickAt < SAVE_PARCEL_DEBOUNCE_MS) return;
+        _lastSaveParcelClickAt = _now;
         await saveParcel(account, county, fullName, parseFloat(lat), parseFloat(lng), geometry);
         saveLink.textContent = "✓ Saved";
         saveLink.style.color = "#888";
