@@ -4337,6 +4337,40 @@ async def _run_download_csv(
                 # stored-values header block so existing positions hold.
                 "Stored NBV",
                 "Stored NBV Comment",
+                # === v4a §2.8 — 31 new columns appended at the right edge ===
+                # Existing columns (1..151) are byte-stable. Mike's
+                # column-letter formulas keep working.
+                "Property City",
+                "Property State",
+                "Property Zip",
+                "Property Street Number",
+                "Property Street Half Number",
+                "Property Full Street Name",
+                "Property Building ID",
+                "Property Unit ID",
+                "Property MAPSCO",
+                "Owner Name 2",
+                "Biz Name",
+                "Owner Address Line 1 (raw)",
+                "Owner Address Line 2 (raw)",
+                "Owner Address Line 3 (raw)",
+                "Owner Address Line 4 (raw)",
+                "Owner Country",
+                "City Jurisdiction",
+                "County Jurisdiction",
+                "Hospital Jurisdiction",
+                "College Jurisdiction",
+                "Special District Jurisdiction",
+                "City Taxable Value",
+                "County Taxable Value",
+                "ISD Taxable Value",
+                "Hospital Taxable Value",
+                "College Taxable Value",
+                "Special District Taxable Value",
+                "Owner 2 Name",
+                "Owner 2 %",
+                "Owner 3 Name",
+                "Owner 3 %",
             ]
         )
         buffer.seek(0)
