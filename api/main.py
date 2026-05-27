@@ -4996,6 +4996,35 @@ async def _run_download_csv(
                     csv_share_id,                                                                                # 109 share_id
                     csv_workspace_name,                                                                          # 110 Workspace Name
                     *stored_value_export_cells,                                                                   # 111-120 stored values snapshot
+                    # === v4a §2.8 — 31 new cells (mirror header order) ===
+                    _cad.get("property_city", "") or "",
+                    "TX" if _cad else "",
+                    _cad.get("property_zip", "") or "",
+                    _cad.get("street_num", "") or "",
+                    _cad.get("street_half_num", "") or "",
+                    _cad.get("full_street_name", "") or "",
+                    _cad.get("bldg_id", "") or "",
+                    _cad.get("unit_id", "") or "",
+                    _cad.get("mapsco", "") or "",
+                    _cad.get("owner_name2", "") or "",
+                    _cad.get("biz_name", "") or "",
+                    _cad.get("owner_address_line1", "") or "",
+                    _cad.get("owner_address_line2", "") or "",
+                    _cad.get("owner_address_line3", "") or "",
+                    _cad.get("owner_address_line4", "") or "",
+                    _cad.get("owner_country", "") or "",
+                    _cad.get("city_jurisdiction_desc", "") or "",
+                    _cad.get("county_jurisdiction_desc", "") or "",
+                    _cad.get("hospital_jurisdiction_desc", "") or "",
+                    _cad.get("college_jurisdiction_desc", "") or "",
+                    _cad.get("special_dist_jurisdiction_desc", "") or "",
+                    round(_safe_float(_cad.get("city_taxable_val")), 0) if _cad and _safe_float(_cad.get("city_taxable_val")) is not None else "",
+                    round(_safe_float(_cad.get("county_taxable_val")), 0) if _cad and _safe_float(_cad.get("county_taxable_val")) is not None else "",
+                    round(_safe_float(_cad.get("isd_taxable_val")), 0) if _cad and _safe_float(_cad.get("isd_taxable_val")) is not None else "",
+                    round(_safe_float(_cad.get("hospital_taxable_val")), 0) if _cad and _safe_float(_cad.get("hospital_taxable_val")) is not None else "",
+                    round(_safe_float(_cad.get("college_taxable_val")), 0) if _cad and _safe_float(_cad.get("college_taxable_val")) is not None else "",
+                    round(_safe_float(_cad.get("special_dist_taxable_val")), 0) if _cad and _safe_float(_cad.get("special_dist_taxable_val")) is not None else "",
+                    *_additional_owner_cells(_cad.get("additional_owners") if _cad else []),
                 ]
             )
             buffer.seek(0)
