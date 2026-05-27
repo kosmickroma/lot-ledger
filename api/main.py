@@ -4306,11 +4306,8 @@ async def _run_download_csv(
                 "Certified Total Value",
                 "Denton - Exemptions",
                 "Denton - Homestead (HS)",
-                "Denton - School District",
-                "Denton - Entity Codes",
-                "Denton - Deed Number",
-                "Denton - Deed Date",
-                "Denton - Subdivision",
+                "Deed Number (Detailed)",
+                "Subdivision (Parsed)",
                 "Comp Sold Price",
                 "Comp Sold Date",
                 "Comp $/sqft",
@@ -4635,10 +4632,7 @@ async def _run_download_csv(
                     round(_safe_float(row.get("cert_total_value")), 0) if _safe_float(row.get("cert_total_value")) is not None else "",
                     row.get("exemptions", "") or "",
                     row.get("exempt_homestead", "") or "",
-                    row.get("isd_desc", "") or "",
-                    row.get("entity_codes", "") or "",
                     row.get("deed_number", "") or "",
-                    row.get("deed_date", "") or "",
                     row.get("subdivision", "") or "",
                     round(_safe_float(propelio_comp.get("sold_price")), 0) if propelio_comp and _safe_float(propelio_comp.get("sold_price")) is not None else "",
                     (propelio_comp.get("sold_date", "") or "") if propelio_comp else "",
@@ -4966,11 +4960,8 @@ async def _run_download_csv(
                     round(_safe_float(_cad.get("cert_total_value")), 0) if _safe_float(_cad.get("cert_total_value")) is not None else "",        # 78
                     _cad.get("exemptions", "") or "",                                                            # 79 Denton - Exemptions
                     _cad.get("exempt_homestead", "") or "",                                                      # 80 Denton - Homestead
-                    _cad.get("isd_desc", "") or "",                                                              # 81 Denton - School District
-                    _cad.get("entity_codes", "") or "",                                                          # 82 Denton - Entity Codes
-                    _cad.get("deed_number", "") or "",                                                           # 83 Denton - Deed Number
-                    _cad.get("deed_date", "") or "",                                                             # 84 Denton - Deed Date
-                    _cad.get("subdivision", "") or "",                                                           # 85 Denton - Subdivision
+                    _cad.get("deed_number", "") or "",                                                           # 81 Deed Number (Detailed)
+                    _cad.get("subdivision", "") or "",                                                           # 82 Subdivision (Parsed)
                     _price_csv,                                                                                  # 86 Comp Sold Price
                     str(_comp_sold_date) if _comp_sold_date else "",                                             # 87 Comp Sold Date
                     _comp_ppsf,                                                                                  # 88 Comp $/sqft
