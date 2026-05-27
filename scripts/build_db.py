@@ -399,6 +399,17 @@ def _build_parcels_table() -> list[dict[str, object]]:
                 "owner_city": _clean_text(getattr(row, "OWNER_CITY", None)),
                 "owner_state": _clean_text(getattr(row, "OWNER_STATE", None)),
                 "owner_zip": _clean_text(getattr(row, "OWNER_ZIPCODE", None)),
+                "owner_name2":          _clean_text(getattr(row, "OWNER_NAME2", None)),
+                "biz_name":             _clean_text(getattr(row, "BIZ_NAME", None)),
+                "owner_address_line1":  _clean_text(getattr(row, "OWNER_ADDRESS_LINE1", None)),
+                "owner_address_line2":  _clean_text(getattr(row, "OWNER_ADDRESS_LINE2", None)),
+                "owner_address_line3":  _clean_text(getattr(row, "OWNER_ADDRESS_LINE3", None)),
+                "owner_address_line4":  _clean_text(getattr(row, "OWNER_ADDRESS_LINE4", None)),
+                "owner_country":        _clean_text(getattr(row, "OWNER_COUNTRY", None)),
+                "street_half_num":      _clean_text(getattr(row, "STREET_HALF_NUM", None)),
+                "bldg_id":              _clean_text(getattr(row, "BLDG_ID", None)),
+                "unit_id":              _clean_text(getattr(row, "UNIT_ID", None)),
+                "mapsco":               _clean_text(getattr(row, "MAPSCO", None)),
                 "street_num": _clean_text(getattr(row, "STREET_NUM", None)),
                 "full_street_name": _clean_text(getattr(row, "FULL_STREET_NAME", None)),
                 "property_address": property_address,
@@ -438,10 +449,61 @@ def _build_appraisal_table() -> list[dict[str, object]]:
                 "tot_val": _to_float(getattr(row, "TOT_VAL", None)),
                 "isd_desc": _clean_text(getattr(row, "ISD_JURIS_DESC", None)),
                 "sptd_code": _clean_text(getattr(row, "SPTD_CODE", None)),
+                "city_jurisdiction_desc":         _clean_text(getattr(row, "CITY_JURIS_DESC", None)),
+                "county_jurisdiction_desc":       _clean_text(getattr(row, "COUNTY_JURIS_DESC", None)),
+                "hospital_jurisdiction_desc":     _clean_text(getattr(row, "HOSPITAL_JURIS_DESC", None)),
+                "college_jurisdiction_desc":      _clean_text(getattr(row, "COLLEGE_JURIS_DESC", None)),
+                "special_dist_jurisdiction_desc": _clean_text(getattr(row, "SPECIAL_DIST_JURIS_DESC", None)),
+                "city_taxable_val":               _to_float(getattr(row, "CITY_TAXABLE_VAL", None)),
+                "county_taxable_val":             _to_float(getattr(row, "COUNTY_TAXABLE_VAL", None)),
+                "isd_taxable_val":                _to_float(getattr(row, "ISD_TAXABLE_VAL", None)),
+                "hospital_taxable_val":           _to_float(getattr(row, "HOSPITAL_TAXABLE_VAL", None)),
+                "college_taxable_val":            _to_float(getattr(row, "COLLEGE_TAXABLE_VAL", None)),
+                "special_dist_taxable_val":       _to_float(getattr(row, "SPECIAL_DIST_TAXABLE_VAL", None)),
             }
         )
 
     print(f"Appraisal prepared: {len(rows):,}")
+    return rows
+
+
+def _build_multi_owner_table() -> list[dict[str, object]]:
+    """Build multi_owner rows from DCAD's MULTI_OWNER.CSV (v4a §2.3 + §2.5)."""
+    multi_path = DATA_DIR / "MULTI_OWNER.CSV"
+    if not multi_path.exists():
+        print(f"MULTI_OWNER.CSV not found at {multi_path} — skipping.")
+        return []
+    multi_df = pd.read_csv(multi_path, dtype=str, encoding="latin-1").fillna("")
+
+    rows: list[dict[str, object]] = []
+    for row in multi_df.itertuples(index=False):
+        account_num = _clean_text(getattr(row, "ACCOUNT_NUM", None))
+        if not account_num:
+            continue
+        try:
+            seq_num = int(str(getattr(row, "OWNER_SEQ_NUM", "")).strip())
+            appraisal_yr = int(str(getattr(row, "APPRAISAL_YR", "")).strip())
+        except (TypeError, ValueError):
+            continue
+        owner_name = _clean_text(getattr(row, "OWNER_NAME", None))
+        if not owner_name:
+            continue
+        pct_raw = str(getattr(row, "OWNERSHIP_PCT", "")).strip()
+        try:
+            pct = float(pct_raw) if pct_raw else None
+        except (TypeError, ValueError):
+            pct = None
+        rows.append(
+            {
+                "appraisal_yr": appraisal_yr,
+                "account_num": account_num,
+                "owner_seq_num": seq_num,
+                "owner_name": owner_name,
+                "ownership_pct": pct,
+            }
+        )
+
+    print(f"Multi-owner prepared: {len(rows):,}")
     return rows
 
 
@@ -593,9 +655,15 @@ def main() -> None:
     res_detail_rows = _build_res_detail_table()
     land_detail_rows = _build_land_detail_table()
     exempt_rows = _build_exempt_accounts_table()
+    multi_owner_rows = _build_multi_owner_table()
 
     _upsert_rows("parcels", parcels_rows, "account_num", [col for col in parcels_rows[0] if col != "account_num"])
-    _upsert_rows("appraisal", appraisal_rows, "account_num", ["land_val", "impr_val", "tot_val", "isd_desc", "sptd_code"])
+    _upsert_rows(
+        "appraisal",
+        appraisal_rows,
+        "account_num",
+        [col for col in appraisal_rows[0] if col != "account_num"] if appraisal_rows else [],
+    )
     # v3: res_detail gained 27 columns. Mirror parcels' pattern (update everything
     # except the conflict key) so future column additions in _build_res_detail_table
     # automatically flow through on re-ingest.
@@ -607,6 +675,51 @@ def main() -> None:
     )
     _upsert_rows("land_detail", land_detail_rows, "account_num", ["zoning", "front_dim", "depth_dim", "area_size", "area_uom", "area_estimated"])
     _upsert_rows("exempt_accounts", exempt_rows, "account_num", [])
+
+    if multi_owner_rows:
+        # multi_owner has a composite PK; _upsert_rows expects a single
+        # on_conflict_col. Inline the upsert here using execute_values
+        # (already imported at module top from psycopg2.extras).
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "CREATE TABLE IF NOT EXISTS multi_owner ("
+                    "  appraisal_yr INTEGER NOT NULL,"
+                    "  account_num TEXT NOT NULL,"
+                    "  owner_seq_num INTEGER NOT NULL,"
+                    "  owner_name TEXT NOT NULL,"
+                    "  ownership_pct NUMERIC(5,2),"
+                    "  PRIMARY KEY (appraisal_yr, account_num, owner_seq_num))"
+                )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_multi_owner_account "
+                    "ON multi_owner (account_num)"
+                )
+                execute_values(
+                    cur,
+                    "INSERT INTO multi_owner "
+                    "(appraisal_yr, account_num, owner_seq_num, owner_name, ownership_pct) "
+                    "VALUES %s "
+                    "ON CONFLICT (appraisal_yr, account_num, owner_seq_num) "
+                    "DO UPDATE SET owner_name = EXCLUDED.owner_name, "
+                    "  ownership_pct = EXCLUDED.ownership_pct",
+                    [
+                        (
+                            r["appraisal_yr"],
+                            r["account_num"],
+                            r["owner_seq_num"],
+                            r["owner_name"],
+                            r["ownership_pct"],
+                        )
+                        for r in multi_owner_rows
+                    ],
+                    page_size=1000,
+                )
+            conn.commit()
+            print(f"multi_owner: done — {len(multi_owner_rows):,} rows upserted")
+        finally:
+            release_conn(conn)
 
     print("\nFinal row counts:")
     for table_name in ["parcels", "appraisal", "res_detail", "land_detail", "exempt_accounts"]:
