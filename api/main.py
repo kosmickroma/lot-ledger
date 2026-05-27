@@ -686,6 +686,51 @@ def _ensure_session_schema() -> None:
                         )
                         """,
                     ),
+                    # K4 (2026-05-27 roadmap): add 'nbv' (New Build Value) to
+                    # the allowed field_keys. NBV is the new user-typed input
+                    # that drives TDPP via the calc nbv * 0.2 = tdpp. Existing
+                    # TDPP values are preserved in the table; the calc only
+                    # overrides displayed TDPP when NBV is set. Both steps are
+                    # idempotent: the DROP locates the old field_key CHECK
+                    # constraint by inspecting pg_constraint (no reliance on
+                    # PostgreSQL's auto-generated name), and the ADD uses an
+                    # explicit v2 name so re-runs are no-ops.
+                    (
+                        "stored_value_entries_drop_old_field_key_check",
+                        """
+                        DO $$
+                        DECLARE
+                            con_name TEXT;
+                        BEGIN
+                            SELECT conname INTO con_name
+                            FROM pg_constraint
+                            WHERE conrelid = 'stored_value_entries'::regclass
+                              AND contype = 'c'
+                              AND pg_get_constraintdef(oid) ILIKE '%field_key%'
+                              AND pg_get_constraintdef(oid) NOT ILIKE '%nbv%'
+                            LIMIT 1;
+                            IF con_name IS NOT NULL THEN
+                                EXECUTE 'ALTER TABLE stored_value_entries DROP CONSTRAINT ' || quote_ident(con_name);
+                            END IF;
+                        END$$;
+                        """,
+                    ),
+                    (
+                        "stored_value_entries_add_field_key_check_v2",
+                        """
+                        DO $$
+                        BEGIN
+                            IF NOT EXISTS (
+                                SELECT 1 FROM pg_constraint
+                                WHERE conname = 'stored_value_entries_field_key_check_v2'
+                            ) THEN
+                                ALTER TABLE stored_value_entries
+                                ADD CONSTRAINT stored_value_entries_field_key_check_v2
+                                CHECK (field_key IN ('arv','nbv','tdpp','rehab_needed','mao_arv','tdpp_minus_mao_arv'));
+                            END IF;
+                        END$$;
+                        """,
+                    ),
                 ],
             )
             _backfill_saved_area_share_ids(cur)
@@ -1636,6 +1681,11 @@ def _stored_value_csv_cells(payload: dict[str, dict[str, Any]]) -> list[str]:
         _comment_str("mao_arv"),
         _num_str("tdpp_minus_mao_arv"),
         _comment_str("tdpp_minus_mao_arv"),
+        # K4 (2026-05-27): NBV cells APPENDED at end of stored-values block
+        # so existing columns 1-10 within the block are unchanged. CSV column
+        # count grows by 2 overall.
+        _num_str("nbv"),
+        _comment_str("nbv"),
     ]
 
 
@@ -3866,7 +3916,7 @@ async def _run_download_csv(
         finally:
             release_session_conn(_conn)
 
-    stored_value_export_cells = [""] * 10
+    stored_value_export_cells = [""] * 12  # K4 (2026-05-27): +2 for NBV num+comment
     if job_saved_area_id:
         _conn = get_session_conn()
         try:
@@ -4257,6 +4307,10 @@ async def _run_download_csv(
                 "Stored MAO (ARV) Comment",
                 "Stored TDPP-MAO (ARV)",
                 "Stored TDPP-MAO (ARV) Comment",
+                # K4 (2026-05-27): NBV columns APPENDED at the end of the
+                # stored-values header block so existing positions hold.
+                "Stored NBV",
+                "Stored NBV Comment",
             ]
         )
         buffer.seek(0)

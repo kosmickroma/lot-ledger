@@ -80,15 +80,36 @@
             <textarea id="sv-comment-arv" class="sv-comment" rows="2" placeholder="Comment (optional)"></textarea>
           </div>
 
-          <div class="sv-row" data-field-key="tdpp">
+          <!-- K4 (2026-05-27 roadmap): NBV (New Build Value) — user input
+               that drives TDPP via NBV × 0.2. Inserted above TDPP. -->
+          <div class="sv-row" data-field-key="nbv">
             <div class="sv-row-head">
-              <label class="sv-label" for="sv-input-tdpp">TDPP</label>
-              <button type="button" class="sv-tooltip-trigger" aria-describedby="sv-tooltip-tdpp" aria-label="What is TDPP?">?</button>
-              <span id="sv-tooltip-tdpp" role="tooltip" class="sv-tooltip">Tear Down Purchase Price</span>
+              <label class="sv-label" for="sv-input-nbv">NBV</label>
+              <button type="button" class="sv-tooltip-trigger" aria-describedby="sv-tooltip-nbv" aria-label="What is NBV?">?</button>
+              <span id="sv-tooltip-nbv" role="tooltip" class="sv-tooltip">New Build Value (× 0.2 → TDPP)</span>
             </div>
             <div class="sv-input-wrap">
               <span class="sv-input-prefix">$</span>
-              <input id="sv-input-tdpp" class="sv-numeric-input" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="0">
+              <input id="sv-input-nbv" class="sv-numeric-input" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="0">
+            </div>
+            <textarea id="sv-comment-nbv" class="sv-comment" rows="2" placeholder="Comment (optional)"></textarea>
+          </div>
+
+          <!-- K4 (2026-05-27 roadmap): TDPP is now CALC, driven by NBV × 0.2.
+               sv-row-calc + sv-numeric-readonly + CALC badge match the MAO/
+               TDPP-MAO styling. Backwards-compat: when NBV is null, the
+               displayed value falls back to whatever was previously stored
+               in DB (see _storedValueComputeCalc in map.js). -->
+          <div class="sv-row sv-row-calc" data-field-key="tdpp">
+            <div class="sv-row-head">
+              <label class="sv-label" for="sv-input-tdpp">TDPP</label>
+              <button type="button" class="sv-tooltip-trigger" aria-describedby="sv-tooltip-tdpp" aria-label="What is TDPP?">?</button>
+              <span id="sv-tooltip-tdpp" role="tooltip" class="sv-tooltip">Tear Down Purchase Price (calc: NBV × 0.2)</span>
+              <span class="sv-calc-badge">calc</span>
+            </div>
+            <div class="sv-input-wrap">
+              <span class="sv-input-prefix">$</span>
+              <input id="sv-input-tdpp" class="sv-numeric-input sv-numeric-readonly" type="text" readonly tabindex="-1" placeholder="—">
             </div>
             <textarea id="sv-comment-tdpp" class="sv-comment" rows="2" placeholder="Comment (optional)"></textarea>
           </div>

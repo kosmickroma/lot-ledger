@@ -12010,15 +12010,21 @@ document.getElementById("btn-deep-pull-stop")?.addEventListener("click", stopDee
 
 // ─── Stored Values sidebar block (Phase 3 wiring) ────────────────────────
 // Workspace-scoped per-saved-area value tracking. Backed by
-// stored_value_entries. Manual fields: arv, tdpp, rehab_needed.
+// stored_value_entries. Manual fields: arv, nbv, rehab_needed.
 // Calc fields (computed locally + server-side):
+//   tdpp                = nbv * 0.2  (K4 2026-05-27 — was manual; now driven by NBV)
 //   mao_arv             = arv * 0.75 - rehab_needed
 //   tdpp_minus_mao_arv  = tdpp - mao_arv
+//
+// K4 backwards-compat: when nbv is null (unset), tdpp keeps whatever was
+// previously stored — so existing typed TDPP values from before this
+// change continue to display until the user populates NBV.
 
-const _STORED_VALUE_FIELDS = ["arv", "tdpp", "rehab_needed", "mao_arv", "tdpp_minus_mao_arv"];
-const _STORED_VALUE_MANUAL_FIELDS = ["arv", "tdpp", "rehab_needed"];
-const _STORED_VALUE_CALC_FIELDS = ["mao_arv", "tdpp_minus_mao_arv"];
+const _STORED_VALUE_FIELDS = ["arv", "nbv", "tdpp", "rehab_needed", "mao_arv", "tdpp_minus_mao_arv"];
+const _STORED_VALUE_MANUAL_FIELDS = ["arv", "nbv", "rehab_needed"];
+const _STORED_VALUE_CALC_FIELDS = ["tdpp", "mao_arv", "tdpp_minus_mao_arv"];
 const _STORED_VALUE_MULTIPLIER = 0.75;
+const _STORED_VALUE_NBV_TO_TDPP_MULTIPLIER = 0.2;  // K4: nbv × 0.2 = tdpp
 const _STORED_VALUE_NUMERIC_MAX = 999_999_999;
 const _STORED_VALUE_DEBOUNCE_MS = 600;
 
@@ -12067,15 +12073,22 @@ function _storedValueFormatDisplay(value) {
 
 function _storedValueComputeCalc(state) {
   const arv = state.arv.numeric_value;
-  const tdpp = state.tdpp.numeric_value;
+  const nbv = state.nbv.numeric_value;
   const rehab = state.rehab_needed.numeric_value;
+  // K4 (2026-05-27): tdpp is now driven by nbv (×0.2). Backwards-compat:
+  // when nbv is null/unset, keep the prior stored tdpp value rather than
+  // wiping it — preserves data Mike's users typed before this change.
+  const priorTdpp = state.tdpp.numeric_value;
+  const tdpp = (nbv != null)
+    ? Math.round(nbv * _STORED_VALUE_NBV_TO_TDPP_MULTIPLIER)
+    : priorTdpp;
   const mao = (arv != null && rehab != null)
     ? Math.round(arv * _STORED_VALUE_MULTIPLIER - rehab)
     : null;
   const tdppMinusMao = (tdpp != null && mao != null)
     ? Math.round(tdpp - mao)
     : null;
-  return { mao_arv: mao, tdpp_minus_mao_arv: tdppMinusMao };
+  return { tdpp: tdpp, mao_arv: mao, tdpp_minus_mao_arv: tdppMinusMao };
 }
 
 function _storedValueApplyState(state) {
