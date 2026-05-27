@@ -1746,6 +1746,29 @@ def _enforce_admin_target_rules(actor: dict[str, Any], target: dict[str, Any], a
             raise HTTPException(status_code=403, detail="Cannot disable the last active owner account")
 
 
+def _additional_owner_cells(additional_owners: list[dict] | None) -> tuple[str, str, str, str]:
+    """Return (owner2_name, owner2_pct, owner3_name, owner3_pct) cells.
+
+    Per spec v4a.2 §2.8 — only seqs 2 and 3 surface in CSV. multi_owner
+    can have more, but DCAD caps at seq=3 in practice. Empty strings
+    fill missing seqs so cell count stays fixed.
+    """
+    seqs: dict[int, dict] = {}
+    for entry in (additional_owners or []):
+        seq = entry.get("seq")
+        if isinstance(seq, int):
+            seqs[seq] = entry
+
+    def _name(seq: int) -> str:
+        return (seqs.get(seq, {}).get("name") or "").strip()
+
+    def _pct(seq: int) -> str:
+        v = seqs.get(seq, {}).get("pct")
+        return f"{v:.2f}" if isinstance(v, (int, float)) else ""
+
+    return _name(2), _pct(2), _name(3), _pct(3)
+
+
 def _normalize_csv_filename(raw: str | None) -> str:
     if not raw:
         return "parcels.csv"
@@ -4643,6 +4666,35 @@ async def _run_download_csv(
                     csv_share_id,
                     csv_workspace_name,
                     *stored_value_export_cells,
+                    # === v4a §2.8 — 31 new cells (mirror header order exactly) ===
+                    row.get("property_city", "") or "",
+                    "TX",
+                    row.get("property_zip", "") or "",
+                    row.get("street_num", "") or "",
+                    row.get("street_half_num", "") or "",
+                    row.get("full_street_name", "") or "",
+                    row.get("bldg_id", "") or "",
+                    row.get("unit_id", "") or "",
+                    row.get("mapsco", "") or "",
+                    row.get("owner_name2", "") or "",
+                    row.get("biz_name", "") or "",
+                    row.get("owner_address_line1", "") or "",
+                    row.get("owner_address_line2", "") or "",
+                    row.get("owner_address_line3", "") or "",
+                    row.get("owner_address_line4", "") or "",
+                    row.get("owner_country", "") or "",
+                    row.get("city_jurisdiction_desc", "") or "",
+                    row.get("county_jurisdiction_desc", "") or "",
+                    row.get("hospital_jurisdiction_desc", "") or "",
+                    row.get("college_jurisdiction_desc", "") or "",
+                    row.get("special_dist_jurisdiction_desc", "") or "",
+                    round(_safe_float(row.get("city_taxable_val")), 0) if _safe_float(row.get("city_taxable_val")) is not None else "",
+                    round(_safe_float(row.get("county_taxable_val")), 0) if _safe_float(row.get("county_taxable_val")) is not None else "",
+                    round(_safe_float(row.get("isd_taxable_val")), 0) if _safe_float(row.get("isd_taxable_val")) is not None else "",
+                    round(_safe_float(row.get("hospital_taxable_val")), 0) if _safe_float(row.get("hospital_taxable_val")) is not None else "",
+                    round(_safe_float(row.get("college_taxable_val")), 0) if _safe_float(row.get("college_taxable_val")) is not None else "",
+                    round(_safe_float(row.get("special_dist_taxable_val")), 0) if _safe_float(row.get("special_dist_taxable_val")) is not None else "",
+                    *_additional_owner_cells(row.get("additional_owners")),
                 ]
             )
             buffer.seek(0)
