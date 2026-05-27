@@ -880,6 +880,11 @@ let _currentTargetParcel = null; // { county, account, lat?, lng? } | null
 // subject-saves are in-flight. See TkDodo "Concurrent Optimistic Updates
 // in React Query" pattern. Decremented in finally blocks. Read by SA5.
 let _pendingSubjectSaves = 0;
+// v1.1 §2.6 — 50ms debounce on the popup Save Parcel link. Absorbs
+// event-bubbling and mobile double-tap. Single deliberate clicks
+// (>50ms apart) work normally.
+const SAVE_PARCEL_DEBOUNCE_MS = 50;
+let _lastSaveParcelClickAt = 0;
 let _targetCoordsResolvePromise = null;
 let _measureModeEnabled = false;
 let _measurePoints = [];
@@ -11218,6 +11223,9 @@ function _wireParcelInteractiveUi(root, options = {}) {
         }
       } catch {}
       try {
+        const _now = Date.now();
+        if (_now - _lastSaveParcelClickAt < SAVE_PARCEL_DEBOUNCE_MS) return;
+        _lastSaveParcelClickAt = _now;
         await saveParcel(account, county, fullName, parseFloat(lat), parseFloat(lng), geometry);
         saveLink.textContent = "✓ Saved";
         saveLink.style.color = "#888";
