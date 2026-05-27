@@ -104,6 +104,9 @@
               <label class="sv-label" for="sv-input-tdpp">TDPP</label>
               <button type="button" class="sv-tooltip-trigger" aria-describedby="sv-tooltip-tdpp" aria-label="What is TDPP?">?</button>
               <span id="sv-tooltip-tdpp" role="tooltip" class="sv-tooltip">Tear Down Purchase Price (NBV × 0.2)</span>
+              <!-- K4: CALC badge signals "auto-filled from NBV" even though
+                   the input itself remains editable (operator can override). -->
+              <span class="sv-calc-badge">calc</span>
             </div>
             <div class="sv-input-wrap">
               <span class="sv-input-prefix">$</span>
