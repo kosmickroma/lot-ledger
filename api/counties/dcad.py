@@ -853,6 +853,38 @@ def build_feature(row: dict[str, Any], prop_type: str, on_redfin: bool, redfin_l
         "potential_target": _clean_text(row.get("potential_target")),
         "redfin_price": f"${redfin_listing['price']:,}" if redfin_listing and redfin_listing.get("price") else None,
         "redfin_url": redfin_listing.get("url") if redfin_listing else None,
+        # === v4a §2.7 — raw owner-mailing-label + property-side fields ===
+        # All passed through unchanged; CSV writer reads by name. No popup
+        # rendering until v4b.
+        "owner_name2": _clean_text(row.get("owner_name2")),
+        "biz_name": _clean_text(row.get("biz_name")),
+        "owner_address_line1": _clean_text(row.get("owner_address_line1")),
+        "owner_address_line2": _clean_text(row.get("owner_address_line2")),
+        "owner_address_line3": _clean_text(row.get("owner_address_line3")),
+        "owner_address_line4": _clean_text(row.get("owner_address_line4")),
+        "owner_country": _clean_text(row.get("owner_country")),
+        "property_state": "TX",
+        "property_zip": _clean_text(row.get("property_zip")),
+        "property_street_num": _clean_text(row.get("street_num")),
+        "property_street_half_num": _clean_text(row.get("street_half_num")),
+        "property_full_street_name": _clean_text(row.get("full_street_name")),
+        "property_bldg_id": _clean_text(row.get("bldg_id")),
+        "property_unit_id": _clean_text(row.get("unit_id")),
+        "property_mapsco": _clean_text(row.get("mapsco")),
+        # === v4a §2.7 — jurisdiction descriptors + taxable values ===
+        "city_jurisdiction_desc": _clean_text(row.get("city_jurisdiction_desc")),
+        "county_jurisdiction_desc": _clean_text(row.get("county_jurisdiction_desc")),
+        "hospital_jurisdiction_desc": _clean_text(row.get("hospital_jurisdiction_desc")),
+        "college_jurisdiction_desc": _clean_text(row.get("college_jurisdiction_desc")),
+        "special_dist_jurisdiction_desc": _clean_text(row.get("special_dist_jurisdiction_desc")),
+        "city_taxable_val": _safe_float(row.get("city_taxable_val")),
+        "county_taxable_val": _safe_float(row.get("county_taxable_val")),
+        "isd_taxable_val": _safe_float(row.get("isd_taxable_val")),
+        "hospital_taxable_val": _safe_float(row.get("hospital_taxable_val")),
+        "college_taxable_val": _safe_float(row.get("college_taxable_val")),
+        "special_dist_taxable_val": _safe_float(row.get("special_dist_taxable_val")),
+        # === v4a §2.6.c — full additional_owners array (seq>=2) ===
+        "additional_owners": row.get("additional_owners") or [],
         "lat": lat,
         "lng": lng,
     }
