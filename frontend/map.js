@@ -3041,6 +3041,35 @@ async function _reloadSavedResources() {
   renderSavedAreasList();
   renderSavedSessionsList();
   _renderSubjectProperties();
+
+  // v1.1 §2.3 — when another tab auto-saves a new subject for a loaded
+  // area, _savedAreasCache here gets refreshed by the lines above, but
+  // the sidebar #active-item-target-name text isn't refreshed because
+  // it's only ever written by _setOriginatorTargetLabel (called only
+  // from _setCurrentTargetParcel). Push the loaded area's current
+  // originator through _setCurrentTargetParcel so the sidebar label
+  // catches up. No-op when no area is loaded or loaded area has no
+  // subject.
+  if (_currentLoadedAreaId) {
+    const loaded = _savedAreasCache.find(
+      (a) => a.id === _currentLoadedAreaId && a.type === "area",
+    );
+    if (loaded) {
+      const c = String(loaded.originator_parcel_county || "").trim().toLowerCase();
+      const a = String(loaded.originator_parcel_account_num || "").trim();
+      if (c && a) {
+        // Only push if the staged in-memory state has actually drifted
+        // from the freshly-fetched persisted state. Otherwise this fires
+        // _setOriginatorTargetLabel unnecessarily every visibility flip.
+        const staged = _currentTargetParcel;
+        const stagedC = staged ? String(staged.county || "").trim().toLowerCase() : null;
+        const stagedA = staged ? String(staged.account || "").trim() : null;
+        if (c !== stagedC || a !== stagedA) {
+          _setCurrentTargetParcel({ county: c, account: a });
+        }
+      }
+    }
+  }
 }
 
 // Sync the browser tab title AND the ?area=<share_id> URL param to the
