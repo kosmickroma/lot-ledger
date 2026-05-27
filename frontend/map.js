@@ -154,17 +154,19 @@ function _renderUpdateBanner() {
   banner.style.cssText = [
     "position:fixed",
     "top:0",
-    "left:0",
-    "right:0",
+    "left:50%",
+    "transform:translateX(-50%)",
+    "max-width:480px",
     "background:#2a7",
     "color:#fff",
-    "padding:10px 16px",
+    "padding:10px 20px",
     "text-align:center",
     "z-index:100000",
     "cursor:pointer",
     "font-family:inherit",
     "font-size:14px",
     "box-shadow:0 2px 8px rgba(0,0,0,.2)",
+    "border-radius:0 0 8px 8px",
   ].join(";");
   banner.innerHTML = 'A new version is available &mdash; <strong>click to refresh</strong>';
   banner.addEventListener("click", () => window.location.reload());
