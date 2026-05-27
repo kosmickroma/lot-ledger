@@ -189,12 +189,11 @@ document.addEventListener("visibilitychange", () => {
 // file; lookup is dynamic so this listener can register early.
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState !== "visible") return;
-  // v1.1 §2.6 — skip cross-tab refetch while a subject-save is in-flight.
-  // Otherwise the refetch overwrites the optimistic UI mid-save, causing
-  // a visible gold-swap flicker (A → B → A → B). The final settling
-  // save will trigger its own _reloadSavedResources, so deferring here
-  // is safe — state catches up after the in-flight save resolves.
-  if (_pendingSubjectSaves > 0) return;
+  // FA8 (filter-autosave §2.4) — extended gate: skip while EITHER a
+  // subject-save OR a filter-save is in-flight. The final settling
+  // save (whichever happens last) triggers its own _reloadSavedResources,
+  // so deferring here is safe — state catches up after.
+  if (_pendingSubjectSaves + _pendingFilterSaves > 0) return;
   if (typeof _reloadSavedResources === "function") {
     _reloadSavedResources().catch((err) => console.warn("[visibilitychange] _reloadSavedResources failed:", err));
   }
