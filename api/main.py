@@ -2767,6 +2767,12 @@ def _fetch_dcad_parcel_by_account(account_num: str) -> tuple[dict[str, Any] | No
                 [account_num]
             ).get(account_num, [])
 
+            # v4b §3 Rule A — compose canonical owner mailing address
+            # from the last populated LINE1-4. Single-parcel mirror of
+            # the same composition applied in query_parcels merged_rows.
+            from api.counties.dcad import _compose_dcad_owner_address
+            parcel["owner_address"] = _compose_dcad_owner_address(parcel)
+
             exempt_set = {account_num} if parcel.get("is_exempt_account") else set()
             return parcel, exempt_set
     finally:
