@@ -12010,15 +12010,23 @@ document.getElementById("btn-deep-pull-stop")?.addEventListener("click", stopDee
 
 // ─── Stored Values sidebar block (Phase 3 wiring) ────────────────────────
 // Workspace-scoped per-saved-area value tracking. Backed by
-// stored_value_entries. Manual fields: arv, tdpp, rehab_needed.
+// stored_value_entries. Manual fields: arv, nbv, tdpp, rehab_needed.
 // Calc fields (computed locally + server-side):
 //   mao_arv             = arv * 0.75 - rehab_needed
 //   tdpp_minus_mao_arv  = tdpp - mao_arv
+//
+// K4 (2026-05-27 roadmap, Option B product call): NBV is a NEW manual
+// field. Typing in NBV auto-fills TDPP with NBV × 0.2 (see
+// _storedValueOnNbvInput below). TDPP stays user-editable so the
+// operator can override the auto-filled value when needed (e.g.,
+// negotiated price differs from the .2 multiplier). NBV itself is just
+// stored — no backend calc reads it.
 
-const _STORED_VALUE_FIELDS = ["arv", "tdpp", "rehab_needed", "mao_arv", "tdpp_minus_mao_arv"];
-const _STORED_VALUE_MANUAL_FIELDS = ["arv", "tdpp", "rehab_needed"];
+const _STORED_VALUE_FIELDS = ["arv", "nbv", "tdpp", "rehab_needed", "mao_arv", "tdpp_minus_mao_arv"];
+const _STORED_VALUE_MANUAL_FIELDS = ["arv", "nbv", "tdpp", "rehab_needed"];
 const _STORED_VALUE_CALC_FIELDS = ["mao_arv", "tdpp_minus_mao_arv"];
 const _STORED_VALUE_MULTIPLIER = 0.75;
+const _STORED_VALUE_NBV_TO_TDPP_MULTIPLIER = 0.2;  // K4: NBV × 0.2 auto-fills TDPP
 const _STORED_VALUE_NUMERIC_MAX = 999_999_999;
 const _STORED_VALUE_DEBOUNCE_MS = 600;
 
@@ -12304,6 +12312,24 @@ function _storedValueOnNumericInput(fieldKey, raw) {
   if (!_storedValueState) return;
   const parsed = _storedValueParseNumber(raw);
   _storedValueState[fieldKey].numeric_value = parsed;
+
+  // K4 (2026-05-27 — Option B): typing in NBV auto-fills TDPP with
+  // NBV × 0.2. TDPP stays user-editable, so the operator can override
+  // the auto-filled value afterward by typing in the TDPP input
+  // directly (which fires this same handler with fieldKey === "tdpp"
+  // and updates only TDPP, not NBV).
+  if (fieldKey === "nbv") {
+    const newTdpp = (parsed != null)
+      ? Math.round(parsed * _STORED_VALUE_NBV_TO_TDPP_MULTIPLIER)
+      : null;
+    _storedValueState.tdpp.numeric_value = newTdpp;
+    const tdppInput = document.getElementById("sv-input-tdpp");
+    if (tdppInput && tdppInput !== document.activeElement) {
+      tdppInput.value = _storedValueFormatDisplay(newTdpp);
+    }
+    _storedValueQueueSave("tdpp");
+  }
+
   const calc = _storedValueComputeCalc(_storedValueState);
   _storedValueState.mao_arv.numeric_value = calc.mao_arv;
   _storedValueState.tdpp_minus_mao_arv.numeric_value = calc.tdpp_minus_mao_arv;
