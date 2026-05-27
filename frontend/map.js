@@ -3193,6 +3193,91 @@ function _filterSaveSetStatus(state, label) {
   }
 }
 
+// Per spec v1 §2.3 — debounced queue + serialized PUT. Mirror of
+// _storedValueQueueSave / _storedValueProcessQueue at
+// frontend/map.js:12446+.
+
+function _filterSaveQueueSave() {
+  // No-op when no area loaded (spec §2.6 — current behavior preserved).
+  if (!_currentLoadedAreaId) return;
+  _filterSavePending = true;
+  if (_filterSaveDebounceTimer) clearTimeout(_filterSaveDebounceTimer);
+  _filterSaveDebounceTimer = setTimeout(() => {
+    _filterSaveDebounceTimer = null;
+    void _filterSaveProcessQueue();
+  }, _FILTER_SAVE_DEBOUNCE_MS);
+}
+
+async function _filterSaveProcessQueue() {
+  if (_filterSaveInflight) return;
+  if (!_filterSavePending) return;
+  if (!_currentLoadedAreaId) {
+    _filterSavePending = false;
+    return;
+  }
+  const areaId = _currentLoadedAreaId;
+  _filterSaveInflight = true;
+  _filterSavePending = false;
+  _pendingFilterSaves++;
+  _filterSaveSetStatus("saving");
+  try {
+    const body = { filter_state: captureFilterState() };
+    await _apiJson(`/api/areas/${encodeURIComponent(areaId)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify(body),
+    });
+    // Update the in-memory cache so re-renders see the persisted state.
+    const area = _savedAreasCache.find((a) => a.id === areaId && a.type === "area");
+    if (area) area.filter_state = _normalizeFilterStateForCompare(body.filter_state);
+    _filterSaveSetStatus("flash");
+  } catch (err) {
+    console.error("[filter-autosave] save failed", err);
+    _filterSaveSetStatus("error", "Retry");
+  } finally {
+    _filterSaveInflight = false;
+    _pendingFilterSaves = Math.max(0, _pendingFilterSaves - 1);
+    if (_filterSavePending) void _filterSaveProcessQueue();
+  }
+}
+
+async function _filterSaveFlushPending() {
+  if (_filterSaveDebounceTimer) {
+    clearTimeout(_filterSaveDebounceTimer);
+    _filterSaveDebounceTimer = null;
+  }
+  if (_filterSavePending) {
+    await _filterSaveProcessQueue();
+  }
+}
+
+async function _filterSaveOnAreaChange(_newAreaId) {
+  // Called BEFORE _currentLoadedAreaId changes. Flush any pending save
+  // for the outgoing area so the changes commit before we swap state.
+  // Mirror of _storedValueOnAreaChange at frontend/map.js:12314+.
+  await _filterSaveFlushPending().catch(() => {});
+}
+
+// Retry click handler (spec v1 §2.2). Mirror of stored-values retry
+// at frontend/map.js:12545+.
+(function _filterSaveWireRetryClick() {
+  const wire = () => {
+    const status = document.getElementById("filter-save-status");
+    if (!status) return;
+    status.addEventListener("click", () => {
+      if (status.getAttribute("data-state") !== "error") return;
+      _filterSaveSetStatus("saving");
+      _filterSavePending = true;
+      void _filterSaveProcessQueue();
+    });
+  };
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", wire, { once: true });
+  } else {
+    wire();
+  }
+})();
+
 async function _updateSavedAreaFilters(area, actionBtn) {
   if (!area || area.type !== "area") return;
   const nextState = captureFilterState();
