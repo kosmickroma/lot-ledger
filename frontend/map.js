@@ -3120,33 +3120,12 @@ function _syncTabTitle() {
   }
 }
 
-function _isLoadedAreaWithFilterDrift(area) {
-  if (!area || area.type !== "area") return false;
-  if (area.id !== _currentLoadedAreaId) return false;
-  if (!_filterStatesEqual(captureFilterState(), area.filter_state)) return true;
-  // Originator drift: user staged a new subject via Save Parcel inside the
-  // loaded area. Update button should appear so they can commit it without
-  // doing a Copy Area As.
-  const staged = _currentTargetParcel
-    ? {
-        c: String(_currentTargetParcel.county || "").trim().toLowerCase(),
-        a: String(_currentTargetParcel.account || "").trim(),
-      }
-    : { c: "", a: "" };
-  const persisted = {
-    c: String(area.originator_parcel_county || "").trim().toLowerCase(),
-    a: String(area.originator_parcel_account_num || "").trim(),
-  };
-  return staged.c !== persisted.c || staged.a !== persisted.a;
-}
-
 // Commits a subject (originator_parcel_*) change for the loaded area to
 // the backend via PUT /api/areas/{id}. Returns true if a commit happened,
 // false if no drift was detected. Mutates `area` in place on success so
 // subsequent calls see the persisted state.
 //
-// Per spec v1.1 §2.5 + §4.2. Extracted from _updateSavedAreaFilters so
-// saveParcel (auto-save) can call it directly in a later task.
+// Per spec v1.1 §2.5 + §4.2. Called from saveParcel (subject auto-save).
 async function _commitOriginatorToArea(area, stagedCounty, stagedAccount) {
   if (!area || area.type !== "area") return false;
   const persistedCounty = String(area.originator_parcel_county || "").trim().toLowerCase() || null;
@@ -3279,64 +3258,6 @@ async function _filterSaveOnAreaChange(_newAreaId) {
   }
 })();
 
-async function _updateSavedAreaFilters(area, actionBtn) {
-  if (!area || area.type !== "area") return;
-  const nextState = captureFilterState();
-  const filterChanged = !_filterStatesEqual(nextState, area.filter_state);
-
-  // Originator drift: if the user staged a different subject parcel via
-  // Save Parcel inside this loaded area, commit that change to the
-  // persisted area too. Same Update button serves both kinds of drift.
-  const stagedCounty = _currentTargetParcel
-    ? String(_currentTargetParcel.county || "").trim().toLowerCase() || null
-    : null;
-  const stagedAccount = _currentTargetParcel
-    ? String(_currentTargetParcel.account || "").trim() || null
-    : null;
-  const persistedCounty = String(area.originator_parcel_county || "").trim().toLowerCase() || null;
-  const persistedAccount = String(area.originator_parcel_account_num || "").trim() || null;
-  const originatorChanged = stagedCounty !== persistedCounty || stagedAccount !== persistedAccount;
-
-  if (!filterChanged && !originatorChanged) {
-    renderSavedAreasList();
-    return;
-  }
-
-  bumpUndoPillVersion();
-  if (actionBtn) {
-    actionBtn.disabled = true;
-    actionBtn.textContent = "Saving...";
-  }
-  try {
-    // Filter changes go through their own PUT with `filter_state`.
-    if (filterChanged) {
-      await _apiJson(`/api/areas/${encodeURIComponent(area.id)}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json", ...authHeaders() },
-        body: JSON.stringify({ filter_state: nextState }),
-      });
-      area.filter_state = _normalizeFilterStateForCompare(nextState);
-    }
-    // Originator changes use the shared helper.
-    const originatorCommitted = await _commitOriginatorToArea(area, stagedCounty, stagedAccount);
-    if (originatorCommitted) {
-      await _reloadSavedResources().catch(() => {});
-    }
-    if (actionBtn) actionBtn.textContent = "✓ Updated";
-    setTimeout(() => {
-      if (actionBtn) actionBtn.disabled = false;
-      renderSavedAreasList();
-      _updateUpdateAreaButtonVisibility();
-    }, 700);
-  } catch (err) {
-    console.error("[updateSavedAreaFilters] failed", err);
-    if (actionBtn) {
-      actionBtn.disabled = false;
-      actionBtn.textContent = "Update";
-    }
-    await _reloadSavedResources();
-  }
-}
 
 function _savedAreaBoundsFromLatLngs(latlngs) {
   let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
@@ -5270,27 +5191,6 @@ function renderSavedAreasList() {
     });
   _renderList("saved-areas", "saved-areas-list", areas, { searchActive: areasTokens.length > 0 });
   _renderList("saved-parcels", "saved-parcels-list", targets, { searchActive: targetsTokens.length > 0 });
-  _updateUpdateAreaButtonVisibility();
-}
-
-function _updateUpdateAreaButtonVisibility() {
-  const btn = document.getElementById("btn-update-saved-area");
-  if (!btn) return;
-  // Keep the in-flight Saving... state until request completion.
-  if (btn.disabled) return;
-  if (!_currentLoadedAreaId) {
-    btn.classList.add("hidden");
-    btn.textContent = "Update";
-    return;
-  }
-  const area = _savedAreasCache.find((a) => a.id === _currentLoadedAreaId && a.type === "area");
-  if (!area || !_isLoadedAreaWithFilterDrift(area)) {
-    btn.classList.add("hidden");
-    btn.textContent = "Update";
-    return;
-  }
-  btn.classList.remove("hidden");
-  btn.textContent = "Update";
 }
 
 function _renderSessionsList(sectionId, listId, items) {
@@ -7140,7 +7040,6 @@ function applyPropelioClientFilters() {
   // rated comps in the workspace, IGNORING active filter chips. We read
   // from the unfiltered `all` array (not visibleOnMap).
   _renderGoodCompsSection();
-  _updateUpdateAreaButtonVisibility();
   // v1 §2.1 — auto-save filter_state after propelio client filter apply.
   _filterSaveQueueSave();
 }
@@ -11132,12 +11031,6 @@ document.getElementById("btn-save-session")?.addEventListener("click", () => {
   _openSaveSessionInlineInput();
 });
 
-document.getElementById("btn-update-saved-area")?.addEventListener("click", async (e) => {
-  if (!_currentLoadedAreaId) return;
-  const area = _savedAreasCache.find((a) => a.id === _currentLoadedAreaId && a.type === "area");
-  if (!area) return;
-  await _updateSavedAreaFilters(area, e.currentTarget);
-});
 
 document.getElementById("btn-clear").addEventListener("click", () => {
   clearDrawResults();
