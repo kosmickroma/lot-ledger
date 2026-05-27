@@ -4179,8 +4179,11 @@ async def _run_download_csv(
                 "Row Type",
                 "County Source",  # 2 (Phase 2 — 2026-05-21): "DCAD" / "TAD" / "Collin" / "Denton"
                 "Intended Target",
-                "Property Address",
                 "MLS Status",
+                "Property Address",
+                "Property City",
+                "Property State",
+                "Property Zip",
                 "Owner Name",
                 "Owner Mailing Address",
                 "Owner City",
@@ -4360,12 +4363,10 @@ async def _run_download_csv(
                 # stored-values header block so existing positions hold.
                 "Stored NBV",
                 "Stored NBV Comment",
-                # === v4a §2.8 — 31 new columns appended at the right edge ===
+                # === v4a §2.8 — 28 new columns appended at the right edge ===
                 # Existing columns (1..151) are byte-stable. Mike's
                 # column-letter formulas keep working.
-                "Property City",
-                "Property State",
-                "Property Zip",
+                # (Property City/State/Zip moved to positions 6-8 near Property Address)
                 "Property Street Number",
                 "Property Street Half Number",
                 "Property Full Street Name",
@@ -4510,8 +4511,11 @@ async def _run_download_csv(
                     "Parcel",
                     _csv_county_source(row),  # 2 (Phase 2)
                     "yes" if _is_intended_target else "",
-                    display_address,
                     "Active" if on_redfin else "Off Market",
+                    display_address,
+                    row.get("property_city", "") or "",
+                    "TX",
+                    row.get("property_zip", "") or "",
                     row.get("owner_name", ""),
                     row.get("owner_address", ""),
                     row.get("owner_city", ""),
@@ -4666,10 +4670,8 @@ async def _run_download_csv(
                     csv_share_id,
                     csv_workspace_name,
                     *stored_value_export_cells,
-                    # === v4a §2.8 — 31 new cells (mirror header order exactly) ===
-                    row.get("property_city", "") or "",
-                    "TX",
-                    row.get("property_zip", "") or "",
+                    # === v4a §2.8 — 28 new cells (mirror header order exactly) ===
+                    # (property_city/TX/property_zip moved to positions 6-8 near display_address)
                     row.get("street_num", "") or "",
                     row.get("street_half_num", "") or "",
                     row.get("full_street_name", "") or "",
@@ -4846,9 +4848,12 @@ async def _run_download_csv(
                     "Comp",                                                                                     # 1
                     _csv_county_source(_cad) if _cad else "",                                                   # 2 County Source (Phase 2)
                     "",                                                                                          # 3 Intended Target
-                    _row_address,                                                                                # 4 Property Address
                     _comp_status_titled,                                                                         # 4 MLS Status (comp's own status)
-                    _cad.get("owner_name", "") or "",                                                            # 5
+                    _row_address,                                                                                # 5 Property Address
+                    _cad.get("property_city", "") or "",                                                         # 6 Property City
+                    "TX" if _cad else "",                                                                        # 7 Property State
+                    _cad.get("property_zip", "") or "",                                                          # 8 Property Zip
+                    _cad.get("owner_name", "") or "",                                                            # 9
                     _cad.get("owner_address", "") or "",                                                         # 6
                     _cad.get("owner_city", "") or "",                                                            # 7
                     _cad.get("owner_state", "") or "",                                                           # 8
@@ -4996,10 +5001,8 @@ async def _run_download_csv(
                     csv_share_id,                                                                                # 109 share_id
                     csv_workspace_name,                                                                          # 110 Workspace Name
                     *stored_value_export_cells,                                                                   # 111-120 stored values snapshot
-                    # === v4a §2.8 — 31 new cells (mirror header order) ===
-                    _cad.get("property_city", "") or "",
-                    "TX" if _cad else "",
-                    _cad.get("property_zip", "") or "",
+                    # === v4a §2.8 — 28 new cells (mirror header order) ===
+                    # (property_city/TX/property_zip moved to positions 6-8 near _row_address)
                     _cad.get("street_num", "") or "",
                     _cad.get("street_half_num", "") or "",
                     _cad.get("full_street_name", "") or "",
