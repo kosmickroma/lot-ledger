@@ -65,7 +65,7 @@ from api.auth import (
 )
 from api.config import get_conn, get_session_conn, get_settings, release_conn, release_session_conn
 from api.counties.collin import _classify_collin, _normalize_collin_row, query_collin_parcels
-from api.counties.dcad import SPTD_LABELS, _clean_text, _estimate_front_depth, build_feature, classify_parcel, query_parcels
+from api.counties.dcad import SPTD_LABELS, _clean_text, _estimate_front_depth, _fetch_additional_owners, build_feature, classify_parcel, query_parcels
 from api.counties.denton import _classify_denton, _normalize_denton_row, query_denton_parcels
 from api.counties.tad import _normalize_tad_row, _classify_tad, query_tad_parcels
 from api.geo import polygon_bbox
@@ -2619,6 +2619,11 @@ def _fetch_dcad_parcel_by_account(account_num: str) -> tuple[dict[str, Any] | No
                 SELECT p.account_num, p.parcel_key, p.gis_parcel_id,
                        p.owner_name, p.owner_address, p.owner_city, p.owner_state,
                        p.owner_zip, p.street_num, p.full_street_name,
+                       p.owner_name2, p.biz_name,
+                       p.owner_address_line1, p.owner_address_line2,
+                       p.owner_address_line3, p.owner_address_line4,
+                       p.owner_country,
+                       p.street_half_num, p.bldg_id, p.unit_id, p.mapsco,
                        p.property_address, p.property_city, p.property_zip, p.division_cd,
                        COALESCE(a.sptd_code, p.sptd_code) AS sptd_code,
                        p.nbhd_cd, p.legal1, p.legal2, p.legal3, p.legal4, p.legal5,
@@ -2645,6 +2650,12 @@ def _fetch_dcad_parcel_by_account(account_num: str) -> tuple[dict[str, Any] | No
                         ELSE NULL
                        END AS envelope_area_sqft,
                        a.land_val, a.impr_val, a.tot_val, a.isd_desc,
+                       a.city_jurisdiction_desc, a.county_jurisdiction_desc,
+                       a.hospital_jurisdiction_desc, a.college_jurisdiction_desc,
+                       a.special_dist_jurisdiction_desc,
+                       a.city_taxable_val, a.county_taxable_val, a.isd_taxable_val,
+                       a.hospital_taxable_val, a.college_taxable_val,
+                       a.special_dist_taxable_val,
                        r.yr_built, r.tot_living_area, r.tot_main_sf,
                        -- v3 residential detail expansion (canonical key aliases
                        -- per CAD_RESIDENTIAL_DETAIL_EXPANSION_SPEC.md).
@@ -2728,6 +2739,10 @@ def _fetch_dcad_parcel_by_account(account_num: str) -> tuple[dict[str, Any] | No
                 parcel["area_estimated"] = area_estimated
             parcel["hoa_name"] = ""
             parcel["hoa_url"] = ""
+
+            parcel["additional_owners"] = _fetch_additional_owners(
+                [account_num]
+            ).get(account_num, [])
 
             exempt_set = {account_num} if parcel.get("is_exempt_account") else set()
             return parcel, exempt_set
