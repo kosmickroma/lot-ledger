@@ -753,13 +753,32 @@ function _buildSubjectPropertyLoadAreaHtml(parcelProps) {
   const county = String(parcelProps.source_county || "dcad").trim().toLowerCase();
   const key = _subjectPropertyKey(county, parcelProps.account_num);
   if (!key) return "";
-  const entry = _subjectPropertiesByKey.get(key);
-  if (!entry || !Array.isArray(entry.areas) || entry.areas.length === 0) return "";
+
+  // v1.1 §2.4 — re-derive from _savedAreasCache on every popup render.
+  // Eliminates the stale-dropdown bug: when a subject auto-save changes
+  // an area's originator_parcel_*, the cached _subjectPropertiesByKey
+  // view doesn't reflect it until the next _reloadSavedResources cycle.
+  // .filter() is O(N) over N≈dozens; zero perf concern. Also handles
+  // area-delete / rename / copy-as without manual invalidation.
+  const _normCounty = county;  // already lowercased+trimmed above
+  const _normAccount = String(parcelProps.account_num || "").trim();
+  const areas = (_savedAreasCache || [])
+    .filter((a) =>
+      a.type === "area"
+      && String(a.originator_parcel_county || "").trim().toLowerCase() === _normCounty
+      && String(a.originator_parcel_account_num || "").trim() === _normAccount,
+    )
+    .map((a) => ({
+      area_id: a.id,
+      name: a.name || "",
+      updated_at: a.updated_at || "",
+    }));
+  if (areas.length === 0) return "";
 
   const loadedId = String(_currentLoadedAreaId || "");
 
-  if (entry.areas.length === 1) {
-    const a = entry.areas[0];
+  if (areas.length === 1) {
+    const a = areas[0];
     const isLoaded = String(a.area_id) === loadedId;
     const buttonHtml = isLoaded
       ? `<button type="button" class="subject-property-load-btn" disabled>Currently loaded</button>`
@@ -774,10 +793,10 @@ function _buildSubjectPropertyLoadAreaHtml(parcelProps) {
   }
 
   // Multi-area: dropdown defaults to most-recent (areas[0]).
-  const options = entry.areas
+  const options = areas
     .map(a => `<option value="${_subjectPropertyEscape(a.area_id)}">${_subjectPropertyEscape(a.name)}</option>`)
     .join("");
-  const firstId = String(entry.areas[0].area_id);
+  const firstId = String(areas[0].area_id);
   const firstIsLoaded = firstId === loadedId;
   return `<div class="subject-property-load-section" data-mode="multi">
     <div class="subject-property-load-label">Subject of saved area:</div>
