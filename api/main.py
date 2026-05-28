@@ -1848,6 +1848,11 @@ _CSV_COUNTY_SOURCE_MAP = {
 }
 
 
+# DCAD ownership-history years surfaced as raw CSV columns. Hand-extend when
+# older certified rolls are ingested (e.g. add 2020, 2019, … back to 1999).
+OWNERSHIP_HISTORY_YEARS = [2021, 2022, 2023, 2024, 2025]
+
+
 def _csv_county_source(row: dict[str, Any]) -> str:
     """Return the PascalCase County Source enum value for a CSV row.
     Tries source_county first (the canonical feature.properties key set by
@@ -1864,6 +1869,56 @@ def _csv_county_source(row: dict[str, Any]) -> str:
         if mapped:
             return mapped
     return ""
+
+
+def _fetch_ownership_history(account_nums: set[str]) -> dict[str, dict]:
+    """Batched lookup of DCAD owner history for the given account_nums.
+
+    Returns {account_num: {"owners": {year: owner_name}, "acquired": date|None}}.
+    `acquired` is the deed_txfr_date of the latest snapshot_year present (the
+    current owner's acquisition date). Returns {} on any DB error (e.g. table
+    not yet created) so the CSV export never breaks on missing history.
+    """
+    if not account_nums:
+        return {}
+    try:
+        conn = get_conn()
+    except Exception as exc:
+        logger.warning("ownership history: get_conn failed (%s); emitting blanks", exc)
+        return {}
+    try:
+        out: dict[str, dict] = {}
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT account_num, snapshot_year, owner_name, deed_txfr_date "
+                "FROM ownership_snapshots "
+                "WHERE county = 'dcad' AND account_num = ANY(%s)",
+                (list(account_nums),),
+            )
+            for acct, year, owner, deed in cur.fetchall():
+                rec = out.setdefault(
+                    str(acct), {"owners": {}, "acquired": None, "_max": -1}
+                )
+                rec["owners"][int(year)] = owner or ""
+                if int(year) > rec["_max"]:
+                    rec["_max"] = int(year)
+                    rec["acquired"] = deed
+        return out
+    except Exception as exc:
+        # A missing table (before the ingest runs) is benign and expected during
+        # the deploy-before-ingest window — warn (no full traceback), don't spam.
+        # pgcode 42P01 = undefined_table. Real errors still surface as warnings.
+        if getattr(exc, "pgcode", None) == "42P01":
+            logger.warning("ownership_snapshots table not present yet; emitting blanks")
+        else:
+            logger.warning("ownership history lookup failed (%s); emitting blanks", exc)
+        try:
+            conn.rollback()  # don't return a poisoned connection to the pool
+        except Exception:
+            pass
+        return {}
+    finally:
+        release_conn(conn)
 
 
 def _google_maps_link(row: dict[str, Any]) -> str:
