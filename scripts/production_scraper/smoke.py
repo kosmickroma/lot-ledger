@@ -395,6 +395,25 @@ def _test_classifier_non_auth() -> None:
     assert is_401_or_403(e) is False
 
 
+def _test_classifier_does_not_false_positive_on_address_digits() -> None:
+    """Regression for 2026-05-27 PM hotfix: error messages that contain
+    HTTP-status-like digit sequences as STREET NUMBERS must not classify
+    as auth/rate-limit. PropelioScraperError "No parcel match for
+    '401 HASSETT AVE…'" was misclassified as 401 unauth, exit-2'ing the
+    scraper on the first address."""
+    from production_scraper.run import is_429, is_401_or_403
+    for msg in (
+        "No parcel match for '401 HASSETT AVE, RIVER OAKS, TX'",
+        "No parcel match for '403 FOREST DR, ANYWHERE, TX'",
+        "No parcel match for '429 SOMEWHERE LN, CITY, TX'",
+        "No parcel match for '1401 S FERGUSON PKWY, ANNA, TX'",  # 401 mid-substring
+        "lead lookup failed at 4029 OAK ST",
+    ):
+        e = Exception(msg)
+        assert is_429(e) is False, f"false-positive 429 on: {msg!r}"
+        assert is_401_or_403(e) is False, f"false-positive 401/403 on: {msg!r}"
+
+
 def _test_classifier_status_via_response_attribute() -> None:
     """Some exceptions carry status via exc.response.status_code (requests style)."""
     from production_scraper.run import is_429, is_401_or_403

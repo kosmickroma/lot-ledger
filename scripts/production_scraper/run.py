@@ -232,8 +232,16 @@ class RunLock:
 # 401/403 → re-login + retry path (session expiry, recoverable)
 # Non-auth → fall through to the normal per-pull error path.
 
-_429_FRAGMENTS = ("429", "rate limit", "throttle", "too many")
-_AUTH_FRAGMENTS = ("401", "403", "unauthor", "forbidden")
+# 2026-05-27 PM hotfix: the bare numeric substrings ("401", "403", "429")
+# false-positive on non-auth errors whose message text happens to include
+# the digit sequence — most notably PropelioScraperError "No parcel match
+# for '401 HASSETT AVE, …'" where 401 is the STREET NUMBER, not an HTTP
+# status code. Real auth errors are reliably signaled by the exception's
+# .status_code attribute (or its .response.status_code). The remaining
+# word-based fragments stay because "unauthor", "forbidden", "rate limit",
+# "throttle", "too many" don't appear in addresses or normal error text.
+_429_FRAGMENTS = ("rate limit", "throttle", "too many")
+_AUTH_FRAGMENTS = ("unauthor", "forbidden")
 
 
 def _status_code_from(exc: Exception) -> int | None:
