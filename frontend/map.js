@@ -189,6 +189,11 @@ document.addEventListener("visibilitychange", () => {
 // file; lookup is dynamic so this listener can register early.
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState !== "visible") return;
+  // FA8 (filter-autosave §2.4) — extended gate: skip while EITHER a
+  // subject-save OR a filter-save is in-flight. The final settling
+  // save (whichever happens last) triggers its own _reloadSavedResources,
+  // so deferring here is safe — state catches up after.
+  if (_pendingSubjectSaves + _pendingFilterSaves > 0) return;
   if (typeof _reloadSavedResources === "function") {
     _reloadSavedResources().catch((err) => console.warn("[visibilitychange] _reloadSavedResources failed:", err));
   }
@@ -747,13 +752,32 @@ function _buildSubjectPropertyLoadAreaHtml(parcelProps) {
   const county = String(parcelProps.source_county || "dcad").trim().toLowerCase();
   const key = _subjectPropertyKey(county, parcelProps.account_num);
   if (!key) return "";
-  const entry = _subjectPropertiesByKey.get(key);
-  if (!entry || !Array.isArray(entry.areas) || entry.areas.length === 0) return "";
+
+  // v1.1 §2.4 — re-derive from _savedAreasCache on every popup render.
+  // Eliminates the stale-dropdown bug: when a subject auto-save changes
+  // an area's originator_parcel_*, the cached _subjectPropertiesByKey
+  // view doesn't reflect it until the next _reloadSavedResources cycle.
+  // .filter() is O(N) over N≈dozens; zero perf concern. Also handles
+  // area-delete / rename / copy-as without manual invalidation.
+  const _normCounty = county;  // already lowercased+trimmed above
+  const _normAccount = String(parcelProps.account_num || "").trim();
+  const areas = (_savedAreasCache || [])
+    .filter((a) =>
+      a.type === "area"
+      && String(a.originator_parcel_county || "").trim().toLowerCase() === _normCounty
+      && String(a.originator_parcel_account_num || "").trim() === _normAccount,
+    )
+    .map((a) => ({
+      area_id: a.id,
+      name: a.name || "",
+      updated_at: a.updated_at || "",
+    }));
+  if (areas.length === 0) return "";
 
   const loadedId = String(_currentLoadedAreaId || "");
 
-  if (entry.areas.length === 1) {
-    const a = entry.areas[0];
+  if (areas.length === 1) {
+    const a = areas[0];
     const isLoaded = String(a.area_id) === loadedId;
     const buttonHtml = isLoaded
       ? `<button type="button" class="subject-property-load-btn" disabled>Currently loaded</button>`
@@ -768,10 +792,10 @@ function _buildSubjectPropertyLoadAreaHtml(parcelProps) {
   }
 
   // Multi-area: dropdown defaults to most-recent (areas[0]).
-  const options = entry.areas
+  const options = areas
     .map(a => `<option value="${_subjectPropertyEscape(a.area_id)}">${_subjectPropertyEscape(a.name)}</option>`)
     .join("");
-  const firstId = String(entry.areas[0].area_id);
+  const firstId = String(areas[0].area_id);
   const firstIsLoaded = firstId === loadedId;
   return `<div class="subject-property-load-section" data-mode="multi">
     <div class="subject-property-load-label">Subject of saved area:</div>
@@ -870,6 +894,28 @@ let _currentSessionIsNamed = false;
 let _savedSessionsCache = [];
 let _currentLoadedAreaId = null;
 let _currentTargetParcel = null; // { county, account, lat?, lng? } | null
+// v1.1 §2.6 — gates cross-tab refetch to prevent flicker when concurrent
+// subject-saves are in-flight. See TkDodo "Concurrent Optimistic Updates
+// in React Query" pattern. Decremented in finally blocks. Read by SA5.
+let _pendingSubjectSaves = 0;
+
+// v1 §2.1 filter-state auto-save — mirrors stored-values save machinery
+// at frontend/map.js:12183+. _filterSavePending is a single boolean
+// (vs stored-values' per-field Set) because filter_state is one whole
+// JSON blob written by a single PUT. _filterSaveInflight serializes
+// concurrent saves. _pendingFilterSaves counter (parallel to
+// _pendingSubjectSaves) gates the visibilitychange cross-tab refetch.
+const _FILTER_SAVE_DEBOUNCE_MS = 600;
+let _filterSaveDebounceTimer = null;
+let _filterSaveFlashTimer = null;
+let _filterSavePending = false;
+let _filterSaveInflight = false;
+let _pendingFilterSaves = 0;
+// v1.1 §2.6 — 50ms debounce on the popup Save Parcel link. Absorbs
+// event-bubbling and mobile double-tap. Single deliberate clicks
+// (>50ms apart) work normally.
+const SAVE_PARCEL_DEBOUNCE_MS = 50;
+let _lastSaveParcelClickAt = 0;
 let _targetCoordsResolvePromise = null;
 let _measureModeEnabled = false;
 let _measurePoints = [];
@@ -2642,6 +2688,8 @@ function renderSoldCompsPanel() {
     soldCompsFilter.maxPrice = parseShorthand(soldPriceMaxInput?.value);
     applyAndRenderSoldFilters();
     _refreshLoadedAreaUi();
+    // v1 §2.1 — auto-save filter_state after sold-comp filter apply.
+    _filterSaveQueueSave();
   };
 
   const applyCompNumericInputFilters = () => {
@@ -3007,6 +3055,35 @@ async function _reloadSavedResources() {
   renderSavedAreasList();
   renderSavedSessionsList();
   _renderSubjectProperties();
+
+  // v1.1 §2.3 — when another tab auto-saves a new subject for a loaded
+  // area, _savedAreasCache here gets refreshed by the lines above, but
+  // the sidebar #active-item-target-name text isn't refreshed because
+  // it's only ever written by _setOriginatorTargetLabel (called only
+  // from _setCurrentTargetParcel). Push the loaded area's current
+  // originator through _setCurrentTargetParcel so the sidebar label
+  // catches up. No-op when no area is loaded or loaded area has no
+  // subject.
+  if (_currentLoadedAreaId) {
+    const loaded = _savedAreasCache.find(
+      (a) => a.id === _currentLoadedAreaId && a.type === "area",
+    );
+    if (loaded) {
+      const c = String(loaded.originator_parcel_county || "").trim().toLowerCase();
+      const a = String(loaded.originator_parcel_account_num || "").trim();
+      if (c && a) {
+        // Only push if the staged in-memory state has actually drifted
+        // from the freshly-fetched persisted state. Otherwise this fires
+        // _setOriginatorTargetLabel unnecessarily every visibility flip.
+        const staged = _currentTargetParcel;
+        const stagedC = staged ? String(staged.county || "").trim().toLowerCase() : null;
+        const stagedA = staged ? String(staged.account || "").trim() : null;
+        if (c !== stagedC || a !== stagedA) {
+          _setCurrentTargetParcel({ county: c, account: a });
+        }
+      }
+    }
+  }
 }
 
 // Sync the browser tab title AND the ?area=<share_id> URL param to the
@@ -3043,96 +3120,144 @@ function _syncTabTitle() {
   }
 }
 
-function _isLoadedAreaWithFilterDrift(area) {
+// Commits a subject (originator_parcel_*) change for the loaded area to
+// the backend via PUT /api/areas/{id}. Returns true if a commit happened,
+// false if no drift was detected. Mutates `area` in place on success so
+// subsequent calls see the persisted state.
+//
+// Per spec v1.1 §2.5 + §4.2. Called from saveParcel (subject auto-save).
+async function _commitOriginatorToArea(area, stagedCounty, stagedAccount) {
   if (!area || area.type !== "area") return false;
-  if (area.id !== _currentLoadedAreaId) return false;
-  if (!_filterStatesEqual(captureFilterState(), area.filter_state)) return true;
-  // Originator drift: user staged a new subject via Save Parcel inside the
-  // loaded area. Update button should appear so they can commit it without
-  // doing a Copy Area As.
-  const staged = _currentTargetParcel
-    ? {
-        c: String(_currentTargetParcel.county || "").trim().toLowerCase(),
-        a: String(_currentTargetParcel.account || "").trim(),
-      }
-    : { c: "", a: "" };
-  const persisted = {
-    c: String(area.originator_parcel_county || "").trim().toLowerCase(),
-    a: String(area.originator_parcel_account_num || "").trim(),
-  };
-  return staged.c !== persisted.c || staged.a !== persisted.a;
-}
-
-async function _updateSavedAreaFilters(area, actionBtn) {
-  if (!area || area.type !== "area") return;
-  const nextState = captureFilterState();
-  const filterChanged = !_filterStatesEqual(nextState, area.filter_state);
-
-  // Originator drift: if the user staged a different subject parcel via
-  // Save Parcel inside this loaded area, commit that change to the
-  // persisted area too. Same Update button serves both kinds of drift.
-  const stagedCounty = _currentTargetParcel
-    ? String(_currentTargetParcel.county || "").trim().toLowerCase() || null
-    : null;
-  const stagedAccount = _currentTargetParcel
-    ? String(_currentTargetParcel.account || "").trim() || null
-    : null;
   const persistedCounty = String(area.originator_parcel_county || "").trim().toLowerCase() || null;
   const persistedAccount = String(area.originator_parcel_account_num || "").trim() || null;
-  const originatorChanged = stagedCounty !== persistedCounty || stagedAccount !== persistedAccount;
+  if (stagedCounty === persistedCounty && stagedAccount === persistedAccount) return false;
+  // Backend requires county + account together (or neither). When staged
+  // is "(none, none)" the user effectively unset the subject — current
+  // backend doesn't accept that, so skip.
+  if (!stagedCounty || !stagedAccount) return false;
+  await _apiJson(`/api/areas/${encodeURIComponent(area.id)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({
+      originator_parcel_county: stagedCounty,
+      originator_parcel_account_num: stagedAccount,
+    }),
+  });
+  area.originator_parcel_county = stagedCounty;
+  area.originator_parcel_account_num = stagedAccount;
+  return true;
+}
 
-  if (!filterChanged && !originatorChanged) {
-    renderSavedAreasList();
+// Mirror of _storedValueSetStatus (frontend/map.js:12256+). Drives the
+// #filter-save-status chip's data-state + text. Defensive: chip element
+// may not exist yet (FA4 adds it).
+function _filterSaveSetStatus(state, label) {
+  const chip = document.getElementById("filter-save-status");
+  if (!chip) return;
+  if (_filterSaveFlashTimer) {
+    clearTimeout(_filterSaveFlashTimer);
+    _filterSaveFlashTimer = null;
+  }
+  chip.setAttribute("data-state", state);
+  const defaults = { idle: "", saving: "Saving…", flash: "Saved ✓", error: "Retry" };
+  chip.textContent = label || defaults[state] || state;
+  if (state === "flash") {
+    _filterSaveFlashTimer = setTimeout(() => {
+      _filterSaveFlashTimer = null;
+      const c = document.getElementById("filter-save-status");
+      if (c && c.getAttribute("data-state") === "flash") {
+        c.setAttribute("data-state", "idle");
+        c.textContent = "";
+      }
+    }, 1200);
+  }
+}
+
+// Per spec v1 §2.3 — debounced queue + serialized PUT. Mirror of
+// _storedValueQueueSave / _storedValueProcessQueue at
+// frontend/map.js:12446+.
+
+function _filterSaveQueueSave() {
+  // No-op when no area loaded (spec §2.6 — current behavior preserved).
+  if (!_currentLoadedAreaId) return;
+  _filterSavePending = true;
+  if (_filterSaveDebounceTimer) clearTimeout(_filterSaveDebounceTimer);
+  _filterSaveDebounceTimer = setTimeout(() => {
+    _filterSaveDebounceTimer = null;
+    void _filterSaveProcessQueue();
+  }, _FILTER_SAVE_DEBOUNCE_MS);
+}
+
+async function _filterSaveProcessQueue() {
+  if (_filterSaveInflight) return;
+  if (!_filterSavePending) return;
+  if (!_currentLoadedAreaId) {
+    _filterSavePending = false;
     return;
   }
-
-  bumpUndoPillVersion();
-  if (actionBtn) {
-    actionBtn.disabled = true;
-    actionBtn.textContent = "Saving...";
-  }
+  const areaId = _currentLoadedAreaId;
+  _filterSaveInflight = true;
+  _filterSavePending = false;
+  _pendingFilterSaves++;
+  _filterSaveSetStatus("saving");
   try {
-    const body = {};
-    if (filterChanged) body.filter_state = nextState;
-    if (originatorChanged) {
-      // The PUT endpoint requires county+account together (or neither).
-      // When staged is "(none, none)" — user cleared the target —
-      // current backend doesn't accept clearing the originator
-      // (rejects with 400). Skip the originator update in that case
-      // to keep Update working for filter-only drift.
-      if (stagedCounty && stagedAccount) {
-        body.originator_parcel_county = stagedCounty;
-        body.originator_parcel_account_num = stagedAccount;
-      }
-    }
-    await _apiJson(`/api/areas/${encodeURIComponent(area.id)}`, {
+    const body = { filter_state: captureFilterState() };
+    await _apiJson(`/api/areas/${encodeURIComponent(areaId)}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json", ...authHeaders() },
       body: JSON.stringify(body),
     });
-    if (filterChanged) area.filter_state = _normalizeFilterStateForCompare(nextState);
-    if (originatorChanged && stagedCounty && stagedAccount) {
-      area.originator_parcel_county = stagedCounty;
-      area.originator_parcel_account_num = stagedAccount;
-      // Subject_properties payload needs a refetch so the new layer
-      // picks up the persisted-originator change.
-      await _reloadSavedResources().catch(() => {});
-    }
-    if (actionBtn) actionBtn.textContent = "✓ Updated";
-    setTimeout(() => {
-      if (actionBtn) actionBtn.disabled = false;
-      renderSavedAreasList();
-      _updateUpdateAreaButtonVisibility();
-    }, 700);
+    // Update the in-memory cache so re-renders see the persisted state.
+    const area = _savedAreasCache.find((a) => a.id === areaId && a.type === "area");
+    if (area) area.filter_state = _normalizeFilterStateForCompare(body.filter_state);
+    _filterSaveSetStatus("flash");
   } catch (err) {
-    console.error("[updateSavedAreaFilters] failed", err);
-    if (actionBtn) {
-      actionBtn.disabled = false;
-      actionBtn.textContent = "Update";
-    }
-    await _reloadSavedResources();
+    console.error("[filter-autosave] save failed", err);
+    _filterSaveSetStatus("error", "Retry");
+  } finally {
+    _filterSaveInflight = false;
+    _pendingFilterSaves = Math.max(0, _pendingFilterSaves - 1);
+    if (_filterSavePending) void _filterSaveProcessQueue();
   }
 }
+
+async function _filterSaveFlushPending() {
+  if (_filterSaveDebounceTimer) {
+    clearTimeout(_filterSaveDebounceTimer);
+    _filterSaveDebounceTimer = null;
+  }
+  if (_filterSavePending) {
+    await _filterSaveProcessQueue();
+  }
+}
+
+async function _filterSaveOnAreaChange(_newAreaId) {
+  // Called BEFORE _currentLoadedAreaId changes. Flush any pending save
+  // for the outgoing area so the changes commit before we swap state.
+  // Mirror of _storedValueOnAreaChange at frontend/map.js:12314+.
+  await _filterSaveFlushPending().catch(() => {});
+}
+
+// Retry click handler (spec v1 §2.2). Mirror of stored-values retry
+// at frontend/map.js:12545+.
+(function _filterSaveWireRetryClick() {
+  const wire = () => {
+    const status = document.getElementById("filter-save-status");
+    if (!status) return;
+    status.addEventListener("click", () => {
+      if (status.getAttribute("data-state") !== "error") return;
+      _filterSaveSetStatus("saving");
+      _filterSavePending = true;
+      void _filterSaveProcessQueue();
+    });
+  };
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", wire, { once: true });
+  } else {
+    wire();
+  }
+})();
+
 
 function _savedAreaBoundsFromLatLngs(latlngs) {
   let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
@@ -3175,6 +3300,7 @@ async function saveCurrentArea(name) {
   _currentLoadedAreaId = normalized.id;
   _syncTabTitle();
   _storedValueOnAreaChange(_currentLoadedAreaId);
+  void _filterSaveOnAreaChange(_currentLoadedAreaId);
   _selectedSavedItemId = normalized.id;
   // Render the originator star immediately if captured at save time.
   // Use lat/lng from origin (the pre-save _currentTargetParcel) to skip
@@ -3313,6 +3439,7 @@ async function deleteSavedArea(item) {
       _currentLoadedAreaId = null;
       _syncTabTitle();
       _storedValueOnAreaChange(null);
+      void _filterSaveOnAreaChange(null);
     }
     // Refetch subject_properties so the deleted area's originator drops
     // off the gold-outline / star layer (if it was the only area for that
@@ -3582,8 +3709,26 @@ function _renderSubjectProperties() {
   const staged = _stagedSubjectIdentity();
   const stagedKey = staged ? _subjectPropertyKey(staged.county, staged.account_num) : null;
 
+  // v1.1 §2.2 — suppression rule: when a saved area is loaded, only THAT
+  // area's subject shows gold + star + parcel highlight globally. All
+  // other saved-area subjects go dormant on the map (sidebar list is
+  // unaffected — separate UI surface). Restored on Clear / area switch
+  // / no-area-loaded.
+  const _loadedAreaId = _currentLoadedAreaId;
+  const _loadedAreaSubjectKey = _loadedAreaId
+    ? (() => {
+        const loaded = _savedAreasCache.find((a) => a.id === _loadedAreaId && a.type === "area");
+        if (!loaded) return null;
+        const c = String(loaded.originator_parcel_county || "").trim().toLowerCase();
+        const a = String(loaded.originator_parcel_account_num || "").trim();
+        return c && a ? _subjectPropertyKey(c, a) : null;
+      })()
+    : null;
+
   // Outlines: every persisted subject_property in viewport gets one.
   for (const entry of _subjectPropertiesByKey.values()) {
+    // Suppression: skip non-loaded-area subjects when an area is loaded.
+    if (_loadedAreaId && _loadedAreaSubjectKey && _subjectPropertyKey(entry.county, entry.account_num) !== _loadedAreaSubjectKey) continue;
     if (!lowZoom && bounds
         && Number.isFinite(entry.lat) && Number.isFinite(entry.lng)
         && bounds.contains([entry.lat, entry.lng])) {
@@ -3591,14 +3736,23 @@ function _renderSubjectProperties() {
     }
   }
 
-  // Outlines: every bonded saved-parcel of the currently-loaded area in
-  // viewport also gets one. Covers the "old subject still gold" case
-  // after the user stages a new target via Save Parcel.
+  // Outlines: bonded saved-parcels of the currently-loaded area. With
+  // the v1.1 §2.2 suppression rule, ONLY the parcel matching the loaded
+  // area's current subject (originator_parcel_*) gets gold here. Earlier
+  // bonded saved-parcels from prior Save Parcel clicks (now superseded
+  // by auto-save) stay invisible on the map. The first loop already
+  // renders the persisted subject; this loop covers the brief window
+  // before the next _reloadSavedResources lands _subjectPropertiesByKey
+  // for a freshly-set originator.
   if (!lowZoom && _currentLoadedAreaId) {
     for (const sp of _loadedAreaSeedParcelsByKey.values()) {
       if (!bounds) continue;
       if (!Number.isFinite(sp.lat) || !Number.isFinite(sp.lng)) continue;
       if (!bounds.contains([sp.lat, sp.lng])) continue;
+      // Suppression: skip seed parcels that aren't the loaded area's
+      // current subject. Prevents stale-gold pileup when Mike clicks
+      // Save Parcel multiple times in the same loaded area.
+      if (_loadedAreaSubjectKey && _subjectPropertyKey(sp.county, sp.account_num) !== _loadedAreaSubjectKey) continue;
       // Dedupe against any subject_property already rendered at this key.
       const key = _subjectPropertyKey(sp.county, sp.account_num);
       if (key && _subjectPropertyOutlineLayers.has(key)) continue;
@@ -3611,6 +3765,8 @@ function _renderSubjectProperties() {
   // star with `is-loaded` so the user sees their pending change.
   if (lowZoom) {
     for (const entry of _subjectPropertiesByKey.values()) {
+      // Suppression: skip non-loaded-area subjects when an area is loaded.
+      if (_loadedAreaId && _loadedAreaSubjectKey && _subjectPropertyKey(entry.county, entry.account_num) !== _loadedAreaSubjectKey) continue;
       const isStaged = stagedKey != null && _subjectPropertyKey(entry.county, entry.account_num) === stagedKey;
       _renderSubjectPropertyStarMarker(entry, isStaged);
     }
@@ -3914,6 +4070,46 @@ async function saveParcel(account_num, county, addr, lat, lng, geometry) {
     _setCurrentTargetParcel({ county: targetCounty, account: targetAccount, lat, lng });
     void _renderOriginatorTargetStar(targetCounty, targetAccount, lat, lng);
   }
+  // v1.1 §2.1 — auto-commit subject change when inside a loaded area.
+  // Replaces the v0.29 "stage then Update" two-step. The helper writes
+  // the new originator_parcel_* on the loaded area's row and refreshes
+  // _savedAreasCache. Optimistic UI: _setCurrentTargetParcel above
+  // already updated the in-memory state; if the PUT fails we roll back
+  // to the previously-persisted subject here.
+  if (_currentLoadedAreaId && targetAccount && targetCounty) {
+    const area = _savedAreasCache.find(
+      (a) => a.id === _currentLoadedAreaId && a.type === "area",
+    );
+    if (area) {
+      // Capture rollback state BEFORE the helper mutates `area`.
+      const rollbackCounty = String(area.originator_parcel_county || "").trim().toLowerCase() || null;
+      const rollbackAccount = String(area.originator_parcel_account_num || "").trim() || null;
+      _pendingSubjectSaves++;
+      try {
+        const committed = await _commitOriginatorToArea(area, targetCounty, targetAccount);
+        if (committed) {
+          await _reloadSavedResources().catch(() => {});
+        }
+      } catch (err) {
+        console.error("[saveParcel] originator auto-commit failed", err);
+        // Roll back optimistic UI: restore previous target so the
+        // gold + star migrate back to where they were before the click.
+        if (rollbackAccount && rollbackCounty) {
+          _setCurrentTargetParcel({
+            county: rollbackCounty,
+            account: rollbackAccount,
+          });
+          void _renderOriginatorTargetStar(rollbackCounty, rollbackAccount);
+        } else {
+          _setCurrentTargetParcel(null);
+        }
+        _showToast("Subject save failed — retry via Update", "error");
+      } finally {
+        _pendingSubjectSaves = Math.max(0, _pendingSubjectSaves - 1);
+      }
+    }
+  }
+
   // Only seed the Workspace slot label when there is no loaded workspace.
   // When one is loaded (xyz), saving a different parcel as the new target
   // must NOT rename the workspace — the Target row (updated via
@@ -4314,6 +4510,7 @@ async function restoreSavedArea(area, options = {}) {
     _currentLoadedAreaId = area.id;
     _syncTabTitle();
     _storedValueOnAreaChange(_currentLoadedAreaId);
+    void _filterSaveOnAreaChange(_currentLoadedAreaId);
     if (area.originator_parcel_county && area.originator_parcel_account_num) {
       _setCurrentTargetParcel({
         county: area.originator_parcel_county,
@@ -4371,6 +4568,7 @@ async function restoreNamedSession(session, options = {}) {
   _currentLoadedAreaId = null;
   _syncTabTitle();
   _storedValueOnAreaChange(null);
+  void _filterSaveOnAreaChange(null);
   renderSavedAreasList();
   const savedFilterState = session.filter_state && typeof session.filter_state === "object"
     ? session.filter_state
@@ -4694,6 +4892,7 @@ function _renderList(sectionId, listId, items, options = {}) {
           _currentLoadedAreaId = cloned.area_id;
           _syncTabTitle();
           _storedValueOnAreaChange(_currentLoadedAreaId);
+          void _filterSaveOnAreaChange(_currentLoadedAreaId);
           // Refresh Good Comps section visibility — fork bypasses the
           // normal restoreSavedArea path, so applyPropelioClientFilters
           // isn't called automatically. Per spec v2 §Risk #1.
@@ -4992,27 +5191,6 @@ function renderSavedAreasList() {
     });
   _renderList("saved-areas", "saved-areas-list", areas, { searchActive: areasTokens.length > 0 });
   _renderList("saved-parcels", "saved-parcels-list", targets, { searchActive: targetsTokens.length > 0 });
-  _updateUpdateAreaButtonVisibility();
-}
-
-function _updateUpdateAreaButtonVisibility() {
-  const btn = document.getElementById("btn-update-saved-area");
-  if (!btn) return;
-  // Keep the in-flight Saving... state until request completion.
-  if (btn.disabled) return;
-  if (!_currentLoadedAreaId) {
-    btn.classList.add("hidden");
-    btn.textContent = "Update";
-    return;
-  }
-  const area = _savedAreasCache.find((a) => a.id === _currentLoadedAreaId && a.type === "area");
-  if (!area || !_isLoadedAreaWithFilterDrift(area)) {
-    btn.classList.add("hidden");
-    btn.textContent = "Update";
-    return;
-  }
-  btn.classList.remove("hidden");
-  btn.textContent = "Update";
 }
 
 function _renderSessionsList(sectionId, listId, items) {
@@ -6862,7 +7040,8 @@ function applyPropelioClientFilters() {
   // rated comps in the workspace, IGNORING active filter chips. We read
   // from the unfiltered `all` array (not visibleOnMap).
   _renderGoodCompsSection();
-  _updateUpdateAreaButtonVisibility();
+  // v1 §2.1 — auto-save filter_state after propelio client filter apply.
+  _filterSaveQueueSave();
 }
 
 function _sortPropelioComps(comps, mode) {
@@ -7223,6 +7402,9 @@ async function pullPropelioRefresh() {
   }
   const filters = readPropelioFiltersFromUI();
   propelioFilterState = filters;
+  // v1 §2.1 — auto-save filter_state after propelio refresh
+  // (covers prop-months + prop-range which only get read here).
+  _filterSaveQueueSave();
   const targetAddress = _deriveDeepPullTargetAddress();
   const savedAreaId = (typeof _currentLoadedAreaId === "string" ? _currentLoadedAreaId : "") || "";
   btn.disabled = true;
@@ -7372,6 +7554,8 @@ let propelioStickyBtn = null;
     sortEl.addEventListener("change", () => {
       propelioCompSortMode = sortEl.value || "price_desc";
       applyPropelioClientFilters();
+      // v1 §2.1 — auto-save filter_state after sort mode change.
+      _filterSaveQueueSave();
     });
   }
 
@@ -8195,6 +8379,8 @@ function _applyNumericFilters() {
   // user edits a Property Filter input.
   applyPropelioClientFilters();
   _refreshLoadedAreaUi();
+  // v1 §2.1 — auto-save filter_state after numeric-filter apply.
+  _filterSaveQueueSave();
 }
 
 NUMERIC_FILTER_INPUTS.forEach(({ id }) => {
@@ -8220,6 +8406,7 @@ NUMERIC_FILTER_INPUTS.forEach(({ id }) => {
     bumpUndoPillVersion();
     normalize();
     _applyNumericFilters();
+    void _filterSaveFlushPending();
   });
   inputEl.addEventListener("change", () => {
     bumpUndoPillVersion();
@@ -8244,6 +8431,8 @@ Object.entries(FILTER_INPUT_IDS).forEach(([key, id]) => {
     applyMapVisibilityFilters();
     applyPropelioClientFilters();
     _refreshLoadedAreaUi();
+    // v1 §2.1 — auto-save filter_state after checkbox toggle.
+    _filterSaveQueueSave();
   });
 });
 
@@ -8255,6 +8444,8 @@ document.getElementById("btn-filters-reset")?.addEventListener("click", () => {
   applyMapVisibilityFilters();
   applyPropelioClientFilters();
   _refreshLoadedAreaUi();
+  // v1 §2.1 — auto-save filter_state after filter reset.
+  _filterSaveQueueSave();
 });
 
 // Comp Filters: read from nf-comp-* inputs and apply
@@ -8307,6 +8498,8 @@ function _applyCompNumericFilters() {
   const counts = getVisibleFeatureCounts(lastAnalysisGeojson.features || []);
   if (lastAnalysisCounts) renderSidebar(counts, markers || {});
   _refreshLoadedAreaUi();
+  // v1 §2.1 — auto-save filter_state after comp-numeric apply.
+  _filterSaveQueueSave();
 }
 
 // Comp numeric filter event listeners are wired INSIDE renderSoldCompsPanel
@@ -10295,6 +10488,7 @@ map.on("draw:created", async (e) => {
   _currentLoadedAreaId = null;
   _syncTabTitle();
   _storedValueOnAreaChange(null);
+  void _filterSaveOnAreaChange(null);
   _selectedSavedItemId = null;
   _setSessionCacheNote("");
   renderSavedAreasList();
@@ -10474,6 +10668,7 @@ function clearDrawResults() {
   _currentLoadedAreaId = null;
   _syncTabTitle();
   _storedValueOnAreaChange(null);
+  void _filterSaveOnAreaChange(null);
   _updateSaveSessionButtonState();
   _setSessionCacheNote("");
   lastAnalysisGeojson = null;
@@ -10489,6 +10684,60 @@ function clearDrawResults() {
     const el = document.getElementById(id);
     if (el) el.value = "";
   });
+
+  // KK 2026-05-27: Clear button resets ALL left-sidebar filters to defaults.
+  // Saved areas in DB are NOT touched — reloading a saved area still restores
+  // its specific settings via the existing load path.
+  //
+  // _currentLoadedAreaId = null happened above (line ~10668) and
+  // _filterSaveOnAreaChange(null) was called at line ~10671, so
+  // _filterSaveQueueSave() will early-return during these mutations —
+  // no spurious PUT/autosave fires here.
+
+  // Property type filter checkboxes (filterState)
+  filterState = { ...DEFAULT_FILTERS };
+  for (const [key, inputId] of Object.entries(FILTER_INPUT_IDS)) {
+    const el = document.getElementById(inputId);
+    if (el) el.checked = Boolean(DEFAULT_FILTERS[key]);
+  }
+
+  // Property numeric filters (lot/sqft/year/appraisal-value ranges)
+  // numericFilters is const — reset in-place via Object.assign
+  Object.assign(numericFilters, {
+    lot_sqft_min: null, lot_sqft_max: null,
+    appr_val_min: null, appr_val_max: null,
+    yr_built_min: null, yr_built_max: null,
+    sqft_min: null,     sqft_max: null,
+  });
+  ["nf-lot-min", "nf-lot-max", "nf-val-min", "nf-val-max",
+   "nf-yr-min", "nf-yr-max", "nf-sqft-min", "nf-sqft-max"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.value = "";
+  });
+
+  // Comp numeric filters — same const pattern, reset in-place
+  Object.assign(compNumericFilters, {
+    lot_sqft_min: null, lot_sqft_max: null,
+    appr_val_min: null, appr_val_max: null,
+    yr_built_min: null, yr_built_max: null,
+    sqft_min: null,     sqft_max: null,
+  });
+  ["nf-comp-lot-min", "nf-comp-lot-max", "nf-comp-val-min", "nf-comp-val-max",
+   "nf-comp-yr-min", "nf-comp-yr-max", "nf-comp-sqft-min", "nf-comp-sqft-max"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.value = "";
+  });
+
+  // Propelio filter block (months/range/status checkboxes/sold-within/
+  // lot/sqft/year/price ranges). applyPropelioFilterStateToUI also
+  // calls readPropelioFiltersFromUI() at its end, so propelioFilterState
+  // ends up in sync with the DOM automatically.
+  propelioFilterState = { ...DEFAULT_PROPELIO_FILTERS };
+  applyPropelioFilterStateToUI(DEFAULT_PROPELIO_FILTERS);
+  // Comp-list sort mode: reset to the same default used at declaration
+  propelioCompSortMode = "price_desc";
+  const _clearSortEl = document.getElementById("propelio-comp-sort");
+  if (_clearSortEl) _clearSortEl.value = "price_desc";
   const soldCompsPanel = document.getElementById("sold-comps-panel");
   if (soldCompsPanel) soldCompsPanel.innerHTML = "";
   document.getElementById("redfin-toggle-status").textContent = "";
@@ -10524,6 +10773,7 @@ map.on("draw:drawstart", () => {
   _currentLoadedAreaId = null;
   _syncTabTitle();
   _storedValueOnAreaChange(null);
+  void _filterSaveOnAreaChange(null);
   _selectedSavedItemId = null;
   _setSessionCacheNote("");
   renderSavedAreasList();
@@ -10835,12 +11085,6 @@ document.getElementById("btn-save-session")?.addEventListener("click", () => {
   _openSaveSessionInlineInput();
 });
 
-document.getElementById("btn-update-saved-area")?.addEventListener("click", async (e) => {
-  if (!_currentLoadedAreaId) return;
-  const area = _savedAreasCache.find((a) => a.id === _currentLoadedAreaId && a.type === "area");
-  if (!area) return;
-  await _updateSavedAreaFilters(area, e.currentTarget);
-});
 
 document.getElementById("btn-clear").addEventListener("click", () => {
   clearDrawResults();
@@ -11151,6 +11395,9 @@ function _wireParcelInteractiveUi(root, options = {}) {
         }
       } catch {}
       try {
+        const _now = Date.now();
+        if (_now - _lastSaveParcelClickAt < SAVE_PARCEL_DEBOUNCE_MS) return;
+        _lastSaveParcelClickAt = _now;
         await saveParcel(account, county, fullName, parseFloat(lat), parseFloat(lng), geometry);
         saveLink.textContent = "✓ Saved";
         saveLink.style.color = "#888";
@@ -12411,3 +12658,9 @@ if (document.readyState === "loading") {
 } else {
   _storedValueWireListeners();
 }
+
+// v1 §2.1 — flush pending filter save on tab close. Mirror of
+// stored-values beforeunload inside _storedValueWireListeners above.
+window.addEventListener("beforeunload", () => {
+  if (_filterSavePending) void _filterSaveProcessQueue();
+});

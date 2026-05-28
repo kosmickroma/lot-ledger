@@ -339,6 +339,36 @@ def _fetch_hoa_lookup(parcels: list[dict[str, Any]]) -> dict[str, dict[str, str]
         release_conn(conn)
 
 
+def _compose_dcad_owner_address(row: dict[str, Any]) -> str:
+    """v4b §3 Rule A (DCAD-only): canonical owner mailing address.
+
+    DCAD ships joint-owner names overflowed into OWNER_ADDRESS_LINE1, so
+    the raw LINE1 isn't reliable as the mailing address. Truth lives in
+    the LAST populated of LINE1-4 (the actual street / PO box after any
+    name continuations).
+
+    Returns the cleaned last-non-empty line. Falls back to the original
+    owner_address (LINE1 raw) if all 4 lines are empty — preserves the
+    previous behavior for the no-data edge case.
+
+    TAD / Collin / Denton owner_address comes from their own pipelines
+    that are already correct; this helper is DCAD-specific and only
+    invoked from query_parcels + _fetch_dcad_parcel_by_account.
+    """
+    lines = [
+        row.get("owner_address_line1"),
+        row.get("owner_address_line2"),
+        row.get("owner_address_line3"),
+        row.get("owner_address_line4"),
+    ]
+    populated = [str(l).strip() for l in lines if l and str(l).strip()]
+    if populated:
+        return populated[-1]
+    # All 4 lines empty: keep whatever was already there (LINE1 raw via
+    # the original owner_address field from parcels.owner_address).
+    return _clean_text(row.get("owner_address")) or ""
+
+
 def _fetch_additional_owners(
     account_nums: list[str],
 ) -> dict[str, list[dict[str, Any]]]:
@@ -556,7 +586,10 @@ def query_parcels(polygon: list[list[float]]) -> ParcelQueryResult:
                 "parcel_key": _clean_text(row.get("parcel_key")),
                 "gis_parcel_id": _clean_text(row.get("gis_parcel_id")),
                 "owner_name": _clean_text(row.get("owner_name")),
-                "owner_address": _clean_text(row.get("owner_address")),
+                # v4b §3 Rule A — compose canonical mailing address from
+                # the last populated LINE1-4 instead of raw LINE1 (which
+                # for joint-owner DCAD rows is the name continuation).
+                "owner_address": _compose_dcad_owner_address(row),
                 "owner_city": _clean_text(row.get("owner_city")),
                 "owner_state": _clean_text(row.get("owner_state")),
                 "owner_zip": _clean_text(row.get("owner_zip")),
@@ -574,6 +607,7 @@ def query_parcels(polygon: list[list[float]]) -> ParcelQueryResult:
                 "street_num": _clean_text(row.get("street_num")),
                 "full_street_name": _clean_text(row.get("full_street_name")),
                 "property_address": property_address,
+                "property_city": _clean_text(row.get("property_city")),
                 "property_zip": _clean_text(row.get("property_zip")),
                 "division_cd": _clean_text(row.get("division_cd")),
                 "sptd_code": sptd_code,

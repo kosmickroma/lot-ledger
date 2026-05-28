@@ -4170,6 +4170,52 @@ body.is-not-power-user .power-user-only {
   50%      { opacity: 1; }
 }
 
+/* v1 §2.2 — filter-save status chip. Mirrors .stored-value-status
+   exactly so the visual pattern Mike is already trained on for
+   stored-values carries over to filter-state auto-save. */
+.filter-save-status {
+  position: absolute;
+  right: 28px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: none;
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid rgba(201, 162, 79, 0.28);
+  background: rgba(0, 0, 0, 0.18);
+  color: var(--text-muted);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.filter-save-status[data-state="saving"] {
+  display: inline-block;
+  color: #cfe5ff;
+  border-color: rgba(120, 170, 230, 0.55);
+  background: rgba(38, 96, 160, 0.32);
+  animation: stored-value-pulse 1.1s ease-in-out infinite;
+}
+
+.filter-save-status[data-state="flash"] {
+  display: inline-block;
+  color: #cfeccf;
+  border-color: rgba(120, 200, 140, 0.55);
+  background: rgba(40, 96, 50, 0.32);
+  transition: opacity 0.4s ease;
+}
+
+.filter-save-status[data-state="error"] {
+  display: inline-block;
+  color: #ffe1e1;
+  border-color: rgba(220, 90, 90, 0.65);
+  background: rgba(140, 40, 40, 0.38);
+  cursor: pointer;
+  pointer-events: auto;
+}
+
 .sv-row {
   padding: 10px 0;
   border-top: 1px solid rgba(201, 162, 79, 0.16);
