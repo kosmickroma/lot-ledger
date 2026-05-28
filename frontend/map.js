@@ -10684,6 +10684,60 @@ function clearDrawResults() {
     const el = document.getElementById(id);
     if (el) el.value = "";
   });
+
+  // KK 2026-05-27: Clear button resets ALL left-sidebar filters to defaults.
+  // Saved areas in DB are NOT touched — reloading a saved area still restores
+  // its specific settings via the existing load path.
+  //
+  // _currentLoadedAreaId = null happened above (line ~10668) and
+  // _filterSaveOnAreaChange(null) was called at line ~10671, so
+  // _filterSaveQueueSave() will early-return during these mutations —
+  // no spurious PUT/autosave fires here.
+
+  // Property type filter checkboxes (filterState)
+  filterState = { ...DEFAULT_FILTERS };
+  for (const [key, inputId] of Object.entries(FILTER_INPUT_IDS)) {
+    const el = document.getElementById(inputId);
+    if (el) el.checked = Boolean(DEFAULT_FILTERS[key]);
+  }
+
+  // Property numeric filters (lot/sqft/year/appraisal-value ranges)
+  // numericFilters is const — reset in-place via Object.assign
+  Object.assign(numericFilters, {
+    lot_sqft_min: null, lot_sqft_max: null,
+    appr_val_min: null, appr_val_max: null,
+    yr_built_min: null, yr_built_max: null,
+    sqft_min: null,     sqft_max: null,
+  });
+  ["nf-lot-min", "nf-lot-max", "nf-val-min", "nf-val-max",
+   "nf-yr-min", "nf-yr-max", "nf-sqft-min", "nf-sqft-max"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.value = "";
+  });
+
+  // Comp numeric filters — same const pattern, reset in-place
+  Object.assign(compNumericFilters, {
+    lot_sqft_min: null, lot_sqft_max: null,
+    appr_val_min: null, appr_val_max: null,
+    yr_built_min: null, yr_built_max: null,
+    sqft_min: null,     sqft_max: null,
+  });
+  ["nf-comp-lot-min", "nf-comp-lot-max", "nf-comp-val-min", "nf-comp-val-max",
+   "nf-comp-yr-min", "nf-comp-yr-max", "nf-comp-sqft-min", "nf-comp-sqft-max"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.value = "";
+  });
+
+  // Propelio filter block (months/range/status checkboxes/sold-within/
+  // lot/sqft/year/price ranges). applyPropelioFilterStateToUI also
+  // calls readPropelioFiltersFromUI() at its end, so propelioFilterState
+  // ends up in sync with the DOM automatically.
+  propelioFilterState = { ...DEFAULT_PROPELIO_FILTERS };
+  applyPropelioFilterStateToUI(DEFAULT_PROPELIO_FILTERS);
+  // Comp-list sort mode: reset to the same default used at declaration
+  propelioCompSortMode = "price_desc";
+  const _clearSortEl = document.getElementById("propelio-comp-sort");
+  if (_clearSortEl) _clearSortEl.value = "price_desc";
   const soldCompsPanel = document.getElementById("sold-comps-panel");
   if (soldCompsPanel) soldCompsPanel.innerHTML = "";
   document.getElementById("redfin-toggle-status").textContent = "";
