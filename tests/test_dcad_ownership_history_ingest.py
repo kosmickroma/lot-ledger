@@ -5,6 +5,7 @@ from scripts.ownership_history.build_dcad_ownership_history import (
     _find_year_files,
     _parse_deed_date,
     _row_to_record,
+    _stream_record_batches,
 )
 
 
@@ -47,3 +48,36 @@ def test_row_to_record_shape_and_tolerance():
 
     # Blank account_num → None (caller skips).
     assert _row_to_record({"ACCOUNT_NUM": "  "}, 2021, "f.csv") is None
+
+
+def test_stream_record_batches_bounded_skips_blank_and_preserves_order(tmp_path: Path):
+    # Header + 6 data rows; row 2 has a blank ACCOUNT_NUM and must be skipped.
+    csv_text = (
+        "ACCOUNT_NUM,OWNER_NAME1,DEED_TXFR_DATE,JUNK\n"
+        "A1,OWNER A,01/02/2020,x\n"
+        ",OWNER SKIP,03/04/2021,x\n"
+        "A2,OWNER B,00/00/0000,x\n"
+        "A3,OWNER C,,x\n"
+        "A4,,05/06/2022,x\n"
+        "A5,OWNER E,07/08/2023,x\n"
+    )
+    csv_path = tmp_path / "account_info.csv"
+    csv_path.write_text(csv_text, encoding="latin-1")
+
+    batches = list(
+        _stream_record_batches(str(csv_path), 2024, "account_info.csv", batch_size=2)
+    )
+
+    # Memory-safety property: every batch is bounded by batch_size.
+    assert all(len(b) <= 2 for b in batches)
+    # 5 valid records (blank-account row dropped) → [2, 2, 1].
+    assert [len(b) for b in batches] == [2, 2, 1]
+
+    flat = [rec for b in batches for rec in b]
+    assert flat == [
+        ("dcad", "A1", 2024, "OWNER A", dt.date(2020, 1, 2), "account_info.csv"),
+        ("dcad", "A2", 2024, "OWNER B", None, "account_info.csv"),
+        ("dcad", "A3", 2024, "OWNER C", None, "account_info.csv"),
+        ("dcad", "A4", 2024, None, dt.date(2022, 5, 6), "account_info.csv"),
+        ("dcad", "A5", 2024, "OWNER E", dt.date(2023, 7, 8), "account_info.csv"),
+    ]

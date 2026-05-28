@@ -18,6 +18,7 @@ import csv
 import datetime as dt
 import os
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 # Make the repo root importable when run as a plain script from any cwd.
@@ -28,6 +29,7 @@ from psycopg2.extras import execute_values  # noqa: E402
 from api.config import get_conn, release_conn  # noqa: E402
 
 COUNTY = "dcad"
+BATCH_SIZE = 50_000
 DEFAULT_HISTORICAL_DIR = str(
     Path(__file__).resolve().parents[2]
     / "ingest" / "counties" / "dallas" / "dcad" / "Historical"
@@ -83,6 +85,29 @@ def _row_to_record(
     return (COUNTY, acct, year, owner, deed, source_file)
 
 
+def _stream_record_batches(
+    path: str, year: int, source_file: str, batch_size: int = BATCH_SIZE
+) -> Iterator[list[tuple]]:
+    """Yield bounded batches of upsert tuples, streaming the CSV row-by-row.
+
+    Peak memory is one batch (never the whole file or year), so ingesting an
+    ~800k-row roll stays at a few MB instead of ~250-450 MB.
+    """
+    batch: list[tuple] = []
+    with open(path, "r", encoding="latin-1", newline="") as fh:
+        reader = csv.DictReader(fh)
+        for row in reader:
+            rec = _row_to_record(row, year, source_file)
+            if rec is None:
+                continue
+            batch.append(rec)
+            if len(batch) >= batch_size:
+                yield batch
+                batch = []
+    if batch:
+        yield batch
+
+
 def _create_table() -> None:
     conn = get_conn()
     try:
@@ -134,18 +159,14 @@ def _upsert(records: list[tuple]) -> None:
         release_conn(conn)
 
 
-def _ingest_year(year: int, path: str) -> int:
+def _ingest_year(year: int, path: str, batch_size: int = BATCH_SIZE) -> int:
     source_file = os.path.basename(path)
-    records: list[tuple] = []
-    with open(path, "r", encoding="latin-1", newline="") as fh:
-        reader = csv.DictReader(fh)
-        for row in reader:
-            rec = _row_to_record(row, year, source_file)
-            if rec is not None:
-                records.append(rec)
-    print(f"{year}: parsed {len(records):,} records from {source_file}")
-    _upsert(records)
-    return len(records)
+    total = 0
+    for batch in _stream_record_batches(path, year, source_file, batch_size):
+        _upsert(batch)
+        total += len(batch)
+    print(f"{year}: upserted {total:,} records from {source_file}")
+    return total
 
 
 def main() -> None:
