@@ -2504,7 +2504,7 @@ async def address_suggest(q: str, limit: int = 8) -> dict[str, Any]:
                         'dcad'::text AS county,
                         p.account_num::text AS account_num,
                         p.property_address::text AS address,
-                        p.owner_city::text AS city,
+                        p.property_city::text AS city,
                         ST_Y(p.centroid) AS lat,
                         ST_X(p.centroid) AS lng
                     FROM parcels p
@@ -2521,7 +2521,7 @@ async def address_suggest(q: str, limit: int = 8) -> dict[str, Any]:
                         'tad'::text AS county,
                         t.account_num::text AS account_num,
                         t.situs_addr::text AS address,
-                        t.owner_city::text AS city,
+                        t.property_city::text AS city,
                         ST_Y(t.centroid) AS lat,
                         ST_X(t.centroid) AS lng
                     FROM tad_parcels t
@@ -2766,6 +2766,12 @@ def _fetch_dcad_parcel_by_account(account_num: str) -> tuple[dict[str, Any] | No
             parcel["additional_owners"] = _fetch_additional_owners(
                 [account_num]
             ).get(account_num, [])
+
+            # v4b §3 Rule A — compose canonical owner mailing address
+            # from the last populated LINE1-4. Single-parcel mirror of
+            # the same composition applied in query_parcels merged_rows.
+            from api.counties.dcad import _compose_dcad_owner_address
+            parcel["owner_address"] = _compose_dcad_owner_address(parcel)
 
             exempt_set = {account_num} if parcel.get("is_exempt_account") else set()
             return parcel, exempt_set
@@ -4179,8 +4185,11 @@ async def _run_download_csv(
                 "Row Type",
                 "County Source",  # 2 (Phase 2 — 2026-05-21): "DCAD" / "TAD" / "Collin" / "Denton"
                 "Intended Target",
-                "Property Address",
                 "MLS Status",
+                "Property Address",
+                "Property City",
+                "Property State",
+                "Property Zip",
                 "Owner Name",
                 "Owner Mailing Address",
                 "Owner City",
@@ -4303,11 +4312,8 @@ async def _run_download_csv(
                 "Certified Total Value",
                 "Denton - Exemptions",
                 "Denton - Homestead (HS)",
-                "Denton - School District",
-                "Denton - Entity Codes",
-                "Denton - Deed Number",
-                "Denton - Deed Date",
-                "Denton - Subdivision",
+                "Deed Number (Detailed)",
+                "Subdivision (Parsed)",
                 "Comp Sold Price",
                 "Comp Sold Date",
                 "Comp $/sqft",
@@ -4360,12 +4366,10 @@ async def _run_download_csv(
                 # stored-values header block so existing positions hold.
                 "Stored NBV",
                 "Stored NBV Comment",
-                # === v4a §2.8 — 31 new columns appended at the right edge ===
+                # === v4a §2.8 — 28 new columns appended at the right edge ===
                 # Existing columns (1..151) are byte-stable. Mike's
                 # column-letter formulas keep working.
-                "Property City",
-                "Property State",
-                "Property Zip",
+                # (Property City/State/Zip moved to positions 6-8 near Property Address)
                 "Property Street Number",
                 "Property Street Half Number",
                 "Property Full Street Name",
@@ -4510,8 +4514,11 @@ async def _run_download_csv(
                     "Parcel",
                     _csv_county_source(row),  # 2 (Phase 2)
                     "yes" if _is_intended_target else "",
-                    display_address,
                     "Active" if on_redfin else "Off Market",
+                    display_address,
+                    row.get("property_city", "") or "",
+                    "TX",
+                    row.get("property_zip", "") or "",
                     row.get("owner_name", ""),
                     row.get("owner_address", ""),
                     row.get("owner_city", ""),
@@ -4631,10 +4638,7 @@ async def _run_download_csv(
                     round(_safe_float(row.get("cert_total_value")), 0) if _safe_float(row.get("cert_total_value")) is not None else "",
                     row.get("exemptions", "") or "",
                     row.get("exempt_homestead", "") or "",
-                    row.get("isd_desc", "") or "",
-                    row.get("entity_codes", "") or "",
                     row.get("deed_number", "") or "",
-                    row.get("deed_date", "") or "",
                     row.get("subdivision", "") or "",
                     round(_safe_float(propelio_comp.get("sold_price")), 0) if propelio_comp and _safe_float(propelio_comp.get("sold_price")) is not None else "",
                     (propelio_comp.get("sold_date", "") or "") if propelio_comp else "",
@@ -4666,10 +4670,8 @@ async def _run_download_csv(
                     csv_share_id,
                     csv_workspace_name,
                     *stored_value_export_cells,
-                    # === v4a §2.8 — 31 new cells (mirror header order exactly) ===
-                    row.get("property_city", "") or "",
-                    "TX",
-                    row.get("property_zip", "") or "",
+                    # === v4a §2.8 — 28 new cells (mirror header order exactly) ===
+                    # (property_city/TX/property_zip moved to positions 6-8 near display_address)
                     row.get("street_num", "") or "",
                     row.get("street_half_num", "") or "",
                     row.get("full_street_name", "") or "",
@@ -4846,9 +4848,12 @@ async def _run_download_csv(
                     "Comp",                                                                                     # 1
                     _csv_county_source(_cad) if _cad else "",                                                   # 2 County Source (Phase 2)
                     "",                                                                                          # 3 Intended Target
-                    _row_address,                                                                                # 4 Property Address
                     _comp_status_titled,                                                                         # 4 MLS Status (comp's own status)
-                    _cad.get("owner_name", "") or "",                                                            # 5
+                    _row_address,                                                                                # 5 Property Address
+                    _cad.get("property_city", "") or "",                                                         # 6 Property City
+                    "TX" if _cad else "",                                                                        # 7 Property State
+                    _cad.get("property_zip", "") or "",                                                          # 8 Property Zip
+                    _cad.get("owner_name", "") or "",                                                            # 9
                     _cad.get("owner_address", "") or "",                                                         # 6
                     _cad.get("owner_city", "") or "",                                                            # 7
                     _cad.get("owner_state", "") or "",                                                           # 8
@@ -4961,11 +4966,8 @@ async def _run_download_csv(
                     round(_safe_float(_cad.get("cert_total_value")), 0) if _safe_float(_cad.get("cert_total_value")) is not None else "",        # 78
                     _cad.get("exemptions", "") or "",                                                            # 79 Denton - Exemptions
                     _cad.get("exempt_homestead", "") or "",                                                      # 80 Denton - Homestead
-                    _cad.get("isd_desc", "") or "",                                                              # 81 Denton - School District
-                    _cad.get("entity_codes", "") or "",                                                          # 82 Denton - Entity Codes
-                    _cad.get("deed_number", "") or "",                                                           # 83 Denton - Deed Number
-                    _cad.get("deed_date", "") or "",                                                             # 84 Denton - Deed Date
-                    _cad.get("subdivision", "") or "",                                                           # 85 Denton - Subdivision
+                    _cad.get("deed_number", "") or "",                                                           # 81 Deed Number (Detailed)
+                    _cad.get("subdivision", "") or "",                                                           # 82 Subdivision (Parsed)
                     _price_csv,                                                                                  # 86 Comp Sold Price
                     str(_comp_sold_date) if _comp_sold_date else "",                                             # 87 Comp Sold Date
                     _comp_ppsf,                                                                                  # 88 Comp $/sqft
@@ -4996,10 +4998,8 @@ async def _run_download_csv(
                     csv_share_id,                                                                                # 109 share_id
                     csv_workspace_name,                                                                          # 110 Workspace Name
                     *stored_value_export_cells,                                                                   # 111-120 stored values snapshot
-                    # === v4a §2.8 — 31 new cells (mirror header order) ===
-                    _cad.get("property_city", "") or "",
-                    "TX" if _cad else "",
-                    _cad.get("property_zip", "") or "",
+                    # === v4a §2.8 — 28 new cells (mirror header order) ===
+                    # (property_city/TX/property_zip moved to positions 6-8 near _row_address)
                     _cad.get("street_num", "") or "",
                     _cad.get("street_half_num", "") or "",
                     _cad.get("full_street_name", "") or "",
