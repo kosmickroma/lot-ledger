@@ -1921,6 +1921,20 @@ def _fetch_ownership_history(account_nums: set[str]) -> dict[str, dict]:
         release_conn(conn)
 
 
+def _ownership_history_cells(hist: dict | None) -> list:
+    """Render the 6 ownership-history cells: one owner-name per year in
+    OWNERSHIP_HISTORY_YEARS, then 'Owner Acquired' (latest deed date MM/DD/YYYY).
+    `hist` is None (non-DCAD / no history) → all blanks. Always returns a fixed
+    count (len(years) + 1) so header/parcel/orphan rows stay aligned."""
+    if not hist:
+        return ["" for _ in OWNERSHIP_HISTORY_YEARS] + [""]
+    owners = hist.get("owners") or {}
+    cells = [owners.get(y, "") for y in OWNERSHIP_HISTORY_YEARS]
+    acquired = hist.get("acquired")
+    cells.append(acquired.strftime("%m/%d/%Y") if acquired else "")
+    return cells
+
+
 def _google_maps_link(row: dict[str, Any]) -> str:
     property_address = str(row.get("property_address", "") or "").strip()
     street_num = str(row.get("street_num", "") or "").strip()
@@ -4232,6 +4246,21 @@ async def _run_download_csv(
         filename = f"{csv_workspace_name}_{_dt.now().strftime('%Y-%m-%d_%H%M%S')}.csv"
     download_name = _normalize_csv_filename(filename)
 
+    # Ownership-history (raw per-year owner columns, Dallas only). Collect
+    # all DCAD account_nums from parcel rows + orphan comps, one batched lookup.
+    _hist_accounts: set[str] = set()
+    for _r in rows:
+        if _csv_county_source(_r) == "DCAD":
+            _an = str(_r.get("account_num") or "").strip()
+            if _an:
+                _hist_accounts.add(_an)
+    for _oc in orphan_comps:
+        if str(_oc.get("parcel_county") or "").strip().lower() in ("dcad", "dallas"):
+            _an = str(_oc.get("parcel_account_num") or "").strip()
+            if _an:
+                _hist_accounts.add(_an)
+    ownership_history = _fetch_ownership_history(_hist_accounts)
+
     def generate_csv():
         buffer = io.StringIO()
         writer = csv.writer(buffer)
@@ -4453,6 +4482,12 @@ async def _run_download_csv(
                 "Owner 2 %",
                 "Owner 3 Name",
                 "Owner 3 %",
+                "Owner 2021",
+                "Owner 2022",
+                "Owner 2023",
+                "Owner 2024",
+                "Owner 2025",
+                "Owner Acquired",
             ]
         )
         buffer.seek(0)
@@ -4563,6 +4598,10 @@ async def _run_download_csv(
                     str(row.get("county", "") or "").strip().lower(),
                     str(row.get("account_num", "") or "").strip(),
                 ) == originator_key
+            )
+            _own = _ownership_history_cells(
+                ownership_history.get(str(row.get("account_num") or "").strip())
+                if _csv_county_source(row) == "DCAD" else None
             )
             writer.writerow(
                 [
@@ -4752,6 +4791,7 @@ async def _run_download_csv(
                     round(_safe_float(row.get("college_taxable_val")), 0) if _safe_float(row.get("college_taxable_val")) is not None else "",
                     round(_safe_float(row.get("special_dist_taxable_val")), 0) if _safe_float(row.get("special_dist_taxable_val")) is not None else "",
                     *_additional_owner_cells(row.get("additional_owners")),
+                    _own[0], _own[1], _own[2], _own[3], _own[4], _own[5],
                 ]
             )
             buffer.seek(0)
@@ -4898,6 +4938,10 @@ async def _run_download_csv(
                     str(_cad.get("legal5", "") or "").strip(),
                 ]
             ).strip() if _cad else ""
+            _own_orphan = _ownership_history_cells(
+                ownership_history.get(_cad_key[1])
+                if _cad_key[0] in ("dcad", "dallas") and _cad_key[1] else None
+            )
             writer.writerow(
                 [
                     "Comp",                                                                                     # 1
@@ -5080,6 +5124,7 @@ async def _run_download_csv(
                     round(_safe_float(_cad.get("college_taxable_val")), 0) if _cad and _safe_float(_cad.get("college_taxable_val")) is not None else "",
                     round(_safe_float(_cad.get("special_dist_taxable_val")), 0) if _cad and _safe_float(_cad.get("special_dist_taxable_val")) is not None else "",
                     *_additional_owner_cells(_cad.get("additional_owners") if _cad else []),
+                    _own_orphan[0], _own_orphan[1], _own_orphan[2], _own_orphan[3], _own_orphan[4], _own_orphan[5],
                 ]
             )
             buffer.seek(0)

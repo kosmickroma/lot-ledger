@@ -38,3 +38,16 @@ def test_fetch_ownership_history_swallows_db_error(monkeypatch):
         raise RuntimeError("table missing")
     monkeypatch.setattr(main, "get_conn", boom)
     assert main._fetch_ownership_history({"A1"}) == {}
+
+
+def test_ownership_history_cells_none_is_six_blanks():
+    assert main._ownership_history_cells(None) == ["", "", "", "", "", ""]
+
+
+def test_ownership_history_cells_populated():
+    hist = {"owners": {2021: "SHARPE SARA", 2023: "PARK JU YONG"},
+            "acquired": dt.date(2023, 3, 14)}
+    # OWNERSHIP_HISTORY_YEARS = [2021, 2022, 2023, 2024, 2025]
+    assert main._ownership_history_cells(hist) == [
+        "SHARPE SARA", "", "PARK JU YONG", "", "", "03/14/2023",
+    ]
