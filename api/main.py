@@ -1432,6 +1432,14 @@ class SavedAreaCreateRequest(BaseModel):
 
 class StoredValueGetResponse(BaseModel):
     arv: dict[str, Any]
+    # K4 NBV fix (2026-05-29): nbv was added to the schema, the field_key
+    # whitelist, and the frontend list when K4 shipped, but NOT to this
+    # response model. Pydantic silently drops unknown fields when
+    # constructed via **payload, so the GET (and PUT) response returned
+    # JSON with no 'nbv' key — frontend `data["nbv"]` was always undefined,
+    # state.nbv stayed at its blank default on reload, and the UI showed
+    # NBV as wiped after every refresh even though the DB row was correct.
+    nbv: dict[str, Any]
     tdpp: dict[str, Any]
     rehab_needed: dict[str, Any]
     mao_arv: dict[str, Any]
