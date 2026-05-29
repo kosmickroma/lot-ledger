@@ -7136,7 +7136,10 @@ function _propelioCompRowHtml(comp) {
     <div class="propelio-comp-row" data-comp-key="${keyAttr}">
       <div class="propelio-comp-row-top">
         <span class="propelio-comp-row-price">${fmtPrice(Number(comp?.price))}</span>
-        <span class="propelio-comp-row-status ${statusClass}">${_propelioEscape(status || "—")}</span>
+        <span class="propelio-comp-row-statuswrap">
+          <span class="propelio-comp-row-status ${statusClass}">${_propelioEscape(status || "—")}</span>
+          ${comp?.user_rating === "good" ? `<span class="propelio-comp-row-good-check" title="Good comp">✓</span>` : ""}
+        </span>
       </div>
       <div class="propelio-comp-row-mid">${_propelioEscape(comp?.address || "")}</div>
       ${neighborhood ? `<div class="propelio-comp-row-nbhd">${_propelioEscape(neighborhood)}</div>` : ""}
