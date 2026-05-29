@@ -3966,6 +3966,21 @@ body.is-not-power-user .power-user-only {
   color: #c9a24f;
 }
 
+.propelio-comp-row-statuswrap {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+.propelio-comp-row-good-check {
+  color: var(--gold);
+  font-weight: 800;
+  font-size: 13px;
+  line-height: 1;
+}
+
 .propelio-comp-row-mid {
   font-size: 11px;
   color: var(--text-muted);

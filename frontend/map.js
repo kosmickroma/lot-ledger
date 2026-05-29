@@ -7136,7 +7136,10 @@ function _propelioCompRowHtml(comp) {
     <div class="propelio-comp-row" data-comp-key="${keyAttr}">
       <div class="propelio-comp-row-top">
         <span class="propelio-comp-row-price">${fmtPrice(Number(comp?.price))}</span>
-        <span class="propelio-comp-row-status ${statusClass}">${_propelioEscape(status || "—")}</span>
+        <span class="propelio-comp-row-statuswrap">
+          <span class="propelio-comp-row-status ${statusClass}">${_propelioEscape(status || "—")}</span>
+          ${comp?.user_rating === "good" ? `<span class="propelio-comp-row-good-check" title="Good comp">✓</span>` : ""}
+        </span>
       </div>
       <div class="propelio-comp-row-mid">${_propelioEscape(comp?.address || "")}</div>
       ${neighborhood ? `<div class="propelio-comp-row-nbhd">${_propelioEscape(neighborhood)}</div>` : ""}
@@ -12075,6 +12078,11 @@ async function _loadAreaFromShareId(shareId) {
         _clearOriginatorStar();
         _setCurrentTargetParcel(null);
         _currentLoadedAreaId = cloned.area_id;
+        // Reload stored values against the FORKED area (not the source). The
+        // earlier load in restoreSavedArea ran against the unowned source and
+        // came back blank; the fork carries its own copies. Mirrors the
+        // "Make my copy" button path.
+        _storedValueOnAreaChange(_currentLoadedAreaId);
         _syncTabTitle();
         _selectedSavedItemId = cloned.area_id;
         // Carry the originator TARGET star through the auto-fork.
