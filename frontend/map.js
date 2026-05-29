@@ -12078,6 +12078,11 @@ async function _loadAreaFromShareId(shareId) {
         _clearOriginatorStar();
         _setCurrentTargetParcel(null);
         _currentLoadedAreaId = cloned.area_id;
+        // Reload stored values against the FORKED area (not the source). The
+        // earlier load in restoreSavedArea ran against the unowned source and
+        // came back blank; the fork carries its own copies. Mirrors the
+        // "Make my copy" button path.
+        _storedValueOnAreaChange(_currentLoadedAreaId);
         _syncTabTitle();
         _selectedSavedItemId = cloned.area_id;
         // Carry the originator TARGET star through the auto-fork.
