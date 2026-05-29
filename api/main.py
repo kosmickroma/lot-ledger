@@ -6054,6 +6054,21 @@ async def fork_saved_area(
                 """,
                 (row[0], source_area_id),
             )
+
+            # stored_value_entries — copy the source area's stored values
+            # (ARV / TDPP / rehab + comments) into the fork, parallel to the
+            # rating copies above, so a shared-then-opened (forked) area keeps
+            # its stored values instead of loading blank.
+            cur.execute(
+                """
+                INSERT INTO stored_value_entries
+                    (area_id, field_key, numeric_value, comment_text, client_seq)
+                SELECT %s, field_key, numeric_value, comment_text, client_seq
+                FROM stored_value_entries
+                WHERE area_id = %s
+                """,
+                (row[0], source_area_id),
+            )
         conn.commit()
     except HTTPException:
         conn.rollback()
