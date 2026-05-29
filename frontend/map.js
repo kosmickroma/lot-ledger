@@ -12550,8 +12550,20 @@ async function _storedValueSaveField(fieldKey) {
     if (_storedValueAreaId === areaIdAtCall && _storedValueState) {
       for (const key of _STORED_VALUE_FIELDS) {
         if (data[key] && typeof data[key] === "object") {
-          _storedValueState[key].numeric_value = data[key].numeric_value ?? null;
+          // K4 NBV-wipe fix (2026-05-29): only refresh numeric_value +
+          // comment_text for the field that was just saved. The PUT response
+          // returns the full DB snapshot for all 6 fields, but for fields
+          // OTHER than the one we PUT, that snapshot can be stale relative
+          // to local state with pending edits. Specifically: typing NBV
+          // queues 'tdpp' first then 'nbv' (the K4 auto-fill cascade); if
+          // we clobber state.nbv here from the 'tdpp' PUT's stale snapshot,
+          // the subsequent 'nbv' save reads the clobbered value and writes
+          // it back, wiping the user's typed NBV in the DB. Tracking
+          // client_seq for all fields is fine (and useful for avoiding 409
+          // thrash); the data wipe is from cross-field numeric_value/comment
+          // overwrite.
           if (key === fieldKey) {
+            _storedValueState[key].numeric_value = data[key].numeric_value ?? null;
             _storedValueState[key].comment_text = String(data[key].comment_text || "");
           }
           _storedValueState[key].client_seq = Math.max(
