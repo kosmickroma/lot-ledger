@@ -24,8 +24,16 @@ def test_fetch_ownership_history_pivots_and_picks_latest_deed(monkeypatch):
     out = main._fetch_ownership_history({"A1", "A2"})
     assert out["A1"]["owners"] == {2021: "SHARPE SARA", 2022: "SHARPE SARA", 2023: "PARK JU YONG"}
     assert out["A1"]["acquired"] == dt.date(2023, 3, 14)   # latest year's deed
+    # v2 (2026-06-01): per-year deed_dates map; the v2 caller picks the date
+    # matching whichever year anchors the Current Owner after blank-skip.
+    assert out["A1"]["deed_dates"] == {
+        2021: dt.date(2010, 1, 1),
+        2022: dt.date(2010, 1, 1),
+        2023: dt.date(2023, 3, 14),
+    }
     assert out["A2"]["owners"] == {2024: "WILSON LOIS"}
     assert out["A2"]["acquired"] == dt.date(2024, 8, 2)
+    assert out["A2"]["deed_dates"] == {2024: dt.date(2024, 8, 2)}
 
 
 def test_fetch_ownership_history_empty_input_skips_query(monkeypatch):
@@ -45,9 +53,101 @@ def test_ownership_history_cells_none_is_six_blanks():
 
 
 def test_ownership_history_cells_populated():
-    hist = {"owners": {2021: "SHARPE SARA", 2023: "PARK JU YONG"},
-            "acquired": dt.date(2023, 3, 14)}
-    # OWNERSHIP_HISTORY_YEARS = [2021, 2022, 2023, 2024, 2025]
+    """v2 (2026-06-01): cells are [Current Owner, Current Owner Acquired,
+    Prior Owner 1..4]. SHARPE SARA (2021) and PARK JU YONG (2023) are
+    NOT calendar-consecutive (gap at 2022), so two distinct runs."""
+    hist = {
+        "owners": {2021: "SHARPE SARA", 2023: "PARK JU YONG"},
+        "deed_dates": {2021: dt.date(2010, 1, 1), 2023: dt.date(2023, 3, 14)},
+        "acquired": dt.date(2023, 3, 14),
+    }
     assert main._ownership_history_cells(hist) == [
-        "SHARPE SARA", "", "PARK JU YONG", "", "", "03/14/2023",
+        "PARK JU YONG", "03/14/2023", "SHARPE SARA (~2021)", "", "", "",
     ]
+
+
+def test_ownership_history_cells_blank_latest_year_anchor_walks_back():
+    """v2: when the latest year has a blank owner_name, the anchor walks
+    back to the latest non-blank year and the Acquired cell follows it
+    (not the max snapshot year's date)."""
+    hist = {
+        "owners": {2025: "", 2024: "WILSON LOIS", 2023: "WILSON LOIS"},
+        "deed_dates": {2025: None, 2024: dt.date(2022, 5, 1), 2023: dt.date(2010, 1, 1)},
+        "acquired": None,  # max year (2025) has null deed
+    }
+    # Anchor = 2024 (latest non-blank). Acquired = deed_dates[2024].
+    assert main._ownership_history_cells(hist) == [
+        "WILSON LOIS", "05/01/2022", "", "", "", "",
+    ]
+
+
+def test_ownership_history_cells_null_deed_on_anchor_blank_acquired():
+    """v2: when the anchor year has a null deed_txfr_date, Acquired cell
+    is blank but Current Owner still populates."""
+    hist = {
+        "owners": {2024: "WILSON LOIS"},
+        "deed_dates": {2024: None},
+        "acquired": None,
+    }
+    assert main._ownership_history_cells(hist) == [
+        "WILSON LOIS", "", "", "", "", "",
+    ]
+
+
+def test_ownership_history_cells_overflow_truncates_to_four_priors():
+    """v2: more than 5 distinct owners → 1 current + 4 priors kept, the
+    5th-and-older entries dropped silently (overflow handling deferred
+    until 1999-2020 owner data lands)."""
+    hist = {
+        "owners": {
+            1999: "A", 2003: "B", 2008: "C", 2013: "D",
+            2018: "E", 2022: "F", 2025: "G",
+        },
+        "deed_dates": {y: None for y in [1999, 2003, 2008, 2013, 2018, 2022, 2025]},
+        "acquired": None,
+    }
+    assert main._ownership_history_cells(hist) == [
+        "G", "", "F (~2022)", "E (~2018)", "D (~2013)", "C (~2008)",
+    ]
+
+
+def test_ownership_history_cells_all_blank_owners_six_blanks():
+    """v2: every year has a blank/whitespace owner_name → 6 blank cells
+    (distill returns empty list)."""
+    hist = {
+        "owners": {2025: "", 2024: "  ", 2023: None},
+        "deed_dates": {
+            2025: dt.date(2025, 1, 1),
+            2024: dt.date(2024, 1, 1),
+            2023: dt.date(2023, 1, 1),
+        },
+        "acquired": dt.date(2025, 1, 1),
+    }
+    assert main._ownership_history_cells(hist) == ["", "", "", "", "", ""]
+
+
+def test_fetch_ownership_history_records_null_deed_dates(monkeypatch):
+    """v2 (2026-06-01): deed_dates carries None for years with no recorded
+    deed_txfr_date so the caller can decide blank vs fallback per-row."""
+    rows = [
+        ("B1", 2021, "OWNER A", None),
+        ("B1", 2022, "OWNER A", dt.date(2022, 5, 1)),
+        ("B1", 2023, "OWNER B", None),
+    ]
+    cur = MagicMock()
+    cur.fetchall.return_value = rows
+    cur.__enter__ = lambda s: cur
+    cur.__exit__ = lambda *a: False
+    conn = MagicMock()
+    conn.cursor.return_value = cur
+    monkeypatch.setattr(main, "get_conn", lambda: conn)
+    monkeypatch.setattr(main, "release_conn", lambda c: None)
+
+    out = main._fetch_ownership_history({"B1"})
+    assert out["B1"]["deed_dates"] == {
+        2021: None,
+        2022: dt.date(2022, 5, 1),
+        2023: None,
+    }
+    # 'acquired' = deed_date of latest year, which is None here.
+    assert out["B1"]["acquired"] is None
