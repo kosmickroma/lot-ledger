@@ -120,19 +120,47 @@ def _find_year_files(historical_dir: str) -> dict[int, str]:
 
 
 def _parse_deed_date(raw: str | None) -> dt.date | None:
-    """Parse TAD 'MM/DD/YYYY' → date; None on blank/zero/unparseable.
+    """Parse TAD deed_date → date; None on blank/sentinel/unparseable.
 
-    Same shape as DCAD/Collin's deed dates. Year-range guard 1900-2100
-    matches the sibling ingests (rejects out-of-range placeholders).
+    TAD's doc reads `MM\\DD\\YYYY` (probably a doc-render glitch) but the
+    actual shipped format is `MM-DD-YYYY` with dashes. We accept BOTH
+    `MM-DD-YYYY` and `MM/DD/YYYY` defensively against vintage drift.
+
+    Known TAD sentinels for "no recorded deed" → None:
+      * blank / whitespace
+      * `00/00/0000`, `00-00-0000`
+      * `12/31/1900`, `12-31-1900`  (used very widely on city/county
+        government-owned parcels and pre-PACS records)
+
+    Year-range guard 1900-2100 matches the sibling ingests; only 1900
+    dates that survive the sentinel check would actually reach the guard.
     """
     if not raw:
         return None
     text = raw.strip()
-    if not text or text.startswith("00/00"):
+    if not text:
         return None
-    try:
-        parsed = dt.datetime.strptime(text, "%m/%d/%Y")
-    except ValueError:
+    # Explicit sentinels for "no recorded deed". 12-31-1900 is TAD's
+    # internal "no data" placeholder; 00/00/0000 covers truly empty values
+    # that the exporter still padded into the field.
+    sentinels = {
+        "00/00/0000", "00-00-0000",
+        "12/31/1900", "12-31-1900",
+    }
+    if text in sentinels:
+        return None
+    parsed: dt.datetime | None = None
+    if "-" in text:
+        try:
+            parsed = dt.datetime.strptime(text, "%m-%d-%Y")
+        except ValueError:
+            parsed = None
+    elif "/" in text:
+        try:
+            parsed = dt.datetime.strptime(text, "%m/%d/%Y")
+        except ValueError:
+            parsed = None
+    if parsed is None:
         return None
     if not (1900 <= parsed.year <= 2100):
         return None

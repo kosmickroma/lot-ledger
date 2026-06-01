@@ -143,7 +143,17 @@ def test_find_year_files_case_insensitive_filename(tmp_path: Path):
 # _parse_deed_date
 # ---------------------------------------------------------------------------
 
-def test_parse_deed_date_happy_path():
+def test_parse_deed_date_dashes_is_real_tad_format():
+    """The TAD doc reads MM\\DD\\YYYY but the actual shipped files use
+    MM-DD-YYYY (dashes). Discovered when the first ingest left every row's
+    deed_txfr_date NULL because the original parser only handled slashes."""
+    assert _parse_deed_date("04-17-2019") == dt.date(2019, 4, 17)
+    assert _parse_deed_date("01-01-2020") == dt.date(2020, 1, 1)
+
+
+def test_parse_deed_date_slashes_kept_as_defensive_fallback():
+    """MM/DD/YYYY support stays as defense against future vintage drift —
+    cheap to support both formats since we already branch on the separator."""
     assert _parse_deed_date("04/17/2019") == dt.date(2019, 4, 17)
     assert _parse_deed_date("01/01/2020") == dt.date(2020, 1, 1)
 
@@ -153,18 +163,31 @@ def test_parse_deed_date_blank_zero_garbage():
     assert _parse_deed_date(None) is None
     assert _parse_deed_date("   ") is None
     assert _parse_deed_date("00/00/0000") is None
+    assert _parse_deed_date("00-00-0000") is None
     assert _parse_deed_date("garbage") is None
-    assert _parse_deed_date("99/99/9999") is None  # invalid month/day
+    assert _parse_deed_date("99-99-9999") is None  # invalid month/day
+
+
+def test_parse_deed_date_12_31_1900_sentinel():
+    """TAD's internal 'no recorded deed' placeholder for many city/county
+    government-owned parcels and pre-PACS records. Must NOT survive the
+    parser as a real 1900-12-31 deed — it would otherwise poison the
+    Current Owner Acquired cell with a misleading historical date."""
+    assert _parse_deed_date("12-31-1900") is None
+    assert _parse_deed_date("12/31/1900") is None
 
 
 def test_parse_deed_date_year_out_of_range():
-    # 1900-2100 inclusive
-    assert _parse_deed_date("01/01/1900") == dt.date(1900, 1, 1)
-    assert _parse_deed_date("12/31/2100") == dt.date(2100, 12, 31)
+    # 1900-2100 inclusive (boundary). Note: the 12-31-1900 sentinel test
+    # above takes precedence — any 1900 deed that survives the sentinel
+    # check (which would have to be something like 03-15-1900) is still
+    # accepted as a real date.
+    assert _parse_deed_date("03-15-1900") == dt.date(1900, 3, 15)
+    assert _parse_deed_date("12-31-2100") == dt.date(2100, 12, 31)
     # outside range
-    assert _parse_deed_date("01/01/1899") is None
-    assert _parse_deed_date("01/01/2101") is None
-    assert _parse_deed_date("01/01/5000") is None
+    assert _parse_deed_date("01-01-1899") is None
+    assert _parse_deed_date("01-01-2101") is None
+    assert _parse_deed_date("01-01-5000") is None
 
 
 # ---------------------------------------------------------------------------
