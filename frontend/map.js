@@ -8830,7 +8830,7 @@ function _buildPanelOwnerHistoryHtml(p) {
   return `
         <section class="parcel-panel-owner-history">
           <div class="parcel-panel-section-title">Owner History</div>
-          <table class="parcel-panel-detail-table">
+          <table class="popup-table">
             ${rowsHtml}
           </table>
         </section>`;
