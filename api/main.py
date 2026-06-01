@@ -1921,6 +1921,99 @@ def _fetch_ownership_history(account_nums: set[str]) -> dict[str, dict]:
         release_conn(conn)
 
 
+# v2 (2026-06-01): distinct-owners-most-recent-first helpers for the
+# ownership-history CSV columns. See
+# docs/superpowers/specs/2026-06-01-dcad-ownership-history-v2-design.md.
+
+_OWNER_NAME_PUNCT_RE = re.compile(r"[,.'()]")
+_OWNER_NAME_WS_RE = re.compile(r"\s+")
+
+
+def _normalize_owner_name(name: str | None) -> str:
+    """Normalize an owner_name for distinct-owner grouping.
+
+    Trim + uppercase + collapse internal whitespace + strip punctuation
+    (commas, periods, apostrophes, parens), and replace '&' with 'AND'.
+    Suffixes like LLC/INC/TR/TRUST/EST are deliberately NOT stripped —
+    those represent real ownership flips (estate planning, probate) per
+    the 2026-05-28 spike validation.
+
+    Returns "" for None / blank input.
+    """
+    if not name:
+        return ""
+    s = str(name).strip()
+    if not s:
+        return ""
+    s = s.upper().replace("&", " AND ")
+    s = _OWNER_NAME_PUNCT_RE.sub("", s)
+    s = _OWNER_NAME_WS_RE.sub(" ", s).strip()
+    return s
+
+
+def _distill_distinct_owners(per_year_owners: dict[int, str]) -> list[tuple[str, int]]:
+    """Distill {year: owner_name} into distinct ownership periods, most-recent-first.
+
+    Each entry is (display_name, earliest_year_in_run). `display_name` is
+    the actual stored owner_name from the LATEST year in the run (latest
+    spelling wins, trimmed of leading/trailing whitespace but otherwise
+    preserved as stored). `earliest_year_in_run` is the earliest
+    CALENDAR-CONSECUTIVE year whose normalized name matches.
+
+    Blank/whitespace-only owner_name years are SKIPPED — they don't
+    anchor a run, don't contribute to grouping, and are invisible to
+    the output.
+
+    Grouping uses _normalize_owner_name() for equality. Calendar-
+    consecutive years are required. If per_year_owners = {2024: 'A',
+    2022: 'A'} with no 2023 entry, the result is TWO entries for A — the
+    gap breaks the run.
+
+    Returns [] for empty input or all-blank input.
+    """
+    if not per_year_owners:
+        return []
+    cleaned: list[tuple[int, str, str]] = []
+    for year, raw_name in per_year_owners.items():
+        norm = _normalize_owner_name(raw_name)
+        if not norm:
+            continue
+        display = str(raw_name).strip()
+        cleaned.append((int(year), display, norm))
+    if not cleaned:
+        return []
+    cleaned.sort(key=lambda r: r[0], reverse=True)
+    result: list[tuple[str, int]] = []
+    cur_norm: str | None = None
+    cur_display: str = ""
+    cur_earliest: int = 0
+    for year, display, norm in cleaned:
+        if cur_norm is None:
+            cur_norm = norm
+            cur_display = display
+            cur_earliest = year
+        elif norm == cur_norm and year == cur_earliest - 1:
+            cur_earliest = year
+        else:
+            result.append((cur_display, cur_earliest))
+            cur_norm = norm
+            cur_display = display
+            cur_earliest = year
+    if cur_norm is not None:
+        result.append((cur_display, cur_earliest))
+    return result
+
+
+def _is_dcad_source(county_or_source: str | None) -> bool:
+    """True if the value identifies a DCAD/Dallas source.
+
+    Centralizes the gate used in both CSV writer paths so the parcel
+    path's `_csv_county_source(...) == "DCAD"` check and the orphan
+    path's raw `"dcad"`/`"dallas"` token check stay in sync.
+    """
+    return str(county_or_source or "").strip().lower() in {"dcad", "dallas"}
+
+
 def _ownership_history_cells(hist: dict | None) -> list:
     """Render the 6 ownership-history cells: one owner-name per year in
     OWNERSHIP_HISTORY_YEARS, then 'Owner Acquired' (latest deed date MM/DD/YYYY).
