@@ -195,8 +195,10 @@ def test_parse_deed_date_year_out_of_range():
 # ---------------------------------------------------------------------------
 
 def test_row_to_record_happy_path_residential():
-    """A normal Residential AAAA row → upsert tuple with account_num
-    lstripped of leading zeros."""
+    """A normal Residential AAAA row → upsert tuple. Account_Num is kept
+    in its 8-char zero-padded form ("00000051") to match tad_parcels —
+    discovered 2026-06-01 that stripping to "51" only matched ~28% of
+    parcels; preserving the padded form matches ~93%."""
     row = {
         "RP": "R",
         "Appraisal_Year": "2022",
@@ -207,7 +209,7 @@ def test_row_to_record_happy_path_residential():
     }
     assert _row_to_record(row, 2022, "PropertyData_2022.txt") == (
         "tad",
-        "51",
+        "00000051",  # padded form preserved
         2022,
         "FORT WORTH CITY OF",
         dt.date(2019, 4, 17),
@@ -247,17 +249,22 @@ def test_row_to_record_skips_non_aaaa_records():
     assert _row_to_record(row, 2022, "f.txt") is None
 
 
-def test_row_to_record_strips_account_leading_zeros():
-    """TAD stores Account_Num as 8-char zero-padded; the rest of LotLedger
-    uses the unpadded form."""
+def test_row_to_record_preserves_account_zero_padding():
+    """TAD stores Account_Num as 8-char zero-padded; tad_parcels uses the
+    same padded form, so we PRESERVE the padding rather than stripping.
+    All-zeros accounts are still skipped (placeholder/malformed records)."""
     row = {"RP": "R", "Account_Num": "00000051", "Record_Type": "AAAA",
            "Owner_Name": "X", "Deed_Date": ""}
     rec = _row_to_record(row, 2022, "f.txt")
     assert rec is not None
-    assert rec[1] == "51"
+    assert rec[1] == "00000051"  # padded form preserved (was wrongly "51" before)
 
-    # All-zeros account → empty after lstrip → skipped.
+    # All-zeros account → still skipped (placeholder/malformed).
     row["Account_Num"] = "00000000"
+    assert _row_to_record(row, 2022, "f.txt") is None
+
+    # Blank/whitespace account → skipped.
+    row["Account_Num"] = "   "
     assert _row_to_record(row, 2022, "f.txt") is None
 
 
@@ -317,7 +324,8 @@ def test_stream_record_batches_filters_and_emits(tmp_path: Path, capsys):
     )
     batches = list(_stream_record_batches(str(txt), 2022, txt.name, batch_size=10))
     flat = [rec for b in batches for rec in b]
-    assert sorted(r[1] for r in flat) == ["51", "99"]
+    # account_num kept padded — sorted alphabetically of the 8-char form.
+    assert sorted(r[1] for r in flat) == ["00000051", "00000099"]
     out = capsys.readouterr().out
     assert "scanned=7" in out
     assert "non_real(PP+M)=2" in out

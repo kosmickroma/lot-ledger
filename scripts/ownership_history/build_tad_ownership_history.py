@@ -23,9 +23,12 @@ Layout:
 Field mapping (TAD pipe-delimited header → ownership_snapshots):
     RP             → row filter: keep 'R' (Residential) + 'C' (Commercial);
                      drop 'P' (Personal Property) + 'M' (Minerals).
-    Account_Num    → account_num (lstrip leading zeros — TAD stores as
-                     8-char zero-padded numeric like "00000051"; the rest of
-                     LotLedger uses the unpadded form).
+    Account_Num    → account_num (kept as 8-char zero-padded numeric like
+                     "00000051" — matches the existing tad_parcels table's
+                     format. Verified 2026-06-01: stripping to "51" matched
+                     only ~28% of TAD parcels; preserving the padded form
+                     matches ~93%, which is the same shape as the other
+                     counties' coverage.)
     Record_Type    → row filter: keep "AAAA" (the primary real-estate record
                      per the doc); reject anything else ("LOCA" location
                      rows etc., which carry blank/garbage Owner_Name).
@@ -187,8 +190,11 @@ def _row_to_record(
     record_type = (row.get("Record_Type") or "").strip().upper()
     if record_type != "AAAA":
         return None
-    acct = (row.get("Account_Num") or "").strip().lstrip("0")
-    if not acct:
+    acct = (row.get("Account_Num") or "").strip()
+    # Skip rows whose account_num is empty or all-zeros (TAD pads to 8
+    # zeros for malformed/placeholder records); keep the zero-padded form
+    # otherwise so it matches tad_parcels.account_num directly.
+    if not acct or acct.lstrip("0") == "":
         return None
     owner = (row.get("Owner_Name") or "").strip()
     if not owner:
@@ -271,8 +277,10 @@ def _stream_record_batches(
             if record_type != "AAAA":
                 skipped_non_aaaa += 1
                 continue
-            acct = (row.get("Account_Num") or "").strip().lstrip("0")
-            if not acct:
+            acct = (row.get("Account_Num") or "").strip()
+            # Skip empty or all-zeros account_nums; keep the padded form
+            # otherwise to match tad_parcels.account_num (8-char zero-padded).
+            if not acct or acct.lstrip("0") == "":
                 skipped_blank_acct += 1
                 continue
             owner = (row.get("Owner_Name") or "").strip()
