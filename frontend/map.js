@@ -8809,9 +8809,16 @@ function _buildPanelAgentBlockHtml(title, agent, emptyText) {
 function _buildPanelOwnerHistoryHtml(p) {
   const cells = Array.isArray(p?.owner_history_cells) ? p.owner_history_cells : null;
   if (!cells || cells.length < 2) return "";
+  // Popup uses "Owner on Last Roll" + "Acquired" instead of the CSV's
+  // "Current Owner" + "Current Owner Acquired" — the snapshot table is
+  // anchored at certified-roll dates and lags the live CAD owner field
+  // by up to ~12 months between rolls, so "Current Owner" was misleading
+  // when a sale happened after the last roll was published (KK + Mike,
+  // 2026-06-01). "Owner on Last Roll" is truthful in BOTH the match and
+  // mismatch cases. CSV column headers are unchanged.
   const labels = [
-    "Current Owner",
-    "Current Owner Acquired",
+    "Owner on Last Roll",
+    "Acquired",
     "Prior Owner 1",
     "Prior Owner 2",
     "Prior Owner 3",
