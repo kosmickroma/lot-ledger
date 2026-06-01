@@ -2022,14 +2022,26 @@ def _distill_distinct_owners(per_year_owners: dict[int, str]) -> list[tuple[str,
     return result
 
 
-def _is_dcad_source(county_or_source: str | None) -> bool:
-    """True if the value identifies a DCAD/Dallas source.
+def _is_owner_history_supported(county_or_source: str | None) -> bool:
+    """True if this county has ingested rows in `ownership_snapshots`.
 
-    Centralizes the gate used in both CSV writer paths so the parcel
-    path's `_csv_county_source(...) == "DCAD"` check and the orphan
-    path's raw `"dcad"`/`"dallas"` token check stay in sync.
+    The v2 distinct-owners CSV columns + popup display read from
+    `ownership_snapshots`. A county only appears here once we've ingested
+    its certified rolls; this gate keeps the CSV emitting blank cells
+    rather than misleading "Current Owner = (None)" for counties whose
+    data is not yet loaded. Extend the set when a new county is ingested.
+
+    Supported (data ingested 2026-06-01):
+      * dcad / dallas — DCAD Certified Data (2021-2025)
+      * collin       — Collin CAD via data.austintexas.gov (2020-2025)
+      * denton       — Denton CAD PACS Appraisal Export (2020-2025)
+
+    Pending:
+      * tad / tarrant — not yet ingested (false until rolls land)
     """
-    return str(county_or_source or "").strip().lower() in {"dcad", "dallas"}
+    return str(county_or_source or "").strip().lower() in {
+        "dcad", "dallas", "collin", "denton",
+    }
 
 
 def _ownership_history_cells(hist: dict | None) -> list:
@@ -4388,16 +4400,18 @@ async def _run_download_csv(
         filename = f"{csv_workspace_name}_{_dt.now().strftime('%Y-%m-%d_%H%M%S')}.csv"
     download_name = _normalize_csv_filename(filename)
 
-    # Ownership-history (raw per-year owner columns, Dallas only). Collect
-    # all DCAD account_nums from parcel rows + orphan comps, one batched lookup.
+    # Ownership-history. Collect account_nums from every supported-county
+    # parcel + orphan comp, then one batched lookup against ownership_snapshots.
+    # Supported set is owned by _is_owner_history_supported (DCAD + Collin +
+    # Denton today; TAD pending).
     _hist_accounts: set[str] = set()
     for _r in rows:
-        if _is_dcad_source(_csv_county_source(_r)):
+        if _is_owner_history_supported(_csv_county_source(_r)):
             _an = str(_r.get("account_num") or "").strip()
             if _an:
                 _hist_accounts.add(_an)
     for _oc in orphan_comps:
-        if _is_dcad_source(_oc.get("parcel_county")):
+        if _is_owner_history_supported(_oc.get("parcel_county")):
             _an = str(_oc.get("parcel_account_num") or "").strip()
             if _an:
                 _hist_accounts.add(_an)
@@ -4743,7 +4757,7 @@ async def _run_download_csv(
             )
             _own = _ownership_history_cells(
                 ownership_history.get(str(row.get("account_num") or "").strip())
-                if _is_dcad_source(_csv_county_source(row)) else None
+                if _is_owner_history_supported(_csv_county_source(row)) else None
             )
             writer.writerow(
                 [
@@ -5082,7 +5096,7 @@ async def _run_download_csv(
             ).strip() if _cad else ""
             _own_orphan = _ownership_history_cells(
                 ownership_history.get(_cad_key[1])
-                if _is_dcad_source(_cad_key[0]) and _cad_key[1] else None
+                if _is_owner_history_supported(_cad_key[0]) and _cad_key[1] else None
             )
             writer.writerow(
                 [
