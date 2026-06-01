@@ -8796,42 +8796,47 @@ function _buildPanelAgentBlockHtml(title, agent, emptyText) {
     </div>`;
 }
 
-// Owner-history panel section. Server attaches `owner_history_cells` (a
-// 6-element list: [Current Owner, Current Owner Acquired, Prior Owner 1..4])
+// Owner-history panel section. Server attaches `owner_history` (a
+// reconciled chain dict — see _owner_history_for_popup in api/main.py)
 // only when the requesting user is a superuser (developer/owner/power_user)
-// AND the parcel's county has ingested rows in ownership_snapshots. If the
-// key is absent we render nothing — gating is server-side, the frontend
-// just respects what arrives.
+// AND the parcel's county has ingested rows in ownership_snapshots.
 //
-// Per Mike's 2026-06-01 ask, this section sits above Remarks in the parcel
-// detail panel. Empty prior-owner slots are dropped so the section size
-// matches how much history the parcel actually has.
+// The chain reconciles the live CAD owner with the snapshot data: when
+// they match (most parcels), the section shows "Current Owner" + "Acquired"
+// straight from the snapshot. When they mismatch (recent sale, snapshot
+// lags), the server promotes the live CAD owner to "Current Owner" with
+// the live deed_date for "Acquired", and demotes the snapshot's "current"
+// into the first "Previously" entry — preserves chain order so the user
+// doesn't have to mentally reconcile two competing "Current Owner" rows.
+//
+// Per Mike's 2026-06-01 ask, this section sits above Remarks in the
+// parcel detail panel.
 function _buildPanelOwnerHistoryHtml(p) {
-  const cells = Array.isArray(p?.owner_history_cells) ? p.owner_history_cells : null;
-  if (!cells || cells.length < 2) return "";
-  const labels = [
-    "Current Owner",
-    "Current Owner Acquired",
-    "Prior Owner 1",
-    "Prior Owner 2",
-    "Prior Owner 3",
-    "Prior Owner 4",
-  ];
-  const rowsHtml = cells
-    .map((value, i) => {
-      const label = labels[i] || `Prior Owner ${i - 1}`;
-      const text = String(value || "").trim();
-      if (!text) return "";
-      return _buildParcelDetailTableRow(label, _propelioEscape(text));
-    })
-    .filter(Boolean)
-    .join("");
-  if (!rowsHtml) return "";
+  const block = p?.owner_history && typeof p.owner_history === "object" ? p.owner_history : null;
+  if (!block) return "";
+  const currentOwner = String(block.current_owner || "").trim();
+  const currentAcquired = String(block.current_acquired || "").trim();
+  const previous = Array.isArray(block.previous) ? block.previous : [];
+  if (!currentOwner && previous.length === 0) return "";
+
+  const rows = [];
+  if (currentOwner) {
+    rows.push(_buildParcelDetailTableRow("Current Owner", _propelioEscape(currentOwner)));
+  }
+  if (currentAcquired) {
+    rows.push(_buildParcelDetailTableRow("Acquired", _propelioEscape(currentAcquired)));
+  }
+  for (const entry of previous) {
+    const text = String(entry || "").trim();
+    if (!text) continue;
+    rows.push(_buildParcelDetailTableRow("Previously", _propelioEscape(text)));
+  }
+  if (rows.length === 0) return "";
   return `
         <section class="parcel-panel-owner-history">
           <div class="parcel-panel-section-title">Owner History</div>
           <table class="popup-table">
-            ${rowsHtml}
+            ${rows.join("")}
           </table>
         </section>`;
 }

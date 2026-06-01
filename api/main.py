@@ -3442,21 +3442,56 @@ async def get_parcel_near(lat: float, lng: float) -> dict[str, Any]:
 _OWNER_HISTORY_POPUP_ROLES = {"developer", "owner", "power_user"}
 
 
+def _format_live_deed_for_popup(raw: Any) -> str:
+    """Coerce a live deed_date (datetime.date | 'YYYY-MM-DD' str | '' | None)
+    into the popup's MM/DD/YYYY display format. Returns "" when nothing
+    usable. Tolerates Collin's string-format and Denton's date-object form."""
+    import datetime as _dt
+    if raw is None:
+        return ""
+    if isinstance(raw, _dt.date):
+        return raw.strftime("%m/%d/%Y")
+    text = str(raw).strip()
+    if not text:
+        return ""
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y"):
+        try:
+            parsed = _dt.datetime.strptime(text, fmt).date()
+            return parsed.strftime("%m/%d/%Y")
+        except ValueError:
+            continue
+    return text  # fall back to raw string if it doesn't match a known format
+
+
 def _owner_history_for_popup(
-    county_lower: str, account_num: str, user: dict[str, Any] | None
-) -> list[str] | None:
-    """Return the 6 owner-history cells for the popup, or None when the
-    viewer isn't authorized or the county isn't supported.
+    county_lower: str,
+    account_num: str,
+    user: dict[str, Any] | None,
+    parcel_props: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Return the popup owner-history block, or None when the viewer isn't
+    authorized / county isn't supported / no data exists.
 
-    Gated to {developer, owner, power_user} per Mike's 2026-06-01 ask:
-    "Yes, in the popups, but only for superusers." Anyone outside the
-    superuser set gets None so the popup section never renders.
+    Gated to {developer, owner, power_user} per Mike's 2026-06-01 ask.
 
-    Uses the same _fetch_ownership_history + _ownership_history_cells
-    helpers as the CSV export, so the 6 cells displayed in the popup are
-    byte-identical to what'd appear on the right edge of the CSV. Returns
-    None on lookup-empty (no rows in ownership_snapshots for this acct)
-    so the popup hides the section entirely rather than showing 6 blanks.
+    Output shape (chain-oriented, reconciled against the live CAD owner):
+        {
+            "current_owner":    "...",                   # str
+            "current_acquired": "MM/DD/YYYY" | "",       # str
+            "previous":         ["NAME (~YYYY)", ...],   # up to 4 strings
+        }
+
+    Reconcile rule (Mike's preview-selected behavior 2026-06-01): if the
+    live CAD `owner_name` (from parcel_props) differs from the snapshot's
+    most-recent owner_name (after normalization), promote the live owner
+    to `current_owner`, use the live `deed_date` for `current_acquired`,
+    and shift the snapshot's "current" into the FIRST entry of
+    `previous`. Resolves the "Prior Owner N" off-by-one that surfaces
+    when a sale happened after the last certified roll.
+
+    If they match (or parcel_props lacks an owner_name to compare), the
+    block reads straight from the snapshot — same data as the CSV's
+    Current Owner / Current Owner Acquired / Prior Owner 1..4 columns.
     """
     role = (user or {}).get("role")
     if role not in _OWNER_HISTORY_POPUP_ROLES:
@@ -3470,12 +3505,55 @@ def _owner_history_for_popup(
     hist = history.get((county_lower, acct))
     if not hist:
         return None
-    cells = _ownership_history_cells(hist)
-    # _ownership_history_cells returns 6 empty strings on a malformed
-    # record; treat that as "nothing to show" rather than 6 blanks.
-    if not any(cells):
+    per_year_owners = hist.get("owners") or {}
+    distilled = _distill_distinct_owners(per_year_owners)
+    # Snapshot distilled to nothing — every year was blank/whitespace.
+    if not distilled:
         return None
-    return cells
+
+    deed_dates = hist.get("deed_dates") or {}
+    anchor_year = max(
+        (y for y, n in per_year_owners.items() if str(n or "").strip()),
+        default=None,
+    )
+    anchor_deed = deed_dates.get(anchor_year) if anchor_year is not None else None
+
+    snap_current_name = distilled[0][0]
+    snap_current_earliest = distilled[0][1]  # first year of the snapshot's "current" run
+    snap_acquired_str = anchor_deed.strftime("%m/%d/%Y") if anchor_deed else ""
+    snap_prior_runs = distilled[1:]  # [(name, earliest_year), ...] older runs
+
+    def _fmt_prior(name: str, year: int) -> str:
+        return f"{name} (~{year})"
+
+    props = parcel_props or {}
+    live_owner_raw = str(props.get("owner_name") or "").strip()
+    snap_norm = _normalize_owner_name(snap_current_name) if snap_current_name else ""
+    live_norm = _normalize_owner_name(live_owner_raw)
+
+    # MATCH (or no live-owner info to compare): snapshot drives the block.
+    if not live_norm or snap_norm == live_norm:
+        return {
+            "current_owner":    snap_current_name,
+            "current_acquired": snap_acquired_str,
+            "previous":         [_fmt_prior(n, y) for n, y in snap_prior_runs[:4]],
+        }
+
+    # MISMATCH: live owner is fresher than the latest certified roll.
+    # Promote the live owner to the top of the chain and demote the
+    # snapshot's "current" to the first "Previously" entry. The demoted
+    # entry uses the snapshot's recorded deed-year when on file (more
+    # accurate than the "first year we saw them" approximation older
+    # priors fall back to), and the earliest-year-in-run otherwise.
+    demoted_year = anchor_deed.year if anchor_deed is not None else snap_current_earliest
+    demoted = _fmt_prior(snap_current_name, demoted_year)
+    # Cap total previous entries at 4 — drop the oldest snapshot prior to
+    # make room for the demoted snapshot current.
+    return {
+        "current_owner":    live_owner_raw,
+        "current_acquired": _format_live_deed_for_popup(props.get("deed_date")),
+        "previous":         [demoted, *[_fmt_prior(n, y) for n, y in snap_prior_runs[:3]]],
+    }
 
 
 @app.get("/api/parcel/{county}/{account_num}")
@@ -3534,9 +3612,11 @@ async def get_parcel_detail(
         feature = build_feature(row, prop_type, False, None)
         feature["properties"]["source_county"] = "denton"
 
-    cells = _owner_history_for_popup(county_key, account_num, user)
-    if cells is not None:
-        feature["properties"]["owner_history_cells"] = cells
+    block = _owner_history_for_popup(
+        county_key, account_num, user, feature["properties"]
+    )
+    if block is not None:
+        feature["properties"]["owner_history"] = block
     return feature
 
 
