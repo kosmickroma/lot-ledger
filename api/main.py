@@ -1874,10 +1874,23 @@ def _csv_county_source(row: dict[str, Any]) -> str:
 def _fetch_ownership_history(account_nums: set[str]) -> dict[str, dict]:
     """Batched lookup of DCAD owner history for the given account_nums.
 
-    Returns {account_num: {"owners": {year: owner_name}, "acquired": date|None}}.
-    `acquired` is the deed_txfr_date of the latest snapshot_year present (the
-    current owner's acquisition date). Returns {} on any DB error (e.g. table
-    not yet created) so the CSV export never breaks on missing history.
+    Returns {account_num: {
+        "owners":     {year: owner_name},
+        "deed_dates": {year: deed_txfr_date|None},
+        "acquired":   date|None,
+    }}.
+
+    `owners` and `deed_dates` are per-year maps for the snapshot_years
+    present in `ownership_snapshots` for that account. `acquired` is the
+    deed_txfr_date of the latest snapshot_year present (kept for v1 cell-
+    builder back-compat). v2 callers pair the Current Owner's displayed
+    deed_txfr_date by reading `deed_dates[anchor_year]` after
+    `_distill_distinct_owners()` resolves which year anchors the current
+    owner — which may not be the latest year if the latest year's
+    owner_name is blank.
+
+    Returns {} on any DB error (e.g. table not yet created) so the CSV
+    export never breaks on missing history.
     """
     if not account_nums:
         return {}
@@ -1897,9 +1910,11 @@ def _fetch_ownership_history(account_nums: set[str]) -> dict[str, dict]:
             )
             for acct, year, owner, deed in cur.fetchall():
                 rec = out.setdefault(
-                    str(acct), {"owners": {}, "acquired": None, "_max": -1}
+                    str(acct),
+                    {"owners": {}, "deed_dates": {}, "acquired": None, "_max": -1},
                 )
                 rec["owners"][int(year)] = owner or ""
+                rec["deed_dates"][int(year)] = deed
                 if int(year) > rec["_max"]:
                     rec["_max"] = int(year)
                     rec["acquired"] = deed
