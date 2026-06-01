@@ -192,12 +192,14 @@ def test_is_owner_history_supported_collin_and_denton():
     assert main._is_owner_history_supported("  collin  ") is True
 
 
-def test_is_owner_history_supported_pending_counties():
-    """TAD/Tarrant is still pending ingest — gate must keep returning False
-    so the CSV emits blank cells rather than misleading '(None)' values."""
-    assert main._is_owner_history_supported("Tarrant") is False
-    assert main._is_owner_history_supported("TAD") is False
-    assert main._is_owner_history_supported("tad") is False
+def test_is_owner_history_supported_tad_and_tarrant():
+    """TAD joined the supported set on 2026-06-01 once their 2021-2025
+    PropertyData(Certified) rolls were ingested into ownership_snapshots."""
+    assert main._is_owner_history_supported("tad") is True
+    assert main._is_owner_history_supported("TAD") is True
+    assert main._is_owner_history_supported("tarrant") is True
+    assert main._is_owner_history_supported("Tarrant") is True
+    assert main._is_owner_history_supported("  TAD  ") is True
 
 
 def test_is_owner_history_supported_blank_and_none():

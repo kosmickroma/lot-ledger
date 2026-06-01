@@ -2051,15 +2051,13 @@ def _is_owner_history_supported(county_or_source: str | None) -> bool:
     data is not yet loaded. Extend the set when a new county is ingested.
 
     Supported (data ingested 2026-06-01):
-      * dcad / dallas — DCAD Certified Data (2021-2025)
-      * collin       — Collin CAD via data.austintexas.gov (2020-2025)
-      * denton       — Denton CAD PACS Appraisal Export (2020-2025)
-
-    Pending:
-      * tad / tarrant — not yet ingested (false until rolls land)
+      * dcad / dallas    — DCAD Certified Data (2021-2025)
+      * collin           — Collin CAD via data.austintexas.gov (2020-2025)
+      * denton           — Denton CAD PACS Appraisal Export (2020-2025)
+      * tad / tarrant    — TAD Standard Data PropertyData(Certified) (2021-2025)
     """
     return str(county_or_source or "").strip().lower() in {
-        "dcad", "dallas", "collin", "denton",
+        "dcad", "dallas", "collin", "denton", "tad", "tarrant",
     }
 
 
