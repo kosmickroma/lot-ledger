@@ -75,10 +75,11 @@ def test_writerow_cell_counts_match():
     )
 
 
-def test_total_columns_is_at_least_182():
-    # Pre-v4a baseline = 151 columns. v4a adds 31 → expect 182 minimum.
+def test_total_columns_is_at_least_188():
+    # 151 baseline + 31 v4a + 6 ownership-history (v2: Current Owner +
+    # Current Owner Acquired + Prior Owner 1..4).
     counts = _writerow_cell_counts()
-    assert counts and counts[0] >= 182, (
-        f"Expected at least 182 cells (151 baseline + 31 from v4a §2.8). "
+    assert counts and counts[0] >= 188, (
+        f"Expected at least 188 cells (151 baseline + 31 v4a + 6 ownership). "
         f"Got {counts[0] if counts else 'no rows'}."
     )

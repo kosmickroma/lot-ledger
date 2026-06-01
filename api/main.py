@@ -1874,6 +1874,238 @@ def _csv_county_source(row: dict[str, Any]) -> str:
     return ""
 
 
+def _fetch_ownership_history(
+    account_keys: set[tuple[str, str]],
+) -> dict[tuple[str, str], dict]:
+    """Batched lookup of multi-county owner history for the given keys.
+
+    `account_keys` is a set of (county_lower, account_num) pairs — the
+    pair, not the account_num alone, is the unique key. Two counties can
+    legitimately share an account_num string for unrelated parcels, so
+    keying by account_num alone would silently merge ownership timelines
+    across counties. Callers always know the parcel's county at gather
+    time (via _csv_county_source or parcel_county), so passing the pair
+    is cheap.
+
+    Returns {(county_lower, account_num): {
+        "owners":     {year: owner_name},
+        "deed_dates": {year: deed_txfr_date|None},
+        "acquired":   date|None,
+    }}.
+
+    `owners` and `deed_dates` are per-year maps for the snapshot_years
+    present in `ownership_snapshots` for that account. `acquired` is the
+    deed_txfr_date of the latest snapshot_year present (kept for v1 cell-
+    builder back-compat). v2 callers pair the Current Owner's displayed
+    deed_txfr_date by reading `deed_dates[anchor_year]` after
+    `_distill_distinct_owners()` resolves which year anchors the current
+    owner — which may not be the latest year if the latest year's
+    owner_name is blank.
+
+    Returns {} on any DB error (e.g. table not yet created) so the CSV
+    export never breaks on missing history.
+    """
+    if not account_keys:
+        return {}
+    try:
+        conn = get_conn()
+    except Exception as exc:
+        logger.warning("ownership history: get_conn failed (%s); emitting blanks", exc)
+        return {}
+    try:
+        out: dict[tuple[str, str], dict] = {}
+        # Group by county so each query hits the composite PK index
+        # (county, account_num, snapshot_year) cleanly with one ANY() per
+        # county rather than mixing counties in a tuple-IN clause.
+        by_county: dict[str, list[str]] = {}
+        for county, acct in account_keys:
+            by_county.setdefault(county, []).append(acct)
+
+        with conn.cursor() as cur:
+            for county, accts in by_county.items():
+                cur.execute(
+                    "SELECT account_num, snapshot_year, owner_name, deed_txfr_date "
+                    "FROM ownership_snapshots "
+                    "WHERE county = %s AND account_num = ANY(%s)",
+                    (county, accts),
+                )
+                for acct, year, owner, deed in cur.fetchall():
+                    key = (county, str(acct))
+                    rec = out.setdefault(
+                        key,
+                        {"owners": {}, "deed_dates": {}, "acquired": None, "_max": -1},
+                    )
+                    rec["owners"][int(year)] = owner or ""
+                    rec["deed_dates"][int(year)] = deed
+                    if int(year) > rec["_max"]:
+                        rec["_max"] = int(year)
+                        rec["acquired"] = deed
+        return out
+    except Exception as exc:
+        # A missing table (before the ingest runs) is benign and expected during
+        # the deploy-before-ingest window — warn (no full traceback), don't spam.
+        # pgcode 42P01 = undefined_table. Real errors still surface as warnings.
+        if getattr(exc, "pgcode", None) == "42P01":
+            logger.warning("ownership_snapshots table not present yet; emitting blanks")
+        else:
+            logger.warning("ownership history lookup failed (%s); emitting blanks", exc)
+        try:
+            conn.rollback()  # don't return a poisoned connection to the pool
+        except Exception:
+            pass
+        return {}
+    finally:
+        release_conn(conn)
+
+
+# v2 (2026-06-01): distinct-owners-most-recent-first helpers for the
+# ownership-history CSV columns. See
+# docs/superpowers/specs/2026-06-01-dcad-ownership-history-v2-design.md.
+
+_OWNER_NAME_PUNCT_RE = re.compile(r"[,.'()]")
+_OWNER_NAME_WS_RE = re.compile(r"\s+")
+
+
+def _normalize_owner_name(name: str | None) -> str:
+    """Normalize an owner_name for distinct-owner grouping.
+
+    Trim + uppercase + collapse internal whitespace + strip punctuation
+    (commas, periods, apostrophes, parens), and replace '&' with 'AND'.
+    Suffixes like LLC/INC/TR/TRUST/EST are deliberately NOT stripped —
+    those represent real ownership flips (estate planning, probate) per
+    the 2026-05-28 spike validation.
+
+    Returns "" for None / blank input.
+    """
+    if not name:
+        return ""
+    s = str(name).strip()
+    if not s:
+        return ""
+    s = s.upper().replace("&", " AND ")
+    s = _OWNER_NAME_PUNCT_RE.sub("", s)
+    s = _OWNER_NAME_WS_RE.sub(" ", s).strip()
+    return s
+
+
+def _distill_distinct_owners(per_year_owners: dict[int, str]) -> list[tuple[str, int]]:
+    """Distill {year: owner_name} into distinct ownership periods, most-recent-first.
+
+    Each entry is (display_name, earliest_year_in_run). `display_name` is
+    the actual stored owner_name from the LATEST year in the run (latest
+    spelling wins, trimmed of leading/trailing whitespace but otherwise
+    preserved as stored). `earliest_year_in_run` is the earliest
+    CALENDAR-CONSECUTIVE year whose normalized name matches.
+
+    Blank/whitespace-only owner_name years are SKIPPED — they don't
+    anchor a run, don't contribute to grouping, and are invisible to
+    the output.
+
+    Grouping uses _normalize_owner_name() for equality. Calendar-
+    consecutive years are required. If per_year_owners = {2024: 'A',
+    2022: 'A'} with no 2023 entry, the result is TWO entries for A — the
+    gap breaks the run.
+
+    Returns [] for empty input or all-blank input.
+    """
+    if not per_year_owners:
+        return []
+    cleaned: list[tuple[int, str, str]] = []
+    for year, raw_name in per_year_owners.items():
+        norm = _normalize_owner_name(raw_name)
+        if not norm:
+            continue
+        display = str(raw_name).strip()
+        cleaned.append((int(year), display, norm))
+    if not cleaned:
+        return []
+    cleaned.sort(key=lambda r: r[0], reverse=True)
+    result: list[tuple[str, int]] = []
+    cur_norm: str | None = None
+    cur_display: str = ""
+    cur_earliest: int = 0
+    for year, display, norm in cleaned:
+        if cur_norm is None:
+            cur_norm = norm
+            cur_display = display
+            cur_earliest = year
+        elif norm == cur_norm and year == cur_earliest - 1:
+            cur_earliest = year
+        else:
+            result.append((cur_display, cur_earliest))
+            cur_norm = norm
+            cur_display = display
+            cur_earliest = year
+    if cur_norm is not None:
+        result.append((cur_display, cur_earliest))
+    return result
+
+
+def _is_owner_history_supported(county_or_source: str | None) -> bool:
+    """True if this county has ingested rows in `ownership_snapshots`.
+
+    The v2 distinct-owners CSV columns + popup display read from
+    `ownership_snapshots`. A county only appears here once we've ingested
+    its certified rolls; this gate keeps the CSV emitting blank cells
+    rather than misleading "Current Owner = (None)" for counties whose
+    data is not yet loaded. Extend the set when a new county is ingested.
+
+    Supported (data ingested 2026-06-01):
+      * dcad / dallas    — DCAD Certified Data (2021-2025)
+      * collin           — Collin CAD via data.austintexas.gov (2020-2025)
+      * denton           — Denton CAD PACS Appraisal Export (2020-2025)
+      * tad / tarrant    — TAD Standard Data PropertyData(Certified) (2021-2025)
+    """
+    return str(county_or_source or "").strip().lower() in {
+        "dcad", "dallas", "collin", "denton", "tad", "tarrant",
+    }
+
+
+def _ownership_history_cells(hist: dict | None) -> list:
+    """Render the 6 v2 ownership-history cells:
+        [Current Owner, Current Owner Acquired, Prior Owner 1..4]
+
+    `hist` is the per-account record from `_fetch_ownership_history`
+    (with v2 `owners`, `deed_dates`, `acquired` keys), or None for
+    non-DCAD / missing accounts. Always returns exactly 6 cells so
+    header/parcel/orphan row widths stay aligned.
+
+    Layout C, per docs/superpowers/specs/2026-06-01-dcad-ownership-history-v2-design.md:
+      - Slot 0 (Current Owner): display_name of the first run from
+        `_distill_distinct_owners` (the LATEST non-blank year's owner_name).
+      - Slot 1 (Current Owner Acquired): the deed_txfr_date for the
+        anchor year (the latest non-blank year), formatted MM/DD/YYYY;
+        blank when null. The anchor year — which may not be the max
+        snapshot year if the max is blank — is recovered from
+        `hist["deed_dates"]` (added by the v2 lookup helper) so the date
+        always pairs with the actually-displayed Current Owner.
+      - Slots 2-5 (Prior Owner 1-4): up to 4 prior distilled runs as
+        'NAME (~YYYY)' where YYYY = earliest_year_in_run. Older priors
+        (5th+) are silently dropped (overflow handling deferred until
+        1999-2020 ownership data lands).
+    """
+    if not hist:
+        return ["", "", "", "", "", ""]
+    per_year_owners = hist.get("owners") or {}
+    distilled = _distill_distinct_owners(per_year_owners)
+    if not distilled:
+        return ["", "", "", "", "", ""]
+    deed_dates = hist.get("deed_dates") or {}
+    anchor_year = max(
+        (y for y, n in per_year_owners.items() if str(n or "").strip()),
+        default=None,
+    )
+    anchor_deed = deed_dates.get(anchor_year) if anchor_year is not None else None
+    current_name = distilled[0][0]
+    current_acquired = anchor_deed.strftime("%m/%d/%Y") if anchor_deed else ""
+    prior_cells: list[str] = [
+        f"{display} (~{earliest})" for display, earliest in distilled[1:5]
+    ]
+    while len(prior_cells) < 4:
+        prior_cells.append("")
+    return [current_name, current_acquired, *prior_cells]
+
+
 def _google_maps_link(row: dict[str, Any]) -> str:
     property_address = str(row.get("property_address", "") or "").strip()
     street_num = str(row.get("street_num", "") or "").strip()
@@ -4185,6 +4417,28 @@ async def _run_download_csv(
         filename = f"{csv_workspace_name}_{_dt.now().strftime('%Y-%m-%d_%H%M%S')}.csv"
     download_name = _normalize_csv_filename(filename)
 
+    # Ownership-history. Collect (county_lower, account_num) keys from every
+    # supported-county parcel + orphan comp, then one batched lookup against
+    # ownership_snapshots (one query per county, joined back here). Supported
+    # set is owned by _is_owner_history_supported (DCAD + Collin + Denton
+    # today; TAD pending). Keying by (county, account_num) — not account_num
+    # alone — keeps two counties that share the same account_num string from
+    # bleeding ownership timelines into each other.
+    _hist_keys: set[tuple[str, str]] = set()
+    for _r in rows:
+        _src = _csv_county_source(_r)
+        if _is_owner_history_supported(_src):
+            _an = str(_r.get("account_num") or "").strip()
+            if _an:
+                _hist_keys.add((_src.lower(), _an))
+    for _oc in orphan_comps:
+        _orphan_county = str(_oc.get("parcel_county") or "").strip().lower()
+        if _is_owner_history_supported(_orphan_county):
+            _an = str(_oc.get("parcel_account_num") or "").strip()
+            if _an:
+                _hist_keys.add((_orphan_county, _an))
+    ownership_history = _fetch_ownership_history(_hist_keys)
+
     def generate_csv():
         buffer = io.StringIO()
         writer = csv.writer(buffer)
@@ -4406,6 +4660,12 @@ async def _run_download_csv(
                 "Owner 2 %",
                 "Owner 3 Name",
                 "Owner 3 %",
+                "Current Owner",
+                "Current Owner Acquired",
+                "Prior Owner 1",
+                "Prior Owner 2",
+                "Prior Owner 3",
+                "Prior Owner 4",
             ]
         )
         buffer.seek(0)
@@ -4516,6 +4776,13 @@ async def _run_download_csv(
                     str(row.get("county", "") or "").strip().lower(),
                     str(row.get("account_num", "") or "").strip(),
                 ) == originator_key
+            )
+            _own = _ownership_history_cells(
+                ownership_history.get(
+                    (_csv_county_source(row).lower(),
+                     str(row.get("account_num") or "").strip())
+                )
+                if _is_owner_history_supported(_csv_county_source(row)) else None
             )
             writer.writerow(
                 [
@@ -4705,6 +4972,7 @@ async def _run_download_csv(
                     round(_safe_float(row.get("college_taxable_val")), 0) if _safe_float(row.get("college_taxable_val")) is not None else "",
                     round(_safe_float(row.get("special_dist_taxable_val")), 0) if _safe_float(row.get("special_dist_taxable_val")) is not None else "",
                     *_additional_owner_cells(row.get("additional_owners")),
+                    _own[0], _own[1], _own[2], _own[3], _own[4], _own[5],
                 ]
             )
             buffer.seek(0)
@@ -4851,6 +5119,10 @@ async def _run_download_csv(
                     str(_cad.get("legal5", "") or "").strip(),
                 ]
             ).strip() if _cad else ""
+            _own_orphan = _ownership_history_cells(
+                ownership_history.get(_cad_key)  # (county_lower, account_num) — same shape as the fetch dict's keys
+                if _is_owner_history_supported(_cad_key[0]) and _cad_key[1] else None
+            )
             writer.writerow(
                 [
                     "Comp",                                                                                     # 1
@@ -5033,6 +5305,7 @@ async def _run_download_csv(
                     round(_safe_float(_cad.get("college_taxable_val")), 0) if _cad and _safe_float(_cad.get("college_taxable_val")) is not None else "",
                     round(_safe_float(_cad.get("special_dist_taxable_val")), 0) if _cad and _safe_float(_cad.get("special_dist_taxable_val")) is not None else "",
                     *_additional_owner_cells(_cad.get("additional_owners") if _cad else []),
+                    _own_orphan[0], _own_orphan[1], _own_orphan[2], _own_orphan[3], _own_orphan[4], _own_orphan[5],
                 ]
             )
             buffer.seek(0)
