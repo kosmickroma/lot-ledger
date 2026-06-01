@@ -707,7 +707,20 @@ def query_parcels(polygon: list[list[float]]) -> ParcelQueryResult:
 
 
 def classify_parcel(row: dict[str, Any], exempt_set: set[str]) -> str:
-    """Ported parcel type logic from the reference tool."""
+    """Ported parcel type logic from the reference tool.
+
+    Duplexes (v1, 2026-06-01): the row's `units` field (aliased from
+    `res_detail.num_units` in both `query_parcels` and
+    `_fetch_dcad_parcel_by_account`) gates the new bucket. SPTD is used
+    only to decide *eligibility* — condos (A13/A14) and apartments (B11)
+    stay multifamily regardless of unit count because DCAD's
+    classification of "this is a condo or apartment" is authoritative.
+    A live data audit showed DCAD's `B12` ("Duplexes") SPTD label
+    captures 60% single-unit parcels, so trusting SPTD alone would put
+    10k single-family-by-structure parcels into the duplex bucket; the
+    operator wants ACTUAL 2-4 unit residential only. See
+    `docs/DUPLEXES_PROPERTY_TYPE_SPEC.md` for the full audit.
+    """
     account_num = _clean_text(row.get("account_num"))
     sptd = _clean_text(row.get("sptd_code"))
     owner_up = _clean_text(row.get("owner_name")).upper()
@@ -722,8 +735,20 @@ def classify_parcel(row: dict[str, Any], exempt_set: set[str]) -> str:
 
     if account_num in exempt_set or sptd in {"X11", "D10"} or non_target_owner or is_nominal:
         return "exempt"
-    if sptd in {"B11", "B12", "A14", "A13"}:
+    # Condos (A13/A14) and apartments (B11) stay multifamily by DCAD's
+    # classification regardless of unit count. Audit (2026-06-01): A13
+    # has 99.96% shared-polygon stacking rate, B11 averages 5+ units;
+    # both buckets are fundamentally non-duplex for Mike's flip thesis.
+    if sptd in {"B11", "A14", "A13"}:
         return "multifamily"
+    # Duplexes: residential SPTDs with `units` in {2, 3, 4}. Eligible
+    # SPTDs are the existing single-family bucket (A11/A12/A20) PLUS
+    # B12 — DCAD's "Duplexes" label is unreliable for unit count, so we
+    # trust `units` here. Outside that 2-4 band, B12 falls through to
+    # single_family (single-unit B12 parcels are functionally SFR).
+    units = _safe_int(row.get("units"))
+    if sptd in {"A11", "A12", "A20", "B12"} and units is not None and 2 <= units <= 4:
+        return "duplexes"
     if sptd == "C11":
         return "vacant"
     if sptd in {"C12", "C13", "F10", "F20"}:

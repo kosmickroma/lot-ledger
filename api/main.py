@@ -1185,7 +1185,7 @@ def _build_features_from_rows(
     features: list[dict[str, Any]] = []
     parcel_ratings_map: dict[tuple[str, str], str] = _load_parcel_ratings_for_workspace(area_id)
     counts: dict[str, int] = {
-        "active": 0, "off_market": 0, "multifamily": 0,
+        "active": 0, "off_market": 0, "multifamily": 0, "duplexes": 0,
         "vacant": 0, "commercial": 0, "exempt": 0, "total": len(rows),
     }
     for row in rows:
@@ -1200,6 +1200,8 @@ def _build_features_from_rows(
             prop_type = classify_parcel(row, exempt_set)
         if prop_type == "multifamily":
             counts["multifamily"] += 1
+        elif prop_type == "duplexes":
+            counts["duplexes"] += 1
         elif prop_type == "vacant":
             counts["vacant"] += 1
         elif prop_type == "commercial":
@@ -3773,7 +3775,7 @@ async def analyze(request: AnalyzeRequest, req: Request, user: dict[str, Any] = 
         return {
             "type": "FeatureCollection",
             "features": [],
-            "counts": {"active": 0, "off_market": 0, "multifamily": 0, "vacant": 0, "commercial": 0, "exempt": 0, "total": 0},
+            "counts": {"active": 0, "off_market": 0, "multifamily": 0, "duplexes": 0, "vacant": 0, "commercial": 0, "exempt": 0, "total": 0},
             "sold_points": sold_points,
             "job_id": empty_job_id,
             "redfin_requested": include_redfin,
@@ -3803,6 +3805,7 @@ async def analyze(request: AnalyzeRequest, req: Request, user: dict[str, Any] = 
         "active": 0,
         "off_market": 0,
         "multifamily": 0,
+        "duplexes": 0,
         "vacant": 0,
         "commercial": 0,
         "exempt": 0,
@@ -3832,6 +3835,8 @@ async def analyze(request: AnalyzeRequest, req: Request, user: dict[str, Any] = 
             counts["active"] += 1
         elif prop_type == "multifamily":
             counts["multifamily"] += 1
+        elif prop_type == "duplexes":
+            counts["duplexes"] += 1
         elif prop_type == "vacant":
             counts["vacant"] += 1
         elif prop_type == "commercial":
