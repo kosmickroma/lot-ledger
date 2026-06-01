@@ -20,15 +20,18 @@ DCAD ingest, i.e. Mike's prod Cloud SQL):
 
 Field mapping (Collin → DCAD equivalent in ownership_snapshots):
     propID       → account_num
-    propYear     → (snapshot_year — taken from folder name, NOT this column,
-                    to match DCAD's behavior; propYear is a sanity-check anchor)
+    propYear     → (NOT used as snapshot_year — folder name wins, matching
+                    DCAD's behavior). The first row's propYear IS sanity-
+                    checked against the folder year; mismatch logs a warning
+                    but does not fail. Catches accidental file-in-wrong-
+                    folder placement.
     ownerName    → owner_name      (primary owner only; ownerNameAddtl is the
                                     co-owner and is intentionally ignored —
                                     co-ownership is a separate feature, the
                                     "Owner 2 Name / %" CSV-export columns)
     deedEffDate  → deed_txfr_date  (effective date; deedFileDate is administrative
-                                    and has a higher null rate, so we don't fall
-                                    back to it)
+                                    and has a higher null rate, so we never
+                                    fall back to it even when both are present)
 """
 from __future__ import annotations
 
@@ -68,17 +71,23 @@ def _find_year_files(historical_dir: str) -> dict[int, str]:
     if not os.path.isdir(historical_dir):
         return found
     for entry in sorted(os.listdir(historical_dir)):
+        # 4-digit numeric AND within a sane year range (rejects an accidental
+        # '0000' folder, which would otherwise produce snapshot_year=0 rows).
         if not (entry.isdigit() and len(entry) == 4):
+            continue
+        year_int = int(entry)
+        if not (1900 <= year_int <= 2100):
             continue
         year_path = os.path.join(historical_dir, entry)
         if not os.path.isdir(year_path):
             continue
-        # The download script writes 'collin_<year>.csv'; accept any 'collin_*.csv'
-        # case-insensitively to be tolerant of future renames.
+        # Match exactly 'collin_<year>.csv' (case-insensitive). Sorted
+        # listdir + first-match for deterministic file selection if a
+        # case-insensitive filesystem accidentally produces duplicates.
         target_lower = f"collin_{entry}.csv"
-        for fname in os.listdir(year_path):
+        for fname in sorted(os.listdir(year_path)):
             if fname.lower() == target_lower:
-                found[int(entry)] = os.path.join(year_path, fname)
+                found[year_int] = os.path.join(year_path, fname)
                 break
     return dict(sorted(found.items()))
 
@@ -113,6 +122,30 @@ def _row_to_record(
     return (COUNTY, acct, year, owner, deed, source_file)
 
 
+def _check_propyear_matches_folder(
+    first_row: dict[str, str], expected_year: int, source_file: str
+) -> None:
+    """Sanity-check the first data row's `propYear` column against the folder
+    year we're ingesting under. Prints a warning on mismatch but does not
+    fail — catches the foot-gun where a file gets placed in the wrong year
+    folder (which would otherwise silently write 400k rows under the wrong
+    snapshot_year). Silent on missing or unparseable propYear (treated as
+    "no anchor available, trust the folder")."""
+    raw = (first_row.get("propYear") or "").strip()
+    if not raw:
+        return
+    try:
+        seen = int(raw)
+    except ValueError:
+        return
+    if seen != expected_year:
+        print(
+            f"  WARNING: {source_file} has propYear={seen} on its first row "
+            f"but is in folder for year={expected_year}; ingesting under "
+            f"folder year (file may have been placed in the wrong folder)"
+        )
+
+
 def _stream_record_batches(
     path: str, year: int, source_file: str, batch_size: int = BATCH_SIZE
 ) -> Iterator[list[tuple]]:
@@ -121,14 +154,30 @@ def _stream_record_batches(
     Peak memory is one batch (never the whole file or year), so ingesting a
     ~400k-row Collin roll (~250 MB on disk) stays at a few MB resident.
 
-    Collin is UTF-8 (NOT latin-1 like DCAD). csv.DictReader is quote-aware,
-    which matters here because Collin owner names and addresses frequently
-    contain embedded commas (e.g. "SANTA CRUZ RICHARD &", "LEA C SANTA CRUZ").
+    Encoding is `utf-8-sig` — strips a UTF-8 BOM if present, transparently
+    handles BOM-less files. data.austintexas.gov (Socrata) does NOT currently
+    serve a BOM on Collin's CSVs, but the with-BOM Excel-compatible export
+    flavor is one toggle away on Socrata's side, and a BOM would otherwise
+    make the first header column literally '﻿propID' — silently turning
+    every row's `propID` lookup into None and dropping the entire ingest with
+    zero rows and no error.
+
+    csv.DictReader is quote-aware, which matters because Collin owner names
+    and addresses frequently contain embedded commas (e.g. "SANTA CRUZ,
+    RICHARD & LEA").
+
+    On the FIRST data row, we sanity-check `propYear` against the folder
+    year and warn (don't fail) on mismatch — catches accidental
+    file-in-wrong-folder placement.
     """
     batch: list[tuple] = []
-    with open(path, "r", encoding="utf-8", newline="") as fh:
+    with open(path, "r", encoding="utf-8-sig", newline="") as fh:
         reader = csv.DictReader(fh)
+        checked_propyear = False
         for row in reader:
+            if not checked_propyear:
+                checked_propyear = True
+                _check_propyear_matches_folder(row, year, source_file)
             rec = _row_to_record(row, year, source_file)
             if rec is None:
                 continue

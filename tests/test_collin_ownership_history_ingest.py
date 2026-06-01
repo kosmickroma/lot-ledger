@@ -9,6 +9,7 @@ import datetime as dt
 from pathlib import Path
 
 from scripts.ownership_history.build_collin_ownership_history import (
+    _check_propyear_matches_folder,
     _find_year_files,
     _parse_deed_date,
     _row_to_record,
@@ -61,6 +62,21 @@ def test_find_year_files_case_insensitive_filename(tmp_path: Path):
 
 def test_find_year_files_missing_dir_returns_empty(tmp_path: Path):
     assert _find_year_files(str(tmp_path / "nope")) == {}
+
+
+def test_find_year_files_rejects_year_outside_1900_2100(tmp_path: Path):
+    """A 4-digit folder named '0000' would otherwise produce snapshot_year=0
+    rows if a collin_0000.csv accidentally landed there."""
+    bad = tmp_path / "0000"
+    bad.mkdir()
+    (bad / "collin_0000.csv").write_text("propYear,propID\n0,1\n")
+
+    good = tmp_path / "2024"
+    good.mkdir()
+    (good / "collin_2024.csv").write_text("propYear,propID\n2024,1\n")
+
+    found = _find_year_files(str(tmp_path))
+    assert set(found.keys()) == {2024}
 
 
 def test_parse_deed_date():
@@ -124,6 +140,97 @@ def test_row_to_record_uses_deed_eff_not_file_date():
     }
     rec = _row_to_record(row, 2022, "f.csv")
     assert rec[4] is None  # deed_txfr_date = None even though deedFileDate exists
+
+
+def test_row_to_record_ignores_file_date_when_both_present():
+    """Even when BOTH dates are populated and differ, we keep only
+    deedEffDate. Locks in the policy decision so future drift to a
+    'fall-back to file date' behavior is caught."""
+    row = {
+        "propID": "100",
+        "ownerName": "OWNER",
+        "deedEffDate": "04/17/2019",
+        "deedFileDate": "04/20/2019",  # different from effDate — must be ignored
+    }
+    rec = _row_to_record(row, 2022, "f.csv")
+    assert rec[4] == dt.date(2019, 4, 17)  # effDate wins; fileDate not read at all
+
+
+def test_stream_record_batches_handles_utf8_bom(tmp_path: Path, capsys):
+    """A CSV with a UTF-8 BOM (one toggle away on Socrata's export) would
+    otherwise make the first header column '\\ufeffpropID' and silently drop
+    every row. encoding='utf-8-sig' must transparently strip it."""
+    csv_text = (
+        "propID,ownerName,deedEffDate\n"
+        "A1,OWNER A,01/02/2020\n"
+        "A2,OWNER B,03/04/2021\n"
+    )
+    csv_path = tmp_path / "collin_2024.csv"
+    # Write WITH a BOM (utf-8-sig adds the BOM on write).
+    csv_path.write_text(csv_text, encoding="utf-8-sig")
+
+    batches = list(
+        _stream_record_batches(str(csv_path), 2024, "collin_2024.csv", batch_size=10)
+    )
+    flat = [rec for b in batches for rec in b]
+    # Both rows must come through with valid propID — proves BOM was stripped.
+    assert [rec[1] for rec in flat] == ["A1", "A2"]
+    assert all(rec[3] == "OWNER A" or rec[3] == "OWNER B" for rec in flat)
+
+
+def test_stream_record_batches_warns_on_propyear_mismatch(tmp_path: Path, capsys):
+    """If a CSV's first-row propYear disagrees with its folder year, the
+    ingest still proceeds (folder year wins) but a warning is printed so a
+    misplaced file isn't silent."""
+    csv_text = (
+        "propID,ownerName,deedEffDate,propYear\n"
+        "A1,OWNER A,01/02/2020,2023\n"  # propYear=2023 but caller says folder year is 2025
+    )
+    csv_path = tmp_path / "collin_2025.csv"
+    csv_path.write_text(csv_text, encoding="utf-8")
+
+    batches = list(
+        _stream_record_batches(str(csv_path), 2025, "collin_2025.csv", batch_size=10)
+    )
+    captured = capsys.readouterr()
+    assert "WARNING" in captured.out
+    assert "propYear=2023" in captured.out
+    assert "year=2025" in captured.out
+    # Ingest still proceeds — the row gets written under the folder year (2025).
+    flat = [rec for b in batches for rec in b]
+    assert flat[0][2] == 2025  # snapshot_year is folder year, not row's propYear
+
+
+def test_check_propyear_silent_on_missing_or_garbage():
+    """_check_propyear_matches_folder is silent (no warning) when propYear is
+    blank, missing, or non-numeric — treating those as 'no anchor available'
+    rather than spurious warnings."""
+    import io
+    import contextlib
+
+    # No propYear key at all.
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        _check_propyear_matches_folder({}, 2024, "f.csv")
+    assert buf.getvalue() == ""
+
+    # Blank propYear.
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        _check_propyear_matches_folder({"propYear": ""}, 2024, "f.csv")
+    assert buf.getvalue() == ""
+
+    # Non-numeric propYear.
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        _check_propyear_matches_folder({"propYear": "abc"}, 2024, "f.csv")
+    assert buf.getvalue() == ""
+
+    # Matching propYear — silent.
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        _check_propyear_matches_folder({"propYear": "2024"}, 2024, "f.csv")
+    assert buf.getvalue() == ""
 
 
 def test_stream_record_batches_bounded_skips_blank_and_preserves_order(tmp_path: Path):
