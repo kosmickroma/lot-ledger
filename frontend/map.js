@@ -25,6 +25,7 @@ const COLORS = {
   off_market: "#2980b9",
   vacant: "#27ae60",
   multifamily: "#2c2c2c",
+  duplexes: "#9C7B8C",
   commercial: "#8B7355",
   exempt: "#95a5a6",
   active: "#D92228",
@@ -36,6 +37,7 @@ const BORDER_COLORS = {
   off_market: "#1a6a9a",
   vacant: "#1e8449",
   multifamily: "#1f1f1f",
+  duplexes: "#7E6373",
   commercial: "#6e5c42",
   exempt: "#7f8c8d",
   active: "#a3161a",
@@ -203,6 +205,7 @@ const TYPE_LABELS = {
   single_family: "Off-Market SFR",
   vacant: "Vacant Lot",
   multifamily: "Multifamily",
+  duplexes: "Duplexes",
   commercial: "Commercial",
   exempt: "Exempt",
   active: "Active Listing",
@@ -226,6 +229,7 @@ const DEFAULT_FILTERS = {
   off_market: true,
   vacant: true,
   multifamily: false,
+  duplexes: false,  // new types default OFF per filter-defaults convention (2026-06-01)
   commercial: false,
   exempt: false,
 };
@@ -236,6 +240,7 @@ const FILTER_INPUT_IDS = {
   off_market: "filter-off-market",
   vacant: "filter-vacant",
   multifamily: "filter-multifamily",
+  duplexes: "filter-duplexes",
   commercial: "filter-commercial",
   exempt: "filter-exempt",
 };
@@ -415,7 +420,7 @@ function passesCompFilters(feature) {
   return true;
 }
 
-const PARCEL_LAYER_KEYS = ["active", "sold", "off_market", "vacant", "multifamily", "commercial", "exempt"];
+const PARCEL_LAYER_KEYS = ["active", "sold", "off_market", "vacant", "multifamily", "duplexes", "commercial", "exempt"];
 
 // -- Click mode helpers (Jump vs Stay) --
 let currentClickMode = "stay";
@@ -2021,6 +2026,12 @@ function restoreFilterState(state) {
     return;
   }
   if (Number(state.v || 0) !== 1) return;
+  // Rebase to defaults first so keys MISSING from the saved blob (e.g.,
+  // older saved_areas with no `duplexes` checkbox key) resolve to the
+  // current default rather than inheriting whatever the user's in-memory
+  // toggle happened to be. Without this, restoring an old area would
+  // silently leak the current toggle state for any new filter key.
+  Object.assign(filterState, DEFAULT_FILTERS);
   if (state.checkboxes && typeof state.checkboxes === "object") Object.assign(filterState, state.checkboxes);
   // Legacy R.F. Active filter never auto-enables from saved state — mirrors the
   // localStorage-restore guard above. Old saved areas baked R.F. Active on when
@@ -2121,6 +2132,7 @@ function classifyFeatureForFilter(feature) {
   if (p.on_redfin) return "active";
   if (p.prop_type === "vacant") return "vacant";
   if (p.prop_type === "multifamily") return "multifamily";
+  if (p.prop_type === "duplexes") return "duplexes";
   if (p.prop_type === "commercial") return "commercial";
   if (p.prop_type === "exempt") return "exempt";
   return "off_market";
@@ -2153,6 +2165,7 @@ function getVisibleFeatureCounts(features, options = {}) {
     off_market: 0,
     vacant: 0,
     multifamily: 0,
+    duplexes: 0,
     commercial: 0,
     exempt: 0,
   };
@@ -2203,6 +2216,7 @@ function getVisibleFeatureCounts(features, options = {}) {
       active: counts.active,
       vacant: counts.vacant,
       multifamily: counts.multifamily,
+      duplexes: counts.duplexes,
       commercial: counts.commercial,
       exempt: counts.exempt,
     });
@@ -6854,6 +6868,7 @@ function readPropelioFiltersFromUI() {
     // Property Type Filter toggles — read from the parcel-side filterState
     // so the same toggles gate both parcels and comps.
     parcelTypeMultifamily: filterState.multifamily,
+    parcelTypeDuplexes:    filterState.duplexes,
     parcelTypeCommercial:  filterState.commercial,
     parcelTypeVacant:      filterState.vacant,
     parcelTypeExempt:      filterState.exempt,
@@ -7017,6 +7032,7 @@ function compPassesPropelioFilters(comp, filters) {
   //                       residential-default
   const bucket = _compPropertyTypeBucket(comp);
   if (bucket === "multifamily"   && filters.parcelTypeMultifamily === false) return false;
+  if (bucket === "duplexes"      && filters.parcelTypeDuplexes    === false) return false;
   if (bucket === "commercial"    && filters.parcelTypeCommercial  === false) return false;
   if (bucket === "vacant"        && filters.parcelTypeVacant      === false) return false;
   if (bucket === "exempt"        && filters.parcelTypeExempt      === false) return false;
@@ -8388,6 +8404,7 @@ function _updateMergedSidebarCounts() {
     ["off_market", visibleCounts.off_market],
     ["vacant", visibleCounts.vacant],
     ["multifamily", visibleCounts.multifamily],
+    ["duplexes", visibleCounts.duplexes],
     ["commercial", visibleCounts.commercial],
     ["exempt", visibleCounts.exempt],
   ];
@@ -8562,6 +8579,7 @@ function getBorderColor(feature) {
 function getStatusLabel(feature) {
   if (isRedfinVisualActive(feature)) return "ACTIVE LISTING";
   if (feature.properties.prop_type === "multifamily") return "MULTIFAMILY";
+  if (feature.properties.prop_type === "duplexes") return "DUPLEXES";
   if (feature.properties.prop_type === "vacant") return "VACANT LOT";
   if (feature.properties.prop_type === "commercial") return "COMMERCIAL";
   if (feature.properties.prop_type === "exempt") return "EXEMPT (church/school/nonprofit)";
@@ -9966,6 +9984,7 @@ function renderSidebar(counts, markers) {
       off_market: counts.off_market,
       vacant: counts.vacant,
       multifamily: counts.multifamily,
+      duplexes: counts.duplexes,
       commercial: counts.commercial,
       exempt: counts.exempt,
     };
@@ -9978,6 +9997,7 @@ function renderSidebar(counts, markers) {
     ["off_market", visibleCounts.off_market],
     ["vacant", visibleCounts.vacant],
     ["multifamily", visibleCounts.multifamily],
+    ["duplexes", visibleCounts.duplexes],
     ["commercial", visibleCounts.commercial],
     ["exempt", visibleCounts.exempt],
   ];
@@ -10412,11 +10432,12 @@ async function runTiledAnalysis(polygon, includeRedfin, includeSold, options = {
   });
 
   // Recount from deduplicated + clipped features
-  const mergedCounts = { active: 0, off_market: 0, multifamily: 0, vacant: 0, commercial: 0, exempt: 0, total: filteredFeatures.length };
+  const mergedCounts = { active: 0, off_market: 0, multifamily: 0, duplexes: 0, vacant: 0, commercial: 0, exempt: 0, total: filteredFeatures.length };
   for (const feature of filteredFeatures) {
     const p = feature.properties || {};
     if (p.on_redfin) mergedCounts.active++;
     else if (p.prop_type === "multifamily") mergedCounts.multifamily++;
+    else if (p.prop_type === "duplexes") mergedCounts.duplexes++;
     else if (p.prop_type === "vacant") mergedCounts.vacant++;
     else if (p.prop_type === "commercial") mergedCounts.commercial++;
     else if (p.prop_type === "exempt") mergedCounts.exempt++;
