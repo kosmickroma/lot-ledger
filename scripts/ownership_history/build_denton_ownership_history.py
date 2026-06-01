@@ -250,6 +250,7 @@ def _stream_dedup_records(
     non_cert_rows = 0
     blank_propid = 0
     blank_owner = 0
+    unparseable_dates = 0  # non-blank deed_dt that _parse_pacs_date rejected
     dedup_replaced = 0
     same_pyownerid_different_name = 0
 
@@ -286,7 +287,16 @@ def _stream_dedup_records(
                 continue
             py_owner_id_raw = line[596:608].strip()
             py_owner_id = int(py_owner_id_raw) if py_owner_id_raw.isdigit() else 0
-            deed = _parse_pacs_date(line[2033:2058])
+            deed_raw = line[2033:2058]
+            deed = _parse_pacs_date(deed_raw)
+            if deed is None:
+                # Distinguish legitimate-blank (no deed) from drift (format we
+                # couldn't parse). Both upsert with deed=None; the counter
+                # surfaces drift so a future file's separator change is visible
+                # without scanning the DB.
+                deed_stripped = deed_raw.strip()
+                if deed_stripped and deed_stripped not in ("00000000", "00-00-0000"):
+                    unparseable_dates += 1
             record = (COUNTY, prop_id, year, owner_name, deed, source_file)
 
             existing = dedup.get(prop_id)
@@ -303,9 +313,33 @@ def _stream_dedup_records(
         f"  {source_file}: scanned={rows_scanned:,} "
         f"short={short_rows:,} non_cert={non_cert_rows:,} "
         f"blank_propid={blank_propid:,} blank_owner={blank_owner:,} "
+        f"unparseable_dates={unparseable_dates:,} "
         f"unique={len(dedup):,} dedup_replaced={dedup_replaced:,} "
         f"same_id_diff_name={same_pyownerid_different_name:,}"
     )
+
+    # Loud-not-silent: if any skip-reason bucket exceeds 1% of scanned rows
+    # the file is suspect (format drift, wrong file in the year folder, or a
+    # corrupt extraction). Emit a WARNING per offending bucket so it's visible
+    # in the run log without having to inspect counts by eye. Threshold is
+    # 1% — for a clean Denton year of ~410k rows, a normal source has ZERO
+    # short/non_cert/blank_*; even a 0.5% bucket would be unusual.
+    if rows_scanned > 0:
+        threshold_pct = 1.0
+        for name, count in (
+            ("short", short_rows),
+            ("non_cert", non_cert_rows),
+            ("blank_propid", blank_propid),
+            ("blank_owner", blank_owner),
+            ("unparseable_dates", unparseable_dates),
+        ):
+            pct = count / rows_scanned * 100.0
+            if pct > threshold_pct:
+                print(
+                    f"  WARNING: {source_file} {name}={count:,} "
+                    f"({pct:.2f}% of {rows_scanned:,} scanned) "
+                    f"exceeds {threshold_pct}% threshold — investigate source file"
+                )
 
     # Yield deduped records in bounded batches.
     batch: list[tuple] = []

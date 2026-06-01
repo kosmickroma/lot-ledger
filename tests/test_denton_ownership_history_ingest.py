@@ -254,8 +254,10 @@ def test_stream_dedup_same_py_owner_id_different_name_first_seen_wins_and_logs(
     tmp_path: Path, capsys
 ):
     """Defensive: when PACS exposes the same prop_id + py_owner_id with two
-    different names (shouldn't normally happen), keep first-seen and surface
-    the count in the per-file summary so anomalies are visible."""
+    different names AND different deed dates, the WHOLE first-seen tuple is
+    preserved (owner_name AND deed) — not just the owner_name field with
+    the later row's deed accidentally substituted. Surfaces the anomaly
+    count in the per-file summary so it's visible to operators."""
     txt = tmp_path / "x.TXT"
     _write_file(
         txt,
@@ -263,19 +265,108 @@ def test_stream_dedup_same_py_owner_id_different_name_first_seen_wins_and_logs(
             prop_id="000000111625",
             py_owner_id="000000555555",
             py_owner_name="FIRST NAME",
+            deed_dt="01011990",  # older deed
         ),
         _row(
             prop_id="000000111625",
             py_owner_id="000000555555",
             py_owner_name="SECOND NAME",
+            deed_dt="06152020",  # newer "better-looking" deed must NOT bleed through
         ),
     )
     batches = list(_stream_dedup_records(str(txt), 2022, "x.TXT", batch_size=10))
     flat = [rec for b in batches for rec in b]
     assert len(flat) == 1
+    # Whole first-seen tuple preserved: name AND deed both come from row 1.
     assert flat[0][3] == "FIRST NAME"
+    assert flat[0][4] == dt.date(1990, 1, 1)
     out = capsys.readouterr().out
     assert "same_id_diff_name=1" in out
+
+
+def test_stream_dedup_unparseable_date_counted_but_row_still_ingested(
+    tmp_path: Path, capsys
+):
+    """A row with an unparseable deed_dt is still ingested (deed=None) but
+    `unparseable_dates` is incremented and the per-file summary surfaces
+    the count. Threshold warnings + this counter close Copilot's HIGH-1
+    visibility gap: a future source-format drift is loud, not silent.
+
+    "99999999" parses to 99/99/9999 → ValueError → None, AND is not in the
+    blank-sentinel list ("00000000" / "00-00-0000"), so it counts as drift.
+    """
+    txt = tmp_path / "x.TXT"
+    _write_file(
+        txt,
+        _row(prop_id="000000111625", py_owner_name="OWNER", deed_dt="99999999"),
+        _row(prop_id="000000222222", py_owner_name="OWNER2", deed_dt="01012020"),
+    )
+    batches = list(_stream_dedup_records(str(txt), 2022, "x.TXT", batch_size=10))
+    flat = sorted((rec for b in batches for rec in b), key=lambda r: r[1])
+    # Both rows ingested; the drift row gets deed=None, the valid row gets a date.
+    assert len(flat) == 2
+    assert flat[0][1] == "111625" and flat[0][4] is None
+    assert flat[1][1] == "222222" and flat[1][4] == dt.date(2020, 1, 1)
+    out = capsys.readouterr().out
+    assert "unparseable_dates=1" in out
+
+
+def test_stream_dedup_unparseable_does_not_count_blank_or_zero_sentinels(
+    tmp_path: Path
+):
+    """Legitimate-blank deed values ("", "00000000", "00-00-0000") must NOT
+    bump the unparseable counter. Only non-blank inputs that the parser
+    can't decode count as drift signal."""
+    txt = tmp_path / "x.TXT"
+    _write_file(
+        txt,
+        _row(prop_id="000000100001", py_owner_name="A", deed_dt=""),
+        _row(prop_id="000000100002", py_owner_name="B", deed_dt="00000000"),
+        _row(prop_id="000000100003", py_owner_name="C", deed_dt="00-00-0000"),
+    )
+    import io
+    import contextlib
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        list(_stream_dedup_records(str(txt), 2022, "x.TXT", batch_size=10))
+    assert "unparseable_dates=0" in buf.getvalue()
+
+
+def test_stream_dedup_threshold_warning_when_short_rows_exceed_1_percent(
+    tmp_path: Path, capsys
+):
+    """If a skip-reason bucket exceeds 1% of scanned rows the per-file
+    summary is followed by a WARNING line so a broken file is loud rather
+    than just a number in the log. With 1 short + 9 valid rows (10 scanned,
+    short=10%), the WARNING must fire."""
+    txt = tmp_path / "x.TXT"
+    valid_rows = [
+        _row(prop_id=f"00000000{i:04d}", py_owner_name=f"O{i}")
+        for i in range(1, 10)
+    ]
+    _write_file(txt, _row(prop_id="000099999999", row_len=1000), *valid_rows)
+    list(_stream_dedup_records(str(txt), 2022, "x.TXT", batch_size=100))
+    out = capsys.readouterr().out
+    assert "WARNING" in out
+    assert "short=1" in out
+    assert "exceeds 1.0% threshold" in out
+
+
+def test_stream_dedup_no_threshold_warning_when_under_1_percent(
+    tmp_path: Path, capsys
+):
+    """At 1 short row + 199 valid rows (200 scanned, short=0.5%), the
+    WARNING must NOT fire — only the standard summary line."""
+    txt = tmp_path / "x.TXT"
+    valid_rows = [
+        _row(prop_id=f"00000000{i:04d}", py_owner_name=f"O{i}")
+        for i in range(1, 200)
+    ]
+    _write_file(txt, _row(prop_id="000099999999", row_len=1000), *valid_rows)
+    list(_stream_dedup_records(str(txt), 2022, "x.TXT", batch_size=1000))
+    out = capsys.readouterr().out
+    assert "WARNING" not in out
+    assert "short=1" in out
 
 
 def test_stream_dedup_short_row_skipped_with_counter(tmp_path: Path, capsys):
