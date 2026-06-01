@@ -1874,10 +1874,20 @@ def _csv_county_source(row: dict[str, Any]) -> str:
     return ""
 
 
-def _fetch_ownership_history(account_nums: set[str]) -> dict[str, dict]:
-    """Batched lookup of DCAD owner history for the given account_nums.
+def _fetch_ownership_history(
+    account_keys: set[tuple[str, str]],
+) -> dict[tuple[str, str], dict]:
+    """Batched lookup of multi-county owner history for the given keys.
 
-    Returns {account_num: {
+    `account_keys` is a set of (county_lower, account_num) pairs — the
+    pair, not the account_num alone, is the unique key. Two counties can
+    legitimately share an account_num string for unrelated parcels, so
+    keying by account_num alone would silently merge ownership timelines
+    across counties. Callers always know the parcel's county at gather
+    time (via _csv_county_source or parcel_county), so passing the pair
+    is cheap.
+
+    Returns {(county_lower, account_num): {
         "owners":     {year: owner_name},
         "deed_dates": {year: deed_txfr_date|None},
         "acquired":   date|None,
@@ -1895,7 +1905,7 @@ def _fetch_ownership_history(account_nums: set[str]) -> dict[str, dict]:
     Returns {} on any DB error (e.g. table not yet created) so the CSV
     export never breaks on missing history.
     """
-    if not account_nums:
+    if not account_keys:
         return {}
     try:
         conn = get_conn()
@@ -1903,24 +1913,33 @@ def _fetch_ownership_history(account_nums: set[str]) -> dict[str, dict]:
         logger.warning("ownership history: get_conn failed (%s); emitting blanks", exc)
         return {}
     try:
-        out: dict[str, dict] = {}
+        out: dict[tuple[str, str], dict] = {}
+        # Group by county so each query hits the composite PK index
+        # (county, account_num, snapshot_year) cleanly with one ANY() per
+        # county rather than mixing counties in a tuple-IN clause.
+        by_county: dict[str, list[str]] = {}
+        for county, acct in account_keys:
+            by_county.setdefault(county, []).append(acct)
+
         with conn.cursor() as cur:
-            cur.execute(
-                "SELECT account_num, snapshot_year, owner_name, deed_txfr_date "
-                "FROM ownership_snapshots "
-                "WHERE county = 'dcad' AND account_num = ANY(%s)",
-                (list(account_nums),),
-            )
-            for acct, year, owner, deed in cur.fetchall():
-                rec = out.setdefault(
-                    str(acct),
-                    {"owners": {}, "deed_dates": {}, "acquired": None, "_max": -1},
+            for county, accts in by_county.items():
+                cur.execute(
+                    "SELECT account_num, snapshot_year, owner_name, deed_txfr_date "
+                    "FROM ownership_snapshots "
+                    "WHERE county = %s AND account_num = ANY(%s)",
+                    (county, accts),
                 )
-                rec["owners"][int(year)] = owner or ""
-                rec["deed_dates"][int(year)] = deed
-                if int(year) > rec["_max"]:
-                    rec["_max"] = int(year)
-                    rec["acquired"] = deed
+                for acct, year, owner, deed in cur.fetchall():
+                    key = (county, str(acct))
+                    rec = out.setdefault(
+                        key,
+                        {"owners": {}, "deed_dates": {}, "acquired": None, "_max": -1},
+                    )
+                    rec["owners"][int(year)] = owner or ""
+                    rec["deed_dates"][int(year)] = deed
+                    if int(year) > rec["_max"]:
+                        rec["_max"] = int(year)
+                        rec["acquired"] = deed
         return out
     except Exception as exc:
         # A missing table (before the ingest runs) is benign and expected during
@@ -4400,22 +4419,27 @@ async def _run_download_csv(
         filename = f"{csv_workspace_name}_{_dt.now().strftime('%Y-%m-%d_%H%M%S')}.csv"
     download_name = _normalize_csv_filename(filename)
 
-    # Ownership-history. Collect account_nums from every supported-county
-    # parcel + orphan comp, then one batched lookup against ownership_snapshots.
-    # Supported set is owned by _is_owner_history_supported (DCAD + Collin +
-    # Denton today; TAD pending).
-    _hist_accounts: set[str] = set()
+    # Ownership-history. Collect (county_lower, account_num) keys from every
+    # supported-county parcel + orphan comp, then one batched lookup against
+    # ownership_snapshots (one query per county, joined back here). Supported
+    # set is owned by _is_owner_history_supported (DCAD + Collin + Denton
+    # today; TAD pending). Keying by (county, account_num) — not account_num
+    # alone — keeps two counties that share the same account_num string from
+    # bleeding ownership timelines into each other.
+    _hist_keys: set[tuple[str, str]] = set()
     for _r in rows:
-        if _is_owner_history_supported(_csv_county_source(_r)):
+        _src = _csv_county_source(_r)
+        if _is_owner_history_supported(_src):
             _an = str(_r.get("account_num") or "").strip()
             if _an:
-                _hist_accounts.add(_an)
+                _hist_keys.add((_src.lower(), _an))
     for _oc in orphan_comps:
-        if _is_owner_history_supported(_oc.get("parcel_county")):
+        _orphan_county = str(_oc.get("parcel_county") or "").strip().lower()
+        if _is_owner_history_supported(_orphan_county):
             _an = str(_oc.get("parcel_account_num") or "").strip()
             if _an:
-                _hist_accounts.add(_an)
-    ownership_history = _fetch_ownership_history(_hist_accounts)
+                _hist_keys.add((_orphan_county, _an))
+    ownership_history = _fetch_ownership_history(_hist_keys)
 
     def generate_csv():
         buffer = io.StringIO()
@@ -4756,7 +4780,10 @@ async def _run_download_csv(
                 ) == originator_key
             )
             _own = _ownership_history_cells(
-                ownership_history.get(str(row.get("account_num") or "").strip())
+                ownership_history.get(
+                    (_csv_county_source(row).lower(),
+                     str(row.get("account_num") or "").strip())
+                )
                 if _is_owner_history_supported(_csv_county_source(row)) else None
             )
             writer.writerow(
@@ -5095,7 +5122,7 @@ async def _run_download_csv(
                 ]
             ).strip() if _cad else ""
             _own_orphan = _ownership_history_cells(
-                ownership_history.get(_cad_key[1])
+                ownership_history.get(_cad_key)  # (county_lower, account_num) — same shape as the fetch dict's keys
                 if _is_owner_history_supported(_cad_key[0]) and _cad_key[1] else None
             )
             writer.writerow(
