@@ -169,23 +169,40 @@ def test_distill_display_name_is_latest_stored_form():
     assert result[0] == ("Wilson Lois", 2021)
 
 
-# ---------- _is_dcad_source ----------
+# ---------- _is_owner_history_supported ----------
+# Renamed from _is_dcad_source 2026-06-01 when Collin + Denton ingests landed.
+# The supported set widens as new counties' rolls get loaded into
+# ownership_snapshots; TAD is the next addition.
 
-def test_is_dcad_source_recognized_values():
-    assert main._is_dcad_source("DCAD") is True
-    assert main._is_dcad_source("dcad") is True
-    assert main._is_dcad_source("Dallas") is True
-    assert main._is_dcad_source("dallas") is True
-    assert main._is_dcad_source("  DCAD  ") is True
-
-
-def test_is_dcad_source_other_counties():
-    assert main._is_dcad_source("Tarrant") is False
-    assert main._is_dcad_source("collin") is False
-    assert main._is_dcad_source("denton") is False
+def test_is_owner_history_supported_dcad_aliases():
+    assert main._is_owner_history_supported("DCAD") is True
+    assert main._is_owner_history_supported("dcad") is True
+    assert main._is_owner_history_supported("Dallas") is True
+    assert main._is_owner_history_supported("dallas") is True
+    assert main._is_owner_history_supported("  DCAD  ") is True
 
 
-def test_is_dcad_source_blank_and_none():
-    assert main._is_dcad_source("") is False
-    assert main._is_dcad_source(None) is False
-    assert main._is_dcad_source("  ") is False
+def test_is_owner_history_supported_collin_and_denton():
+    """Collin + Denton joined the supported set on 2026-06-01 once their
+    certified rolls were ingested into ownership_snapshots."""
+    assert main._is_owner_history_supported("collin") is True
+    assert main._is_owner_history_supported("Collin") is True
+    assert main._is_owner_history_supported("denton") is True
+    assert main._is_owner_history_supported("Denton") is True
+    assert main._is_owner_history_supported("  collin  ") is True
+
+
+def test_is_owner_history_supported_tad_and_tarrant():
+    """TAD joined the supported set on 2026-06-01 once their 2021-2025
+    PropertyData(Certified) rolls were ingested into ownership_snapshots."""
+    assert main._is_owner_history_supported("tad") is True
+    assert main._is_owner_history_supported("TAD") is True
+    assert main._is_owner_history_supported("tarrant") is True
+    assert main._is_owner_history_supported("Tarrant") is True
+    assert main._is_owner_history_supported("  TAD  ") is True
+
+
+def test_is_owner_history_supported_blank_and_none():
+    assert main._is_owner_history_supported("") is False
+    assert main._is_owner_history_supported(None) is False
+    assert main._is_owner_history_supported("  ") is False

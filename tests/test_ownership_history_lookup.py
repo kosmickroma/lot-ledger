@@ -6,6 +6,7 @@ import api.main as main
 
 def test_fetch_ownership_history_pivots_and_picks_latest_deed(monkeypatch):
     # Mock cursor returns (account_num, snapshot_year, owner_name, deed_txfr_date)
+    # for a single-county (dcad) lookup — one cursor.execute call → one fetchall.
     rows = [
         ("A1", 2021, "SHARPE SARA", dt.date(2010, 1, 1)),
         ("A1", 2022, "SHARPE SARA", dt.date(2010, 1, 1)),
@@ -21,19 +22,58 @@ def test_fetch_ownership_history_pivots_and_picks_latest_deed(monkeypatch):
     monkeypatch.setattr(main, "get_conn", lambda: conn)
     monkeypatch.setattr(main, "release_conn", lambda c: None)
 
-    out = main._fetch_ownership_history({"A1", "A2"})
-    assert out["A1"]["owners"] == {2021: "SHARPE SARA", 2022: "SHARPE SARA", 2023: "PARK JU YONG"}
-    assert out["A1"]["acquired"] == dt.date(2023, 3, 14)   # latest year's deed
+    out = main._fetch_ownership_history({("dcad", "A1"), ("dcad", "A2")})
+    assert out[("dcad", "A1")]["owners"] == {
+        2021: "SHARPE SARA", 2022: "SHARPE SARA", 2023: "PARK JU YONG",
+    }
+    assert out[("dcad", "A1")]["acquired"] == dt.date(2023, 3, 14)
     # v2 (2026-06-01): per-year deed_dates map; the v2 caller picks the date
     # matching whichever year anchors the Current Owner after blank-skip.
-    assert out["A1"]["deed_dates"] == {
+    assert out[("dcad", "A1")]["deed_dates"] == {
         2021: dt.date(2010, 1, 1),
         2022: dt.date(2010, 1, 1),
         2023: dt.date(2023, 3, 14),
     }
-    assert out["A2"]["owners"] == {2024: "WILSON LOIS"}
-    assert out["A2"]["acquired"] == dt.date(2024, 8, 2)
-    assert out["A2"]["deed_dates"] == {2024: dt.date(2024, 8, 2)}
+    assert out[("dcad", "A2")]["owners"] == {2024: "WILSON LOIS"}
+    assert out[("dcad", "A2")]["acquired"] == dt.date(2024, 8, 2)
+    assert out[("dcad", "A2")]["deed_dates"] == {2024: dt.date(2024, 8, 2)}
+
+
+def test_fetch_ownership_history_keys_isolated_per_county(monkeypatch):
+    """v2.1 (2026-06-01): two counties sharing the same account_num string
+    must NOT bleed ownership timelines into each other — keying is
+    (county, account_num), so DCAD's account_num='100' and Collin's
+    account_num='100' resolve to two distinct records.
+
+    Set-iteration order is non-deterministic, so we route fetchall via the
+    actual `cur.execute(sql, (county, accts))` params rather than a
+    positional `side_effect` list — that makes the test order-independent
+    and matches how the real lookup works (one query per county)."""
+    rows_by_county = {
+        "dcad":   [("100", 2024, "DCAD OWNER",   dt.date(2024, 1, 1))],
+        "collin": [("100", 2024, "COLLIN OWNER", dt.date(2024, 6, 1))],
+    }
+    cur = MagicMock()
+    cur.__enter__ = lambda s: cur
+    cur.__exit__ = lambda *a: False
+
+    def execute_side_effect(_sql, params):
+        county = params[0]
+        cur.fetchall.return_value = rows_by_county[county]
+    cur.execute.side_effect = execute_side_effect
+
+    conn = MagicMock()
+    conn.cursor.return_value = cur
+    monkeypatch.setattr(main, "get_conn", lambda: conn)
+    monkeypatch.setattr(main, "release_conn", lambda c: None)
+
+    out = main._fetch_ownership_history({("dcad", "100"), ("collin", "100")})
+    assert out[("dcad", "100")]["owners"] == {2024: "DCAD OWNER"}
+    assert out[("collin", "100")]["owners"] == {2024: "COLLIN OWNER"}
+    # Two distinct cursor.execute calls — one per county. If we ever
+    # collapse back to a single query, this assertion catches the
+    # cross-county collision risk again.
+    assert cur.execute.call_count == 2
 
 
 def test_fetch_ownership_history_empty_input_skips_query(monkeypatch):
@@ -45,7 +85,7 @@ def test_fetch_ownership_history_swallows_db_error(monkeypatch):
     def boom():
         raise RuntimeError("table missing")
     monkeypatch.setattr(main, "get_conn", boom)
-    assert main._fetch_ownership_history({"A1"}) == {}
+    assert main._fetch_ownership_history({("dcad", "A1")}) == {}
 
 
 def test_ownership_history_cells_none_is_six_blanks():
@@ -143,11 +183,11 @@ def test_fetch_ownership_history_records_null_deed_dates(monkeypatch):
     monkeypatch.setattr(main, "get_conn", lambda: conn)
     monkeypatch.setattr(main, "release_conn", lambda c: None)
 
-    out = main._fetch_ownership_history({"B1"})
-    assert out["B1"]["deed_dates"] == {
+    out = main._fetch_ownership_history({("dcad", "B1")})
+    assert out[("dcad", "B1")]["deed_dates"] == {
         2021: None,
         2022: dt.date(2022, 5, 1),
         2023: None,
     }
     # 'acquired' = deed_date of latest year, which is None here.
-    assert out["B1"]["acquired"] is None
+    assert out[("dcad", "B1")]["acquired"] is None
