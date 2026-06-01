@@ -3439,8 +3439,51 @@ async def get_parcel_near(lat: float, lng: float) -> dict[str, Any]:
     raise HTTPException(status_code=404, detail="No parcel found near this point")
 
 
+_OWNER_HISTORY_POPUP_ROLES = {"developer", "owner", "power_user"}
+
+
+def _owner_history_for_popup(
+    county_lower: str, account_num: str, user: dict[str, Any] | None
+) -> list[str] | None:
+    """Return the 6 owner-history cells for the popup, or None when the
+    viewer isn't authorized or the county isn't supported.
+
+    Gated to {developer, owner, power_user} per Mike's 2026-06-01 ask:
+    "Yes, in the popups, but only for superusers." Anyone outside the
+    superuser set gets None so the popup section never renders.
+
+    Uses the same _fetch_ownership_history + _ownership_history_cells
+    helpers as the CSV export, so the 6 cells displayed in the popup are
+    byte-identical to what'd appear on the right edge of the CSV. Returns
+    None on lookup-empty (no rows in ownership_snapshots for this acct)
+    so the popup hides the section entirely rather than showing 6 blanks.
+    """
+    role = (user or {}).get("role")
+    if role not in _OWNER_HISTORY_POPUP_ROLES:
+        return None
+    if not _is_owner_history_supported(county_lower):
+        return None
+    acct = (account_num or "").strip()
+    if not acct:
+        return None
+    history = _fetch_ownership_history({(county_lower, acct)})
+    hist = history.get((county_lower, acct))
+    if not hist:
+        return None
+    cells = _ownership_history_cells(hist)
+    # _ownership_history_cells returns 6 empty strings on a malformed
+    # record; treat that as "nothing to show" rather than 6 blanks.
+    if not any(cells):
+        return None
+    return cells
+
+
 @app.get("/api/parcel/{county}/{account_num}")
-async def get_parcel_detail(county: str, account_num: str) -> dict[str, Any]:
+async def get_parcel_detail(
+    county: str,
+    account_num: str,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
     """
     Single-parcel detail endpoint used by PMTiles click popups.
 
@@ -3450,6 +3493,13 @@ async def get_parcel_detail(county: str, account_num: str) -> dict[str, Any]:
     Why it exists: PMTiles stores only minimal properties for fast rendering. This
     endpoint fetches the full parcel row from the live database and returns one
     GeoJSON feature in the same shape produced by /api/analyze.
+
+    Owner-history cells (since 2026-06-01): when the requesting user is a
+    superuser (developer/owner/power_user) AND the parcel's county has
+    ingested owner-history rows in ownership_snapshots, attach the 6
+    distinct-owners cells as `properties.owner_history_cells`. Frontend
+    renders a popup section above Remarks; absence of the key hides it
+    entirely.
     """
     county_key = county.strip().lower()
     if county_key not in {"dcad", "tad", "collin", "denton"}:
@@ -3462,32 +3512,31 @@ async def get_parcel_detail(county: str, account_num: str) -> dict[str, Any]:
         prop_type = classify_parcel(row, exempt_set)
         feature = build_feature(row, prop_type, False, None)
         feature["properties"]["source_county"] = "dcad"
-        return feature
-
-    if county_key == "tad":
+    elif county_key == "tad":
         row = _fetch_tad_parcel_by_account(account_num)
         if row is None:
             raise HTTPException(status_code=404, detail="Parcel not found")
         prop_type = _classify_tad(row)
         feature = build_feature(row, prop_type, False, None)
         feature["properties"]["source_county"] = "tad"
-        return feature
-
-    if county_key == "collin":
+    elif county_key == "collin":
         row = _fetch_collin_parcel_by_account(account_num)
         if row is None:
             raise HTTPException(status_code=404, detail="Parcel not found")
         prop_type = _classify_collin(row)
         feature = build_feature(row, prop_type, False, None)
         feature["properties"]["source_county"] = "collin"
-        return feature
+    else:
+        row = _fetch_denton_parcel_by_account(account_num)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Parcel not found")
+        prop_type = _classify_denton(row)
+        feature = build_feature(row, prop_type, False, None)
+        feature["properties"]["source_county"] = "denton"
 
-    row = _fetch_denton_parcel_by_account(account_num)
-    if row is None:
-        raise HTTPException(status_code=404, detail="Parcel not found")
-    prop_type = _classify_denton(row)
-    feature = build_feature(row, prop_type, False, None)
-    feature["properties"]["source_county"] = "denton"
+    cells = _owner_history_for_popup(county_key, account_num, user)
+    if cells is not None:
+        feature["properties"]["owner_history_cells"] = cells
     return feature
 
 

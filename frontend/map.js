@@ -8796,6 +8796,47 @@ function _buildPanelAgentBlockHtml(title, agent, emptyText) {
     </div>`;
 }
 
+// Owner-history panel section. Server attaches `owner_history_cells` (a
+// 6-element list: [Current Owner, Current Owner Acquired, Prior Owner 1..4])
+// only when the requesting user is a superuser (developer/owner/power_user)
+// AND the parcel's county has ingested rows in ownership_snapshots. If the
+// key is absent we render nothing — gating is server-side, the frontend
+// just respects what arrives.
+//
+// Per Mike's 2026-06-01 ask, this section sits above Remarks in the parcel
+// detail panel. Empty prior-owner slots are dropped so the section size
+// matches how much history the parcel actually has.
+function _buildPanelOwnerHistoryHtml(p) {
+  const cells = Array.isArray(p?.owner_history_cells) ? p.owner_history_cells : null;
+  if (!cells || cells.length < 2) return "";
+  const labels = [
+    "Current Owner",
+    "Current Owner Acquired",
+    "Prior Owner 1",
+    "Prior Owner 2",
+    "Prior Owner 3",
+    "Prior Owner 4",
+  ];
+  const rowsHtml = cells
+    .map((value, i) => {
+      const label = labels[i] || `Prior Owner ${i - 1}`;
+      const text = String(value || "").trim();
+      if (!text) return "";
+      return _buildParcelDetailTableRow(label, _propelioEscape(text));
+    })
+    .filter(Boolean)
+    .join("");
+  if (!rowsHtml) return "";
+  return `
+        <section class="parcel-panel-owner-history">
+          <div class="parcel-panel-section-title">Owner History</div>
+          <table class="popup-table">
+            ${rowsHtml}
+          </table>
+        </section>`;
+}
+
+
 function _buildParcelDetailPanelHtml(p, matchedComp) {
   const pseudoFeature = { properties: p };
   const hasVisibleSoldComp = Boolean(p?.sold_comp);
@@ -8987,6 +9028,7 @@ function _buildParcelDetailPanelHtml(p, matchedComp) {
             ? _buildPanelAgentBlockHtml("Buyer Agent", compDetails.buyerAgent, "No buyer agent details available.")
             : _buildPanelAgentBlockHtml("Buyer Agent", null, "Buyer agent only appears on sold comps.")}
         </section>
+        ${_buildPanelOwnerHistoryHtml(p)}
         <section class="parcel-panel-remarks">
           <div class="parcel-panel-section-title">Remarks</div>
           ${compDetails?.remarks
