@@ -1146,6 +1146,7 @@ body.is-not-power-user .power-user-only {
 .parcel-panel-cad,
 .parcel-panel-mls,
 .parcel-panel-agents,
+.parcel-panel-owner-history,
 .parcel-panel-remarks {
   border: 1px solid #e2e8f0;
   border-radius: 10px;
@@ -1154,6 +1155,7 @@ body.is-not-power-user .power-user-only {
 
 .parcel-panel-cad,
 .parcel-panel-mls,
+.parcel-panel-owner-history,
 .parcel-panel-remarks {
   padding: 14px 16px;
 }
@@ -1270,6 +1272,7 @@ body.is-not-power-user .power-user-only {
   background: #f8fafc;
 }
 
+.parcel-panel-owner-history,
 .parcel-panel-remarks {
   margin-top: 18px;
 }
