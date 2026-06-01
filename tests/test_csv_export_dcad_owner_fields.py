@@ -76,7 +76,8 @@ def test_writerow_cell_counts_match():
 
 
 def test_total_columns_is_at_least_188():
-    # 151 baseline + 31 v4a + 6 ownership-history (Owner 2021..2025 + Owner Acquired).
+    # 151 baseline + 31 v4a + 6 ownership-history (v2: Current Owner +
+    # Current Owner Acquired + Prior Owner 1..4).
     counts = _writerow_cell_counts()
     assert counts and counts[0] >= 188, (
         f"Expected at least 188 cells (151 baseline + 31 v4a + 6 ownership). "

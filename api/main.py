@@ -1848,11 +1848,6 @@ _CSV_COUNTY_SOURCE_MAP = {
 }
 
 
-# DCAD ownership-history years surfaced as raw CSV columns. Hand-extend when
-# older certified rolls are ingested (e.g. add 2020, 2019, … back to 1999).
-OWNERSHIP_HISTORY_YEARS = [2021, 2022, 2023, 2024, 2025]
-
-
 def _csv_county_source(row: dict[str, Any]) -> str:
     """Return the PascalCase County Source enum value for a CSV row.
     Tries source_county first (the canonical feature.properties key set by
@@ -2030,17 +2025,48 @@ def _is_dcad_source(county_or_source: str | None) -> bool:
 
 
 def _ownership_history_cells(hist: dict | None) -> list:
-    """Render the 6 ownership-history cells: one owner-name per year in
-    OWNERSHIP_HISTORY_YEARS, then 'Owner Acquired' (latest deed date MM/DD/YYYY).
-    `hist` is None (non-DCAD / no history) → all blanks. Always returns a fixed
-    count (len(years) + 1) so header/parcel/orphan rows stay aligned."""
+    """Render the 6 v2 ownership-history cells:
+        [Current Owner, Current Owner Acquired, Prior Owner 1..4]
+
+    `hist` is the per-account record from `_fetch_ownership_history`
+    (with v2 `owners`, `deed_dates`, `acquired` keys), or None for
+    non-DCAD / missing accounts. Always returns exactly 6 cells so
+    header/parcel/orphan row widths stay aligned.
+
+    Layout C, per docs/superpowers/specs/2026-06-01-dcad-ownership-history-v2-design.md:
+      - Slot 0 (Current Owner): display_name of the first run from
+        `_distill_distinct_owners` (the LATEST non-blank year's owner_name).
+      - Slot 1 (Current Owner Acquired): the deed_txfr_date for the
+        anchor year (the latest non-blank year), formatted MM/DD/YYYY;
+        blank when null. The anchor year — which may not be the max
+        snapshot year if the max is blank — is recovered from
+        `hist["deed_dates"]` (added by the v2 lookup helper) so the date
+        always pairs with the actually-displayed Current Owner.
+      - Slots 2-5 (Prior Owner 1-4): up to 4 prior distilled runs as
+        'NAME (~YYYY)' where YYYY = earliest_year_in_run. Older priors
+        (5th+) are silently dropped (overflow handling deferred until
+        1999-2020 ownership data lands).
+    """
     if not hist:
-        return ["" for _ in OWNERSHIP_HISTORY_YEARS] + [""]
-    owners = hist.get("owners") or {}
-    cells = [owners.get(y, "") for y in OWNERSHIP_HISTORY_YEARS]
-    acquired = hist.get("acquired")
-    cells.append(acquired.strftime("%m/%d/%Y") if acquired else "")
-    return cells
+        return ["", "", "", "", "", ""]
+    per_year_owners = hist.get("owners") or {}
+    distilled = _distill_distinct_owners(per_year_owners)
+    if not distilled:
+        return ["", "", "", "", "", ""]
+    deed_dates = hist.get("deed_dates") or {}
+    anchor_year = max(
+        (y for y, n in per_year_owners.items() if str(n or "").strip()),
+        default=None,
+    )
+    anchor_deed = deed_dates.get(anchor_year) if anchor_year is not None else None
+    current_name = distilled[0][0]
+    current_acquired = anchor_deed.strftime("%m/%d/%Y") if anchor_deed else ""
+    prior_cells: list[str] = [
+        f"{display} (~{earliest})" for display, earliest in distilled[1:5]
+    ]
+    while len(prior_cells) < 4:
+        prior_cells.append("")
+    return [current_name, current_acquired, *prior_cells]
 
 
 def _google_maps_link(row: dict[str, Any]) -> str:
@@ -4358,12 +4384,12 @@ async def _run_download_csv(
     # all DCAD account_nums from parcel rows + orphan comps, one batched lookup.
     _hist_accounts: set[str] = set()
     for _r in rows:
-        if _csv_county_source(_r) == "DCAD":
+        if _is_dcad_source(_csv_county_source(_r)):
             _an = str(_r.get("account_num") or "").strip()
             if _an:
                 _hist_accounts.add(_an)
     for _oc in orphan_comps:
-        if str(_oc.get("parcel_county") or "").strip().lower() in ("dcad", "dallas"):
+        if _is_dcad_source(_oc.get("parcel_county")):
             _an = str(_oc.get("parcel_account_num") or "").strip()
             if _an:
                 _hist_accounts.add(_an)
@@ -4590,12 +4616,12 @@ async def _run_download_csv(
                 "Owner 2 %",
                 "Owner 3 Name",
                 "Owner 3 %",
-                "Owner 2021",
-                "Owner 2022",
-                "Owner 2023",
-                "Owner 2024",
-                "Owner 2025",
-                "Owner Acquired",
+                "Current Owner",
+                "Current Owner Acquired",
+                "Prior Owner 1",
+                "Prior Owner 2",
+                "Prior Owner 3",
+                "Prior Owner 4",
             ]
         )
         buffer.seek(0)
@@ -4709,7 +4735,7 @@ async def _run_download_csv(
             )
             _own = _ownership_history_cells(
                 ownership_history.get(str(row.get("account_num") or "").strip())
-                if _csv_county_source(row) == "DCAD" else None
+                if _is_dcad_source(_csv_county_source(row)) else None
             )
             writer.writerow(
                 [
@@ -5048,7 +5074,7 @@ async def _run_download_csv(
             ).strip() if _cad else ""
             _own_orphan = _ownership_history_cells(
                 ownership_history.get(_cad_key[1])
-                if _cad_key[0] in ("dcad", "dallas") and _cad_key[1] else None
+                if _is_dcad_source(_cad_key[0]) and _cad_key[1] else None
             )
             writer.writerow(
                 [
