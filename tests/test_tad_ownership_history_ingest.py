@@ -304,21 +304,30 @@ def test_stream_record_batches_filters_and_emits(tmp_path: Path, capsys):
     assert "emitted=2" in out
 
 
-def test_stream_record_batches_handles_utf8_bom(tmp_path: Path):
-    """A BOM-prefixed file would otherwise make the first header column
-    '\\ufeffRP' and silently drop every row. encoding='utf-8-sig' must
-    transparently strip it."""
-    txt = tmp_path / "PropertyData_2024.txt"
-    body = (
-        HEADER + "\r\n"
-        + _row(RP="R", Account_Num="00000001", Owner_Name="A") + "\r\n"
+def test_stream_record_batches_cp1252_smart_quote_in_owner_name(tmp_path: Path):
+    """TAD's 2021 file contains at least one byte 0x92 (cp1252 right single
+    quotation mark, U+2019) in an owner name — likely "BARNEY'S TRUST" and
+    similar generated on Windows. encoding='cp1252' must decode it to the
+    smart quote without crashing the ingest. utf-8-sig (our first attempt)
+    crashed here in production."""
+    txt = tmp_path / "PropertyData_2021.txt"
+    header_bytes = HEADER.encode("ascii") + b"\r\n"
+    # Build a row with a raw 0x92 byte embedded in Owner_Name. We can't go
+    # through _row() because the helper builds via str.join, so synthesize
+    # the row as bytes directly.
+    owner_name = b"BARNEY\x92S TRUST"
+    row_bytes = (
+        b"R|2021|00000051|AAAA|000||"  # RP|Year|Acct|RecType|Seq|PIDN|
+        + owner_name + b"|"            # Owner_Name (with cp1252 0x92)
+        + b"|" * (len(_FIELD_NAMES) - 7)  # remaining fields blank
+        + b"\r\n"
     )
-    txt.write_bytes(b"\xef\xbb\xbf" + body.encode("utf-8"))
-    batches = list(_stream_record_batches(str(txt), 2024, txt.name, batch_size=10))
+    txt.write_bytes(header_bytes + row_bytes)
+    batches = list(_stream_record_batches(str(txt), 2021, txt.name, batch_size=10))
     flat = [rec for b in batches for rec in b]
     assert len(flat) == 1
-    assert flat[0][1] == "1"
-    assert flat[0][3] == "A"
+    # 0x92 in cp1252 -> U+2019 (right single quotation mark).
+    assert flat[0][3] == "BARNEY’S TRUST"
 
 
 def test_stream_record_batches_warns_on_appraisal_year_mismatch(

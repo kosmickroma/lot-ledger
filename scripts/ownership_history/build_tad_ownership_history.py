@@ -200,11 +200,14 @@ def _stream_record_batches(
     Peak memory is one batch (never the whole file or year), so ingesting a
     ~750k-row TAD roll (~700 MB on disk) stays at a few MB resident.
 
-    Encoding is utf-8-sig (strips a UTF-8 BOM if present, transparent
-    otherwise). TAD's files are reported as plain ASCII by `file(1)` on the
-    sample we have, but utf-8-sig is the defensive choice that would also
-    handle a future BOM toggle on TAD's exporter without silently breaking
-    the first column. Pipe delimiter (|) per the file format; csv.DictReader
+    Encoding is cp1252 (Windows-1252). `file(1)` reports the 2022 file as
+    ASCII, but 2021 contains at least one byte 0x92 (right single quotation
+    mark in cp1252 — likely from an owner name like "BARNEY'S TRUST" that
+    was generated on a Windows system). cp1252 is a superset of ASCII so
+    pure-ASCII years decode identically; the smart-quote byte resolves to
+    U+2019 instead of crashing the ingest. cp1252 doesn't have undefined
+    bytes in the 0x80-0xFF range we'd actually expect, so a strict-mode
+    decode is safe. Pipe delimiter (|) per the file format; csv.DictReader
     parses on the header row.
 
     Filters at the row level via _row_to_record (RP in {R,C}, Record_Type
@@ -220,7 +223,7 @@ def _stream_record_batches(
     emitted = 0
 
     batch: list[tuple] = []
-    with open(path, "r", encoding="utf-8-sig", newline="") as fh:
+    with open(path, "r", encoding="cp1252", newline="") as fh:
         reader = csv.DictReader(fh, delimiter="|")
         checked_year = False
         for row in reader:
