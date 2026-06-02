@@ -1758,6 +1758,42 @@ _STORED_VALUE_MANUAL_FIELD_KEYS: tuple[str, ...] = ("arv", "nbv", "tdpp", "rehab
 _STORED_VALUE_CALC_FIELD_KEYS: tuple[str, ...] = ("mao_arv", "tdpp_minus_mao_arv")
 
 
+# Sprint 2 multi-user collab: allowlist of field keys accepted by
+# PATCH /api/areas/{id}/filter-fields/{field_key}. Mirrors the structure
+# of captureFilterState() in frontend/map.js. Enumerated in
+# docs/MULTIUSER_COLLAB_SPRINT2_SPEC.md §2.1.A.
+# Test: tests/test_multiuser_collab_sprint2_allowlist_drift.py guards
+# against frontend additions that miss this allowlist.
+_FILTER_FIELD_KEYS: frozenset[str] = frozenset({
+    # checkboxes (8)
+    "checkboxes.active", "checkboxes.sold", "checkboxes.off_market",
+    "checkboxes.vacant", "checkboxes.multifamily", "checkboxes.duplexes",
+    "checkboxes.commercial", "checkboxes.exempt",
+    # numeric Property Filters (8)
+    "numeric.lot_sqft_min", "numeric.lot_sqft_max",
+    "numeric.appr_val_min", "numeric.appr_val_max",
+    "numeric.yr_built_min", "numeric.yr_built_max",
+    "numeric.sqft_min",     "numeric.sqft_max",
+    # sold (5)
+    "sold.maxDaysAgo",  "sold.minPrice", "sold.maxPrice",
+    "sold.minYearBuilt", "sold.maxYearBuilt",
+    # comp Comp Filters (8)
+    "comp.lot_sqft_min", "comp.lot_sqft_max",
+    "comp.appr_val_min", "comp.appr_val_max",
+    "comp.yr_built_min", "comp.yr_built_max",
+    "comp.sqft_min",     "comp.sqft_max",
+    # propelio (16)
+    "propelio.months",  "propelio.range",
+    "propelio.statusSold", "propelio.statusActive", "propelio.statusPending",
+    "propelio.showOutsideArea", "propelio.soldWithinDays",
+    "propelio.lotMin",  "propelio.lotMax",
+    "propelio.sqftMin", "propelio.sqftMax",
+    "propelio.yearMin", "propelio.yearMax",
+    "propelio.priceMin", "propelio.priceMax",
+    "propelio.sortMode",
+})
+
+
 def compute_calc_fields(manual_map: dict[str, int | None]) -> dict[str, int | None]:
     arv_raw = manual_map.get("arv")
     tdpp_raw = manual_map.get("tdpp")
