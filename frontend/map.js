@@ -926,6 +926,18 @@ let _filterSaveClientSeq = 0;
 // captureFilterState() output and decide which fields actually changed.
 // null = no area loaded; reset on clearDrawResults, set on restoreSavedArea.
 let _filterSaveLastSnapshot = null;
+
+// Sprint 3 multi-user collab: SSE subscriber state.
+// Per docs/MULTIUSER_COLLAB_SPRINT3_SPEC.md v1 §4.1.
+let _sseEventSource = null;           // current EventSource instance
+let _sseAreaId = null;                 // which area it's subscribed to
+const _sseSessionUuid = (typeof crypto !== "undefined" && crypto.randomUUID)
+  ? crypto.randomUUID()
+  : `sess-${Math.random().toString(36).slice(2)}-${Date.now()}`;
+// Track last-dispatched client_seq per field for self-echo filtering.
+// Updated after each successful PATCH dispatch in _filterSaveProcessQueue.
+const _dispatchedSeqByField = new Map();  // field_key -> client_seq we sent
+
 // v1.1 §2.6 — 50ms debounce on the popup Save Parcel link. Absorbs
 // event-bubbling and mobile double-tap. Single deliberate clicks
 // (>50ms apart) work normally.
@@ -1937,6 +1949,12 @@ function _writeFilterFieldDirect(fieldKey, value) {
     try { applyAndRenderSoldFilters(); } catch (_) {}
     try { applyMapVisibilityFilters(); } catch (_) {}
   }
+  // Sprint 3 hotfix (2026-06-02): propelio comp layer + comp list also
+  // need to re-render when ANY filter changes remotely. parcelType*
+  // mirrors propagate via the propelio object; sold/comp filters affect
+  // compPassesPropelioFilters gating. applyPropelioClientFilters is a
+  // safe no-op if no comps have been searched yet.
+  try { applyPropelioClientFilters(); } catch (_) {}
 }
 
 // Apply a server-reconciled value to the UI. Anti-flicker rule (§5.5):
@@ -1960,6 +1978,150 @@ function _applyFilterFieldToUI(fieldKey, value) {
     return;
   }
   _writeFilterFieldDirect(fieldKey, value);
+}
+
+// ─── Sprint 3 multi-user collab: SSE EventSource lifecycle (spec §4.4) ───
+
+function _openSseStream(areaId) {
+  // Already open for this area? no-op.
+  if (_sseEventSource && _sseAreaId === areaId) return;
+  _closeSseStream();
+  if (!areaId) return;
+  _sseAreaId = areaId;
+  const es = new EventSource(
+    `/api/areas/${encodeURIComponent(areaId)}/events`,
+    { withCredentials: true }
+  );
+  _sseEventSource = es;
+  es.addEventListener("connected", (e) => {
+    try {
+      const data = JSON.parse(e.data);
+      console.debug("[sse] connected", data);
+    } catch (_) {}
+  });
+  es.addEventListener("message", (e) => {
+    let msg;
+    try { msg = JSON.parse(e.data); } catch (_) { return; }
+    _handleSseFieldChange(msg);
+  });
+  es.addEventListener("resync", () => {
+    console.debug("[sse] resync event — refetching area state");
+    _sseRefetchArea(areaId);
+  });
+  es.addEventListener("blob_explode", () => {
+    console.debug("[sse] blob_explode event — refetching area state");
+    _sseRefetchArea(areaId);
+  });
+  // Sprint 3 hotfix (2026-06-02): stored value live sync.
+  es.addEventListener("stored_value", (e) => {
+    let msg;
+    try { msg = JSON.parse(e.data); } catch (_) { return; }
+    _handleSseStoredValue(msg);
+  });
+  es.addEventListener("error", () => {
+    // EventSource enters CLOSED only on non-200 response. Transport
+    // blips DON'T close — native reconnect handles those. If CLOSED,
+    // probe auth and route through _handle401 on 401.
+    if (es.readyState === EventSource.CLOSED) {
+      _sseProbeAuthAndMaybeReconnect(areaId);
+    }
+  });
+}
+
+function _closeSseStream() {
+  if (_sseEventSource) {
+    try { _sseEventSource.close(); } catch (_) {}
+    _sseEventSource = null;
+  }
+  _sseAreaId = null;
+}
+
+function _handleSseFieldChange(msg) {
+  if (!msg) return;
+  // Type-tagged messages (resync / blob_explode) are handled by
+  // their dedicated addEventListener bindings; this catches only
+  // field-change deltas.
+  if (msg.type === "resync" || msg.type === "blob_explode") return;
+  const { field_key, value, by_session_id } = msg;
+  if (!field_key) return;
+  // TEMP DEBUG (Sprint 3 smoke): log every received SSE event with the
+  // self-echo comparison so we can verify the filter in DevTools.
+  const isOwnEcho = Boolean(by_session_id && by_session_id === _sseSessionUuid);
+  console.debug("[sse] event received", {
+    field_key,
+    value,
+    by_session_id,
+    my_session: _sseSessionUuid,
+    is_self_echo: isOwnEcho,
+    action: isOwnEcho ? "IGNORED (self)" : "APPLY (remote)",
+  });
+  // Sprint 3 §4.4 + Agent C catch M-1: self-echo filter on
+  // by_session_id, not by_user_id. Same-user multi-tab still receives
+  // each other's edits (different session UUIDs per tab).
+  if (isOwnEcho) {
+    // Our own write echoed back. Already applied locally; ignore.
+    return;
+  }
+  // Remote change. Apply via Sprint 2 anti-flicker hook (defers to
+  // blur if user is focused on the input).
+  _applyFilterFieldToUI(field_key, value);
+  // Refresh diff baseline so the next captureFilterState() comparison
+  // doesn't treat this remote change as a local edit pending PATCH.
+  _filterSaveLastSnapshot = captureFilterState();
+}
+
+// Sprint 3 hotfix: apply incoming stored-value SSE event.
+// Mirrors the filter-field handler shape — self-echo filter on
+// by_session_id, apply via existing _storedValueState + recalc-and-render.
+function _handleSseStoredValue(msg) {
+  if (!msg) return;
+  const { field_key, numeric_value, comment_text, client_seq, by_session_id } = msg;
+  if (!field_key) return;
+  const isOwnEcho = Boolean(by_session_id && by_session_id === _sseSessionUuid);
+  console.debug("[sse] stored_value event received", {
+    field_key, numeric_value, comment_text, client_seq, by_session_id,
+    my_session: _sseSessionUuid, is_self_echo: isOwnEcho,
+    action: isOwnEcho ? "IGNORED (self)" : "APPLY (remote)",
+  });
+  if (isOwnEcho) return;
+  if (!_storedValueState) return;
+  const fieldData = _storedValueState[field_key];
+  if (!fieldData) return;
+  // Apply remote value. Bump client_seq tracking so our next PUT
+  // won't lose the LWW race to the value we just applied.
+  fieldData.numeric_value = (numeric_value !== undefined && numeric_value !== null) ? Number(numeric_value) : null;
+  fieldData.comment_text = String(comment_text || "");
+  fieldData.client_seq = Math.max(Number(fieldData.client_seq || 0), Number(client_seq || 0));
+  _storedValueClientSeq = Math.max(_storedValueClientSeq, fieldData.client_seq);
+  try { _storedValueRecalcAndRender(); } catch (_) {}
+}
+
+function _sseRefetchArea(areaId) {
+  // resync / blob_explode events fall through to a full area refetch.
+  _reloadSavedResources().catch((err) =>
+    console.warn("[sse] refetch failed", err)
+  );
+}
+
+async function _sseProbeAuthAndMaybeReconnect(areaId) {
+  try {
+    const resp = await fetch("/api/auth/me", { credentials: "same-origin" });
+    if (resp.status === 401) {
+      // Session expired mid-stream — route through existing 401 path.
+      _closeSseStream();
+      if (typeof _handle401 === "function") _handle401();
+      return;
+    }
+    if (resp.ok) {
+      // Session still valid — likely transport blip or Cloud Run
+      // timeout. EventSource gave up; manually reconnect.
+      console.debug("[sse] auth ok, reconnecting EventSource");
+      _openSseStream(areaId);
+      return;
+    }
+  } catch (err) {
+    console.warn("[sse] auth probe failed", err);
+  }
 }
 
 function setActiveItem(type, name) {
@@ -3413,17 +3575,29 @@ async function _filterSaveProcessQueue() {
   try {
     for (let i = 0; i < toFlush.length; i++) {
       const [fieldKey, value] = toFlush[i];
-      _filterSaveClientSeq += 1;
+      // Sprint 3 hotfix (2026-06-02): use Date.now() as the seq base so
+      // _filterSaveClientSeq survives refreshes/new sessions. Pre-hotfix
+      // every refresh reset to 0, immediately losing every LWW race
+      // against persisted seqs. Date.now() guarantees monotonic across
+      // all sessions/browsers; Math.max protects against multiple
+      // dispatches within the same millisecond (rare but possible).
+      _filterSaveClientSeq = Math.max(Date.now(), _filterSaveClientSeq + 1);
       const seq = _filterSaveClientSeq;
       try {
         const resp = await _apiJson(
           `/api/areas/${encodeURIComponent(areaId)}/filter-fields/${encodeURIComponent(fieldKey)}`,
           {
             method: "PATCH",
-            headers: { "Content-Type": "application/json", ...authHeaders() },
+            headers: {
+              "Content-Type": "application/json",
+              "X-Session-Id": _sseSessionUuid,  // Sprint 3: echoed in NOTIFY for self-echo filter
+              ...authHeaders(),
+            },
             body: JSON.stringify({ value, client_seq: seq }),
           }
         );
+        // Sprint 3 §4.5: track dispatched seq per field for self-echo filter.
+        _dispatchedSeqByField.set(fieldKey, seq);
         // LWW reconciliation: if server's persisted client_seq > our outgoing
         // seq, a concurrent write beat us. Apply the server value to UI
         // (deferred to blur per anti-flicker rule §5.5).
@@ -4705,6 +4879,8 @@ async function restoreSavedArea(area, options = {}) {
   // Sprint 2 §5.3: capture the restored state as the diff baseline so
   // the first user edit after load only PATCHes the fields they touch.
   _filterSaveLastSnapshot = captureFilterState();
+  // Sprint 3 §4.2: open SSE stream for live filter-change push.
+  if (typeof _openSseStream === "function") _openSseStream(area.id);
   drawLayer.clearLayers();
   L.polygon(area.latlngs, {
     color: "#f1c40f",
@@ -4875,6 +5051,8 @@ async function restoreNamedSession(session, options = {}) {
   // Sprint 2 §5.3: no area loaded -> no snapshot baseline + clear queue.
   _filterSaveLastSnapshot = null;
   _filterSavePendingFields.clear();
+  // Sprint 3 §4.3: close any open SSE stream.
+  if (typeof _closeSseStream === "function") _closeSseStream();
   _syncTabTitle();
   _storedValueOnAreaChange(null);
   void _filterSaveOnAreaChange(null);
@@ -11085,6 +11263,8 @@ function clearDrawResults() {
   // Sprint 2 §5.3: no area loaded -> no snapshot baseline + clear queue.
   _filterSaveLastSnapshot = null;
   _filterSavePendingFields.clear();
+  // Sprint 3 §4.3: close any open SSE stream.
+  if (typeof _closeSseStream === "function") _closeSseStream();
   _syncTabTitle();
   _storedValueOnAreaChange(null);
   void _filterSaveOnAreaChange(null);
@@ -12921,7 +13101,11 @@ async function _storedValueSaveField(fieldKey) {
     const resp = await fetch(`/api/areas/${encodeURIComponent(areaIdAtCall)}/stored-value`, {
       method: "PUT",
       credentials: "same-origin",
-      headers: { "Content-Type": "application/json", ...authHeaders() },
+      headers: {
+        "Content-Type": "application/json",
+        "X-Session-Id": _sseSessionUuid,  // Sprint 3 hotfix: echo for self-echo filter
+        ...authHeaders(),
+      },
       body: JSON.stringify(body),
     });
 
