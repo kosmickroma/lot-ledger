@@ -32,10 +32,13 @@ TAD_CLASS_LABELS: dict[str, str] = {
     "A2":  "Townhouses",
     "A3":  "Condominiums",
     "A4":  "Mobile Homes",
-    "B1":  "Multifamily (2–4 units)",
-    "B2":  "Multifamily (5+ units)",
-    "B3":  "Multifamily (5+ units)",
-    "B4":  "Multifamily (5+ units)",
+    # Fixed 2026-06-01: prior labels had B1 and B2/B3/B4 swapped vs TAD's
+    # own State Use Code reference (Appendix C). B1 is the 5+ apartment
+    # code; B2/B3/B4 are explicitly Duplex/Triplex/Quadplex.
+    "B1":  "Multifamily (5+ units)",
+    "B2":  "Duplex",
+    "B3":  "Triplex",
+    "B4":  "Quadplex",
     "BC":  "Commercial/Mixed-Use",
     "C1":  "Vacant Residential Lots",
     "C1C": "Vacant Residential Lots",
@@ -69,7 +72,18 @@ TAD_CLASS_LABELS: dict[str, str] = {
 # property_class sets for classification
 _SFR_CODES     = {"A", "A1", "A2", "A4", "E1", "EC"}
 _CONDO_CODES   = {"A3"}
-_MF_CODES      = {"B1", "B2", "B3", "B4", "M1", "M2"}
+# Duplexes (2026-06-01): TAD's State Use Codes name the small-multi codes
+# explicitly — B2 = Residential Duplex, B3 = Residential Triplex,
+# B4 = Residential Quadplex. Semantically the cleanest mapping of any
+# of the four counties; no `units` tie-breaker needed (tad_parcels has
+# no units column anyway). B1 (Multi-Family / 5+ apartments), M1/M2
+# (mobile homes — an existing TAD quirk we're not touching in this
+# scope), and A3 condos stay multifamily. The documentation superset
+# `_MF_CODES` is kept as a derived union so a future TAD code addition
+# forces an explicit bucket decision.
+_DUPLEX_CODES  = {"B2", "B3", "B4"}
+_MF_ONLY_CODES = {"B1", "M1", "M2"}
+_MF_CODES      = _DUPLEX_CODES | _MF_ONLY_CODES
 _VACANT_CODES  = {"C1", "C1C", "O1"}
 _COMMERCIAL_CODES = {"C2", "C2C", "BC", "F1", "F2", "L1", "L2", "S"}
 _EXEMPT_CODES  = {"D1", "D2", "G1", "G2", "G3", "G4", "J1", "J2", "J3", "J4", "J5",
@@ -167,7 +181,19 @@ def _centroid_from_geojson(centroid_json: Any) -> tuple[float | None, float | No
 
 
 def _classify_tad(row: dict[str, Any]) -> str:
-    """TAD-specific classification → same bucket labels as dcad.classify_parcel."""
+    """TAD-specific classification → same bucket labels as dcad.classify_parcel.
+
+    Reads from the NORMALIZED row produced by `_normalize_tad_row` —
+    `row.get("sptd_code")` is the alias for the raw `property_class`
+    column. If a future call site passes the raw SQL row, every
+    classification will silently fall through to "single_family".
+
+    Duplexes (2026-06-01): TAD's State Use Codes B2/B3/B4 (Duplex /
+    Triplex / Quadplex per TAD's own naming) route to the duplexes
+    bucket. B1 (Multi-Family / 5+ apartments) and A3 (Condominium)
+    stay multifamily. TAD has no `units` column, so the rule is
+    entirely code-driven — no tie-breaker is available.
+    """
     code = _clean_text(row.get("sptd_code")).upper()   # sptd_code ← property_class
     owner_up = _clean_text(row.get("owner_name")).upper()
     tot_val = _safe_float(row.get("tot_val")) or 0.0
@@ -179,7 +205,9 @@ def _classify_tad(row: dict[str, Any]) -> str:
 
     if code in _EXEMPT_CODES or non_target_owner or is_nominal:
         return "exempt"
-    if code in _MF_CODES or code in _CONDO_CODES:
+    if code in _DUPLEX_CODES:
+        return "duplexes"
+    if code in _MF_ONLY_CODES or code in _CONDO_CODES:
         return "multifamily"
     if code in _VACANT_CODES:
         return "vacant"

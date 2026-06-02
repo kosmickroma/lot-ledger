@@ -23,7 +23,20 @@ from api.geo import point_in_polygon, polygon_bbox
 
 
 # Collin uses PTAD-style state category codes.
-_COLLIN_MF_CODES = {"A3", "B1", "B2", "B3", "B4", "B6", "B9"}
+#
+# Duplexes (2026-06-01): the Texas Comptroller's PTAD code set is
+# semantically precise — B2/B3/B4 = Duplex/Triplex/Quadplex by
+# definition — so the duplex bucket trusts the code directly. No
+# `units`-field check is needed (or possible): a data audit showed
+# Collin's `units` field is 99% NULL/0 across all the multifamily-side
+# codes, so it can't serve as a tie-breaker the way it does for DCAD.
+# Both sets are kept explicit at the module level so a future code
+# addition to _COLLIN_MF_CODES (e.g. if PTAD ever issues a new B-series
+# code) forces an explicit decision about which bucket it belongs in,
+# instead of silently routing to duplexes via a set subtraction.
+_COLLIN_DUPLEX_CODES = {"B2", "B3", "B4"}
+_COLLIN_MF_ONLY_CODES = {"A3", "B1", "B6", "B9"}
+_COLLIN_MF_CODES = _COLLIN_DUPLEX_CODES | _COLLIN_MF_ONLY_CODES
 _COLLIN_VACANT_CODES = {"C1", "C2", "C3", "C4", "C5", "C6", "O"}
 _COLLIN_COMMERCIAL_CODES = {"F1", "F2", "F3", "F4", "F6", "F7", "F9", "M1", "M2", "M4", "M5"}
 _COLLIN_EXEMPT_CODES = {"D1", "D2", "D6", "J1A", "J2A", "J3A", "J4A", "J5", "J6A"}
@@ -186,6 +199,22 @@ def _is_full_exempt(row: dict[str, Any]) -> bool:
 
 
 def _classify_collin(row: dict[str, Any]) -> str:
+    """Classify a Collin parcel.
+
+    Reads from the NORMALIZED row produced by `_normalize_collin_row`,
+    not the raw SQL row — `row.get("sptd_code")` here is the normalized
+    alias for what comes off the wire as `state_cd`. If a future call
+    site passes the raw SQL row, the classifier will silently return
+    "single_family" for every parcel.
+
+    Duplexes (2026-06-01): PTAD codes B2 (Duplex), B3 (Triplex), and
+    B4 (Quadplex) route to the duplexes bucket. B1 (Multi-family),
+    A3 (Condo), B6/B9 (other multifamily) stay multifamily even if a
+    rare row happens to carry `units` 2-4 — DCAD-precedent "the
+    appraisal district's classification wins over the count" applies
+    here too, and Collin's `units` field is 99% NULL/0 anyway so it
+    can't be used as a tie-breaker.
+    """
     code = _clean_text(row.get("sptd_code")).upper()
     owner_up = _clean_text(row.get("owner_name")).upper()
     tot_val = _safe_float(row.get("tot_val")) or 0.0
@@ -197,7 +226,9 @@ def _classify_collin(row: dict[str, Any]) -> str:
 
     if _is_full_exempt(row) or non_target_owner or is_nominal:
         return "exempt"
-    if code in _COLLIN_MF_CODES:
+    if code in _COLLIN_DUPLEX_CODES:
+        return "duplexes"
+    if code in _COLLIN_MF_ONLY_CODES:
         return "multifamily"
     if code in _COLLIN_VACANT_CODES:
         return "vacant"
