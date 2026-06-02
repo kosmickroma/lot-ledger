@@ -5718,6 +5718,45 @@ async def _shutdown_session_storage() -> None:
             await task
 
 
+# Sprint 3 multi-user collab — SSE listener lifecycle.
+# Per docs/MULTIUSER_COLLAB_SPRINT3_SPEC.md v1 §3.6.
+
+def _build_session_dsn() -> str:
+    """Build asyncpg-compatible DSN for the lotledger_sessions DB.
+    Reuses the same env vars as the psycopg2 session pool."""
+    import os
+    from urllib.parse import quote_plus as _q
+    host = os.getenv("DB_HOST", "127.0.0.1")
+    port = os.getenv("DB_PORT", "5432")
+    user = os.getenv("DB_USER", "postgres")
+    password = os.getenv("DB_PASSWORD", "")
+    db = os.getenv("SESSION_DB_NAME", "lotledger_sessions")
+    # URL-encode password to handle special chars (Mike's prod has them).
+    return f"postgresql://{user}:{_q(password)}@{host}:{port}/{db}"
+
+
+@app.on_event("startup")
+async def _startup_sse_listener() -> None:
+    """Start the background asyncpg LISTEN task. Mirrors the
+    session-cleanup startup pattern above."""
+    from api.sse import _listen_forever
+    dsn = _build_session_dsn()
+    app.state.sse_listen_task = asyncio.create_task(_listen_forever(dsn))
+    logger.info("[sse-listen] startup task created")
+
+
+@app.on_event("shutdown")
+async def _shutdown_sse_listener() -> None:
+    """Cancel + await the background LISTEN task on app shutdown."""
+    task = getattr(app.state, "sse_listen_task", None)
+    if task is None:
+        return
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        await task
+    logger.info("[sse-listen] shutdown complete")
+
+
 @app.get("/api/session/{session_id}")
 async def get_session(session_id: str, user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
     job = _get_job(session_id, int(user["id"]))
