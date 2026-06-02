@@ -647,6 +647,35 @@ def _ensure_session_schema() -> None:
                         "uq_saved_areas_share_id",
                         "CREATE UNIQUE INDEX IF NOT EXISTS uq_saved_areas_share_id ON saved_areas (share_id) WHERE share_id IS NOT NULL",
                     ),
+                    # Sprint 1 multi-user collab: saved_area_members join table
+                    # per docs/MULTIUSER_COLLAB_SPRINT1_SPEC.md §2.1 + §2.2.
+                    (
+                        "saved_area_members_table",
+                        """
+                        CREATE TABLE IF NOT EXISTS saved_area_members (
+                            area_id     TEXT        NOT NULL REFERENCES saved_areas(area_id) ON DELETE CASCADE,
+                            user_id     INTEGER     NOT NULL REFERENCES users(id)            ON DELETE CASCADE,
+                            role        TEXT        NOT NULL CHECK (role IN ('owner', 'editor')),
+                            added_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+                            added_via   TEXT        NOT NULL CHECK (added_via IN ('owner', 'share_link', 'developer_bypass', 'backfill')),
+                            PRIMARY KEY (area_id, user_id)
+                        )
+                        """,
+                    ),
+                    (
+                        "idx_saved_area_members_user_id",
+                        "CREATE INDEX IF NOT EXISTS idx_saved_area_members_user_id ON saved_area_members(user_id)",
+                    ),
+                    (
+                        "saved_area_members_backfill",
+                        """
+                        INSERT INTO saved_area_members (area_id, user_id, role, added_via)
+                        SELECT area_id, user_id, 'owner', 'backfill'
+                        FROM saved_areas
+                        WHERE user_id IS NOT NULL
+                        ON CONFLICT (area_id, user_id) DO NOTHING
+                        """,
+                    ),
                     ("idx_saved_parcels_user", "CREATE INDEX IF NOT EXISTS idx_saved_parcels_user ON saved_parcels (user_id)"),
                     ("drop_uq_saved_parcels_user_account", "DROP INDEX IF EXISTS uq_saved_parcels_user_account"),
                     ("idx_cached_jobs_expires", "CREATE INDEX IF NOT EXISTS idx_cached_jobs_expires ON cached_jobs (expires_at)"),
