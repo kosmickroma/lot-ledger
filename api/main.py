@@ -676,6 +676,59 @@ def _ensure_session_schema() -> None:
                         ON CONFLICT (area_id, user_id) DO NOTHING
                         """,
                     ),
+                    # Sprint 2 multi-user collab: per-field filter state
+                    # per docs/MULTIUSER_COLLAB_SPRINT2_SPEC.md §2.1 + §2.2.
+                    (
+                        "saved_area_filter_fields_table",
+                        """
+                        CREATE TABLE IF NOT EXISTS saved_area_filter_fields (
+                            area_id              TEXT        NOT NULL REFERENCES saved_areas(area_id) ON DELETE CASCADE,
+                            field_key            TEXT        NOT NULL,
+                            value                JSONB,
+                            client_seq           BIGINT      NOT NULL DEFAULT 0,
+                            updated_by_user_id   INTEGER     REFERENCES users(id) ON DELETE SET NULL,
+                            updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+                            PRIMARY KEY (area_id, field_key)
+                        )
+                        """,
+                    ),
+                    (
+                        "idx_saved_area_filter_fields_updated_at",
+                        "CREATE INDEX IF NOT EXISTS idx_saved_area_filter_fields_updated_at ON saved_area_filter_fields (area_id, updated_at DESC)",
+                    ),
+                    (
+                        "saved_area_filter_fields_backfill",
+                        """
+                        INSERT INTO saved_area_filter_fields
+                          (area_id, field_key, value, client_seq, updated_by_user_id)
+                        SELECT
+                            sa.area_id,
+                            sections.section || '.' || sections.key  AS field_key,
+                            sections.val                              AS value,
+                            0                                         AS client_seq,
+                            sa.user_id                                AS updated_by_user_id
+                        FROM saved_areas sa
+                        CROSS JOIN LATERAL (
+                            SELECT 'checkboxes' AS section, key, value AS val
+                              FROM jsonb_each(sa.filter_state -> 'checkboxes')
+                              WHERE jsonb_typeof(sa.filter_state -> 'checkboxes') = 'object'
+                            UNION ALL
+                            SELECT 'numeric', key, value FROM jsonb_each(sa.filter_state -> 'numeric')
+                              WHERE jsonb_typeof(sa.filter_state -> 'numeric') = 'object'
+                            UNION ALL
+                            SELECT 'sold', key, value FROM jsonb_each(sa.filter_state -> 'sold')
+                              WHERE jsonb_typeof(sa.filter_state -> 'sold') = 'object'
+                            UNION ALL
+                            SELECT 'comp', key, value FROM jsonb_each(sa.filter_state -> 'comp')
+                              WHERE jsonb_typeof(sa.filter_state -> 'comp') = 'object'
+                            UNION ALL
+                            SELECT 'propelio', key, value FROM jsonb_each(sa.filter_state -> 'propelio')
+                              WHERE jsonb_typeof(sa.filter_state -> 'propelio') = 'object'
+                        ) sections
+                        WHERE jsonb_typeof(sa.filter_state) = 'object'
+                        ON CONFLICT (area_id, field_key) DO NOTHING
+                        """,
+                    ),
                     ("idx_saved_parcels_user", "CREATE INDEX IF NOT EXISTS idx_saved_parcels_user ON saved_parcels (user_id)"),
                     ("drop_uq_saved_parcels_user_account", "DROP INDEX IF EXISTS uq_saved_parcels_user_account"),
                     ("idx_cached_jobs_expires", "CREATE INDEX IF NOT EXISTS idx_cached_jobs_expires ON cached_jobs (expires_at)"),
