@@ -3366,10 +3366,22 @@ function _filterSaveSetStatus(state, label) {
 // _storedValueQueueSave / _storedValueProcessQueue at
 // frontend/map.js:12446+.
 
+// Sprint 2 multi-user collab (spec §5): per-field PATCH queue.
+// _filterSaveQueueSave diffs current state vs last-saved snapshot and
+// enqueues only changed fields. _filterSaveProcessQueue drains the queue
+// serially, sending one PATCH per (field_key, value) with a monotonic
+// client_seq. LWW reconciliation if the server's persisted seq is higher
+// (defers to blur via _applyFilterFieldToUI if user is still typing).
+
 function _filterSaveQueueSave() {
-  // No-op when no area loaded (spec §2.6 — current behavior preserved).
   if (!_currentLoadedAreaId) return;
-  _filterSavePending = true;
+  // Diff captureFilterState() against last-saved snapshot, enqueue changed fields.
+  const current = captureFilterState();
+  const changed = _diffFilterState(current, _filterSaveLastSnapshot);
+  if (changed.length === 0) return;
+  for (const [fieldKey, value] of changed) {
+    _filterSavePendingFields.set(fieldKey, value);
+  }
   if (_filterSaveDebounceTimer) clearTimeout(_filterSaveDebounceTimer);
   _filterSaveDebounceTimer = setTimeout(() => {
     _filterSaveDebounceTimer = null;
@@ -3379,55 +3391,89 @@ function _filterSaveQueueSave() {
 
 async function _filterSaveProcessQueue() {
   if (_filterSaveInflight) return;
-  if (!_filterSavePending) return;
-  if (!_currentLoadedAreaId) {
-    _filterSavePending = false;
-    return;
-  }
+  if (_filterSavePendingFields.size === 0) return;
+  if (!_currentLoadedAreaId) { _filterSavePendingFields.clear(); return; }
   const areaId = _currentLoadedAreaId;
   _filterSaveInflight = true;
-  _filterSavePending = false;
   _pendingFilterSaves++;
   _filterSaveSetStatus("saving");
+  // Snapshot + drain. New enqueues during this flight accumulate in the
+  // cleared map for the next flush.
+  const toFlush = Array.from(_filterSavePendingFields.entries());
+  _filterSavePendingFields.clear();
+  let hadError = false;
   try {
-    const body = { filter_state: captureFilterState() };
-    await _apiJson(`/api/areas/${encodeURIComponent(areaId)}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json", ...authHeaders() },
-      body: JSON.stringify(body),
-    });
-    // Update the in-memory cache so re-renders see the persisted state.
-    const area = _savedAreasCache.find((a) => a.id === areaId && a.type === "area");
-    if (area) area.filter_state = _normalizeFilterStateForCompare(body.filter_state);
-    _filterSaveSetStatus("flash");
-  } catch (err) {
-    console.error("[filter-autosave] save failed", err);
-    // Sprint 1 multi-user collab (spec §3.4 + §3.3 defense-in-depth):
-    // - 404 means the owner deleted the area mid-session. Clean up local
-    //   state, drop from cache, toast, and short-circuit any Retry.
-    // - 403 means a permission gate fired server-side (e.g., editor tried
-    //   an owner-only mutation, possibly via a stale UI state). Toast +
-    //   transition to idle — no Retry, since the action would 403 again.
-    const status = (err && typeof err === "object") ? Number(err.status || 0) : 0;
-    if (status === 404) {
-      const deletedId = areaId;
-      _currentLoadedAreaId = null;
-      const idx = _savedAreasCache.findIndex((a) => a.id === deletedId);
-      if (idx !== -1) _savedAreasCache.splice(idx, 1);
-      try { clearActiveItem(); } catch (_) { /* tolerate */ }
-      try { renderSavedAreasList(); } catch (_) { /* tolerate */ }
-      _filterSaveSetStatus("idle");
-      _showToast("This area was deleted by the owner.");
-    } else if (status === 403) {
-      _filterSaveSetStatus("idle");
-      _showToast("You can view this area but only the owner can change it.");
-    } else {
-      _filterSaveSetStatus("error", "Retry");
+    for (let i = 0; i < toFlush.length; i++) {
+      const [fieldKey, value] = toFlush[i];
+      _filterSaveClientSeq += 1;
+      const seq = _filterSaveClientSeq;
+      try {
+        const resp = await _apiJson(
+          `/api/areas/${encodeURIComponent(areaId)}/filter-fields/${encodeURIComponent(fieldKey)}`,
+          {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json", ...authHeaders() },
+            body: JSON.stringify({ value, client_seq: seq }),
+          }
+        );
+        // LWW reconciliation: if server's persisted client_seq > our outgoing
+        // seq, a concurrent write beat us. Apply the server value to UI
+        // (deferred to blur per anti-flicker rule §5.5).
+        const serverSeq = Number(resp.client_seq) || 0;
+        if (serverSeq > seq) {
+          _applyFilterFieldToUI(fieldKey, resp.value);
+        }
+      } catch (err) {
+        hadError = true;
+        console.error("[filter-autosave] PATCH failed", fieldKey, err);
+        const status = (err && typeof err === "object") ? Number(err.status || 0) : 0;
+        if (status === 404) {
+          // Sprint 2 §5.6: distinguish route-not-found (new frontend / old
+          // backend during rolling deploy) from area-deleted-by-owner via
+          // response detail body.
+          const detail = (err && err.data && err.data.detail) || "";
+          const isAreaDeleted = /saved area not found/i.test(detail);
+          if (!isAreaDeleted) {
+            _filterSavePendingFields.clear();
+            _filterSaveSetStatus("idle");
+            _showToast("Filter save failed. Your browser may need a refresh — the app updated.");
+            return;
+          }
+          // Sprint 1 §3.4 area-deleted-by-owner recovery
+          const deletedId = areaId;
+          _currentLoadedAreaId = null;
+          const idx = _savedAreasCache.findIndex((a) => a.id === deletedId);
+          if (idx !== -1) _savedAreasCache.splice(idx, 1);
+          try { clearActiveItem(); } catch (_) {}
+          try { renderSavedAreasList(); } catch (_) {}
+          _filterSaveSetStatus("idle");
+          _showToast("This area was deleted by the owner.");
+          return;
+        }
+        if (status === 403) {
+          _filterSaveSetStatus("idle");
+          _showToast("You can view this area but only the owner can change it.");
+          return;
+        }
+        // Transient error — re-enqueue current + remaining fields for retry.
+        if (!_filterSavePendingFields.has(fieldKey)) {
+          _filterSavePendingFields.set(fieldKey, value);
+        }
+        for (let j = i + 1; j < toFlush.length; j++) {
+          const [k, v] = toFlush[j];
+          if (!_filterSavePendingFields.has(k)) _filterSavePendingFields.set(k, v);
+        }
+        _filterSaveSetStatus("error", "Retry");
+        return;
+      }
     }
+    // All flushed successfully — update last-saved snapshot baseline.
+    _filterSaveLastSnapshot = captureFilterState();
+    _filterSaveSetStatus("flash");
   } finally {
     _filterSaveInflight = false;
     _pendingFilterSaves = Math.max(0, _pendingFilterSaves - 1);
-    if (_filterSavePending) void _filterSaveProcessQueue();
+    if (!hadError && _filterSavePendingFields.size > 0) void _filterSaveProcessQueue();
   }
 }
 
@@ -4640,6 +4686,9 @@ async function restoreSavedArea(area, options = {}) {
   if (savedFilterState) {
     restoreFilterState(savedFilterState);
   }
+  // Sprint 2 §5.3: capture the restored state as the diff baseline so
+  // the first user edit after load only PATCHes the fields they touch.
+  _filterSaveLastSnapshot = captureFilterState();
   drawLayer.clearLayers();
   L.polygon(area.latlngs, {
     color: "#f1c40f",
@@ -4807,6 +4856,9 @@ async function restoreNamedSession(session, options = {}) {
   _clearOriginatorStar();
   _setCurrentTargetParcel(null);
   _currentLoadedAreaId = null;
+  // Sprint 2 §5.3: no area loaded -> no snapshot baseline + clear queue.
+  _filterSaveLastSnapshot = null;
+  _filterSavePendingFields.clear();
   _syncTabTitle();
   _storedValueOnAreaChange(null);
   void _filterSaveOnAreaChange(null);
@@ -4818,6 +4870,9 @@ async function restoreNamedSession(session, options = {}) {
   if (savedFilterState) {
     restoreFilterState(savedFilterState);
   }
+  // Sprint 2 §5.3: refresh diff baseline after snapshot restore so any
+  // subsequent edit only PATCHes the fields actually changed.
+  _filterSaveLastSnapshot = captureFilterState();
   drawLayer.clearLayers();
   L.polygon(session.latlngs, { color: "#f1c40f", weight: 2.5, fill: false, interactive: false }).addTo(drawLayer);
   maskLayer.clearLayers();
@@ -11011,6 +11066,9 @@ function clearDrawResults() {
   _clearOriginatorStar();
   _setCurrentTargetParcel(null);
   _currentLoadedAreaId = null;
+  // Sprint 2 §5.3: no area loaded -> no snapshot baseline + clear queue.
+  _filterSaveLastSnapshot = null;
+  _filterSavePendingFields.clear();
   _syncTabTitle();
   _storedValueOnAreaChange(null);
   void _filterSaveOnAreaChange(null);
