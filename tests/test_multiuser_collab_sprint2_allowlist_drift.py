@@ -31,7 +31,7 @@ _EXPECTED_KEYS = frozenset({
     "comp.appr_val_min", "comp.appr_val_max",
     "comp.yr_built_min", "comp.yr_built_max",
     "comp.sqft_min",     "comp.sqft_max",
-    # propelio (14)
+    # propelio (22) — includes the 6 parcelType* mirrors (Sprint 2 smoke catch).
     "propelio.months",  "propelio.range",
     "propelio.statusSold", "propelio.statusActive", "propelio.statusPending",
     "propelio.showOutsideArea", "propelio.soldWithinDays",
@@ -40,6 +40,9 @@ _EXPECTED_KEYS = frozenset({
     "propelio.yearMin", "propelio.yearMax",
     "propelio.priceMin", "propelio.priceMax",
     "propelio.sortMode",
+    "propelio.parcelTypeMultifamily", "propelio.parcelTypeDuplexes",
+    "propelio.parcelTypeCommercial",  "propelio.parcelTypeVacant",
+    "propelio.parcelTypeExempt",      "propelio.parcelTypeOffMarket",
 })
 
 
@@ -66,12 +69,13 @@ def test_filter_field_keys_no_unknown():
 
 def test_filter_field_keys_count_matches_spec():
     actual = getattr(api_main, "_FILTER_FIELD_KEYS")
-    # 8 checkboxes + 8 numeric + 5 sold + 8 comp + 16 propelio = 45.
-    # Spec §2.1.A initial count of 43 was off-by-2; propelio has 16 keys
-    # (including statusSold/Active/Pending/showOutsideArea, the 3 status
-    # checkboxes were mis-grouped on first pass).
-    assert len(actual) == 45, (
-        f"Sprint 2 captures 45 distinct filter fields; constant has {len(actual)}."
+    # 8 checkboxes + 8 numeric + 5 sold + 8 comp + 22 propelio = 51.
+    # Sprint 2 smoke catch 2026-06-02: readPropelioFiltersFromUI() spreads
+    # 6 additional parcelType* keys into the propelio object at capture
+    # time (mirrors of the parcel-side checkboxes). They must be in the
+    # allowlist or PATCH 400s on every checkbox toggle.
+    assert len(actual) == 51, (
+        f"Sprint 2 captures 51 distinct filter fields; constant has {len(actual)}."
     )
 
 

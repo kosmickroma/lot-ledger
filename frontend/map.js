@@ -3463,7 +3463,15 @@ async function _filterSaveProcessQueue() {
           _showToast("You can view this area but only the owner can change it.");
           return;
         }
-        // Transient error — re-enqueue current + remaining fields for retry.
+        if (status === 400) {
+          // Allowlist rejection or other validation failure. Re-enqueuing
+          // would loop forever — drop THIS field, keep flushing the rest.
+          // Surface to console for diagnosis; chip stays in "saving" until
+          // the loop exits via either flash or a real transient error.
+          console.warn("[filter-autosave] PATCH rejected (400), dropping field", fieldKey, err && err.data);
+          continue;
+        }
+        // Other transient error — re-enqueue current + remaining fields for retry.
         if (!_filterSavePendingFields.has(fieldKey)) {
           _filterSavePendingFields.set(fieldKey, value);
         }
