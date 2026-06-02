@@ -91,10 +91,15 @@ def _fill_batch(conn, table: str, pk_col: str, lo, hi, run_id: str, county: str,
     tbl, pk = _quote_ident(table), _quote_ident(pk_col)
     null_check = "" if force else "AND (p.property_zip IS NULL OR TRIM(p.property_zip) = '')"
 
+    # Note: we deliberately do NOT bump updated_at here. DCAD's parcels
+    # table has no timestamp column at all; TAD/Collin/Denton do but the
+    # audit ledger (backfill_audit_rows.ran_at) is the authoritative record
+    # of when each row was touched, so the parcel-side timestamp is
+    # redundant. Keeps the SQL uniform across the 4 schemas.
     sql = (
         "WITH updated AS ("
         f"  UPDATE {tbl} p "
-        "  SET property_zip = z.zcta5, updated_at = now() "
+        "  SET property_zip = z.zcta5 "
         "  FROM zcta_polygons z "
         "  WHERE ST_Covers(z.geom, p.centroid) "
         "    AND p.centroid IS NOT NULL "
