@@ -3058,6 +3058,27 @@ body.is-not-power-user .power-user-only {
   vertical-align: middle;
 }
 
+/* Sprint 1 multi-user collab (spec §3.5): editor-role rows in the saved-
+   areas sidebar render with italic name + a small 'shared' tag in the
+   secondary line. Matches the existing originator-unresolved tag style
+   visually (cool blue-grey instead of amber to signal "informational",
+   not "warning"). */
+.saved-area-row.is-shared .saved-area-name {
+  font-style: italic;
+}
+
+.saved-area-shared-tag {
+  display: inline-block;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #1e40af;
+  background: #dbeafe;
+  border: 1px solid #93c5fd;
+  border-radius: 3px;
+  vertical-align: middle;
+}
+
 @keyframes savedParcelPulse {
   0%, 100% {
     filter:

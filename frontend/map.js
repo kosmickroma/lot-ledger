@@ -4895,7 +4895,12 @@ function _renderList(sectionId, listId, items, options = {}) {
     const canShare = area.type === "area" && Boolean(String(area.share_id || "").trim());
     const isActiveRow = area.id === _currentLoadedAreaId || area.id === _selectedSavedItemId;
     const activeClass = isActiveRow ? " saved-area-row-active" : "";
-    const secondaryLine = [chip, `saved ${date}`].filter(Boolean).join(" · ");
+    // Sprint 1 multi-user collab (spec §3.5): editor rows render italic
+    // name + a small 'shared' tag so users can tell owned vs joined
+    // workspaces at a glance, pending the fuller member-badge UI in Sprint 4.
+    const sharedClass = (area.role || "owner") === "editor" ? " is-shared" : "";
+    const sharedTag = sharedClass ? '<span class="saved-area-shared-tag" title="You\'re an editor on this shared workspace">shared</span>' : "";
+    const secondaryLine = [chip, `saved ${date}`, sharedTag].filter(Boolean).join(" · ");
 
     // Sprint 1 multi-user collab: role-based affordance gating (spec §3.3, §5).
     // Owner sees full controls (rename, etc.). Editor sees the Make-my-copy
@@ -4907,7 +4912,7 @@ function _renderList(sectionId, listId, items, options = {}) {
     const typeLabel = _typeLabel(area.type);
 
     return `
-      <div class="saved-area-row${activeClass}" tabindex="0" data-id="${area.id}" data-type="${area.type}">
+      <div class="saved-area-row${activeClass}${sharedClass}" tabindex="0" data-id="${area.id}" data-type="${area.type}">
         <div class="saved-area-main">
           <input type="checkbox" class="saved-area-checkbox" data-action="toggle-selection" data-id="${area.id}" aria-labelledby="${nameId}">
           <span class="visually-hidden">${typeLabel}</span>
