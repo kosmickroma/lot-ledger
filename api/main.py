@@ -5950,17 +5950,23 @@ def _resolve_originator_coords_batch(
 
 @app.get("/api/areas")
 async def list_saved_areas(user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
+    # Sprint 1 multi-user collab: return areas the caller is a member of
+    # (owner OR editor). The role column travels with each row so the
+    # frontend can drive affordance gating (spec §3 row 1, §3.5).
     conn = get_session_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT area_id, name, polygon, filter_state, type, share_id,
-                       originator_parcel_county, originator_parcel_account_num,
-                       created_at, updated_at
-                FROM saved_areas
-                WHERE user_id = %s
-                ORDER BY created_at DESC
+                SELECT sa.area_id, sa.name, sa.polygon, sa.filter_state, sa.type, sa.share_id,
+                       sa.originator_parcel_county, sa.originator_parcel_account_num,
+                       sa.created_at, sa.updated_at,
+                       sam.role
+                FROM saved_areas sa
+                JOIN saved_area_members sam
+                  ON sam.area_id = sa.area_id
+                 AND sam.user_id = %s
+                ORDER BY sa.created_at DESC
                 """,
                 (int(user["id"]),)
             )
@@ -6008,6 +6014,7 @@ async def list_saved_areas(user: dict[str, Any] = Depends(get_current_user)) -> 
             "lng": (float(row[2][0][0]) if isinstance(row[2], list) and row[2] and len(row[2][0]) >= 2 else None) if area_type == "location" else None,
             "created_at": created_at_iso,
             "updated_at": updated_at_iso,
+            "role": str(row[10] or "owner"),  # Sprint 1: 'owner' | 'editor'
         })
 
         if county and account and not originator_unresolved:
@@ -6248,8 +6255,11 @@ async def get_saved_area(area_id: str, user: dict[str, Any] = Depends(get_curren
 
     if row is None:
         raise HTTPException(status_code=404, detail="Saved area not found")
-    if int(row[8] or 0) != int(user["id"]):
-        raise HTTPException(status_code=403, detail="Forbidden")
+    # Sprint 1: membership check (spec §3 row 3) replaces row[8] owner check.
+    # 404 first (above), 403 below — preserves the "area doesn't exist vs.
+    # area exists but you're not a member" distinction.
+    _assert_user_is_area_member(area_id, int(user["id"]))
+    caller_role = _user_area_role(area_id, int(user["id"]))
 
     return {
         "area_id": row[0],
@@ -6265,6 +6275,7 @@ async def get_saved_area(area_id: str, user: dict[str, Any] = Depends(get_curren
         "created_at": row[9].isoformat() if row[9] else None,
         "updated_at": row[10].isoformat() if row[10] else None,
         "seed_parcels": seed_parcels,
+        "role": caller_role,  # Sprint 1: 'owner' | 'editor' for the calling user
     }
 
 
@@ -6273,20 +6284,15 @@ async def get_area_stored_value(
     area_id: str,
     user: dict[str, Any] = Depends(get_current_user),
 ) -> StoredValueGetResponse:
+    # Sprint 1 multi-user collab: membership check (spec §3 row 4).
+    # Editors can read stored values on shared areas. _assert_user_is_area_member
+    # raises 403 if not a member; preserves 404 semantics via the existence
+    # check below (area-doesn't-exist vs. area-exists-but-no-access).
+    if not _saved_area_exists(area_id):
+        raise HTTPException(status_code=404, detail="Saved area not found")
+    _assert_user_is_area_member(area_id, int(user["id"]))
     conn = get_session_conn()
     try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT 1
-                FROM saved_areas
-                WHERE area_id = %s AND user_id = %s
-                LIMIT 1
-                """,
-                (area_id, int(user["id"])),
-            )
-            if cur.fetchone() is None:
-                raise HTTPException(status_code=404, detail="Saved area not found")
         return _stored_value_build_response(conn, area_id)
     finally:
         release_session_conn(conn)
