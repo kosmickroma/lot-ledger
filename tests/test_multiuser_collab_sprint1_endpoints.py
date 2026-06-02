@@ -154,3 +154,46 @@ def test_put_stored_value_uses_member_check():
     assert "_assert_user_is_area_member" in fn_src, (
         "PUT /api/areas/{id}/stored-value must use membership check (spec §3 row 5)."
     )
+
+
+# ─── Task 7: cross-cutting (parcels rate, comp rate, parcels POST B-2 gate) ──
+
+
+def test_parcels_rate_uses_member_check():
+    """POST /api/parcels/rate must let editors rate parcels on shared areas."""
+    src = inspect.getsource(api_main)
+    fn_src = _extract_fn_source(src, "rate_parcel")
+    assert fn_src, "rate_parcel handler not found"
+    assert "_assert_user_is_area_member" in fn_src, (
+        "/api/parcels/rate must use _assert_user_is_area_member (spec §3.2)."
+    )
+
+
+def test_propelio_comp_rate_uses_member_check():
+    """Copilot B-4: /comp/rate lives in api/propelio/routes.py, not main.py.
+    Must switch from _assert_user_owns_area to _assert_user_is_area_member."""
+    from api.propelio import routes as propelio_routes
+    src = inspect.getsource(propelio_routes)
+    assert "_assert_user_is_area_member" in src, (
+        "api/propelio/routes.py must import + call _assert_user_is_area_member "
+        "(Copilot B-4 catch — file is outside main.py and was missed in the "
+        "initial endpoint enumeration)."
+    )
+
+
+def test_parcels_post_bonded_copy_membership_check():
+    """Copilot B-2 blocking catch: the bonded-copy SQL at the original
+    line 6684 (in create_saved_parcel) silently skipped non-owners.
+    Replace with membership-aware logic so editors can save parcels into
+    shared areas."""
+    src = inspect.getsource(api_main)
+    fn_src = _extract_fn_source(src, "create_saved_parcel")
+    assert fn_src, "create_saved_parcel handler not found"
+    # The old gate was:
+    #   SELECT 1 FROM saved_areas WHERE area_id = %s AND user_id = %s LIMIT 1
+    # Post-Sprint-1 must NOT exist in this shape.
+    assert "_assert_user_is_area_member" in fn_src or "_user_area_role" in fn_src, (
+        "POST /api/parcels bonded-copy gate must permit editors "
+        "(Copilot B-2 blocking catch). Replace owner-only SELECT with "
+        "membership-aware helper call."
+    )

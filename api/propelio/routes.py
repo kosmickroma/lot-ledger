@@ -1115,8 +1115,10 @@ async def rate_comp(
     the area_id. Late-import to avoid api.main ↔ api.propelio.routes
     circular-import at module load.
     """
-    from api.main import _assert_user_owns_area
-    _assert_user_owns_area(str(request.saved_area_id or "").strip(), int(user.get("id") or 0))
+    # Sprint 1 multi-user collab (Copilot B-4 catch): editors must be able
+    # to rate comps on shared areas. Membership replaces ownership gate.
+    from api.main import _assert_user_is_area_member
+    _assert_user_is_area_member(str(request.saved_area_id or "").strip(), int(user.get("id") or 0))
     try:
         updated = set_comp_rating(
             saved_area_id=request.saved_area_id,

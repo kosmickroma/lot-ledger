@@ -6908,16 +6908,15 @@ async def create_saved_parcel(request: SavedParcelCreateRequest, req: Request, u
             standalone_row = cur.fetchone()
 
             # If a workspace area_id was supplied, also create a bonded copy.
-            # Validate the area exists AND belongs to this user (or skip silently
-            # - we don't want to leak whether an area exists).
+            # Sprint 1 multi-user collab (Copilot B-2 blocking catch): the
+            # gate is membership, not ownership — editors must be able to
+            # save parcels into shared areas. Was a silent skip pre-Sprint-1.
+            # Skip silently when the caller isn't a member (don't leak
+            # whether the area exists).
             bonded_row = None
             if target_area_id:
-                cur.execute(
-                    "SELECT 1 FROM saved_areas WHERE area_id = %s AND user_id = %s LIMIT 1",
-                    (target_area_id, int(user["id"])),
-                )
-                area_owned = cur.fetchone() is not None
-                if area_owned:
+                area_role = _user_area_role(target_area_id, int(user["id"]))
+                if area_role is not None:  # 'owner' OR 'editor' both qualify
                     cur.execute(
                         """
                         INSERT INTO saved_parcels (account_num, county, payload, user_id, area_id)
@@ -6988,7 +6987,8 @@ async def rate_parcel(request: ParcelRateRequest, req: Request, user: dict[str, 
         raise HTTPException(status_code=400, detail="saved_area_id, county, account_num all required")
     if rating not in (None, "good", "bad"):
         raise HTTPException(status_code=400, detail="rating must be 'good', 'bad', or null")
-    _assert_user_owns_area(area_id, int(user["id"]))
+    # Sprint 1: editors can rate parcels on shared areas (spec §3.2).
+    _assert_user_is_area_member(area_id, int(user["id"]))
 
     conn = get_session_conn()
     try:
