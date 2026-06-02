@@ -1617,6 +1617,22 @@ class StoredValuePutRequest(BaseModel):
     client_seq: int
 
 
+# Sprint 2 multi-user collab: per-field filter PATCH request/response.
+# Per docs/MULTIUSER_COLLAB_SPRINT2_SPEC.md v2 §3.
+class FilterFieldPatchRequest(BaseModel):
+    value: Any  # JSON-serializable: bool, int, str, None, or JSON-compatible object
+    client_seq: int
+
+
+class FilterFieldPatchResponse(BaseModel):
+    area_id: str
+    field_key: str
+    value: Any
+    client_seq: int
+    updated_at: str | None
+    updated_by_user_id: int | None
+
+
 class SavedAreaUpdateRequest(BaseModel):
     name: str | None = None
     filter_state: dict[str, Any] | None = None
@@ -6480,6 +6496,160 @@ async def put_area_stored_value(
         raise
     finally:
         release_session_conn(conn)
+
+
+# Sprint 2 multi-user collab: per-field filter PATCH endpoint
+# per docs/MULTIUSER_COLLAB_SPRINT2_SPEC.md v2 §3.
+@app.patch("/api/areas/{area_id}/filter-fields/{field_key}")
+async def patch_area_filter_field(
+    area_id: str,
+    field_key: str,
+    body: FilterFieldPatchRequest,
+    request: Request,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> FilterFieldPatchResponse:
+    """Sprint 2 per-field filter PATCH. Per spec §3.
+
+    Editor or owner can write. UPSERT with `client_seq < EXCLUDED` guard
+    enforces LWW per (area, field). Cache `saved_areas.filter_state`
+    updated transactionally via two-step CASE-WHEN/jsonb_set (Copilot
+    B-2 fix — bare jsonb_set with create_missing silently NO-OPs on
+    null/missing parents, verified on PG 14.23).
+    """
+    require_csrf(request)
+
+    # Membership check (Sprint 1 editor-tier).
+    if not _saved_area_exists(area_id):
+        raise HTTPException(status_code=404, detail="Saved area not found")
+    _assert_user_is_area_member(area_id, int(user["id"]))
+
+    # Allowlist validation (spec §2.1.A + drift regression test).
+    if field_key not in _FILTER_FIELD_KEYS:
+        raise HTTPException(status_code=400, detail=f"Unknown filter field_key: {field_key!r}")
+
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            # Lazy backfill (rolling-deploy safety, spec §2.2): if this
+            # area has no per-field rows yet, explode the cached blob
+            # INSIDE the same transaction as the UPSERT. Same jsonb_typeof
+            # guards as the eager backfill (Copilot B-1 fix).
+            cur.execute(
+                "SELECT 1 FROM saved_area_filter_fields WHERE area_id = %s LIMIT 1",
+                (area_id,),
+            )
+            if cur.fetchone() is None:
+                cur.execute(
+                    """
+                    INSERT INTO saved_area_filter_fields
+                      (area_id, field_key, value, client_seq, updated_by_user_id)
+                    SELECT
+                        sa.area_id,
+                        sections.section || '.' || sections.key,
+                        sections.val,
+                        0,
+                        sa.user_id
+                    FROM saved_areas sa
+                    CROSS JOIN LATERAL (
+                        SELECT 'checkboxes' AS section, key, value AS val
+                          FROM jsonb_each(sa.filter_state -> 'checkboxes')
+                          WHERE jsonb_typeof(sa.filter_state -> 'checkboxes') = 'object'
+                        UNION ALL
+                        SELECT 'numeric', key, value FROM jsonb_each(sa.filter_state -> 'numeric')
+                          WHERE jsonb_typeof(sa.filter_state -> 'numeric') = 'object'
+                        UNION ALL
+                        SELECT 'sold', key, value FROM jsonb_each(sa.filter_state -> 'sold')
+                          WHERE jsonb_typeof(sa.filter_state -> 'sold') = 'object'
+                        UNION ALL
+                        SELECT 'comp', key, value FROM jsonb_each(sa.filter_state -> 'comp')
+                          WHERE jsonb_typeof(sa.filter_state -> 'comp') = 'object'
+                        UNION ALL
+                        SELECT 'propelio', key, value FROM jsonb_each(sa.filter_state -> 'propelio')
+                          WHERE jsonb_typeof(sa.filter_state -> 'propelio') = 'object'
+                    ) sections
+                    WHERE sa.area_id = %s
+                      AND jsonb_typeof(sa.filter_state) = 'object'
+                    ON CONFLICT (area_id, field_key) DO NOTHING
+                    """,
+                    (area_id,),
+                )
+
+            # UPSERT with stale-write rejection via client_seq guard.
+            cur.execute(
+                """
+                INSERT INTO saved_area_filter_fields
+                  (area_id, field_key, value, client_seq, updated_by_user_id)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (area_id, field_key) DO UPDATE
+                SET value              = EXCLUDED.value,
+                    client_seq         = EXCLUDED.client_seq,
+                    updated_by_user_id = EXCLUDED.updated_by_user_id,
+                    updated_at         = now()
+                WHERE saved_area_filter_fields.client_seq < EXCLUDED.client_seq
+                RETURNING value, client_seq, updated_at, updated_by_user_id
+                """,
+                (area_id, field_key, Json(body.value), int(body.client_seq), int(user["id"])),
+            )
+            row = cur.fetchone()
+            if row is None:
+                # Stale write — re-fetch current persisted state for client
+                # to reconcile against.
+                cur.execute(
+                    """
+                    SELECT value, client_seq, updated_at, updated_by_user_id
+                    FROM saved_area_filter_fields
+                    WHERE area_id = %s AND field_key = %s
+                    """,
+                    (area_id, field_key),
+                )
+                row = cur.fetchone()
+
+            # Update denormalized cache. Copilot B-2 fix: bare jsonb_set
+            # with create_missing=true silently NO-OPs when the section
+            # parent is null/missing/non-object. Two-step CASE-WHEN guard
+            # coerces parent to {} first, then sets the leaf.
+            section, _, key = field_key.partition('.')
+            cur.execute(
+                """
+                UPDATE saved_areas
+                SET filter_state = jsonb_set(
+                    CASE
+                        WHEN jsonb_typeof(COALESCE(filter_state, '{}'::jsonb) -> %s) = 'object'
+                        THEN COALESCE(filter_state, '{}'::jsonb)
+                        ELSE jsonb_set(
+                            COALESCE(filter_state, '{}'::jsonb),
+                            ARRAY[%s],
+                            '{}'::jsonb,
+                            true
+                        )
+                    END,
+                    %s::text[],
+                    %s::jsonb,
+                    true
+                ),
+                updated_at = now()
+                WHERE area_id = %s
+                """,
+                (section, section, [section, key], Json(row[0]), area_id),
+            )
+        conn.commit()
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        release_session_conn(conn)
+
+    return FilterFieldPatchResponse(
+        area_id=area_id,
+        field_key=field_key,
+        value=row[0],
+        client_seq=int(row[1]),
+        updated_at=row[2].isoformat() if row[2] else None,
+        updated_by_user_id=row[3],
+    )
 
 
 @app.get("/api/area/by-share-id/{share_id}")
