@@ -5723,15 +5723,27 @@ async def _shutdown_session_storage() -> None:
 
 def _build_session_dsn() -> str:
     """Build asyncpg-compatible DSN for the lotledger_sessions DB.
-    Reuses the same env vars as the psycopg2 session pool."""
+    Mirrors api/config.py:54-78 — when INSTANCE_UNIX_SOCKET is set
+    (Cloud Run), uses the Unix socket; otherwise TCP for local dev.
+
+    Sprint 3 hotfix: initial deploy defaulted to 127.0.0.1:5432 which
+    is wrong on Cloud Run — there's no Postgres on localhost, the
+    connection goes through the Cloud SQL Auth Proxy Unix socket
+    at /cloudsql/<instance>. asyncpg supports the same URL shape
+    as psycopg2 via the `host` query parameter for Unix sockets.
+    """
     import os
     from urllib.parse import quote_plus as _q
-    host = os.getenv("DB_HOST", "127.0.0.1")
-    port = os.getenv("DB_PORT", "5432")
     user = os.getenv("DB_USER", "postgres")
     password = os.getenv("DB_PASSWORD", "")
     db = os.getenv("SESSION_DB_NAME", "lotledger_sessions")
-    # URL-encode password to handle special chars (Mike's prod has them).
+    unix_socket = os.environ.get("INSTANCE_UNIX_SOCKET", "").strip()
+    if unix_socket:
+        # Cloud Run: Postgres via Cloud SQL Auth Proxy Unix socket.
+        return f"postgresql://{user}:{_q(password)}@/{db}?host={unix_socket}"
+    # Local dev or non-Cloud-Run deploy: TCP host:port.
+    host = os.getenv("DB_HOST", "127.0.0.1")
+    port = os.getenv("DB_PORT", "5432")
     return f"postgresql://{user}:{_q(password)}@{host}:{port}/{db}"
 
 
