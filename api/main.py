@@ -6631,6 +6631,84 @@ async def fork_saved_area(
     }
 
 
+# ─── Sprint 1 multi-user collab: join-by-share-id (spec §4.1) ───────────
+
+
+@app.post("/api/areas/by-share-id/{share_id}/join")
+async def join_saved_area_via_share_id(
+    req: Request,
+    share_id: str = FastAPIPath(..., regex=r"^area_[A-Za-z0-9]{10}$"),
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Grant the calling user 'editor' membership on the area pointed at by
+    this share_id. Replaces the auto-fork pattern (spec §4.1). Idempotent —
+    re-calling for an already-member returns their existing role.
+    """
+    require_csrf(req)
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT area_id, user_id FROM saved_areas WHERE share_id = %s LIMIT 1",
+                (share_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail="Saved area not found")
+            area_id, owner_id = str(row[0]), int(row[1] or 0)
+
+            # No-op if the caller IS the owner. Lazy-backfill via the
+            # helper covers the case where their membership row is
+            # missing (rolling-deploy window).
+            if owner_id == int(user["id"]):
+                cur.execute(
+                    "SELECT role FROM saved_area_members WHERE area_id = %s AND user_id = %s",
+                    (area_id, int(user["id"])),
+                )
+                existing = cur.fetchone()
+                role = str(existing[0]) if existing else "owner"
+                conn.commit()
+                return {"area_id": area_id, "role": role, "already_member": True}
+
+            cur.execute(
+                """
+                INSERT INTO saved_area_members (area_id, user_id, role, added_via)
+                VALUES (%s, %s, 'editor', 'share_link')
+                ON CONFLICT (area_id, user_id) DO NOTHING
+                RETURNING role
+                """,
+                (area_id, int(user["id"])),
+            )
+            inserted = cur.fetchone()
+            # Copilot SQ-2: if INSERT was a no-op (user already has a
+            # membership row, possibly with a non-editor role from a
+            # future promotion path), return the ACTUAL role.
+            if inserted is None:
+                cur.execute(
+                    "SELECT role FROM saved_area_members WHERE area_id = %s AND user_id = %s",
+                    (area_id, int(user["id"])),
+                )
+                existing = cur.fetchone()
+                role = str(existing[0]) if existing else "editor"
+            else:
+                role = "editor"
+        conn.commit()
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        release_session_conn(conn)
+
+    return {
+        "area_id": area_id,
+        "role": role,
+        "already_member": inserted is None,
+    }
+
+
 @app.put("/api/areas/{area_id}")
 async def update_saved_area(area_id: str, request: SavedAreaUpdateRequest, req: Request, user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
     require_csrf(req)
