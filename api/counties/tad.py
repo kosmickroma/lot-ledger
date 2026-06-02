@@ -32,10 +32,13 @@ TAD_CLASS_LABELS: dict[str, str] = {
     "A2":  "Townhouses",
     "A3":  "Condominiums",
     "A4":  "Mobile Homes",
-    "B1":  "Multifamily (2–4 units)",
-    "B2":  "Multifamily (5+ units)",
-    "B3":  "Multifamily (5+ units)",
-    "B4":  "Multifamily (5+ units)",
+    # Fixed 2026-06-01: prior labels had B1 and B2/B3/B4 swapped vs TAD's
+    # own State Use Code reference (Appendix C). B1 is the 5+ apartment
+    # code; B2/B3/B4 are explicitly Duplex/Triplex/Quadplex.
+    "B1":  "Multifamily (5+ units)",
+    "B2":  "Duplex",
+    "B3":  "Triplex",
+    "B4":  "Quadplex",
     "BC":  "Commercial/Mixed-Use",
     "C1":  "Vacant Residential Lots",
     "C1C": "Vacant Residential Lots",
