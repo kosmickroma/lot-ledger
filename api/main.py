@@ -2112,9 +2112,12 @@ def _google_maps_link(row: dict[str, Any]) -> str:
     property_address = str(row.get("property_address", "") or "").strip()
     street_num = str(row.get("street_num", "") or "").strip()
     full_street_name = str(row.get("full_street_name", "") or "").strip()
-    city = str(row.get("property_city", "") or row.get("owner_city", "") or "").strip()
-    state = str(row.get("property_state", "") or row.get("owner_state", "") or "TX").strip()
-    zip_code = str(row.get("property_zip", "") or row.get("owner_zip", "") or "").strip()[:5]
+    # Never fall back to owner_* — owner mailing address is often different
+    # from the property (absentee owners). Better to omit than fabricate.
+    # State defaults to TX since the entire footprint is TX-only.
+    city = str(row.get("property_city", "") or "").strip()
+    state = str(row.get("property_state", "") or "TX").strip()
+    zip_code = str(row.get("property_zip", "") or "").strip()[:5]
 
     # Prefer full property address when available; otherwise fall back to
     # street parts. Keep this county-agnostic (no hardcoded city).
@@ -3029,7 +3032,8 @@ def _fetch_tad_parcel_by_account(account_num: str) -> dict[str, Any] | None:
                 """
                 SELECT parcel_key, account_num, taxpin,
                        owner_name, owner_addr, owner_city, owner_citystate,
-                       owner_zip, situs_addr, property_city, property_class, state_use_code,
+                       owner_zip, situs_addr, property_city, property_zip,
+                       property_class, state_use_code,
                        legal_descr, school_code,
                        acres, land_acres, land_sqft,
                        year_built, living_area,
