@@ -2990,6 +2990,10 @@ function _normalizeSavedAreaRow(area) {
     originator_parcel_account_num: String(area.originator_parcel_account_num || "").trim() || null,
     originator_unresolved: Boolean(area.originator_unresolved),
     shared_by_username: area.shared_by_username || null,
+    // Sprint 1 multi-user collab: backend returns 'owner' or 'editor' per row.
+    // Drives affordance gating + sidebar indicator. Default to 'owner' so
+    // pre-Sprint-1 cache entries (no role field) behave like owned rows.
+    role: typeof area.role === "string" && area.role ? area.role : "owner",
   };
 }
 
