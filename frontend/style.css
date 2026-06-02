@@ -1811,19 +1811,6 @@ body.is-not-power-user .power-user-only {
   font-weight: 500;
 }
 
-/* Second-line tail under "Neighborhood" carrying the Block/Lot portion of
-   the full legal description (2026-06-01). Slightly dimmer + lighter
-   weight than the subdivision name above it so the visual hierarchy
-   reads: subdivision = primary, legal tail = supporting detail. */
-.parcel-popup-legal-tail {
-  display: block;
-  font-size: 11px;
-  font-weight: 400;
-  color: #64748b;
-  margin-top: 1px;
-  line-height: 1.3;
-}
-
 .popup-listing-footer {
   margin-top: 8px;
   padding-top: 6px;

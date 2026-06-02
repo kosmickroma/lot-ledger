@@ -34,19 +34,20 @@ def _minimal_row(**overrides):
     return base
 
 
-def test_legal_description_joins_dcad_style_split_fields_and_trims_after_lot():
+def test_legal_description_joins_dcad_style_without_admin_markers_passes_through():
     """DCAD splits across legal1..legal5 — join with single spaces, in
-    the order legal1..legal5, then trim everything after the LOT token
-    (the admin-tail rule for DCAD). Empty fields contribute nothing."""
+    the order legal1..legal5. When no admin markers (INT###, DD###,
+    CO-DC) appear, the trim is a no-op and the ACS / acreage portion
+    stays in the joined string."""
     row = _minimal_row(
         legal1="WINSLOW HEIGHTS",
         legal2="BLK A",
         legal3="LOT 7",
-        legal4="ACS .15",  # gets trimmed off — analyst-irrelevant
+        legal4="ACS .15",
         legal5="",
     )
     feature = build_feature(row, "single_family", False, None)
-    assert feature["properties"]["legal_description"] == "WINSLOW HEIGHTS BLK A LOT 7"
+    assert feature["properties"]["legal_description"] == "WINSLOW HEIGHTS BLK A LOT 7 ACS .15"
 
 
 def test_legal_description_tad_style_full_in_legal1():
@@ -93,17 +94,16 @@ def test_legal_description_empty_when_no_legal_fields():
 
 def test_legal_description_skips_blank_parts_dcad_with_gaps():
     """DCAD parcels with some legal slots blank should produce a clean
-    single-space join — no double spaces or trailing whitespace.
-    The LOT-trim rule then strips the trailing ACS portion."""
+    single-space join — no double spaces or trailing whitespace."""
     row = _minimal_row(
         legal1="HARWOOD HEIGHTS",
         legal2="",
         legal3="LOT 22",  # legal2 empty between legal1 and legal3
         legal4="",
-        legal5="ACS .25",  # trimmed off after LOT 22
+        legal5="ACS .25",
     )
     feature = build_feature(row, "single_family", False, None)
-    assert feature["properties"]["legal_description"] == "HARWOOD HEIGHTS LOT 22"
+    assert feature["properties"]["legal_description"] == "HARWOOD HEIGHTS LOT 22 ACS .25"
 
 
 def test_dcad_admin_tail_trimmed_with_lt_abbreviation():
