@@ -6187,6 +6187,20 @@ async def create_saved_area(request: SavedAreaCreateRequest, req: Request, user:
                     area_id=row[0],
                     polygon_geojson=polygon_geojson,
                 )
+
+            # Sprint 1 multi-user collab: record the creator as the area's
+            # 'owner' member (spec §3 row 2). Placed AFTER the SAVEPOINT
+            # loop completes so a UniqueViolation retry doesn't roll back
+            # the membership INSERT; placed BEFORE the transaction commit
+            # so both rows land atomically (Copilot S-4).
+            cur.execute(
+                """
+                INSERT INTO saved_area_members (area_id, user_id, role, added_via)
+                VALUES (%s, %s, 'owner', 'owner')
+                ON CONFLICT (area_id, user_id) DO NOTHING
+                """,
+                (row[0], int(user["id"])),
+            )
         conn.commit()
     except HTTPException:
         conn.rollback()
@@ -6311,20 +6325,15 @@ async def put_area_stored_value(
     if field_key in _STORED_VALUE_CALC_FIELD_KEYS and body.numeric_value is not None:
         raise HTTPException(status_code=400, detail="calc fields are read-only for numeric_value")
 
+    # Sprint 1 multi-user collab: membership check (spec §3 row 5). Editors
+    # can write stored values on shared areas.
+    if not _saved_area_exists(area_id):
+        raise HTTPException(status_code=404, detail="Saved area not found")
+    _assert_user_is_area_member(area_id, int(user["id"]))
+
     conn = get_session_conn()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                """
-                SELECT 1
-                FROM saved_areas
-                WHERE area_id = %s AND user_id = %s
-                LIMIT 1
-                """,
-                (area_id, int(user["id"])),
-            )
-            if cur.fetchone() is None:
-                raise HTTPException(status_code=404, detail="Saved area not found")
 
             cur.execute(
                 """
@@ -6665,10 +6674,33 @@ async def update_saved_area(area_id: str, request: SavedAreaUpdateRequest, req: 
         params.append(account)
 
     is_developer = str(user.get("role") or "").strip().lower() == "developer"
-    where_clause = "WHERE area_id = %s" if is_developer else "WHERE area_id = %s AND user_id = %s"
-    query_params: list[Any] = [*params, area_id]
+
+    # Sprint 1 multi-user collab: tiered auth (spec §3.1).
+    #   - Owner-only fields: name, type, lat/lng (polygon), originator_parcel_*.
+    #   - Editor-allowed fields: filter_state only.
+    # Developer bypass skips both tiers as today.
+    owner_only_fields = (
+        request.name is not None
+        or request.type is not None
+        or request.lat is not None
+        or request.lng is not None
+        or request.originator_parcel_county is not None
+        or request.originator_parcel_account_num is not None
+    )
+    editor_fields = request.filter_state is not None
+
     if not is_developer:
-        query_params.append(int(user["id"]))
+        if owner_only_fields:
+            _assert_user_owns_area(area_id, int(user["id"]))
+        elif editor_fields:
+            _assert_user_is_area_member(area_id, int(user["id"]))
+        # else: the earlier 400 "Nothing to update" guard already triggered.
+
+    # Copilot B-1: drop `AND user_id = %s` from WHERE — the pre-check above
+    # is the gate. Without this, editors silently 404 because the row's
+    # user_id != caller's user_id.
+    where_clause = "WHERE area_id = %s"
+    query_params: list[Any] = [*params, area_id]
 
     conn = get_session_conn()
     try:
@@ -6711,6 +6743,16 @@ async def update_saved_area(area_id: str, request: SavedAreaUpdateRequest, req: 
 @app.delete("/api/areas/{area_id}")
 async def delete_saved_area(area_id: str, user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
     is_developer = str(user.get("role") or "").strip().lower() == "developer"
+
+    # Sprint 1: explicit owner pre-check so editors get 403, not silent 404
+    # (Copilot S-3). Developers bypass per existing convention.
+    if not is_developer:
+        role = _user_area_role(area_id, int(user["id"]))
+        if role is None:
+            raise HTTPException(status_code=404, detail="Saved area not found")
+        if role != "owner":
+            raise HTTPException(status_code=403, detail="Only the owner can delete this workspace")
+
     where_clause = "WHERE area_id = %s" if is_developer else "WHERE area_id = %s AND user_id = %s"
     params = (area_id,) if is_developer else (area_id, int(user["id"]))
 
