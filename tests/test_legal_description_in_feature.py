@@ -106,6 +106,45 @@ def test_legal_description_skips_blank_parts_dcad_with_gaps():
     assert feature["properties"]["legal_description"] == "HARWOOD HEIGHTS LOT 22"
 
 
+def test_dcad_admin_tail_trimmed_with_lt_abbreviation():
+    """DCAD inconsistently uses both LOT and LT (an abbreviation) to
+    label the lot value. KK hit this on preview (BRYAN PLACE REV 2 BLK
+    B/333 LT 18 INT...). Trim by admin-marker position, NOT by the LOT
+    keyword position — so either abbreviation gets handled."""
+    row = _minimal_row(
+        legal1="BRYAN PLACE REV 2",
+        legal2="BLK B/333",
+        legal3="LT 18",
+        legal4="INT202500021195 DD01312025",
+        legal5="CO-DC 0333 00B 01800 1000333 00B",
+    )
+    feature = build_feature(row, "single_family", False, None)
+    assert (
+        feature["properties"]["legal_description"]
+        == "BRYAN PLACE REV 2 BLK B/333 LT 18"
+    )
+
+
+def test_dcad_subdivision_containing_inst_not_falsely_trimmed():
+    """Many DCAD subdivisions have "INST" in their name (e.g.
+    "BUCKNER TERRACE 1ST INST" = First Installment). The admin-marker
+    regex `\\bINT\\d` requires a digit immediately after, so "INST" with
+    no digit doesn't trigger a false cut. Confirms the regex is
+    well-scoped."""
+    row = _minimal_row(
+        legal1="BUCKNER TERRACE 1ST INST",
+        legal2="BLK A",
+        legal3="LOT 1",
+        legal4="",
+        legal5="",
+    )
+    feature = build_feature(row, "single_family", False, None)
+    assert (
+        feature["properties"]["legal_description"]
+        == "BUCKNER TERRACE 1ST INST BLK A LOT 1"
+    )
+
+
 def test_dcad_admin_tail_trimmed_after_lot():
     """DCAD parcels frequently append deed instrument number + deed date
     + internal CO-DC indices after the LOT token. Those are operational

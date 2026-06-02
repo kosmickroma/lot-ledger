@@ -190,37 +190,43 @@ def _trim_dcad_legal_admin_tail(legal_description: str | None) -> str:
     """Trim DCAD-style operational/admin metadata off the end of a joined
     legal description (2026-06-01).
 
-    DCAD's legal1..legal5 spread looks like:
+    DCAD's legal1..legal5 spread looks like one of:
         "BUCKNER TERRACE 6TH SEC 1ST INST BLK 14/6129 LOT 14
          INT200600063327 DD02102006 CO-DC 6129 014 01400 3DA6129 014"
+        "BRYAN PLACE REV 2 BLK B/333 LT 18 INT202500021195
+         DD01312025 CO-DC 0333 00B 01800 1000333 00B"
 
-    The pre-LOT portion (subdivision + Block + Lot) is what an analyst
-    scanning the popup actually wants. Everything after the LOT token
-    (INT###### deed instrument, DD######## deed date, CO-DC / 3DA###
-    internal indices) is operational metadata and just visually crowds
-    out the subdivision label above it.
+    The pre-admin portion (subdivision + Block + Lot, where LOT can be
+    spelled LOT or LT) is what an analyst scanning the popup actually
+    wants. Everything after the admin marker tokens is operational
+    metadata and just visually crowds out the subdivision label above
+    it in the popup cell.
 
-    Strategy: cut after the FIRST `LOT <token>` pair. The lot token can
-    be a digit, hyphenated range, alphanumeric ("7A"), or slash form.
-    When no LOT is present (commercial / agricultural parcels), return
-    the input unchanged — those legals don't carry admin tails anyway.
+    Strategy: cut at the FIRST occurrence of any of these admin markers:
+      * INT followed by digits — deed instrument number
+      * DD followed by digits — deed date (MMDDYYYY)
+      * CO-DC — county-document internal index keyword
+    All three appear consistently as the start of the admin tail in
+    DCAD data. Cutting before whichever appears first preserves the
+    BLK/LOT (or BLK/LT) clause regardless of which lot abbreviation
+    DCAD chose for that parcel.
 
-    No-op for TAD / Collin / Denton: their joined legal strings either
-    end at "Lot N" naturally (matches the pattern, returns unchanged)
-    or have no LOT token at all. So a single shared helper covers all
-    four counties without per-county branching.
+    No-op for TAD / Collin / Denton: their joined legal strings don't
+    carry these admin markers — they end at "Lot N" naturally — so the
+    search finds nothing and the input passes through unchanged. Single
+    shared helper, no per-county branching needed.
     """
     if not legal_description:
         return ""
     import re
-    # Case-insensitive: capture everything from the start through the
-    # first LOT-token pair. \S+ on the lot value tolerates digits,
-    # hyphenated ranges ("7-8"), alphanumeric suffixes ("7A"), slash
-    # forms ("1/287"). The non-greedy `.*?` makes this stop at the
-    # FIRST LOT, not the last.
-    match = re.match(r"^(.*?\bLOT\s+\S+)\b", legal_description, re.IGNORECASE)
+    # Look for any of the three admin markers, case-insensitive. The
+    # earliest match wins; everything from that index onward is dropped.
+    # \bINT\d / \bDD\d require a digit after the prefix so subdivision
+    # words like "INST" or "DDISTRICT" don't trigger a false cut.
+    admin_marker = re.compile(r"\b(?:INT\d|DD\d|CO-DC\b)", re.IGNORECASE)
+    match = admin_marker.search(legal_description)
     if match:
-        return match.group(1).strip()
+        return legal_description[:match.start()].rstrip(" ,.-")
     return legal_description
 
 
