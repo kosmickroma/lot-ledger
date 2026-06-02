@@ -12165,29 +12165,38 @@ async function _loadAreaFromShareId(shareId) {
       _renderSavedTargetStar(normalized);
     });
 
-    // Best-effort owner skip: if this share_id is already in cache, the
-    // current user is likely the owner. Not airtight if cache load failed.
+    // Sprint 1 multi-user collab (spec §4.2): auto-JOIN replaces auto-FORK.
+    // Opening a share link makes the calling user an 'editor' on the owner's
+    // row instead of cloning a divergent copy. The explicit "Make my copy"
+    // sidebar button remains available for users who DO want a fork.
+    //
+    // Best-effort owner skip: if this share_id is already in our cache, we
+    // already have a membership for it (owner or backfilled).
     const isOwner = _savedAreasCache.some((a) => String(a.share_id || "") === String(shareId));
     if (_currentUser && !isOwner) {
       try {
-        const cloned = await _apiJson(`/api/areas/from-share-id/${encodeURIComponent(shareId)}`, {
+        const joined = await _apiJson(`/api/areas/by-share-id/${encodeURIComponent(shareId)}/join`, {
           method: "POST",
           headers: { "Content-Type": "application/json", ...authHeaders() },
           body: "{}",
         });
-        const normalized = _normalizeSavedAreaRow(cloned);
+        // Cache hydration (Copilot S-2): the joined area is NOT in
+        // _savedAreasCache yet because the initial GET /api/areas list
+        // ran before membership was granted. Build the normalized row
+        // from the by-share-id payload + the role from the join response.
+        const normalized = _normalizeSavedAreaRow({ ...area, role: joined.role });
         _savedAreasCache.unshift(normalized);
         _clearOriginatorStar();
         _setCurrentTargetParcel(null);
-        _currentLoadedAreaId = cloned.area_id;
-        // Reload stored values against the FORKED area (not the source). The
-        // earlier load in restoreSavedArea ran against the unowned source and
-        // came back blank; the fork carries its own copies. Mirrors the
-        // "Make my copy" button path.
+        _currentLoadedAreaId = joined.area_id;
+        // Reload stored values for the shared area (membership-gated GET
+        // succeeds now that the editor row exists).
         _storedValueOnAreaChange(_currentLoadedAreaId);
         _syncTabTitle();
-        _selectedSavedItemId = cloned.area_id;
-        // Carry the originator TARGET star through the auto-fork.
+        _selectedSavedItemId = joined.area_id;
+        // Carry the originator TARGET star through to the editor's view.
+        // Per spec §5: editors see the OWNER's originator (subject is
+        // workspace-scoped, not per-user).
         if (normalized.originator_parcel_county && normalized.originator_parcel_account_num) {
           _setCurrentTargetParcel({
             county: normalized.originator_parcel_county,
@@ -12199,15 +12208,18 @@ async function _loadAreaFromShareId(shareId) {
           );
         }
         renderSavedAreasList();
-        // Refetch subject_properties so the auto-forked area's originator
-        // shows the gold outline + star (subject-property redesign).
+        // Refetch subject_properties so the shared area's originator shows
+        // the gold outline + star (subject-property redesign carry-over).
         await _reloadSavedResources().catch((err) =>
-          console.warn("[auto-fork] post-clone resource reload failed:", err)
+          console.warn("[auto-join] post-join resource reload failed:", err)
         );
-        _showToast(`Added to your saved areas: ${cloned.name}`);
-      } catch (forkErr) {
-        console.warn("auto-fork failed; keeping read-only view", forkErr);
-        _showToast("Could not save shared workspace", "error");
+        const toastMsg = joined.already_member
+          ? `Already shared with you: ${area.name}`
+          : `Shared with you - "${area.name}"`;
+        _showToast(toastMsg);
+      } catch (joinErr) {
+        console.warn("auto-join failed; keeping read-only view", joinErr);
+        _showToast("Could not access shared workspace", "error");
       }
     }
   } catch (err) {
