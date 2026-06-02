@@ -926,6 +926,18 @@ let _filterSaveClientSeq = 0;
 // captureFilterState() output and decide which fields actually changed.
 // null = no area loaded; reset on clearDrawResults, set on restoreSavedArea.
 let _filterSaveLastSnapshot = null;
+
+// Sprint 3 multi-user collab: SSE subscriber state.
+// Per docs/MULTIUSER_COLLAB_SPRINT3_SPEC.md v1 §4.1.
+let _sseEventSource = null;           // current EventSource instance
+let _sseAreaId = null;                 // which area it's subscribed to
+const _sseSessionUuid = (typeof crypto !== "undefined" && crypto.randomUUID)
+  ? crypto.randomUUID()
+  : `sess-${Math.random().toString(36).slice(2)}-${Date.now()}`;
+// Track last-dispatched client_seq per field for self-echo filtering.
+// Updated after each successful PATCH dispatch in _filterSaveProcessQueue.
+const _dispatchedSeqByField = new Map();  // field_key -> client_seq we sent
+
 // v1.1 §2.6 — 50ms debounce on the popup Save Parcel link. Absorbs
 // event-bubbling and mobile double-tap. Single deliberate clicks
 // (>50ms apart) work normally.
@@ -1960,6 +1972,107 @@ function _applyFilterFieldToUI(fieldKey, value) {
     return;
   }
   _writeFilterFieldDirect(fieldKey, value);
+}
+
+// ─── Sprint 3 multi-user collab: SSE EventSource lifecycle (spec §4.4) ───
+
+function _openSseStream(areaId) {
+  // Already open for this area? no-op.
+  if (_sseEventSource && _sseAreaId === areaId) return;
+  _closeSseStream();
+  if (!areaId) return;
+  _sseAreaId = areaId;
+  const es = new EventSource(
+    `/api/areas/${encodeURIComponent(areaId)}/events`,
+    { withCredentials: true }
+  );
+  _sseEventSource = es;
+  es.addEventListener("connected", (e) => {
+    try {
+      const data = JSON.parse(e.data);
+      console.debug("[sse] connected", data);
+    } catch (_) {}
+  });
+  es.addEventListener("message", (e) => {
+    let msg;
+    try { msg = JSON.parse(e.data); } catch (_) { return; }
+    _handleSseFieldChange(msg);
+  });
+  es.addEventListener("resync", () => {
+    console.debug("[sse] resync event — refetching area state");
+    _sseRefetchArea(areaId);
+  });
+  es.addEventListener("blob_explode", () => {
+    console.debug("[sse] blob_explode event — refetching area state");
+    _sseRefetchArea(areaId);
+  });
+  es.addEventListener("error", () => {
+    // EventSource enters CLOSED only on non-200 response. Transport
+    // blips DON'T close — native reconnect handles those. If CLOSED,
+    // probe auth and route through _handle401 on 401.
+    if (es.readyState === EventSource.CLOSED) {
+      _sseProbeAuthAndMaybeReconnect(areaId);
+    }
+  });
+}
+
+function _closeSseStream() {
+  if (_sseEventSource) {
+    try { _sseEventSource.close(); } catch (_) {}
+    _sseEventSource = null;
+  }
+  _sseAreaId = null;
+}
+
+function _handleSseFieldChange(msg) {
+  if (!msg) return;
+  // Type-tagged messages (resync / blob_explode) are handled by
+  // their dedicated addEventListener bindings; this catches only
+  // field-change deltas.
+  if (msg.type === "resync" || msg.type === "blob_explode") return;
+  const { field_key, value, by_session_id } = msg;
+  if (!field_key) return;
+  // Sprint 3 §4.4 + Agent C catch M-1: self-echo filter on
+  // by_session_id, not by_user_id. Same-user multi-tab still receives
+  // each other's edits (different session UUIDs per tab).
+  if (by_session_id && by_session_id === _sseSessionUuid) {
+    // Our own write echoed back. Already applied locally; ignore.
+    return;
+  }
+  // Remote change. Apply via Sprint 2 anti-flicker hook (defers to
+  // blur if user is focused on the input).
+  _applyFilterFieldToUI(field_key, value);
+  // Refresh diff baseline so the next captureFilterState() comparison
+  // doesn't treat this remote change as a local edit pending PATCH.
+  _filterSaveLastSnapshot = captureFilterState();
+}
+
+function _sseRefetchArea(areaId) {
+  // resync / blob_explode events fall through to a full area refetch.
+  _reloadSavedResources().catch((err) =>
+    console.warn("[sse] refetch failed", err)
+  );
+}
+
+async function _sseProbeAuthAndMaybeReconnect(areaId) {
+  try {
+    const resp = await fetch("/api/auth/me", { credentials: "same-origin" });
+    if (resp.status === 401) {
+      // Session expired mid-stream — route through existing 401 path.
+      _closeSseStream();
+      if (typeof _handle401 === "function") _handle401();
+      return;
+    }
+    if (resp.ok) {
+      // Session still valid — likely transport blip or Cloud Run
+      // timeout. EventSource gave up; manually reconnect.
+      console.debug("[sse] auth ok, reconnecting EventSource");
+      _openSseStream(areaId);
+      return;
+    }
+  } catch (err) {
+    console.warn("[sse] auth probe failed", err);
+  }
 }
 
 function setActiveItem(type, name) {
@@ -3420,10 +3533,16 @@ async function _filterSaveProcessQueue() {
           `/api/areas/${encodeURIComponent(areaId)}/filter-fields/${encodeURIComponent(fieldKey)}`,
           {
             method: "PATCH",
-            headers: { "Content-Type": "application/json", ...authHeaders() },
+            headers: {
+              "Content-Type": "application/json",
+              "X-Session-Id": _sseSessionUuid,  // Sprint 3: echoed in NOTIFY for self-echo filter
+              ...authHeaders(),
+            },
             body: JSON.stringify({ value, client_seq: seq }),
           }
         );
+        // Sprint 3 §4.5: track dispatched seq per field for self-echo filter.
+        _dispatchedSeqByField.set(fieldKey, seq);
         // LWW reconciliation: if server's persisted client_seq > our outgoing
         // seq, a concurrent write beat us. Apply the server value to UI
         // (deferred to blur per anti-flicker rule §5.5).
@@ -4705,6 +4824,8 @@ async function restoreSavedArea(area, options = {}) {
   // Sprint 2 §5.3: capture the restored state as the diff baseline so
   // the first user edit after load only PATCHes the fields they touch.
   _filterSaveLastSnapshot = captureFilterState();
+  // Sprint 3 §4.2: open SSE stream for live filter-change push.
+  if (typeof _openSseStream === "function") _openSseStream(area.id);
   drawLayer.clearLayers();
   L.polygon(area.latlngs, {
     color: "#f1c40f",
@@ -4875,6 +4996,8 @@ async function restoreNamedSession(session, options = {}) {
   // Sprint 2 §5.3: no area loaded -> no snapshot baseline + clear queue.
   _filterSaveLastSnapshot = null;
   _filterSavePendingFields.clear();
+  // Sprint 3 §4.3: close any open SSE stream.
+  if (typeof _closeSseStream === "function") _closeSseStream();
   _syncTabTitle();
   _storedValueOnAreaChange(null);
   void _filterSaveOnAreaChange(null);
@@ -11085,6 +11208,8 @@ function clearDrawResults() {
   // Sprint 2 §5.3: no area loaded -> no snapshot baseline + clear queue.
   _filterSaveLastSnapshot = null;
   _filterSavePendingFields.clear();
+  // Sprint 3 §4.3: close any open SSE stream.
+  if (typeof _closeSseStream === "function") _closeSseStream();
   _syncTabTitle();
   _storedValueOnAreaChange(null);
   void _filterSaveOnAreaChange(null);
