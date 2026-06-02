@@ -647,6 +647,35 @@ def _ensure_session_schema() -> None:
                         "uq_saved_areas_share_id",
                         "CREATE UNIQUE INDEX IF NOT EXISTS uq_saved_areas_share_id ON saved_areas (share_id) WHERE share_id IS NOT NULL",
                     ),
+                    # Sprint 1 multi-user collab: saved_area_members join table
+                    # per docs/MULTIUSER_COLLAB_SPRINT1_SPEC.md §2.1 + §2.2.
+                    (
+                        "saved_area_members_table",
+                        """
+                        CREATE TABLE IF NOT EXISTS saved_area_members (
+                            area_id     TEXT        NOT NULL REFERENCES saved_areas(area_id) ON DELETE CASCADE,
+                            user_id     INTEGER     NOT NULL REFERENCES users(id)            ON DELETE CASCADE,
+                            role        TEXT        NOT NULL CHECK (role IN ('owner', 'editor')),
+                            added_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+                            added_via   TEXT        NOT NULL CHECK (added_via IN ('owner', 'share_link', 'developer_bypass', 'backfill')),
+                            PRIMARY KEY (area_id, user_id)
+                        )
+                        """,
+                    ),
+                    (
+                        "idx_saved_area_members_user_id",
+                        "CREATE INDEX IF NOT EXISTS idx_saved_area_members_user_id ON saved_area_members(user_id)",
+                    ),
+                    (
+                        "saved_area_members_backfill",
+                        """
+                        INSERT INTO saved_area_members (area_id, user_id, role, added_via)
+                        SELECT area_id, user_id, 'owner', 'backfill'
+                        FROM saved_areas
+                        WHERE user_id IS NOT NULL
+                        ON CONFLICT (area_id, user_id) DO NOTHING
+                        """,
+                    ),
                     ("idx_saved_parcels_user", "CREATE INDEX IF NOT EXISTS idx_saved_parcels_user ON saved_parcels (user_id)"),
                     ("drop_uq_saved_parcels_user_account", "DROP INDEX IF EXISTS uq_saved_parcels_user_account"),
                     ("idx_cached_jobs_expires", "CREATE INDEX IF NOT EXISTS idx_cached_jobs_expires ON cached_jobs (expires_at)"),
@@ -940,6 +969,83 @@ def _assert_user_owns_area(area_id: str, user_id: int) -> None:
             )
             if cur.fetchone() is None:
                 raise HTTPException(status_code=403, detail="You don't own this workspace")
+    finally:
+        release_session_conn(conn)
+
+
+# ─── Sprint 1 multi-user collab helpers (spec §2.3) ─────────────────────
+
+def _assert_user_is_area_member(area_id: str, user_id: int) -> None:
+    """Raise 403 if calling user isn't a member of this area. Owner falls back
+    to saved_areas.user_id with lazy backfill, surviving rolling-deploy windows
+    where an area was created on a pre-Sprint-1 Cloud Run instance and lacks
+    an explicit owner membership row.
+    Per docs/MULTIUSER_COLLAB_SPRINT1_SPEC.md §2.3 (Copilot S-5 catch)."""
+    if not area_id or not user_id:
+        raise HTTPException(status_code=400, detail="Missing area_id or user")
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM saved_area_members WHERE area_id = %s AND user_id = %s LIMIT 1",
+                (area_id, int(user_id)),
+            )
+            if cur.fetchone() is not None:
+                return
+            # Lazy-backfill fallback: caller is the area's owner per saved_areas.user_id.
+            cur.execute(
+                "SELECT user_id FROM saved_areas WHERE area_id = %s AND user_id = %s LIMIT 1",
+                (area_id, int(user_id)),
+            )
+            if cur.fetchone() is not None:
+                cur.execute(
+                    """
+                    INSERT INTO saved_area_members (area_id, user_id, role, added_via)
+                    VALUES (%s, %s, 'owner', 'backfill')
+                    ON CONFLICT (area_id, user_id) DO NOTHING
+                    """,
+                    (area_id, int(user_id)),
+                )
+                conn.commit()
+                return
+            raise HTTPException(status_code=403, detail="You don't have access to this workspace")
+    finally:
+        release_session_conn(conn)
+
+
+def _user_area_role(area_id: str, user_id: int) -> str | None:
+    """Return 'owner' / 'editor' / None for the calling user's role in this
+    area. Includes the same lazy-backfill fallback as _assert_user_is_area_member.
+    Per docs/MULTIUSER_COLLAB_SPRINT1_SPEC.md §2.3."""
+    if not area_id or not user_id:
+        return None
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT role FROM saved_area_members WHERE area_id = %s AND user_id = %s LIMIT 1",
+                (area_id, int(user_id)),
+            )
+            row = cur.fetchone()
+            if row is not None:
+                return str(row[0])
+            # Lazy-backfill fallback: caller is the area's owner per saved_areas.user_id.
+            cur.execute(
+                "SELECT 1 FROM saved_areas WHERE area_id = %s AND user_id = %s LIMIT 1",
+                (area_id, int(user_id)),
+            )
+            if cur.fetchone() is not None:
+                cur.execute(
+                    """
+                    INSERT INTO saved_area_members (area_id, user_id, role, added_via)
+                    VALUES (%s, %s, 'owner', 'backfill')
+                    ON CONFLICT (area_id, user_id) DO NOTHING
+                    """,
+                    (area_id, int(user_id)),
+                )
+                conn.commit()
+                return 'owner'
+            return None
     finally:
         release_session_conn(conn)
 
