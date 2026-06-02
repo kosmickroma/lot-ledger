@@ -1949,6 +1949,12 @@ function _writeFilterFieldDirect(fieldKey, value) {
     try { applyAndRenderSoldFilters(); } catch (_) {}
     try { applyMapVisibilityFilters(); } catch (_) {}
   }
+  // Sprint 3 hotfix (2026-06-02): propelio comp layer + comp list also
+  // need to re-render when ANY filter changes remotely. parcelType*
+  // mirrors propagate via the propelio object; sold/comp filters affect
+  // compPassesPropelioFilters gating. applyPropelioClientFilters is a
+  // safe no-op if no comps have been searched yet.
+  try { applyPropelioClientFilters(); } catch (_) {}
 }
 
 // Apply a server-reconciled value to the UI. Anti-flicker rule (§5.5):
@@ -2006,6 +2012,12 @@ function _openSseStream(areaId) {
     console.debug("[sse] blob_explode event — refetching area state");
     _sseRefetchArea(areaId);
   });
+  // Sprint 3 hotfix (2026-06-02): stored value live sync.
+  es.addEventListener("stored_value", (e) => {
+    let msg;
+    try { msg = JSON.parse(e.data); } catch (_) { return; }
+    _handleSseStoredValue(msg);
+  });
   es.addEventListener("error", () => {
     // EventSource enters CLOSED only on non-200 response. Transport
     // blips DON'T close — native reconnect handles those. If CLOSED,
@@ -2056,6 +2068,32 @@ function _handleSseFieldChange(msg) {
   // Refresh diff baseline so the next captureFilterState() comparison
   // doesn't treat this remote change as a local edit pending PATCH.
   _filterSaveLastSnapshot = captureFilterState();
+}
+
+// Sprint 3 hotfix: apply incoming stored-value SSE event.
+// Mirrors the filter-field handler shape — self-echo filter on
+// by_session_id, apply via existing _storedValueState + recalc-and-render.
+function _handleSseStoredValue(msg) {
+  if (!msg) return;
+  const { field_key, numeric_value, comment_text, client_seq, by_session_id } = msg;
+  if (!field_key) return;
+  const isOwnEcho = Boolean(by_session_id && by_session_id === _sseSessionUuid);
+  console.debug("[sse] stored_value event received", {
+    field_key, numeric_value, comment_text, client_seq, by_session_id,
+    my_session: _sseSessionUuid, is_self_echo: isOwnEcho,
+    action: isOwnEcho ? "IGNORED (self)" : "APPLY (remote)",
+  });
+  if (isOwnEcho) return;
+  if (!_storedValueState) return;
+  const fieldData = _storedValueState[field_key];
+  if (!fieldData) return;
+  // Apply remote value. Bump client_seq tracking so our next PUT
+  // won't lose the LWW race to the value we just applied.
+  fieldData.numeric_value = (numeric_value !== undefined && numeric_value !== null) ? Number(numeric_value) : null;
+  fieldData.comment_text = String(comment_text || "");
+  fieldData.client_seq = Math.max(Number(fieldData.client_seq || 0), Number(client_seq || 0));
+  _storedValueClientSeq = Math.max(_storedValueClientSeq, fieldData.client_seq);
+  try { _storedValueRecalcAndRender(); } catch (_) {}
 }
 
 function _sseRefetchArea(areaId) {
@@ -13063,7 +13101,11 @@ async function _storedValueSaveField(fieldKey) {
     const resp = await fetch(`/api/areas/${encodeURIComponent(areaIdAtCall)}/stored-value`, {
       method: "PUT",
       credentials: "same-origin",
-      headers: { "Content-Type": "application/json", ...authHeaders() },
+      headers: {
+        "Content-Type": "application/json",
+        "X-Session-Id": _sseSessionUuid,  // Sprint 3 hotfix: echo for self-echo filter
+        ...authHeaders(),
+      },
       body: JSON.stringify(body),
     });
 

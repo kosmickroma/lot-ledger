@@ -6546,6 +6546,25 @@ async def put_area_stored_value(
                     },
                 )
 
+            # Sprint 3 hotfix (2026-06-02): broadcast stored value changes
+            # on winning writes (updated is not None means UPSERT WHERE
+            # client_seq < EXCLUDED passed). Mirror of filter PATCH §3.2.
+            import json as _json_sv
+            _sv_notify = _json_sv.dumps({
+                "area_id": area_id,
+                "type": "stored_value",
+                "field_key": field_key,
+                "numeric_value": int(updated.get("numeric_value")) if updated.get("numeric_value") is not None else None,
+                "comment_text": str(updated.get("comment_text") or ""),
+                "client_seq": int(updated.get("client_seq") or 0),
+                "by_user_id": int(user["id"]),
+                "by_session_id": request.headers.get("x-session-id", ""),
+            })
+            cur.execute(
+                "SELECT pg_notify('saved_area_filter_changes', %s)",
+                (_sv_notify,),
+            )
+
         conn.commit()
         return _stored_value_build_response(conn, area_id)
     except HTTPException:
@@ -6798,7 +6817,7 @@ async def stream_area_events(
                     break
                 # Determine event type.
                 event_type = "message"
-                if isinstance(msg, dict) and msg.get("type") in ("resync", "blob_explode"):
+                if isinstance(msg, dict) and msg.get("type") in ("resync", "blob_explode", "stored_value"):
                     event_type = msg["type"]
                 yield {
                     "event": event_type,
