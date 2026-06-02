@@ -2076,6 +2076,11 @@ function _handleSseFieldChange(msg) {
   // Refresh diff baseline so the next captureFilterState() comparison
   // doesn't treat this remote change as a local edit pending PATCH.
   _filterSaveLastSnapshot = captureFilterState();
+  // Sprint 3 polish (KK ask 2026-06-02): reuse the existing save-status
+  // chip to flash "Synced ✓" so the user knows a remote change just
+  // landed. Same animation as "Saved ✓"; different label distinguishes
+  // outgoing vs incoming.
+  try { _filterSaveSetStatus("flash", "Synced ✓"); } catch (_) {}
 }
 
 // Sprint 3 hotfix: apply incoming stored-value SSE event.
@@ -2107,6 +2112,9 @@ function _handleSseStoredValue(msg) {
   fieldData.client_seq = incomingSeq;
   _storedValueClientSeq = Math.max(_storedValueClientSeq, incomingSeq);
   try { _storedValueRecalcAndRender(); } catch (_) {}
+  // Sprint 3 polish (KK ask 2026-06-02): flash "Synced ✓" on the
+  // stored-value status chip so the user knows a remote change landed.
+  try { _storedValueSetStatus("flash", "Synced ✓"); } catch (_) {}
 }
 
 function _sseRefetchArea(areaId) {
