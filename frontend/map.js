@@ -1842,7 +1842,14 @@ function _updateActiveItemRenameVisibility() {
   const nameEl = document.getElementById("active-item-name");
   const visibleName = (nameEl?.textContent || "").trim();
   const hasRealName = Boolean(visibleName) && visibleName !== "—";
-  const shouldShow = Boolean(_currentLoadedAreaId) || hasRealName;
+  // Sprint 1 multi-user collab (spec §3.3): rename is owner-only on a
+  // loaded shared area. If no loaded area, allow (covers the transient
+  // pre-load state). Editors hit a hidden pencil + 403 server-side.
+  const loadedArea = _currentLoadedAreaId
+    ? _savedAreasCache.find((a) => String(a.id) === String(_currentLoadedAreaId))
+    : null;
+  const isOwnerOfLoaded = loadedArea ? (loadedArea.role || "owner") === "owner" : true;
+  const shouldShow = (Boolean(_currentLoadedAreaId) || hasRealName) && isOwnerOfLoaded;
   btn.classList.toggle("hidden", !shouldShow);
 }
 
@@ -2990,6 +2997,10 @@ function _normalizeSavedAreaRow(area) {
     originator_parcel_account_num: String(area.originator_parcel_account_num || "").trim() || null,
     originator_unresolved: Boolean(area.originator_unresolved),
     shared_by_username: area.shared_by_username || null,
+    // Sprint 1 multi-user collab: backend returns 'owner' or 'editor' per row.
+    // Drives affordance gating + sidebar indicator. Default to 'owner' so
+    // pre-Sprint-1 cache entries (no role field) behave like owned rows.
+    role: typeof area.role === "string" && area.role ? area.role : "owner",
   };
 }
 
@@ -3149,6 +3160,14 @@ async function _commitOriginatorToArea(area, stagedCounty, stagedAccount) {
   // is "(none, none)" the user effectively unset the subject — current
   // backend doesn't accept that, so skip.
   if (!stagedCounty || !stagedAccount) return false;
+  // Sprint 1 multi-user collab (spec §3.3 + §5): subject is owner-only.
+  // Editors on a shared area can save parcels (creates saved_parcels row)
+  // but cannot change the area's anchor subject. Backend would 403; this
+  // surfaces a friendly toast instead of a silent failure.
+  if ((area.role || "owner") !== "owner") {
+    _showToast("Only the owner can change this workspace's subject parcel.");
+    return false;
+  }
   await _apiJson(`/api/areas/${encodeURIComponent(area.id)}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json", ...authHeaders() },
@@ -3227,7 +3246,28 @@ async function _filterSaveProcessQueue() {
     _filterSaveSetStatus("flash");
   } catch (err) {
     console.error("[filter-autosave] save failed", err);
-    _filterSaveSetStatus("error", "Retry");
+    // Sprint 1 multi-user collab (spec §3.4 + §3.3 defense-in-depth):
+    // - 404 means the owner deleted the area mid-session. Clean up local
+    //   state, drop from cache, toast, and short-circuit any Retry.
+    // - 403 means a permission gate fired server-side (e.g., editor tried
+    //   an owner-only mutation, possibly via a stale UI state). Toast +
+    //   transition to idle — no Retry, since the action would 403 again.
+    const status = (err && typeof err === "object") ? Number(err.status || 0) : 0;
+    if (status === 404) {
+      const deletedId = areaId;
+      _currentLoadedAreaId = null;
+      const idx = _savedAreasCache.findIndex((a) => a.id === deletedId);
+      if (idx !== -1) _savedAreasCache.splice(idx, 1);
+      try { clearActiveItem(); } catch (_) { /* tolerate */ }
+      try { renderSavedAreasList(); } catch (_) { /* tolerate */ }
+      _filterSaveSetStatus("idle");
+      _showToast("This area was deleted by the owner.");
+    } else if (status === 403) {
+      _filterSaveSetStatus("idle");
+      _showToast("You can view this area but only the owner can change it.");
+    } else {
+      _filterSaveSetStatus("error", "Retry");
+    }
   } finally {
     _filterSaveInflight = false;
     _pendingFilterSaves = Math.max(0, _pendingFilterSaves - 1);
@@ -4855,18 +4895,24 @@ function _renderList(sectionId, listId, items, options = {}) {
     const canShare = area.type === "area" && Boolean(String(area.share_id || "").trim());
     const isActiveRow = area.id === _currentLoadedAreaId || area.id === _selectedSavedItemId;
     const activeClass = isActiveRow ? " saved-area-row-active" : "";
-    const secondaryLine = [chip, `saved ${date}`].filter(Boolean).join(" · ");
+    // Sprint 1 multi-user collab (spec §3.5): editor rows render italic
+    // name + a small 'shared' tag so users can tell owned vs joined
+    // workspaces at a glance, pending the fuller member-badge UI in Sprint 4.
+    const sharedClass = (area.role || "owner") === "editor" ? " is-shared" : "";
+    const sharedTag = sharedClass ? '<span class="saved-area-shared-tag" title="You\'re an editor on this shared workspace">shared</span>' : "";
+    const secondaryLine = [chip, `saved ${date}`, sharedTag].filter(Boolean).join(" · ");
 
-    // Ownership + role gating for Rename / Fork
-    const isOwn = area.user_id != null
-      ? String(area.user_id) === String(_currentUser?.id || "")
-      : true; // no user_id on row → treat as own (legacy safe)
-    const showFullControls = isOwn || _canEditAnyArea();
+    // Sprint 1 multi-user collab: role-based affordance gating (spec §3.3, §5).
+    // Owner sees full controls (rename, etc.). Editor sees the Make-my-copy
+    // path (existing behavior). Developer-bypass via _canEditAnyArea keeps
+    // KK able to operate on anyone's area.
+    const isOwnerRow = (area.role || "owner") === "owner";
+    const showFullControls = isOwnerRow || _canEditAnyArea();
     const nameId = `name-${listKey}-${area.id}`;
     const typeLabel = _typeLabel(area.type);
 
     return `
-      <div class="saved-area-row${activeClass}" tabindex="0" data-id="${area.id}" data-type="${area.type}">
+      <div class="saved-area-row${activeClass}${sharedClass}" tabindex="0" data-id="${area.id}" data-type="${area.type}">
         <div class="saved-area-main">
           <input type="checkbox" class="saved-area-checkbox" data-action="toggle-selection" data-id="${area.id}" aria-labelledby="${nameId}">
           <span class="visually-hidden">${typeLabel}</span>
@@ -5131,15 +5177,26 @@ function _toggleSelectMode(listKey) {
 async function _handleBulkDelete(listKey) {
   const sel = _listSelections[listKey];
   if (!sel || sel.selectedIds.size === 0) return;
-  const n = sel.selectedIds.size;
-  const noun = (listKey === 'saved-areas') ? 'saved area' : 'target';
-  const ok = window.confirm(`Delete ${n} ${noun}${n > 1 ? 's' : ''}? This cannot be undone.`);
-  if (!ok) return;
+  // Sprint 1 multi-user collab (spec §3.3, Copilot frontend audit): bulk-delete
+  // is owner-only. Pre-filter editor-row IDs so the user gets a clear toast
+  // up-front instead of N silent per-row 403 rejections.
   const ids = Array.from(sel.selectedIds);
   const all = [..._savedAreasCache, ..._savedParcelsCache];
   const items = ids.map(id => all.find(a => a.id === id)).filter(Boolean);
-  // Bounded-concurrency pool of 4 workers
-  const queue = [...items];
+  const ownerItems = items.filter(it => (it.role || "owner") === "owner");
+  const skipped = items.length - ownerItems.length;
+  if (skipped > 0 && ownerItems.length === 0) {
+    _showToast("Cannot delete: only the owner can delete shared areas.");
+    return;
+  }
+  const n = ownerItems.length;
+  const noun = (listKey === 'saved-areas') ? 'saved area' : 'target';
+  const skippedSuffix = skipped > 0 ? ` (${skipped} shared, can't delete)` : '';
+  const ok = window.confirm(`Delete ${n} ${noun}${n > 1 ? 's' : ''}${skippedSuffix}? This cannot be undone.`);
+  if (!ok) return;
+  // Bounded-concurrency pool of 4 workers — iterates ownerItems only
+  // so editor-role rows never hit the delete endpoint (would 403 anyway).
+  const queue = [...ownerItems];
   let successCount = 0;
   const failed = [];
   const alreadyDeleted = [];
@@ -12161,29 +12218,38 @@ async function _loadAreaFromShareId(shareId) {
       _renderSavedTargetStar(normalized);
     });
 
-    // Best-effort owner skip: if this share_id is already in cache, the
-    // current user is likely the owner. Not airtight if cache load failed.
+    // Sprint 1 multi-user collab (spec §4.2): auto-JOIN replaces auto-FORK.
+    // Opening a share link makes the calling user an 'editor' on the owner's
+    // row instead of cloning a divergent copy. The explicit "Make my copy"
+    // sidebar button remains available for users who DO want a fork.
+    //
+    // Best-effort owner skip: if this share_id is already in our cache, we
+    // already have a membership for it (owner or backfilled).
     const isOwner = _savedAreasCache.some((a) => String(a.share_id || "") === String(shareId));
     if (_currentUser && !isOwner) {
       try {
-        const cloned = await _apiJson(`/api/areas/from-share-id/${encodeURIComponent(shareId)}`, {
+        const joined = await _apiJson(`/api/areas/by-share-id/${encodeURIComponent(shareId)}/join`, {
           method: "POST",
           headers: { "Content-Type": "application/json", ...authHeaders() },
           body: "{}",
         });
-        const normalized = _normalizeSavedAreaRow(cloned);
+        // Cache hydration (Copilot S-2): the joined area is NOT in
+        // _savedAreasCache yet because the initial GET /api/areas list
+        // ran before membership was granted. Build the normalized row
+        // from the by-share-id payload + the role from the join response.
+        const normalized = _normalizeSavedAreaRow({ ...area, role: joined.role });
         _savedAreasCache.unshift(normalized);
         _clearOriginatorStar();
         _setCurrentTargetParcel(null);
-        _currentLoadedAreaId = cloned.area_id;
-        // Reload stored values against the FORKED area (not the source). The
-        // earlier load in restoreSavedArea ran against the unowned source and
-        // came back blank; the fork carries its own copies. Mirrors the
-        // "Make my copy" button path.
+        _currentLoadedAreaId = joined.area_id;
+        // Reload stored values for the shared area (membership-gated GET
+        // succeeds now that the editor row exists).
         _storedValueOnAreaChange(_currentLoadedAreaId);
         _syncTabTitle();
-        _selectedSavedItemId = cloned.area_id;
-        // Carry the originator TARGET star through the auto-fork.
+        _selectedSavedItemId = joined.area_id;
+        // Carry the originator TARGET star through to the editor's view.
+        // Per spec §5: editors see the OWNER's originator (subject is
+        // workspace-scoped, not per-user).
         if (normalized.originator_parcel_county && normalized.originator_parcel_account_num) {
           _setCurrentTargetParcel({
             county: normalized.originator_parcel_county,
@@ -12195,15 +12261,18 @@ async function _loadAreaFromShareId(shareId) {
           );
         }
         renderSavedAreasList();
-        // Refetch subject_properties so the auto-forked area's originator
-        // shows the gold outline + star (subject-property redesign).
+        // Refetch subject_properties so the shared area's originator shows
+        // the gold outline + star (subject-property redesign carry-over).
         await _reloadSavedResources().catch((err) =>
-          console.warn("[auto-fork] post-clone resource reload failed:", err)
+          console.warn("[auto-join] post-join resource reload failed:", err)
         );
-        _showToast(`Added to your saved areas: ${cloned.name}`);
-      } catch (forkErr) {
-        console.warn("auto-fork failed; keeping read-only view", forkErr);
-        _showToast("Could not save shared workspace", "error");
+        const toastMsg = joined.already_member
+          ? `Already shared with you: ${area.name}`
+          : `Shared with you - "${area.name}"`;
+        _showToast(toastMsg);
+      } catch (joinErr) {
+        console.warn("auto-join failed; keeping read-only view", joinErr);
+        _showToast("Could not access shared workspace", "error");
       }
     }
   } catch (err) {

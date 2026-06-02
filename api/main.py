@@ -5950,17 +5950,23 @@ def _resolve_originator_coords_batch(
 
 @app.get("/api/areas")
 async def list_saved_areas(user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
+    # Sprint 1 multi-user collab: return areas the caller is a member of
+    # (owner OR editor). The role column travels with each row so the
+    # frontend can drive affordance gating (spec §3 row 1, §3.5).
     conn = get_session_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT area_id, name, polygon, filter_state, type, share_id,
-                       originator_parcel_county, originator_parcel_account_num,
-                       created_at, updated_at
-                FROM saved_areas
-                WHERE user_id = %s
-                ORDER BY created_at DESC
+                SELECT sa.area_id, sa.name, sa.polygon, sa.filter_state, sa.type, sa.share_id,
+                       sa.originator_parcel_county, sa.originator_parcel_account_num,
+                       sa.created_at, sa.updated_at,
+                       sam.role
+                FROM saved_areas sa
+                JOIN saved_area_members sam
+                  ON sam.area_id = sa.area_id
+                 AND sam.user_id = %s
+                ORDER BY sa.created_at DESC
                 """,
                 (int(user["id"]),)
             )
@@ -6008,6 +6014,7 @@ async def list_saved_areas(user: dict[str, Any] = Depends(get_current_user)) -> 
             "lng": (float(row[2][0][0]) if isinstance(row[2], list) and row[2] and len(row[2][0]) >= 2 else None) if area_type == "location" else None,
             "created_at": created_at_iso,
             "updated_at": updated_at_iso,
+            "role": str(row[10] or "owner"),  # Sprint 1: 'owner' | 'editor'
         })
 
         if county and account and not originator_unresolved:
@@ -6180,6 +6187,20 @@ async def create_saved_area(request: SavedAreaCreateRequest, req: Request, user:
                     area_id=row[0],
                     polygon_geojson=polygon_geojson,
                 )
+
+            # Sprint 1 multi-user collab: record the creator as the area's
+            # 'owner' member (spec §3 row 2). Placed AFTER the SAVEPOINT
+            # loop completes so a UniqueViolation retry doesn't roll back
+            # the membership INSERT; placed BEFORE the transaction commit
+            # so both rows land atomically (Copilot S-4).
+            cur.execute(
+                """
+                INSERT INTO saved_area_members (area_id, user_id, role, added_via)
+                VALUES (%s, %s, 'owner', 'owner')
+                ON CONFLICT (area_id, user_id) DO NOTHING
+                """,
+                (row[0], int(user["id"])),
+            )
         conn.commit()
     except HTTPException:
         conn.rollback()
@@ -6248,8 +6269,11 @@ async def get_saved_area(area_id: str, user: dict[str, Any] = Depends(get_curren
 
     if row is None:
         raise HTTPException(status_code=404, detail="Saved area not found")
-    if int(row[8] or 0) != int(user["id"]):
-        raise HTTPException(status_code=403, detail="Forbidden")
+    # Sprint 1: membership check (spec §3 row 3) replaces row[8] owner check.
+    # 404 first (above), 403 below — preserves the "area doesn't exist vs.
+    # area exists but you're not a member" distinction.
+    _assert_user_is_area_member(area_id, int(user["id"]))
+    caller_role = _user_area_role(area_id, int(user["id"]))
 
     return {
         "area_id": row[0],
@@ -6265,6 +6289,7 @@ async def get_saved_area(area_id: str, user: dict[str, Any] = Depends(get_curren
         "created_at": row[9].isoformat() if row[9] else None,
         "updated_at": row[10].isoformat() if row[10] else None,
         "seed_parcels": seed_parcels,
+        "role": caller_role,  # Sprint 1: 'owner' | 'editor' for the calling user
     }
 
 
@@ -6273,20 +6298,15 @@ async def get_area_stored_value(
     area_id: str,
     user: dict[str, Any] = Depends(get_current_user),
 ) -> StoredValueGetResponse:
+    # Sprint 1 multi-user collab: membership check (spec §3 row 4).
+    # Editors can read stored values on shared areas. _assert_user_is_area_member
+    # raises 403 if not a member; preserves 404 semantics via the existence
+    # check below (area-doesn't-exist vs. area-exists-but-no-access).
+    if not _saved_area_exists(area_id):
+        raise HTTPException(status_code=404, detail="Saved area not found")
+    _assert_user_is_area_member(area_id, int(user["id"]))
     conn = get_session_conn()
     try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT 1
-                FROM saved_areas
-                WHERE area_id = %s AND user_id = %s
-                LIMIT 1
-                """,
-                (area_id, int(user["id"])),
-            )
-            if cur.fetchone() is None:
-                raise HTTPException(status_code=404, detail="Saved area not found")
         return _stored_value_build_response(conn, area_id)
     finally:
         release_session_conn(conn)
@@ -6305,20 +6325,15 @@ async def put_area_stored_value(
     if field_key in _STORED_VALUE_CALC_FIELD_KEYS and body.numeric_value is not None:
         raise HTTPException(status_code=400, detail="calc fields are read-only for numeric_value")
 
+    # Sprint 1 multi-user collab: membership check (spec §3 row 5). Editors
+    # can write stored values on shared areas.
+    if not _saved_area_exists(area_id):
+        raise HTTPException(status_code=404, detail="Saved area not found")
+    _assert_user_is_area_member(area_id, int(user["id"]))
+
     conn = get_session_conn()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                """
-                SELECT 1
-                FROM saved_areas
-                WHERE area_id = %s AND user_id = %s
-                LIMIT 1
-                """,
-                (area_id, int(user["id"])),
-            )
-            if cur.fetchone() is None:
-                raise HTTPException(status_code=404, detail="Saved area not found")
 
             cur.execute(
                 """
@@ -6616,6 +6631,84 @@ async def fork_saved_area(
     }
 
 
+# ─── Sprint 1 multi-user collab: join-by-share-id (spec §4.1) ───────────
+
+
+@app.post("/api/areas/by-share-id/{share_id}/join")
+async def join_saved_area_via_share_id(
+    req: Request,
+    share_id: str = FastAPIPath(..., regex=r"^area_[A-Za-z0-9]{10}$"),
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Grant the calling user 'editor' membership on the area pointed at by
+    this share_id. Replaces the auto-fork pattern (spec §4.1). Idempotent —
+    re-calling for an already-member returns their existing role.
+    """
+    require_csrf(req)
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT area_id, user_id FROM saved_areas WHERE share_id = %s LIMIT 1",
+                (share_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail="Saved area not found")
+            area_id, owner_id = str(row[0]), int(row[1] or 0)
+
+            # No-op if the caller IS the owner. Lazy-backfill via the
+            # helper covers the case where their membership row is
+            # missing (rolling-deploy window).
+            if owner_id == int(user["id"]):
+                cur.execute(
+                    "SELECT role FROM saved_area_members WHERE area_id = %s AND user_id = %s",
+                    (area_id, int(user["id"])),
+                )
+                existing = cur.fetchone()
+                role = str(existing[0]) if existing else "owner"
+                conn.commit()
+                return {"area_id": area_id, "role": role, "already_member": True}
+
+            cur.execute(
+                """
+                INSERT INTO saved_area_members (area_id, user_id, role, added_via)
+                VALUES (%s, %s, 'editor', 'share_link')
+                ON CONFLICT (area_id, user_id) DO NOTHING
+                RETURNING role
+                """,
+                (area_id, int(user["id"])),
+            )
+            inserted = cur.fetchone()
+            # Copilot SQ-2: if INSERT was a no-op (user already has a
+            # membership row, possibly with a non-editor role from a
+            # future promotion path), return the ACTUAL role.
+            if inserted is None:
+                cur.execute(
+                    "SELECT role FROM saved_area_members WHERE area_id = %s AND user_id = %s",
+                    (area_id, int(user["id"])),
+                )
+                existing = cur.fetchone()
+                role = str(existing[0]) if existing else "editor"
+            else:
+                role = "editor"
+        conn.commit()
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        release_session_conn(conn)
+
+    return {
+        "area_id": area_id,
+        "role": role,
+        "already_member": inserted is None,
+    }
+
+
 @app.put("/api/areas/{area_id}")
 async def update_saved_area(area_id: str, request: SavedAreaUpdateRequest, req: Request, user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
     require_csrf(req)
@@ -6659,10 +6752,33 @@ async def update_saved_area(area_id: str, request: SavedAreaUpdateRequest, req: 
         params.append(account)
 
     is_developer = str(user.get("role") or "").strip().lower() == "developer"
-    where_clause = "WHERE area_id = %s" if is_developer else "WHERE area_id = %s AND user_id = %s"
-    query_params: list[Any] = [*params, area_id]
+
+    # Sprint 1 multi-user collab: tiered auth (spec §3.1).
+    #   - Owner-only fields: name, type, lat/lng (polygon), originator_parcel_*.
+    #   - Editor-allowed fields: filter_state only.
+    # Developer bypass skips both tiers as today.
+    owner_only_fields = (
+        request.name is not None
+        or request.type is not None
+        or request.lat is not None
+        or request.lng is not None
+        or request.originator_parcel_county is not None
+        or request.originator_parcel_account_num is not None
+    )
+    editor_fields = request.filter_state is not None
+
     if not is_developer:
-        query_params.append(int(user["id"]))
+        if owner_only_fields:
+            _assert_user_owns_area(area_id, int(user["id"]))
+        elif editor_fields:
+            _assert_user_is_area_member(area_id, int(user["id"]))
+        # else: the earlier 400 "Nothing to update" guard already triggered.
+
+    # Copilot B-1: drop `AND user_id = %s` from WHERE — the pre-check above
+    # is the gate. Without this, editors silently 404 because the row's
+    # user_id != caller's user_id.
+    where_clause = "WHERE area_id = %s"
+    query_params: list[Any] = [*params, area_id]
 
     conn = get_session_conn()
     try:
@@ -6705,6 +6821,16 @@ async def update_saved_area(area_id: str, request: SavedAreaUpdateRequest, req: 
 @app.delete("/api/areas/{area_id}")
 async def delete_saved_area(area_id: str, user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
     is_developer = str(user.get("role") or "").strip().lower() == "developer"
+
+    # Sprint 1: explicit owner pre-check so editors get 403, not silent 404
+    # (Copilot S-3). Developers bypass per existing convention.
+    if not is_developer:
+        role = _user_area_role(area_id, int(user["id"]))
+        if role is None:
+            raise HTTPException(status_code=404, detail="Saved area not found")
+        if role != "owner":
+            raise HTTPException(status_code=403, detail="Only the owner can delete this workspace")
+
     where_clause = "WHERE area_id = %s" if is_developer else "WHERE area_id = %s AND user_id = %s"
     params = (area_id,) if is_developer else (area_id, int(user["id"]))
 
@@ -6782,16 +6908,15 @@ async def create_saved_parcel(request: SavedParcelCreateRequest, req: Request, u
             standalone_row = cur.fetchone()
 
             # If a workspace area_id was supplied, also create a bonded copy.
-            # Validate the area exists AND belongs to this user (or skip silently
-            # - we don't want to leak whether an area exists).
+            # Sprint 1 multi-user collab (Copilot B-2 blocking catch): the
+            # gate is membership, not ownership — editors must be able to
+            # save parcels into shared areas. Was a silent skip pre-Sprint-1.
+            # Skip silently when the caller isn't a member (don't leak
+            # whether the area exists).
             bonded_row = None
             if target_area_id:
-                cur.execute(
-                    "SELECT 1 FROM saved_areas WHERE area_id = %s AND user_id = %s LIMIT 1",
-                    (target_area_id, int(user["id"])),
-                )
-                area_owned = cur.fetchone() is not None
-                if area_owned:
+                area_role = _user_area_role(target_area_id, int(user["id"]))
+                if area_role is not None:  # 'owner' OR 'editor' both qualify
                     cur.execute(
                         """
                         INSERT INTO saved_parcels (account_num, county, payload, user_id, area_id)
@@ -6862,7 +6987,8 @@ async def rate_parcel(request: ParcelRateRequest, req: Request, user: dict[str, 
         raise HTTPException(status_code=400, detail="saved_area_id, county, account_num all required")
     if rating not in (None, "good", "bad"):
         raise HTTPException(status_code=400, detail="rating must be 'good', 'bad', or null")
-    _assert_user_owns_area(area_id, int(user["id"]))
+    # Sprint 1: editors can rate parcels on shared areas (spec §3.2).
+    _assert_user_is_area_member(area_id, int(user["id"]))
 
     conn = get_session_conn()
     try:
