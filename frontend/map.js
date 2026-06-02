@@ -1842,7 +1842,14 @@ function _updateActiveItemRenameVisibility() {
   const nameEl = document.getElementById("active-item-name");
   const visibleName = (nameEl?.textContent || "").trim();
   const hasRealName = Boolean(visibleName) && visibleName !== "—";
-  const shouldShow = Boolean(_currentLoadedAreaId) || hasRealName;
+  // Sprint 1 multi-user collab (spec §3.3): rename is owner-only on a
+  // loaded shared area. If no loaded area, allow (covers the transient
+  // pre-load state). Editors hit a hidden pencil + 403 server-side.
+  const loadedArea = _currentLoadedAreaId
+    ? _savedAreasCache.find((a) => String(a.id) === String(_currentLoadedAreaId))
+    : null;
+  const isOwnerOfLoaded = loadedArea ? (loadedArea.role || "owner") === "owner" : true;
+  const shouldShow = (Boolean(_currentLoadedAreaId) || hasRealName) && isOwnerOfLoaded;
   btn.classList.toggle("hidden", !shouldShow);
 }
 
@@ -3153,6 +3160,14 @@ async function _commitOriginatorToArea(area, stagedCounty, stagedAccount) {
   // is "(none, none)" the user effectively unset the subject — current
   // backend doesn't accept that, so skip.
   if (!stagedCounty || !stagedAccount) return false;
+  // Sprint 1 multi-user collab (spec §3.3 + §5): subject is owner-only.
+  // Editors on a shared area can save parcels (creates saved_parcels row)
+  // but cannot change the area's anchor subject. Backend would 403; this
+  // surfaces a friendly toast instead of a silent failure.
+  if ((area.role || "owner") !== "owner") {
+    _showToast("Only the owner can change this workspace's subject parcel.");
+    return false;
+  }
   await _apiJson(`/api/areas/${encodeURIComponent(area.id)}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json", ...authHeaders() },
@@ -4861,11 +4876,12 @@ function _renderList(sectionId, listId, items, options = {}) {
     const activeClass = isActiveRow ? " saved-area-row-active" : "";
     const secondaryLine = [chip, `saved ${date}`].filter(Boolean).join(" · ");
 
-    // Ownership + role gating for Rename / Fork
-    const isOwn = area.user_id != null
-      ? String(area.user_id) === String(_currentUser?.id || "")
-      : true; // no user_id on row → treat as own (legacy safe)
-    const showFullControls = isOwn || _canEditAnyArea();
+    // Sprint 1 multi-user collab: role-based affordance gating (spec §3.3, §5).
+    // Owner sees full controls (rename, etc.). Editor sees the Make-my-copy
+    // path (existing behavior). Developer-bypass via _canEditAnyArea keeps
+    // KK able to operate on anyone's area.
+    const isOwnerRow = (area.role || "owner") === "owner";
+    const showFullControls = isOwnerRow || _canEditAnyArea();
     const nameId = `name-${listKey}-${area.id}`;
     const typeLabel = _typeLabel(area.type);
 
@@ -5135,15 +5151,26 @@ function _toggleSelectMode(listKey) {
 async function _handleBulkDelete(listKey) {
   const sel = _listSelections[listKey];
   if (!sel || sel.selectedIds.size === 0) return;
-  const n = sel.selectedIds.size;
-  const noun = (listKey === 'saved-areas') ? 'saved area' : 'target';
-  const ok = window.confirm(`Delete ${n} ${noun}${n > 1 ? 's' : ''}? This cannot be undone.`);
-  if (!ok) return;
+  // Sprint 1 multi-user collab (spec §3.3, Copilot frontend audit): bulk-delete
+  // is owner-only. Pre-filter editor-row IDs so the user gets a clear toast
+  // up-front instead of N silent per-row 403 rejections.
   const ids = Array.from(sel.selectedIds);
   const all = [..._savedAreasCache, ..._savedParcelsCache];
   const items = ids.map(id => all.find(a => a.id === id)).filter(Boolean);
-  // Bounded-concurrency pool of 4 workers
-  const queue = [...items];
+  const ownerItems = items.filter(it => (it.role || "owner") === "owner");
+  const skipped = items.length - ownerItems.length;
+  if (skipped > 0 && ownerItems.length === 0) {
+    _showToast("Cannot delete: only the owner can delete shared areas.");
+    return;
+  }
+  const n = ownerItems.length;
+  const noun = (listKey === 'saved-areas') ? 'saved area' : 'target';
+  const skippedSuffix = skipped > 0 ? ` (${skipped} shared, can't delete)` : '';
+  const ok = window.confirm(`Delete ${n} ${noun}${n > 1 ? 's' : ''}${skippedSuffix}? This cannot be undone.`);
+  if (!ok) return;
+  // Bounded-concurrency pool of 4 workers — iterates ownerItems only
+  // so editor-role rows never hit the delete endpoint (would 403 anyway).
+  const queue = [...ownerItems];
   let successCount = 0;
   const failed = [];
   const alreadyDeleted = [];
