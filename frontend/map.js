@@ -2032,10 +2032,21 @@ function _handleSseFieldChange(msg) {
   if (msg.type === "resync" || msg.type === "blob_explode") return;
   const { field_key, value, by_session_id } = msg;
   if (!field_key) return;
+  // TEMP DEBUG (Sprint 3 smoke): log every received SSE event with the
+  // self-echo comparison so we can verify the filter in DevTools.
+  const isOwnEcho = Boolean(by_session_id && by_session_id === _sseSessionUuid);
+  console.debug("[sse] event received", {
+    field_key,
+    value,
+    by_session_id,
+    my_session: _sseSessionUuid,
+    is_self_echo: isOwnEcho,
+    action: isOwnEcho ? "IGNORED (self)" : "APPLY (remote)",
+  });
   // Sprint 3 §4.4 + Agent C catch M-1: self-echo filter on
   // by_session_id, not by_user_id. Same-user multi-tab still receives
   // each other's edits (different session UUIDs per tab).
-  if (by_session_id && by_session_id === _sseSessionUuid) {
+  if (isOwnEcho) {
     // Our own write echoed back. Already applied locally; ignore.
     return;
   }
