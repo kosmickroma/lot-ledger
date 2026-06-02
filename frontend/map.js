@@ -3246,7 +3246,28 @@ async function _filterSaveProcessQueue() {
     _filterSaveSetStatus("flash");
   } catch (err) {
     console.error("[filter-autosave] save failed", err);
-    _filterSaveSetStatus("error", "Retry");
+    // Sprint 1 multi-user collab (spec §3.4 + §3.3 defense-in-depth):
+    // - 404 means the owner deleted the area mid-session. Clean up local
+    //   state, drop from cache, toast, and short-circuit any Retry.
+    // - 403 means a permission gate fired server-side (e.g., editor tried
+    //   an owner-only mutation, possibly via a stale UI state). Toast +
+    //   transition to idle — no Retry, since the action would 403 again.
+    const status = (err && typeof err === "object") ? Number(err.status || 0) : 0;
+    if (status === 404) {
+      const deletedId = areaId;
+      _currentLoadedAreaId = null;
+      const idx = _savedAreasCache.findIndex((a) => a.id === deletedId);
+      if (idx !== -1) _savedAreasCache.splice(idx, 1);
+      try { clearActiveItem(); } catch (_) { /* tolerate */ }
+      try { renderSavedAreasList(); } catch (_) { /* tolerate */ }
+      _filterSaveSetStatus("idle");
+      _showToast("This area was deleted by the owner.");
+    } else if (status === 403) {
+      _filterSaveSetStatus("idle");
+      _showToast("You can view this area but only the owner can change it.");
+    } else {
+      _filterSaveSetStatus("error", "Retry");
+    }
   } finally {
     _filterSaveInflight = false;
     _pendingFilterSaves = Math.max(0, _pendingFilterSaves - 1);
