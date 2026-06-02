@@ -186,6 +186,44 @@ def _extract_centroid(point_value: Any) -> tuple[float | None, float | None]:
     return None, None
 
 
+def _trim_dcad_legal_admin_tail(legal_description: str | None) -> str:
+    """Trim DCAD-style operational/admin metadata off the end of a joined
+    legal description (2026-06-01).
+
+    DCAD's legal1..legal5 spread looks like:
+        "BUCKNER TERRACE 6TH SEC 1ST INST BLK 14/6129 LOT 14
+         INT200600063327 DD02102006 CO-DC 6129 014 01400 3DA6129 014"
+
+    The pre-LOT portion (subdivision + Block + Lot) is what an analyst
+    scanning the popup actually wants. Everything after the LOT token
+    (INT###### deed instrument, DD######## deed date, CO-DC / 3DA###
+    internal indices) is operational metadata and just visually crowds
+    out the subdivision label above it.
+
+    Strategy: cut after the FIRST `LOT <token>` pair. The lot token can
+    be a digit, hyphenated range, alphanumeric ("7A"), or slash form.
+    When no LOT is present (commercial / agricultural parcels), return
+    the input unchanged — those legals don't carry admin tails anyway.
+
+    No-op for TAD / Collin / Denton: their joined legal strings either
+    end at "Lot N" naturally (matches the pattern, returns unchanged)
+    or have no LOT token at all. So a single shared helper covers all
+    four counties without per-county branching.
+    """
+    if not legal_description:
+        return ""
+    import re
+    # Case-insensitive: capture everything from the start through the
+    # first LOT-token pair. \S+ on the lot value tolerates digits,
+    # hyphenated ranges ("7-8"), alphanumeric suffixes ("7A"), slash
+    # forms ("1/287"). The non-greedy `.*?` makes this stop at the
+    # FIRST LOT, not the last.
+    match = re.match(r"^(.*?\bLOT\s+\S+)\b", legal_description, re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    return legal_description
+
+
 def _dcad_subdivision_from_legal(legal_descr: str | None) -> str:
     """Best-effort subdivision name extractor from DCAD legal description.
 
@@ -801,7 +839,14 @@ def build_feature(row: dict[str, Any], prop_type: str, on_redfin: bool, redfin_l
         # ~line 4311). Rendered in the popup as a second line under the
         # "Neighborhood" cell so the Block/Lot tail Mike asked for is visible
         # without losing the subdivision-as-quick-scan top line.
-        "legal_description": " ".join(
+        #
+        # _trim_dcad_legal_admin_tail drops DCAD's trailing admin codes
+        # (deed instrument numbers, deed dates, internal CO-DC indices)
+        # after the LOT token — those land in legal3..legal5 and are
+        # operational metadata, not anything an analyst scanning the popup
+        # wants to see. TAD/Collin/Denton produce clean strings that don't
+        # match the trim pattern, so this is a no-op for them.
+        "legal_description": _trim_dcad_legal_admin_tail(" ".join(
             part for part in (
                 _clean_text(row.get("legal1")),
                 _clean_text(row.get("legal2")),
@@ -809,7 +854,7 @@ def build_feature(row: dict[str, Any], prop_type: str, on_redfin: bool, redfin_l
                 _clean_text(row.get("legal4")),
                 _clean_text(row.get("legal5")),
             ) if part
-        ),
+        )),
         "yr_built": str(row.get("yr_built")) if row.get("yr_built") else "N/A",
         "sqft": f"{int(float(row['tot_living_area'])):,}" if _safe_float(row.get("tot_living_area")) not in (None, 0.0) else "N/A",
         # === v3 residential detail expansion (CAD_RESIDENTIAL_DETAIL_EXPANSION_SPEC.md) ===

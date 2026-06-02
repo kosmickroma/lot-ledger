@@ -34,18 +34,19 @@ def _minimal_row(**overrides):
     return base
 
 
-def test_legal_description_joins_dcad_style_split_fields():
+def test_legal_description_joins_dcad_style_split_fields_and_trims_after_lot():
     """DCAD splits across legal1..legal5 — join with single spaces, in
-    the order legal1..legal5. Empty fields contribute nothing."""
+    the order legal1..legal5, then trim everything after the LOT token
+    (the admin-tail rule for DCAD). Empty fields contribute nothing."""
     row = _minimal_row(
         legal1="WINSLOW HEIGHTS",
         legal2="BLK A",
         legal3="LOT 7",
-        legal4="ACS .15",
+        legal4="ACS .15",  # gets trimmed off — analyst-irrelevant
         legal5="",
     )
     feature = build_feature(row, "single_family", False, None)
-    assert feature["properties"]["legal_description"] == "WINSLOW HEIGHTS BLK A LOT 7 ACS .15"
+    assert feature["properties"]["legal_description"] == "WINSLOW HEIGHTS BLK A LOT 7"
 
 
 def test_legal_description_tad_style_full_in_legal1():
@@ -92,16 +93,66 @@ def test_legal_description_empty_when_no_legal_fields():
 
 def test_legal_description_skips_blank_parts_dcad_with_gaps():
     """DCAD parcels with some legal slots blank should produce a clean
-    single-space join — no double spaces or trailing whitespace."""
+    single-space join — no double spaces or trailing whitespace.
+    The LOT-trim rule then strips the trailing ACS portion."""
     row = _minimal_row(
         legal1="HARWOOD HEIGHTS",
         legal2="",
         legal3="LOT 22",  # legal2 empty between legal1 and legal3
         legal4="",
-        legal5="ACS .25",
+        legal5="ACS .25",  # trimmed off after LOT 22
     )
     feature = build_feature(row, "single_family", False, None)
-    assert feature["properties"]["legal_description"] == "HARWOOD HEIGHTS LOT 22 ACS .25"
+    assert feature["properties"]["legal_description"] == "HARWOOD HEIGHTS LOT 22"
+
+
+def test_dcad_admin_tail_trimmed_after_lot():
+    """DCAD parcels frequently append deed instrument number + deed date
+    + internal CO-DC indices after the LOT token. Those are operational
+    metadata, not analyst-relevant — trim them so the popup's
+    Neighborhood cell stays scannable. Real example from a live DCAD
+    parcel (4727 ASHBROOK RD)."""
+    row = _minimal_row(
+        legal1="BUCKNER TERRACE 8TH SEC 1ST INST",
+        legal2="BLK 21/6129",
+        legal3="LOT 7",
+        legal4="INT202500184503 DD08292025",
+        legal5="CO-DC 6129 021 00700 3DA6129 021",
+    )
+    feature = build_feature(row, "single_family", False, None)
+    assert (
+        feature["properties"]["legal_description"]
+        == "BUCKNER TERRACE 8TH SEC 1ST INST BLK 21/6129 LOT 7"
+    )
+
+
+def test_tad_clean_legal_unchanged_by_trim():
+    """TAD's legal strings already end at the lot number — the DCAD
+    admin-tail trim must be a no-op for them (regex matches the whole
+    string and returns it unchanged)."""
+    row = _minimal_row(
+        legal1="WESTPOINT ADDITION (FT WORTH) Block 6 Lot 5",
+        legal2="", legal3="", legal4="", legal5="",
+    )
+    feature = build_feature(row, "single_family", False, None)
+    assert (
+        feature["properties"]["legal_description"]
+        == "WESTPOINT ADDITION (FT WORTH) Block 6 Lot 5"
+    )
+
+
+def test_legal_without_lot_token_passes_through():
+    """Commercial / agricultural / vacant parcels without a LOT token
+    in the legal description get returned unchanged — they don't carry
+    the admin tail anyway, and stripping ACS / TRACT etc. would lose
+    real info."""
+    row = _minimal_row(
+        legal1="ACME COMMERCIAL TRACT",
+        legal2="ACS 12.5",
+        legal3="", legal4="", legal5="",
+    )
+    feature = build_feature(row, "commercial", False, None)
+    assert feature["properties"]["legal_description"] == "ACME COMMERCIAL TRACT ACS 12.5"
 
 
 def test_legal_description_strips_whitespace_in_parts():
