@@ -2204,7 +2204,15 @@ function restoreFilterState(state) {
   // filter checkbox, and forcing it off on every load prevented include_sold
   // from ever firing on the analyze endpoint.
   filterState.active = false;
-  if (state.numeric && typeof state.numeric === "object") Object.assign(numericFilters, state.numeric);
+  // Sprint 2 §6 (resolves deferred Sprint 1 §6): gate Property Filters
+  // inheritance on power_user+. Regular `user`-role members loading a
+  // shared area no longer inherit hidden numericFilters into their
+  // module-global state. Under per-field PATCH this is also structurally
+  // safe (regular user PATCHes only fields they touched, never numeric.*)
+  // — gate stays as belt-and-suspenders for the blob-PUT compat path.
+  if (state.numeric && typeof state.numeric === "object" && _isPowerUserOrAbove()) {
+    Object.assign(numericFilters, state.numeric);
+  }
   if (state.comp && typeof state.comp === "object") Object.assign(compNumericFilters, state.comp);
   if (state.sold && typeof state.sold === "object") {
     Object.assign(soldCompsFilter, {
