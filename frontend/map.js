@@ -916,6 +916,16 @@ let _filterSaveFlashTimer = null;
 let _filterSavePending = false;
 let _filterSaveInflight = false;
 let _pendingFilterSaves = 0;
+// Sprint 2 multi-user collab: per-field PATCH queue state.
+// Per docs/MULTIUSER_COLLAB_SPRINT2_SPEC.md v2 §5.
+// Map<field_key, value> — pending PATCHes drained on flush.
+const _filterSavePendingFields = new Map();
+// Monotonic counter incremented on each PATCH dispatch.
+let _filterSaveClientSeq = 0;
+// Last successfully-PATCHed (or restored) state, used to diff against
+// captureFilterState() output and decide which fields actually changed.
+// null = no area loaded; reset on clearDrawResults, set on restoreSavedArea.
+let _filterSaveLastSnapshot = null;
 // v1.1 §2.6 — 50ms debounce on the popup Save Parcel link. Absorbs
 // event-bubbling and mobile double-tap. Single deliberate clicks
 // (>50ms apart) work normally.
@@ -1804,6 +1814,152 @@ function _filterStatesEqual(a, b) {
   const left = _normalizeFilterStateForCompare(a);
   const right = _normalizeFilterStateForCompare(b);
   return JSON.stringify(left) === JSON.stringify(right);
+}
+
+// ─── Sprint 2 multi-user collab: per-field PATCH helpers (spec §5) ────
+
+// Coerce empty-string / undefined to null for diff comparison.
+function _coerceForDiff(v) {
+  if (v === "" || v === undefined) return null;
+  return v;
+}
+
+// Diff captureFilterState() output against _filterSaveLastSnapshot.
+// Returns Array<[field_key, value]> for each (section.key) pair whose
+// value differs. Spec §5.2 edge-case semantics:
+//   null vs null         -> skip
+//   null vs <value>      -> emit
+//   <value> vs null      -> emit (value=null)
+//   <value> vs same      -> skip
+//   <value> vs different -> emit (value=new)
+//   null vs ""           -> skip (coerced)
+//   missing in current   -> skip (never emit absent keys)
+//   missing in snapshot  -> emit if non-null
+//   checkboxes.active    -> always skip (legacy force-clear churn loop)
+function _diffFilterState(current, lastSnapshot) {
+  if (!current || typeof current !== "object") return [];
+  const out = [];
+  const sections = ["checkboxes", "numeric", "sold", "comp", "propelio"];
+  const snap = lastSnapshot && typeof lastSnapshot === "object" ? lastSnapshot : {};
+  for (const section of sections) {
+    const currSection = (current[section] && typeof current[section] === "object") ? current[section] : {};
+    const snapSection = (snap[section] && typeof snap[section] === "object") ? snap[section] : {};
+    for (const key of Object.keys(currSection)) {
+      const fieldKey = `${section}.${key}`;
+      // §5.2 special case: skip checkboxes.active (force-cleared on restore
+      // — would create a save-restore churn loop)
+      if (fieldKey === "checkboxes.active") continue;
+      const a = _coerceForDiff(currSection[key]);
+      const b = _coerceForDiff(snapSection[key]);
+      if (a === b) continue;
+      // Convert empty-string back to null for the wire (JSONB null)
+      out.push([fieldKey, currSection[key] === "" ? null : currSection[key]]);
+    }
+  }
+  return out;
+}
+
+// Map dotted field_key to its DOM input element for the §5.5 anti-flicker
+// hook. Only sustained-focus inputs (numeric/text) return an element;
+// checkboxes return null (click is momentary, no flicker hazard).
+function _resolveFieldInput(fieldKey) {
+  const [section, key] = fieldKey.split(".");
+  if (section === "numeric") {
+    const map = {
+      lot_sqft_min: "nf-lot-min", lot_sqft_max: "nf-lot-max",
+      appr_val_min: "nf-val-min", appr_val_max: "nf-val-max",
+      yr_built_min: "nf-yr-min",  yr_built_max: "nf-yr-max",
+      sqft_min:     "nf-sqft-min", sqft_max:    "nf-sqft-max",
+    };
+    return map[key] ? document.getElementById(map[key]) : null;
+  }
+  if (section === "comp") {
+    const map = {
+      lot_sqft_min: "nf-comp-lot-min", lot_sqft_max: "nf-comp-lot-max",
+      appr_val_min: "nf-comp-val-min", appr_val_max: "nf-comp-val-max",
+      yr_built_min: "nf-comp-yr-min",  yr_built_max: "nf-comp-yr-max",
+      sqft_min:     "nf-comp-sqft-min", sqft_max:    "nf-comp-sqft-max",
+    };
+    return map[key] ? document.getElementById(map[key]) : null;
+  }
+  if (section === "sold") {
+    const map = {
+      maxDaysAgo:   "sold-days-max",
+      minPrice:     "sold-price-min", maxPrice:     "sold-price-max",
+      minYearBuilt: "sold-yr-min",    maxYearBuilt: "sold-yr-max",
+    };
+    return map[key] ? document.getElementById(map[key]) : null;
+  }
+  if (section === "propelio") {
+    const map = {
+      months:         "prop-months",  range:          "prop-range",
+      soldWithinDays: "prop-sold-within",
+      lotMin:  "prop-lot-min",  lotMax:  "prop-lot-max",
+      sqftMin: "prop-sqft-min", sqftMax: "prop-sqft-max",
+      yearMin: "prop-year-min", yearMax: "prop-year-max",
+      priceMin: "prop-price-min", priceMax: "prop-price-max",
+    };
+    return map[key] ? document.getElementById(map[key]) : null;
+  }
+  // checkboxes + propelio status toggles + sortMode: click-based, no anti-flicker.
+  return null;
+}
+
+// Direct UI write — bypasses the queue (used by stale-write reconciliation
+// after a PATCH loses to a concurrent write). Writes the value into the
+// in-memory state object AND syncs the DOM input element.
+function _writeFilterFieldDirect(fieldKey, value) {
+  const [section, key] = fieldKey.split(".");
+  if (section === "checkboxes") {
+    filterState[key] = Boolean(value);
+    syncFilterInputs();
+  } else if (section === "numeric") {
+    numericFilters[key] = value;
+    _hydrateNumericInputsFromState();
+  } else if (section === "comp") {
+    compNumericFilters[key] = value;
+    _hydrateCompNumericInputsFromState();
+  } else if (section === "sold") {
+    soldCompsFilter[key] = value;
+    _hydrateSoldCompInputsFromState();
+  } else if (section === "propelio") {
+    if (key === "sortMode") {
+      propelioCompSortMode = String(value || "");
+      const sortEl = document.getElementById("propelio-comp-sort");
+      if (sortEl) sortEl.value = propelioCompSortMode;
+    } else {
+      propelioFilterState[key] = value;
+      applyPropelioFilterStateToUI({ ...propelioFilterState, sortMode: propelioCompSortMode });
+    }
+  }
+  // After in-memory state updated, re-render dependent layers if a real area loaded.
+  if (lastAnalysisGeojson) {
+    try { applyAndRenderSoldFilters(); } catch (_) {}
+    try { applyMapVisibilityFilters(); } catch (_) {}
+  }
+}
+
+// Apply a server-reconciled value to the UI. Anti-flicker rule (§5.5):
+// if the user has focus on the corresponding input and is actively
+// typing, defer the apply until blur.
+function _applyFilterFieldToUI(fieldKey, value) {
+  const inputEl = _resolveFieldInput(fieldKey);
+  if (inputEl && document.activeElement === inputEl) {
+    // Defer apply until blur (Figma's anti-flicker pattern).
+    inputEl.dataset.pendingReconcile = JSON.stringify(value);
+    if (!inputEl._reconcileBlurHook) {
+      inputEl._reconcileBlurHook = () => {
+        const stashed = inputEl.dataset.pendingReconcile;
+        delete inputEl.dataset.pendingReconcile;
+        inputEl.removeEventListener("blur", inputEl._reconcileBlurHook);
+        inputEl._reconcileBlurHook = null;
+        if (stashed != null) _writeFilterFieldDirect(fieldKey, JSON.parse(stashed));
+      };
+      inputEl.addEventListener("blur", inputEl._reconcileBlurHook, { once: true });
+    }
+    return;
+  }
+  _writeFilterFieldDirect(fieldKey, value);
 }
 
 function setActiveItem(type, name) {
