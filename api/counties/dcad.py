@@ -652,7 +652,8 @@ def query_parcels(polygon: list[list[float]]) -> ParcelQueryResult:
                 "full_street_name": _clean_text(row.get("full_street_name")),
                 "property_address": property_address,
                 "property_city": _clean_text(row.get("property_city")),
-                "property_zip": _clean_text(row.get("property_zip")),
+                # Display as zip5 — DCAD raw stores 9-digit zip+4 unbroken (e.g. "752195409").
+                "property_zip": _clean_text(row.get("property_zip"))[:5],
                 "division_cd": _clean_text(row.get("division_cd")),
                 "sptd_code": sptd_code,
                 "nbhd_cd": _clean_text(row.get("nbhd_cd")),
@@ -990,7 +991,8 @@ def build_feature(row: dict[str, Any], prop_type: str, on_redfin: bool, redfin_l
         "owner_address_line4": _clean_text(row.get("owner_address_line4")),
         "owner_country": _clean_text(row.get("owner_country")),
         "property_state": "TX",
-        "property_zip": _clean_text(row.get("property_zip")),
+        # Display as zip5 — DCAD raw stores 9-digit zip+4 unbroken.
+        "property_zip": _clean_text(row.get("property_zip"))[:5],
         "property_street_num": _clean_text(row.get("street_num")),
         "property_street_half_num": _clean_text(row.get("street_half_num")),
         "property_full_street_name": _clean_text(row.get("full_street_name")),

@@ -13,12 +13,20 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 from typing import Any
 
 from api.config import get_conn, release_conn
 from api.counties.dcad import ParcelQueryResult, _clean_text, _safe_float, _safe_int
 from api.geo import point_in_polygon, polygon_bbox
+
+logger = logging.getLogger(__name__)
+
+# Rate-limit the "empty property_zip after normalization" warning so a county
+# regression doesn't flood Cloud Logging. First 10 occurrences per process.
+_MISSING_ZIP_WARN_BUDGET = 10
+_missing_zip_warn_count = 0
 
 
 # TAD state-use code → human-readable label (mirrors SPTD_LABELS in dcad.py)
@@ -143,7 +151,8 @@ def _tad_bbox_filter(
                 """
                 SELECT parcel_key, account_num, sequence_num, taxpin, pidn,
                        owner_name, owner_addr, owner_city, owner_citystate, owner_zip, owner_zip4,
-                       situs_addr, property_city, property_class, state_use_code, legal_descr,
+                       situs_addr, property_city, property_zip,
+                       property_class, state_use_code, legal_descr,
                        county_code, city_code, school_code,
                        acres, land_acres, land_sqft,
                        year_built, living_area,
@@ -256,6 +265,20 @@ def _normalize_tad_row(raw: dict[str, Any]) -> dict[str, Any]:
             polygon_geojson = None
 
     owner_zip = _clean_text(raw.get("owner_zip"))
+    # property_zip is backfilled from USPS ZCTA spatial join (see
+    # scripts/backfill_property_zip_from_zcta.py). TAD's raw data does NOT
+    # publish a property zip — historical bug was using owner_zip here, which
+    # is wrong for absentee owners.
+    property_zip = _clean_text(raw.get("property_zip"))[:5]
+    if not property_zip:
+        global _missing_zip_warn_count
+        if _missing_zip_warn_count < _MISSING_ZIP_WARN_BUDGET:
+            _missing_zip_warn_count += 1
+            logger.warning(
+                "TAD parcel has empty property_zip after ZCTA backfill: parcel_key=%s account_num=%s",
+                _clean_text(raw.get("parcel_key")),
+                _clean_text(raw.get("account_num")),
+            )
 
     return {
         # identity
@@ -273,7 +296,7 @@ def _normalize_tad_row(raw: dict[str, Any]) -> dict[str, Any]:
         "full_street_name": "",
         "property_address": property_address,
         "property_city": _clean_text(raw.get("property_city")),
-        "property_zip": owner_zip,
+        "property_zip": property_zip,
         # classification
         "division_cd": "TAD",
         "sptd_code": property_class,       # detailed code used for classify + label

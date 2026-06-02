@@ -294,7 +294,8 @@ def _normalize_collin_row(raw: dict[str, Any]) -> dict[str, Any]:
         "street_num": "",
         "full_street_name": "",
         "property_address": property_address,
-        "property_zip": _clean_text(raw.get("property_zip")),
+        # Display as zip5 (uniform with other counties).
+        "property_zip": _clean_text(raw.get("property_zip"))[:5],
         "division_cd": "COLLIN",
         "sptd_code": sptd_code,
         "nbhd_cd": _clean_text(raw.get("subdivision")) or _clean_text(raw.get("city_code")),

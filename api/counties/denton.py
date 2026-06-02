@@ -284,7 +284,8 @@ def _normalize_denton_row(raw: dict[str, Any]) -> dict[str, Any]:
         "full_street_name": "",
         "property_address": property_address,
         "property_city": _clean_text(raw.get("property_city")),
-        "property_zip": _clean_text(raw.get("property_zip")),
+        # Display as zip5 — Denton raw stores "5-4" format (e.g. "75077-1833").
+        "property_zip": _clean_text(raw.get("property_zip"))[:5],
         "division_cd": "DENTON",
         "sptd_code": sptd_code,
         "nbhd_cd": _clean_text(raw.get("subdivision")),
