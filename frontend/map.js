@@ -916,6 +916,16 @@ let _filterSaveFlashTimer = null;
 let _filterSavePending = false;
 let _filterSaveInflight = false;
 let _pendingFilterSaves = 0;
+// Sprint 2 multi-user collab: per-field PATCH queue state.
+// Per docs/MULTIUSER_COLLAB_SPRINT2_SPEC.md v2 §5.
+// Map<field_key, value> — pending PATCHes drained on flush.
+const _filterSavePendingFields = new Map();
+// Monotonic counter incremented on each PATCH dispatch.
+let _filterSaveClientSeq = 0;
+// Last successfully-PATCHed (or restored) state, used to diff against
+// captureFilterState() output and decide which fields actually changed.
+// null = no area loaded; reset on clearDrawResults, set on restoreSavedArea.
+let _filterSaveLastSnapshot = null;
 // v1.1 §2.6 — 50ms debounce on the popup Save Parcel link. Absorbs
 // event-bubbling and mobile double-tap. Single deliberate clicks
 // (>50ms apart) work normally.
@@ -1806,6 +1816,152 @@ function _filterStatesEqual(a, b) {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+// ─── Sprint 2 multi-user collab: per-field PATCH helpers (spec §5) ────
+
+// Coerce empty-string / undefined to null for diff comparison.
+function _coerceForDiff(v) {
+  if (v === "" || v === undefined) return null;
+  return v;
+}
+
+// Diff captureFilterState() output against _filterSaveLastSnapshot.
+// Returns Array<[field_key, value]> for each (section.key) pair whose
+// value differs. Spec §5.2 edge-case semantics:
+//   null vs null         -> skip
+//   null vs <value>      -> emit
+//   <value> vs null      -> emit (value=null)
+//   <value> vs same      -> skip
+//   <value> vs different -> emit (value=new)
+//   null vs ""           -> skip (coerced)
+//   missing in current   -> skip (never emit absent keys)
+//   missing in snapshot  -> emit if non-null
+//   checkboxes.active    -> always skip (legacy force-clear churn loop)
+function _diffFilterState(current, lastSnapshot) {
+  if (!current || typeof current !== "object") return [];
+  const out = [];
+  const sections = ["checkboxes", "numeric", "sold", "comp", "propelio"];
+  const snap = lastSnapshot && typeof lastSnapshot === "object" ? lastSnapshot : {};
+  for (const section of sections) {
+    const currSection = (current[section] && typeof current[section] === "object") ? current[section] : {};
+    const snapSection = (snap[section] && typeof snap[section] === "object") ? snap[section] : {};
+    for (const key of Object.keys(currSection)) {
+      const fieldKey = `${section}.${key}`;
+      // §5.2 special case: skip checkboxes.active (force-cleared on restore
+      // — would create a save-restore churn loop)
+      if (fieldKey === "checkboxes.active") continue;
+      const a = _coerceForDiff(currSection[key]);
+      const b = _coerceForDiff(snapSection[key]);
+      if (a === b) continue;
+      // Convert empty-string back to null for the wire (JSONB null)
+      out.push([fieldKey, currSection[key] === "" ? null : currSection[key]]);
+    }
+  }
+  return out;
+}
+
+// Map dotted field_key to its DOM input element for the §5.5 anti-flicker
+// hook. Only sustained-focus inputs (numeric/text) return an element;
+// checkboxes return null (click is momentary, no flicker hazard).
+function _resolveFieldInput(fieldKey) {
+  const [section, key] = fieldKey.split(".");
+  if (section === "numeric") {
+    const map = {
+      lot_sqft_min: "nf-lot-min", lot_sqft_max: "nf-lot-max",
+      appr_val_min: "nf-val-min", appr_val_max: "nf-val-max",
+      yr_built_min: "nf-yr-min",  yr_built_max: "nf-yr-max",
+      sqft_min:     "nf-sqft-min", sqft_max:    "nf-sqft-max",
+    };
+    return map[key] ? document.getElementById(map[key]) : null;
+  }
+  if (section === "comp") {
+    const map = {
+      lot_sqft_min: "nf-comp-lot-min", lot_sqft_max: "nf-comp-lot-max",
+      appr_val_min: "nf-comp-val-min", appr_val_max: "nf-comp-val-max",
+      yr_built_min: "nf-comp-yr-min",  yr_built_max: "nf-comp-yr-max",
+      sqft_min:     "nf-comp-sqft-min", sqft_max:    "nf-comp-sqft-max",
+    };
+    return map[key] ? document.getElementById(map[key]) : null;
+  }
+  if (section === "sold") {
+    const map = {
+      maxDaysAgo:   "sold-days-max",
+      minPrice:     "sold-price-min", maxPrice:     "sold-price-max",
+      minYearBuilt: "sold-yr-min",    maxYearBuilt: "sold-yr-max",
+    };
+    return map[key] ? document.getElementById(map[key]) : null;
+  }
+  if (section === "propelio") {
+    const map = {
+      months:         "prop-months",  range:          "prop-range",
+      soldWithinDays: "prop-sold-within",
+      lotMin:  "prop-lot-min",  lotMax:  "prop-lot-max",
+      sqftMin: "prop-sqft-min", sqftMax: "prop-sqft-max",
+      yearMin: "prop-year-min", yearMax: "prop-year-max",
+      priceMin: "prop-price-min", priceMax: "prop-price-max",
+    };
+    return map[key] ? document.getElementById(map[key]) : null;
+  }
+  // checkboxes + propelio status toggles + sortMode: click-based, no anti-flicker.
+  return null;
+}
+
+// Direct UI write — bypasses the queue (used by stale-write reconciliation
+// after a PATCH loses to a concurrent write). Writes the value into the
+// in-memory state object AND syncs the DOM input element.
+function _writeFilterFieldDirect(fieldKey, value) {
+  const [section, key] = fieldKey.split(".");
+  if (section === "checkboxes") {
+    filterState[key] = Boolean(value);
+    syncFilterInputs();
+  } else if (section === "numeric") {
+    numericFilters[key] = value;
+    _hydrateNumericInputsFromState();
+  } else if (section === "comp") {
+    compNumericFilters[key] = value;
+    _hydrateCompNumericInputsFromState();
+  } else if (section === "sold") {
+    soldCompsFilter[key] = value;
+    _hydrateSoldCompInputsFromState();
+  } else if (section === "propelio") {
+    if (key === "sortMode") {
+      propelioCompSortMode = String(value || "");
+      const sortEl = document.getElementById("propelio-comp-sort");
+      if (sortEl) sortEl.value = propelioCompSortMode;
+    } else {
+      propelioFilterState[key] = value;
+      applyPropelioFilterStateToUI({ ...propelioFilterState, sortMode: propelioCompSortMode });
+    }
+  }
+  // After in-memory state updated, re-render dependent layers if a real area loaded.
+  if (lastAnalysisGeojson) {
+    try { applyAndRenderSoldFilters(); } catch (_) {}
+    try { applyMapVisibilityFilters(); } catch (_) {}
+  }
+}
+
+// Apply a server-reconciled value to the UI. Anti-flicker rule (§5.5):
+// if the user has focus on the corresponding input and is actively
+// typing, defer the apply until blur.
+function _applyFilterFieldToUI(fieldKey, value) {
+  const inputEl = _resolveFieldInput(fieldKey);
+  if (inputEl && document.activeElement === inputEl) {
+    // Defer apply until blur (Figma's anti-flicker pattern).
+    inputEl.dataset.pendingReconcile = JSON.stringify(value);
+    if (!inputEl._reconcileBlurHook) {
+      inputEl._reconcileBlurHook = () => {
+        const stashed = inputEl.dataset.pendingReconcile;
+        delete inputEl.dataset.pendingReconcile;
+        inputEl.removeEventListener("blur", inputEl._reconcileBlurHook);
+        inputEl._reconcileBlurHook = null;
+        if (stashed != null) _writeFilterFieldDirect(fieldKey, JSON.parse(stashed));
+      };
+      inputEl.addEventListener("blur", inputEl._reconcileBlurHook, { once: true });
+    }
+    return;
+  }
+  _writeFilterFieldDirect(fieldKey, value);
+}
+
 function setActiveItem(type, name) {
   const typeEl = document.getElementById("active-item-type");
   const nameEl = document.getElementById("active-item-name");
@@ -2048,7 +2204,15 @@ function restoreFilterState(state) {
   // filter checkbox, and forcing it off on every load prevented include_sold
   // from ever firing on the analyze endpoint.
   filterState.active = false;
-  if (state.numeric && typeof state.numeric === "object") Object.assign(numericFilters, state.numeric);
+  // Sprint 2 §6 (resolves deferred Sprint 1 §6): gate Property Filters
+  // inheritance on power_user+. Regular `user`-role members loading a
+  // shared area no longer inherit hidden numericFilters into their
+  // module-global state. Under per-field PATCH this is also structurally
+  // safe (regular user PATCHes only fields they touched, never numeric.*)
+  // — gate stays as belt-and-suspenders for the blob-PUT compat path.
+  if (state.numeric && typeof state.numeric === "object" && _isPowerUserOrAbove()) {
+    Object.assign(numericFilters, state.numeric);
+  }
   if (state.comp && typeof state.comp === "object") Object.assign(compNumericFilters, state.comp);
   if (state.sold && typeof state.sold === "object") {
     Object.assign(soldCompsFilter, {
@@ -3210,10 +3374,22 @@ function _filterSaveSetStatus(state, label) {
 // _storedValueQueueSave / _storedValueProcessQueue at
 // frontend/map.js:12446+.
 
+// Sprint 2 multi-user collab (spec §5): per-field PATCH queue.
+// _filterSaveQueueSave diffs current state vs last-saved snapshot and
+// enqueues only changed fields. _filterSaveProcessQueue drains the queue
+// serially, sending one PATCH per (field_key, value) with a monotonic
+// client_seq. LWW reconciliation if the server's persisted seq is higher
+// (defers to blur via _applyFilterFieldToUI if user is still typing).
+
 function _filterSaveQueueSave() {
-  // No-op when no area loaded (spec §2.6 — current behavior preserved).
   if (!_currentLoadedAreaId) return;
-  _filterSavePending = true;
+  // Diff captureFilterState() against last-saved snapshot, enqueue changed fields.
+  const current = captureFilterState();
+  const changed = _diffFilterState(current, _filterSaveLastSnapshot);
+  if (changed.length === 0) return;
+  for (const [fieldKey, value] of changed) {
+    _filterSavePendingFields.set(fieldKey, value);
+  }
   if (_filterSaveDebounceTimer) clearTimeout(_filterSaveDebounceTimer);
   _filterSaveDebounceTimer = setTimeout(() => {
     _filterSaveDebounceTimer = null;
@@ -3223,55 +3399,97 @@ function _filterSaveQueueSave() {
 
 async function _filterSaveProcessQueue() {
   if (_filterSaveInflight) return;
-  if (!_filterSavePending) return;
-  if (!_currentLoadedAreaId) {
-    _filterSavePending = false;
-    return;
-  }
+  if (_filterSavePendingFields.size === 0) return;
+  if (!_currentLoadedAreaId) { _filterSavePendingFields.clear(); return; }
   const areaId = _currentLoadedAreaId;
   _filterSaveInflight = true;
-  _filterSavePending = false;
   _pendingFilterSaves++;
   _filterSaveSetStatus("saving");
+  // Snapshot + drain. New enqueues during this flight accumulate in the
+  // cleared map for the next flush.
+  const toFlush = Array.from(_filterSavePendingFields.entries());
+  _filterSavePendingFields.clear();
+  let hadError = false;
   try {
-    const body = { filter_state: captureFilterState() };
-    await _apiJson(`/api/areas/${encodeURIComponent(areaId)}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json", ...authHeaders() },
-      body: JSON.stringify(body),
-    });
-    // Update the in-memory cache so re-renders see the persisted state.
-    const area = _savedAreasCache.find((a) => a.id === areaId && a.type === "area");
-    if (area) area.filter_state = _normalizeFilterStateForCompare(body.filter_state);
-    _filterSaveSetStatus("flash");
-  } catch (err) {
-    console.error("[filter-autosave] save failed", err);
-    // Sprint 1 multi-user collab (spec §3.4 + §3.3 defense-in-depth):
-    // - 404 means the owner deleted the area mid-session. Clean up local
-    //   state, drop from cache, toast, and short-circuit any Retry.
-    // - 403 means a permission gate fired server-side (e.g., editor tried
-    //   an owner-only mutation, possibly via a stale UI state). Toast +
-    //   transition to idle — no Retry, since the action would 403 again.
-    const status = (err && typeof err === "object") ? Number(err.status || 0) : 0;
-    if (status === 404) {
-      const deletedId = areaId;
-      _currentLoadedAreaId = null;
-      const idx = _savedAreasCache.findIndex((a) => a.id === deletedId);
-      if (idx !== -1) _savedAreasCache.splice(idx, 1);
-      try { clearActiveItem(); } catch (_) { /* tolerate */ }
-      try { renderSavedAreasList(); } catch (_) { /* tolerate */ }
-      _filterSaveSetStatus("idle");
-      _showToast("This area was deleted by the owner.");
-    } else if (status === 403) {
-      _filterSaveSetStatus("idle");
-      _showToast("You can view this area but only the owner can change it.");
-    } else {
-      _filterSaveSetStatus("error", "Retry");
+    for (let i = 0; i < toFlush.length; i++) {
+      const [fieldKey, value] = toFlush[i];
+      _filterSaveClientSeq += 1;
+      const seq = _filterSaveClientSeq;
+      try {
+        const resp = await _apiJson(
+          `/api/areas/${encodeURIComponent(areaId)}/filter-fields/${encodeURIComponent(fieldKey)}`,
+          {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json", ...authHeaders() },
+            body: JSON.stringify({ value, client_seq: seq }),
+          }
+        );
+        // LWW reconciliation: if server's persisted client_seq > our outgoing
+        // seq, a concurrent write beat us. Apply the server value to UI
+        // (deferred to blur per anti-flicker rule §5.5).
+        const serverSeq = Number(resp.client_seq) || 0;
+        if (serverSeq > seq) {
+          _applyFilterFieldToUI(fieldKey, resp.value);
+        }
+      } catch (err) {
+        hadError = true;
+        console.error("[filter-autosave] PATCH failed", fieldKey, err);
+        const status = (err && typeof err === "object") ? Number(err.status || 0) : 0;
+        if (status === 404) {
+          // Sprint 2 §5.6: distinguish route-not-found (new frontend / old
+          // backend during rolling deploy) from area-deleted-by-owner via
+          // response detail body.
+          const detail = (err && err.data && err.data.detail) || "";
+          const isAreaDeleted = /saved area not found/i.test(detail);
+          if (!isAreaDeleted) {
+            _filterSavePendingFields.clear();
+            _filterSaveSetStatus("idle");
+            _showToast("Filter save failed. Your browser may need a refresh — the app updated.");
+            return;
+          }
+          // Sprint 1 §3.4 area-deleted-by-owner recovery
+          const deletedId = areaId;
+          _currentLoadedAreaId = null;
+          const idx = _savedAreasCache.findIndex((a) => a.id === deletedId);
+          if (idx !== -1) _savedAreasCache.splice(idx, 1);
+          try { clearActiveItem(); } catch (_) {}
+          try { renderSavedAreasList(); } catch (_) {}
+          _filterSaveSetStatus("idle");
+          _showToast("This area was deleted by the owner.");
+          return;
+        }
+        if (status === 403) {
+          _filterSaveSetStatus("idle");
+          _showToast("You can view this area but only the owner can change it.");
+          return;
+        }
+        if (status === 400) {
+          // Allowlist rejection or other validation failure. Re-enqueuing
+          // would loop forever — drop THIS field, keep flushing the rest.
+          // Surface to console for diagnosis; chip stays in "saving" until
+          // the loop exits via either flash or a real transient error.
+          console.warn("[filter-autosave] PATCH rejected (400), dropping field", fieldKey, err && err.data);
+          continue;
+        }
+        // Other transient error — re-enqueue current + remaining fields for retry.
+        if (!_filterSavePendingFields.has(fieldKey)) {
+          _filterSavePendingFields.set(fieldKey, value);
+        }
+        for (let j = i + 1; j < toFlush.length; j++) {
+          const [k, v] = toFlush[j];
+          if (!_filterSavePendingFields.has(k)) _filterSavePendingFields.set(k, v);
+        }
+        _filterSaveSetStatus("error", "Retry");
+        return;
+      }
     }
+    // All flushed successfully — update last-saved snapshot baseline.
+    _filterSaveLastSnapshot = captureFilterState();
+    _filterSaveSetStatus("flash");
   } finally {
     _filterSaveInflight = false;
     _pendingFilterSaves = Math.max(0, _pendingFilterSaves - 1);
-    if (_filterSavePending) void _filterSaveProcessQueue();
+    if (!hadError && _filterSavePendingFields.size > 0) void _filterSaveProcessQueue();
   }
 }
 
@@ -4484,6 +4702,9 @@ async function restoreSavedArea(area, options = {}) {
   if (savedFilterState) {
     restoreFilterState(savedFilterState);
   }
+  // Sprint 2 §5.3: capture the restored state as the diff baseline so
+  // the first user edit after load only PATCHes the fields they touch.
+  _filterSaveLastSnapshot = captureFilterState();
   drawLayer.clearLayers();
   L.polygon(area.latlngs, {
     color: "#f1c40f",
@@ -4651,6 +4872,9 @@ async function restoreNamedSession(session, options = {}) {
   _clearOriginatorStar();
   _setCurrentTargetParcel(null);
   _currentLoadedAreaId = null;
+  // Sprint 2 §5.3: no area loaded -> no snapshot baseline + clear queue.
+  _filterSaveLastSnapshot = null;
+  _filterSavePendingFields.clear();
   _syncTabTitle();
   _storedValueOnAreaChange(null);
   void _filterSaveOnAreaChange(null);
@@ -4662,6 +4886,9 @@ async function restoreNamedSession(session, options = {}) {
   if (savedFilterState) {
     restoreFilterState(savedFilterState);
   }
+  // Sprint 2 §5.3: refresh diff baseline after snapshot restore so any
+  // subsequent edit only PATCHes the fields actually changed.
+  _filterSaveLastSnapshot = captureFilterState();
   drawLayer.clearLayers();
   L.polygon(session.latlngs, { color: "#f1c40f", weight: 2.5, fill: false, interactive: false }).addTo(drawLayer);
   maskLayer.clearLayers();
@@ -10855,6 +11082,9 @@ function clearDrawResults() {
   _clearOriginatorStar();
   _setCurrentTargetParcel(null);
   _currentLoadedAreaId = null;
+  // Sprint 2 §5.3: no area loaded -> no snapshot baseline + clear queue.
+  _filterSaveLastSnapshot = null;
+  _filterSavePendingFields.clear();
   _syncTabTitle();
   _storedValueOnAreaChange(null);
   void _filterSaveOnAreaChange(null);
