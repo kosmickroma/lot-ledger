@@ -794,6 +794,22 @@ def build_feature(row: dict[str, Any], prop_type: str, on_redfin: bool, redfin_l
         "zoning": _clean_text(row.get("zoning")) or "N/A",
         "school": _clean_text(row.get("isd_desc")) or "N/A",
         "subdivision": _clean_text(row.get("subdivision")) or _dcad_subdivision_from_legal(row.get("legal1")),
+        # Full joined legal description (2026-06-01). Each county's normalized
+        # row stuffs the parts into legal1..legal5: DCAD spreads across all
+        # five; TAD/Collin/Denton put the full string in legal1 and leave
+        # the rest blank. Same join shape the CSV writer uses (api/main.py
+        # ~line 4311). Rendered in the popup as a second line under the
+        # "Neighborhood" cell so the Block/Lot tail Mike asked for is visible
+        # without losing the subdivision-as-quick-scan top line.
+        "legal_description": " ".join(
+            part for part in (
+                _clean_text(row.get("legal1")),
+                _clean_text(row.get("legal2")),
+                _clean_text(row.get("legal3")),
+                _clean_text(row.get("legal4")),
+                _clean_text(row.get("legal5")),
+            ) if part
+        ),
         "yr_built": str(row.get("yr_built")) if row.get("yr_built") else "N/A",
         "sqft": f"{int(float(row['tot_living_area'])):,}" if _safe_float(row.get("tot_living_area")) not in (None, 0.0) else "N/A",
         # === v3 residential detail expansion (CAD_RESIDENTIAL_DETAIL_EXPANSION_SPEC.md) ===

@@ -8643,6 +8643,36 @@ function _panelTitleCaseDisplay(value) {
   ).join(" ");
 }
 
+// Build the "Neighborhood" popup cell content. Top line is always the
+// subdivision name (the existing short label). When the parcel feature
+// carries a full `legal_description` from build_feature (joined from
+// legal1..legal5 across all four counties) and that string is longer than
+// the subdivision name, append the legal-description tail as a second
+// line under the subdivision — gives Mike the Block/Lot detail he asked
+// for while keeping the subdivision as the quick-scan top line. Falls
+// back to subdivision-only when legal_description is missing (e.g.
+// cached features from before the field shipped), so old saved areas
+// don't render blank.
+function _neighborhoodCellHtml(subdivision, legalDescription) {
+  const sub = String(subdivision || "").trim();
+  const legal = String(legalDescription || "").trim();
+  if (!sub) return legal ? _propelioEscape(legal) : "";
+  const subEsc = _propelioEscape(sub);
+  if (!legal || legal.toUpperCase() === sub.toUpperCase()) return subEsc;
+  // Strip the subdivision prefix from the legal description (case-
+  // insensitive). When the legal doesn't START with the subdivision
+  // (rare but possible — DCAD's joined legal can occasionally lead with
+  // BLK/LOT before the subdivision name), fall back to the full legal
+  // as the tail so no info is hidden.
+  let tail = legal;
+  if (legal.toUpperCase().startsWith(sub.toUpperCase())) {
+    tail = legal.slice(sub.length).trim();
+  }
+  if (!tail) return subEsc;
+  return `${subEsc}<br><span class="parcel-popup-legal-tail">${_propelioEscape(tail)}</span>`;
+}
+
+
 // Total Value display with prior-year provenance tag. When build_feature
 // (api/counties/dcad.py) emits a non-empty total_value_source flag on the
 // parcel properties — currently Collin-only via _normalize_collin_row's
@@ -8985,7 +9015,7 @@ function _buildParcelDetailPanelHtml(p, matchedComp) {
               ${_buildParcelDetailTableRow("School District", _panelDisplayValue(p.school))}
               ${_buildParcelDetailTableRow("Year Built", _panelDisplayValue(p.yr_built))}
               ${_buildParcelDetailTableRow("Living Area", p.sqft && p.sqft !== "N/A" ? `${p.sqft} sf` : "N/A")}
-              ${p.subdivision ? _buildParcelDetailTableRow("Neighborhood", _propelioEscape(p.subdivision)) : ""}
+              ${p.subdivision ? _buildParcelDetailTableRow("Neighborhood", _neighborhoodCellHtml(p.subdivision, p.legal_description)) : ""}
               <!-- v3 residential detail expansion (Phase 1): per-county
                    CAD source data exposed on feature.properties via the
                    canonical-field contract in
@@ -9322,7 +9352,7 @@ function makePopupHtml(p) {
           ${row("School District", p.school)}
           ${row("Year Built", p.yr_built)}
           ${row("Living Area", p.sqft && p.sqft !== "N/A" ? p.sqft + " sf" : "N/A")}
-          ${subdivision ? row("Neighborhood", subdivision) : ""}
+          ${subdivision ? row("Neighborhood", _neighborhoodCellHtml(subdivision, p.legal_description)) : ""}
           ${redfinListingRow}
           ${soldCompRows}
         </table>
