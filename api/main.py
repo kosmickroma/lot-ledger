@@ -6638,6 +6638,12 @@ async def patch_area_filter_field(
                 (area_id, field_key, Json(body.value), int(body.client_seq), int(user["id"])),
             )
             row = cur.fetchone()
+            # Sprint 3 §3.2 + Agent C C-4: track whether this PATCH WON the
+            # UPSERT race. If RETURNING produced a row, our client_seq beat
+            # the persisted one and we should broadcast. If it returned None,
+            # we lost — re-fetch the winning value for client reconciliation
+            # but DO NOT broadcast a phantom NOTIFY.
+            patch_won = row is not None
             if row is None:
                 # Stale write — re-fetch current persisted state for client
                 # to reconcile against.
@@ -6679,6 +6685,27 @@ async def patch_area_filter_field(
                 """,
                 (section, section, [section, key], Json(row[0]), area_id),
             )
+
+            # Sprint 3 §3.2: broadcast on winning writes only. NOTIFY is
+            # delivered atomically with the transaction commit per Postgres
+            # semantics, so multi-listener instances all see this on commit.
+            # Per Agent C catch C-4 — gate on patch_won to avoid phantom
+            # broadcasts for stale-write reconciliation re-fetches.
+            if patch_won and row is not None:
+                import json as _json
+                _notify_payload = _json.dumps({
+                    "area_id": area_id,
+                    "field_key": field_key,
+                    "value": body.value,
+                    "client_seq": int(body.client_seq),
+                    "by_user_id": int(user["id"]),
+                    "by_session_id": request.headers.get("x-session-id", ""),
+                    "updated_at": row[2].isoformat() if row[2] else None,
+                })
+                cur.execute(
+                    "SELECT pg_notify('saved_area_filter_changes', %s)",
+                    (_notify_payload,),
+                )
         conn.commit()
     except HTTPException:
         conn.rollback()
@@ -6696,6 +6723,87 @@ async def patch_area_filter_field(
         client_seq=int(row[1]),
         updated_at=row[2].isoformat() if row[2] else None,
         updated_by_user_id=row[3],
+    )
+
+
+# Sprint 3 multi-user collab: SSE live-push endpoint.
+# Per docs/MULTIUSER_COLLAB_SPRINT3_SPEC.md v1 §3.5.
+@app.get("/api/areas/{area_id}/events")
+async def stream_area_events(
+    area_id: str,
+    request: Request,
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    """SSE stream for live filter-change push. Membership-gated.
+
+    Subscribes the client to the area's broadcast queue. NOTIFY events
+    from any FastAPI process arrive via the LISTEN connection and get
+    fanned out via the in-process subscriber map (see api/sse.py).
+
+    Returns sse-starlette EventSourceResponse with ping=30s heartbeat.
+    Per Agent C: timeout-with-disconnect-check pattern prevents the
+    generator from parking forever on dead clients.
+    """
+    from sse_starlette import EventSourceResponse
+    import asyncio as _asyncio
+    import json as _json
+    from api.sse import register_subscriber, unregister_subscriber
+
+    # Membership gating (Sprint 1).
+    if not _saved_area_exists(area_id):
+        raise HTTPException(status_code=404, detail="Saved area not found")
+    _assert_user_is_area_member(area_id, int(user["id"]))
+
+    # Origin check (Agent C minor-risk mitigation).
+    origin = request.headers.get("origin", "")
+    request_url = str(request.url)
+    expected_origin = request_url.split("/api/")[0] if "/api/" in request_url else ""
+    if origin and expected_origin and origin != expected_origin:
+        raise HTTPException(status_code=403, detail="Cross-origin SSE rejected")
+
+    queue: _asyncio.Queue = _asyncio.Queue(maxsize=100)
+    await register_subscriber(area_id, queue)
+
+    async def event_generator():
+        try:
+            # Initial 'connected' event signals stream is live.
+            yield {
+                "event": "connected",
+                "data": _json.dumps({"area_id": area_id, "user_id": int(user["id"])}),
+            }
+            while True:
+                # Agent C catch: timeout-with-disconnect-check pattern.
+                # Without timeout, the generator parks forever on dead clients.
+                try:
+                    msg = await _asyncio.wait_for(queue.get(), timeout=30.0)
+                except _asyncio.TimeoutError:
+                    # Heartbeat tick. sse-starlette's built-in ping=30 also
+                    # fires; this is belt-and-suspenders for disconnect detection.
+                    if await request.is_disconnected():
+                        break
+                    continue
+                if await request.is_disconnected():
+                    break
+                # Determine event type.
+                event_type = "message"
+                if isinstance(msg, dict) and msg.get("type") in ("resync", "blob_explode"):
+                    event_type = msg["type"]
+                yield {
+                    "event": event_type,
+                    "data": _json.dumps(msg),
+                }
+        finally:
+            # Always clean up subscriber map — even on cancellation /
+            # exception / disconnect.
+            await unregister_subscriber(area_id, queue)
+
+    return EventSourceResponse(
+        event_generator(),
+        ping=30,  # built-in heartbeat (Agent A: don't hand-roll)
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",  # tell intermediaries not to buffer
+        },
     )
 
 
@@ -7153,6 +7261,19 @@ async def update_saved_area(area_id: str, request: SavedAreaUpdateRequest, req: 
                         Json(request.filter_state), Json(request.filter_state),
                         Json(request.filter_state), Json(request.filter_state),
                     ),
+                )
+                # Sprint 3 §3.3: single batch NOTIFY for the blob-explode
+                # path. Frontend treats this as a refetch hint rather than
+                # N individual field-change events.
+                import json as _json_blob_notify
+                cur.execute(
+                    "SELECT pg_notify('saved_area_filter_changes', %s)",
+                    (_json_blob_notify.dumps({
+                        "area_id": area_id,
+                        "type": "blob_explode",
+                        "by_user_id": int(user["id"]),
+                        "by_session_id": req.headers.get("x-session-id", ""),
+                    }),),
                 )
         conn.commit()
     except Exception:
