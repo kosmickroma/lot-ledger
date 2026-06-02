@@ -2042,29 +2042,37 @@ function _handleSseFieldChange(msg) {
   // their dedicated addEventListener bindings; this catches only
   // field-change deltas.
   if (msg.type === "resync" || msg.type === "blob_explode") return;
-  const { field_key, value, by_session_id } = msg;
+  const { field_key, value, client_seq, by_session_id } = msg;
   if (!field_key) return;
-  // TEMP DEBUG (Sprint 3 smoke): log every received SSE event with the
-  // self-echo comparison so we can verify the filter in DevTools.
-  const isOwnEcho = Boolean(by_session_id && by_session_id === _sseSessionUuid);
+  // Sprint 3 hotfix (2026-06-02 evening): seq-based self-echo + LWW filter.
+  // The earlier session-UUID approach had a subtle bug in concurrent
+  // same-field edits: the WINNER (higher seq) would receive the LOSER's
+  // NOTIFY first via SSE commit-order delivery, apply it to the UI,
+  // then ignore their own NOTIFY as self-echo — leaving the UI showing
+  // the loser's value while the DB has the winner's.
+  //
+  // Fix: compare incoming client_seq against _dispatchedSeqByField
+  // (which we already track post-PATCH-dispatch). If incoming seq <=
+  // applied seq, the event is either (a) our own write echoed back, or
+  // (b) an older write that lost the LWW race. Either way, ignore.
+  // If incoming seq > applied seq, it's a newer change we haven't seen —
+  // apply + update map. Order-correct under all conflict scenarios.
+  const incomingSeq = Number(client_seq || 0);
+  const appliedSeq = Number(_dispatchedSeqByField.get(field_key) || 0);
+  const shouldApply = incomingSeq > appliedSeq;
   console.debug("[sse] event received", {
-    field_key,
-    value,
-    by_session_id,
+    field_key, value, client_seq: incomingSeq,
+    applied_seq: appliedSeq, by_session_id,
     my_session: _sseSessionUuid,
-    is_self_echo: isOwnEcho,
-    action: isOwnEcho ? "IGNORED (self)" : "APPLY (remote)",
+    action: shouldApply ? "APPLY" : "IGNORED (stale or self)",
   });
-  // Sprint 3 §4.4 + Agent C catch M-1: self-echo filter on
-  // by_session_id, not by_user_id. Same-user multi-tab still receives
-  // each other's edits (different session UUIDs per tab).
-  if (isOwnEcho) {
-    // Our own write echoed back. Already applied locally; ignore.
-    return;
-  }
-  // Remote change. Apply via Sprint 2 anti-flicker hook (defers to
-  // blur if user is focused on the input).
+  if (!shouldApply) return;
+  // Apply via Sprint 2 anti-flicker hook (defers to blur if user is
+  // focused on the input).
   _applyFilterFieldToUI(field_key, value);
+  // Update applied-seq map so any subsequent older NOTIFY (or our own
+  // self-echo) is correctly ignored.
+  _dispatchedSeqByField.set(field_key, incomingSeq);
   // Refresh diff baseline so the next captureFilterState() comparison
   // doesn't treat this remote change as a local edit pending PATCH.
   _filterSaveLastSnapshot = captureFilterState();
@@ -2077,22 +2085,27 @@ function _handleSseStoredValue(msg) {
   if (!msg) return;
   const { field_key, numeric_value, comment_text, client_seq, by_session_id } = msg;
   if (!field_key) return;
-  const isOwnEcho = Boolean(by_session_id && by_session_id === _sseSessionUuid);
-  console.debug("[sse] stored_value event received", {
-    field_key, numeric_value, comment_text, client_seq, by_session_id,
-    my_session: _sseSessionUuid, is_self_echo: isOwnEcho,
-    action: isOwnEcho ? "IGNORED (self)" : "APPLY (remote)",
-  });
-  if (isOwnEcho) return;
   if (!_storedValueState) return;
   const fieldData = _storedValueState[field_key];
   if (!fieldData) return;
-  // Apply remote value. Bump client_seq tracking so our next PUT
-  // won't lose the LWW race to the value we just applied.
+  // Sprint 3 hotfix (2026-06-02 evening): seq-based filter, not session-UUID.
+  // Stored values already track fieldData.client_seq as the highest applied
+  // seq (set on GET response, PUT response, and 409 reconciliation). Use
+  // that as the LWW gate: only apply incoming if its seq > local applied.
+  const incomingSeq = Number(client_seq || 0);
+  const appliedSeq = Number(fieldData.client_seq || 0);
+  const shouldApply = incomingSeq > appliedSeq;
+  console.debug("[sse] stored_value event received", {
+    field_key, numeric_value, comment_text,
+    client_seq: incomingSeq, applied_seq: appliedSeq, by_session_id,
+    my_session: _sseSessionUuid,
+    action: shouldApply ? "APPLY" : "IGNORED (stale or self)",
+  });
+  if (!shouldApply) return;
   fieldData.numeric_value = (numeric_value !== undefined && numeric_value !== null) ? Number(numeric_value) : null;
   fieldData.comment_text = String(comment_text || "");
-  fieldData.client_seq = Math.max(Number(fieldData.client_seq || 0), Number(client_seq || 0));
-  _storedValueClientSeq = Math.max(_storedValueClientSeq, fieldData.client_seq);
+  fieldData.client_seq = incomingSeq;
+  _storedValueClientSeq = Math.max(_storedValueClientSeq, incomingSeq);
   try { _storedValueRecalcAndRender(); } catch (_) {}
 }
 
