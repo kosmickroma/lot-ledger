@@ -186,6 +186,50 @@ def _extract_centroid(point_value: Any) -> tuple[float | None, float | None]:
     return None, None
 
 
+def _trim_dcad_legal_admin_tail(legal_description: str | None) -> str:
+    """Trim DCAD-style operational/admin metadata off the end of a joined
+    legal description (2026-06-01).
+
+    DCAD's legal1..legal5 spread looks like one of:
+        "BUCKNER TERRACE 6TH SEC 1ST INST BLK 14/6129 LOT 14
+         INT200600063327 DD02102006 CO-DC 6129 014 01400 3DA6129 014"
+        "BRYAN PLACE REV 2 BLK B/333 LT 18 INT202500021195
+         DD01312025 CO-DC 0333 00B 01800 1000333 00B"
+
+    The pre-admin portion (subdivision + Block + Lot, where LOT can be
+    spelled LOT or LT) is what an analyst scanning the popup actually
+    wants. Everything after the admin marker tokens is operational
+    metadata and just visually crowds out the subdivision label above
+    it in the popup cell.
+
+    Strategy: cut at the FIRST occurrence of any of these admin markers:
+      * INT followed by digits — deed instrument number
+      * DD followed by digits — deed date (MMDDYYYY)
+      * CO-DC — county-document internal index keyword
+    All three appear consistently as the start of the admin tail in
+    DCAD data. Cutting before whichever appears first preserves the
+    BLK/LOT (or BLK/LT) clause regardless of which lot abbreviation
+    DCAD chose for that parcel.
+
+    No-op for TAD / Collin / Denton: their joined legal strings don't
+    carry these admin markers — they end at "Lot N" naturally — so the
+    search finds nothing and the input passes through unchanged. Single
+    shared helper, no per-county branching needed.
+    """
+    if not legal_description:
+        return ""
+    import re
+    # Look for any of the three admin markers, case-insensitive. The
+    # earliest match wins; everything from that index onward is dropped.
+    # \bINT\d / \bDD\d require a digit after the prefix so subdivision
+    # words like "INST" or "DDISTRICT" don't trigger a false cut.
+    admin_marker = re.compile(r"\b(?:INT\d|DD\d|CO-DC\b)", re.IGNORECASE)
+    match = admin_marker.search(legal_description)
+    if match:
+        return legal_description[:match.start()].rstrip(" ,.-")
+    return legal_description
+
+
 def _dcad_subdivision_from_legal(legal_descr: str | None) -> str:
     """Best-effort subdivision name extractor from DCAD legal description.
 
@@ -794,6 +838,29 @@ def build_feature(row: dict[str, Any], prop_type: str, on_redfin: bool, redfin_l
         "zoning": _clean_text(row.get("zoning")) or "N/A",
         "school": _clean_text(row.get("isd_desc")) or "N/A",
         "subdivision": _clean_text(row.get("subdivision")) or _dcad_subdivision_from_legal(row.get("legal1")),
+        # Full joined legal description (2026-06-01). Each county's normalized
+        # row stuffs the parts into legal1..legal5: DCAD spreads across all
+        # five; TAD/Collin/Denton put the full string in legal1 and leave
+        # the rest blank. Same join shape the CSV writer uses (api/main.py
+        # ~line 4311). Rendered in the popup as a second line under the
+        # "Neighborhood" cell so the Block/Lot tail Mike asked for is visible
+        # without losing the subdivision-as-quick-scan top line.
+        #
+        # _trim_dcad_legal_admin_tail drops DCAD's trailing admin codes
+        # (deed instrument numbers, deed dates, internal CO-DC indices)
+        # after the LOT token — those land in legal3..legal5 and are
+        # operational metadata, not anything an analyst scanning the popup
+        # wants to see. TAD/Collin/Denton produce clean strings that don't
+        # match the trim pattern, so this is a no-op for them.
+        "legal_description": _trim_dcad_legal_admin_tail(" ".join(
+            part for part in (
+                _clean_text(row.get("legal1")),
+                _clean_text(row.get("legal2")),
+                _clean_text(row.get("legal3")),
+                _clean_text(row.get("legal4")),
+                _clean_text(row.get("legal5")),
+            ) if part
+        )),
         "yr_built": str(row.get("yr_built")) if row.get("yr_built") else "N/A",
         "sqft": f"{int(float(row['tot_living_area'])):,}" if _safe_float(row.get("tot_living_area")) not in (None, 0.0) else "N/A",
         # === v3 residential detail expansion (CAD_RESIDENTIAL_DETAIL_EXPANSION_SPEC.md) ===
