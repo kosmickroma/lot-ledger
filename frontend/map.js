@@ -7366,20 +7366,27 @@ function readPropelioFiltersFromUI() {
 function _compPropertyTypeBucket(comp) {
   const acct = String(comp?.parcel_account_num || "").trim();
   const county = String(comp?.parcel_county || "").trim().toLowerCase();
-  if (acct && county && lastAnalysisGeojson && Array.isArray(lastAnalysisGeojson.features)) {
+  // Match by acct alone when comp has no county. Account-number formats
+  // differ enough across our 4 counties (DCAD: 17-digit, TAD: '<num>:<seq>',
+  // Collin/Denton: distinct patterns) that cross-county collisions are
+  // effectively impossible. Mike-reported 2026-06-02: Propelio comps with
+  // multi-address listings (e.g. '1825 & 1827 Pollard St') often have a
+  // valid parcel_account_num but blank parcel_county, which made the CAD
+  // lookup short-circuit and fall back to Propelio's coarse "Residential"
+  // category — leaking duplex comps past the Duplexes filter.
+  if (acct && lastAnalysisGeojson && Array.isArray(lastAnalysisGeojson.features)) {
     for (const f of lastAnalysisGeojson.features) {
       const p = f?.properties || {};
-      if (String(p.account_num || "").trim() === acct
-        && String(p.source_county || "").trim().toLowerCase() === county) {
-        const baseType = p.prop_type || null;
-        // Single-family parcels split into "off_market" (default) or "active"
-        // (Redfin listing live) — same derivation the parcel layer uses, so
-        // Property Type Filter "Off Market" toggle gates SFR comps too.
-        if (baseType === "single_family") {
-          return p.on_redfin ? "active" : "off_market";
-        }
-        return baseType;
+      if (String(p.account_num || "").trim() !== acct) continue;
+      if (county && String(p.source_county || "").trim().toLowerCase() !== county) continue;
+      const baseType = p.prop_type || null;
+      // Single-family parcels split into "off_market" (default) or "active"
+      // (Redfin listing live) — same derivation the parcel layer uses, so
+      // Property Type Filter "Off Market" toggle gates SFR comps too.
+      if (baseType === "single_family") {
+        return p.on_redfin ? "active" : "off_market";
       }
+      return baseType;
     }
   }
   // Propelio nests the MLS classification under `extra`; the top-level
