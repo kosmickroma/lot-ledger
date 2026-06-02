@@ -3537,7 +3537,13 @@ async function _filterSaveProcessQueue() {
   try {
     for (let i = 0; i < toFlush.length; i++) {
       const [fieldKey, value] = toFlush[i];
-      _filterSaveClientSeq += 1;
+      // Sprint 3 hotfix (2026-06-02): use Date.now() as the seq base so
+      // _filterSaveClientSeq survives refreshes/new sessions. Pre-hotfix
+      // every refresh reset to 0, immediately losing every LWW race
+      // against persisted seqs. Date.now() guarantees monotonic across
+      // all sessions/browsers; Math.max protects against multiple
+      // dispatches within the same millisecond (rare but possible).
+      _filterSaveClientSeq = Math.max(Date.now(), _filterSaveClientSeq + 1);
       const seq = _filterSaveClientSeq;
       try {
         const resp = await _apiJson(
