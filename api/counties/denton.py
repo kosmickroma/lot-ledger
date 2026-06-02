@@ -21,7 +21,21 @@ from api.counties.dcad import ParcelQueryResult, _clean_text, _safe_float, _safe
 from api.geo import point_in_polygon, polygon_bbox
 
 
-_DENTON_MF_CODES = {"B1", "B2"}
+# Duplexes (2026-06-01): Denton uses fewer PTAD B-codes than Collin —
+# only B1 (Multi-family, 5+ unit) and B2 (Duplex). No B3/B4 codes exist
+# in Denton's data; the district apparently lumps any 3-4 unit residential
+# into B2. `OB2` ("Other B2", 8 parcels) currently falls through to
+# single_family and is brought into the duplex bucket here as the
+# symmetric move with DCAD's defensive A14 inclusion. Denton has NO
+# `units` column in `denton_parcels`, so the rule is entirely
+# code-driven — no fall-back tie-breaker is possible.
+_DENTON_DUPLEX_CODES = {"B2", "OB2"}
+_DENTON_MF_ONLY_CODES = {"B1"}
+# Documentation superset — the full "what Denton classifies as B-class
+# multifamily" catalog. Not consulted by `_classify_denton` directly
+# (it splits via _DENTON_DUPLEX_CODES + _DENTON_MF_ONLY_CODES); kept so a
+# future PTAD code addition prompts an explicit bucket decision.
+_DENTON_MF_CODES = _DENTON_DUPLEX_CODES | _DENTON_MF_ONLY_CODES
 _DENTON_VACANT_CODES = {"C1", "C2", "C3", "C5"}
 _DENTON_COMMERCIAL_CODES = {"F1", "F2", "F3", "J3", "J5", "OC1"}
 _DENTON_EXEMPT_CODES = {"D1", "D2", "E1", "E4"}
@@ -180,6 +194,25 @@ def _centroid_from_geojson(centroid_json: Any) -> tuple[float | None, float | No
 
 
 def _classify_denton(row: dict[str, Any]) -> str:
+    """Classify a Denton parcel.
+
+    Reads from the NORMALIZED row produced by `_normalize_denton_row` —
+    `row.get("sptd_code")` is the aliased form of the raw column
+    `state_cd`, which may carry a comma-joined multi-code value
+    (e.g. `'B2,A1'`). `_primary_code` splits on the first `,` and
+    upper-cases. If a future call site passes the raw SQL row, every
+    classification will silently fall through to "single_family".
+
+    Duplexes (2026-06-01): PTAD code B2 (Duplex) and the variant OB2
+    route to the duplexes bucket. B1 (Multi-family, 5+ apartments)
+    stays multifamily. Denton has no `units` column, so the rule is
+    entirely code-driven — there's no tie-breaker available.
+
+    Multi-code first-wins precedence is intentional and consistent with
+    every other code-check branch in this function: `'B2,A1'` → primary
+    is B2 → duplexes; `'A1,B2'` → primary is A1 → single_family. The
+    district lists the dominant improvement type first.
+    """
     code = _primary_code(_clean_text(row.get("sptd_code")))
 
     if code in _DENTON_EXEMPT_CODES:
@@ -192,7 +225,9 @@ def _classify_denton(row: dict[str, Any]) -> str:
     if non_target_owner:
         return "exempt"
 
-    if code in _DENTON_MF_CODES:
+    if code in _DENTON_DUPLEX_CODES:
+        return "duplexes"
+    if code in _DENTON_MF_ONLY_CODES:
         return "multifamily"
     if code in _DENTON_VACANT_CODES:
         return "vacant"
