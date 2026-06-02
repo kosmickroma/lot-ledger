@@ -7054,6 +7054,59 @@ async def update_saved_area(area_id: str, request: SavedAreaUpdateRequest, req: 
                 tuple(query_params),
             )
             row = cur.fetchone()
+
+            # Sprint 2 multi-user collab (spec §4): when filter_state was
+            # in the PUT body, ALSO explode the blob into per-field rows
+            # transactionally so the new per-field table stays consistent
+            # with the cached blob. Uses client_seq=0 so any subsequent
+            # per-field PATCH (using monotonic seq >= 1) wins on conflict —
+            # this preserves the "per-field PATCH always wins over wholesale
+            # blob PUT" semantic.
+            # Same jsonb_typeof guards as eager backfill (Copilot B-1 fix).
+            if request.filter_state is not None and isinstance(request.filter_state, dict):
+                cur.execute(
+                    """
+                    INSERT INTO saved_area_filter_fields
+                      (area_id, field_key, value, client_seq, updated_by_user_id)
+                    SELECT
+                        %s::text                                   AS area_id,
+                        sections.section || '.' || sections.key    AS field_key,
+                        sections.val                                AS value,
+                        0                                           AS client_seq,
+                        %s::integer                                 AS updated_by_user_id
+                    FROM (
+                        SELECT 'checkboxes' AS section, key, value AS val
+                          FROM jsonb_each(%s::jsonb -> 'checkboxes')
+                          WHERE jsonb_typeof(%s::jsonb -> 'checkboxes') = 'object'
+                        UNION ALL
+                        SELECT 'numeric', key, value FROM jsonb_each(%s::jsonb -> 'numeric')
+                          WHERE jsonb_typeof(%s::jsonb -> 'numeric') = 'object'
+                        UNION ALL
+                        SELECT 'sold', key, value FROM jsonb_each(%s::jsonb -> 'sold')
+                          WHERE jsonb_typeof(%s::jsonb -> 'sold') = 'object'
+                        UNION ALL
+                        SELECT 'comp', key, value FROM jsonb_each(%s::jsonb -> 'comp')
+                          WHERE jsonb_typeof(%s::jsonb -> 'comp') = 'object'
+                        UNION ALL
+                        SELECT 'propelio', key, value FROM jsonb_each(%s::jsonb -> 'propelio')
+                          WHERE jsonb_typeof(%s::jsonb -> 'propelio') = 'object'
+                    ) sections
+                    ON CONFLICT (area_id, field_key) DO UPDATE
+                    SET value              = EXCLUDED.value,
+                        updated_by_user_id = EXCLUDED.updated_by_user_id,
+                        updated_at         = now()
+                    WHERE saved_area_filter_fields.client_seq < 1
+                    """,
+                    (
+                        area_id,
+                        int(user["id"]),
+                        Json(request.filter_state), Json(request.filter_state),
+                        Json(request.filter_state), Json(request.filter_state),
+                        Json(request.filter_state), Json(request.filter_state),
+                        Json(request.filter_state), Json(request.filter_state),
+                        Json(request.filter_state), Json(request.filter_state),
+                    ),
+                )
         conn.commit()
     except Exception:
         conn.rollback()
