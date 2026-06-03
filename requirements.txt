@@ -13,3 +13,5 @@ pyshp>=2.3,<3.0
 ijson>=3.3,<4.0
 itsdangerous>=2.2,<3.0
 passlib[argon2]>=1.7,<2.0
+# Required for FastAPI multipart/form-data parsing (outreach CSV upload, 2026-06-03).
+python-multipart>=0.0.9,<1.0

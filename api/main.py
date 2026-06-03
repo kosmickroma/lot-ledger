@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import parse_qs, quote_plus
 
-from fastapi import Body, Depends, FastAPI, HTTPException, Path as FastAPIPath, Request, Response
+from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Path as FastAPIPath, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from psycopg2.errors import UniqueViolation
@@ -1615,6 +1615,26 @@ class StoredValueGetResponse(BaseModel):
     rehab_needed: dict[str, Any]
     mao_arv: dict[str, Any]
     tdpp_minus_mao_arv: dict[str, Any]
+
+
+class OutreachPutRequest(BaseModel):
+    """Manual outreach edit from the popup (Mailer + Phone Tracking, 2026-06-03).
+
+    Partial-update semantics: omitted keys are not touched. To explicitly
+    clear a field, send the literal null/None. Empty string on phone_number
+    is treated as None (clear).
+    """
+    county: Literal["dcad", "tad", "collin", "denton"]
+    parcel_id: str
+    phone_number: str | None = None
+    mailer_sent: bool | None = None
+    mailer_date: str | None = None  # ISO 'YYYY-MM-DD' or None
+    # _set fields tell the server WHICH keys were intentionally supplied
+    # vs simply absent. Pydantic doesn't distinguish missing-from-payload
+    # from sent-as-None natively in v1 — these booleans make it explicit.
+    phone_number_set: bool = False
+    mailer_sent_set: bool = False
+    mailer_date_set: bool = False
 
 
 class StoredValuePutRequest(BaseModel):
@@ -7622,6 +7642,500 @@ async def rate_parcel(request: ParcelRateRequest, req: Request, user: dict[str, 
     finally:
         release_session_conn(conn)
     return {"ok": True, "rating": rating}
+
+
+# =============================================================================
+# Mailer + Phone Tracking endpoints (spec v2, 2026-06-03)
+# =============================================================================
+#
+# Three endpoints:
+#   PUT  /api/parcels/outreach           — single-field edit from popup
+#   POST /api/parcels/outreach/import    — bulk CSV upload from CRM round-trip
+#   GET  /api/parcels/outreach/imports   — recent import history
+#
+# All gated to power_user / owner / developer via _user_can_see_outreach.
+# Data lives on the DATA DB (parcel_outreach_notes table).
+
+
+_OUTREACH_PARCEL_TABLES = {
+    "dcad":   ("parcels",         "account_num"),
+    "tad":    ("tad_parcels",     "parcel_key"),
+    "collin": ("collin_parcels",  "parcel_key"),
+    "denton": ("denton_parcels",  "parcel_key"),
+}
+
+
+def _validate_outreach_parcel_id(county: str, parcel_id: str) -> bool:
+    """Return True if the (county, parcel_id) actually exists in the
+    corresponding parcel table. Cheap existence check before UPSERT so
+    we don't accumulate ghost rows in parcel_outreach_notes."""
+    if county not in _OUTREACH_PARCEL_TABLES:
+        return False
+    table, pk = _OUTREACH_PARCEL_TABLES[county]
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            # Identifier interpolation is safe — `table` and `pk` come from
+            # the hardcoded _OUTREACH_PARCEL_TABLES dict, not user input.
+            cur.execute(
+                f"SELECT 1 FROM {table} WHERE {pk} = %s LIMIT 1",
+                (parcel_id,),
+            )
+            return cur.fetchone() is not None
+    finally:
+        release_conn(conn)
+
+
+def _parse_iso_date(text: str | None) -> "date_module.date | None":
+    """Parse 'YYYY-MM-DD' into a date. Returns None on empty/invalid."""
+    import datetime as date_module
+    if not text:
+        return None
+    text = text.strip()
+    if not text:
+        return None
+    try:
+        return date_module.date.fromisoformat(text)
+    except (ValueError, TypeError):
+        return None
+
+
+@app.put("/api/parcels/outreach")
+async def put_parcel_outreach(
+    request: OutreachPutRequest,
+    req: Request,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Manual edit of outreach data from the popup. UPSERTs into
+    parcel_outreach_notes. Partial update — only sets fields where the
+    corresponding _set flag is true. Empty phone_number string is treated
+    as null (clear)."""
+    require_csrf(req)
+    if not _user_can_see_outreach(user):
+        raise HTTPException(status_code=403, detail="Outreach editing requires power_user role or higher")
+
+    county = str(request.county).strip().lower()
+    parcel_id = str(request.parcel_id or "").strip()
+    if not parcel_id:
+        raise HTTPException(status_code=400, detail="parcel_id required")
+
+    if not _validate_outreach_parcel_id(county, parcel_id):
+        raise HTTPException(status_code=404, detail=f"Parcel not found: {county}/{parcel_id}")
+
+    # Normalize values. Empty phone string → None (clear). mailer_date must
+    # parse as ISO date if supplied.
+    phone_value: str | None = None
+    if request.phone_number_set:
+        if request.phone_number is None:
+            phone_value = None
+        else:
+            phone_value = str(request.phone_number).strip() or None
+
+    mailer_sent_value: bool | None = None
+    if request.mailer_sent_set:
+        mailer_sent_value = bool(request.mailer_sent) if request.mailer_sent is not None else False
+
+    mailer_date_value = None
+    if request.mailer_date_set:
+        if request.mailer_date is None:
+            mailer_date_value = None
+        else:
+            mailer_date_value = _parse_iso_date(str(request.mailer_date))
+            if request.mailer_date and mailer_date_value is None:
+                raise HTTPException(status_code=400, detail="mailer_date must be ISO YYYY-MM-DD")
+
+    if not (request.phone_number_set or request.mailer_sent_set or request.mailer_date_set):
+        raise HTTPException(status_code=400, detail="Nothing to update — set at least one of phone_number / mailer_sent / mailer_date")
+
+    user_id = int(user["id"])
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            # Read existing row (so partial-update preserves untouched fields).
+            cur.execute(
+                "SELECT phone_number, mailer_sent, mailer_date "
+                "FROM parcel_outreach_notes WHERE county = %s AND parcel_id = %s",
+                (county, parcel_id),
+            )
+            existing = cur.fetchone()
+            existing_phone, existing_mailer_sent, existing_mailer_date = (existing or (None, False, None))
+
+            new_phone = phone_value if request.phone_number_set else existing_phone
+            new_mailer_sent = mailer_sent_value if request.mailer_sent_set else (existing_mailer_sent or False)
+            new_mailer_date = mailer_date_value if request.mailer_date_set else existing_mailer_date
+
+            cur.execute(
+                """
+                INSERT INTO parcel_outreach_notes
+                    (county, parcel_id, phone_number, mailer_sent, mailer_date,
+                     last_updated_by_user_id, last_updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, now())
+                ON CONFLICT (county, parcel_id) DO UPDATE SET
+                    phone_number = EXCLUDED.phone_number,
+                    mailer_sent  = EXCLUDED.mailer_sent,
+                    mailer_date  = EXCLUDED.mailer_date,
+                    last_updated_by_user_id = EXCLUDED.last_updated_by_user_id,
+                    last_updated_at = EXCLUDED.last_updated_at
+                RETURNING phone_number, mailer_sent, mailer_date, last_updated_at
+                """,
+                (county, parcel_id, new_phone, new_mailer_sent, new_mailer_date, user_id),
+            )
+            row = cur.fetchone()
+        conn.commit()
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        release_conn(conn)
+
+    return {
+        "ok": True,
+        "county": county,
+        "parcel_id": parcel_id,
+        "outreach_phone": row[0],
+        "outreach_mailer_sent": bool(row[1]),
+        "outreach_mailer_date": row[2].isoformat() if row[2] else None,
+        "last_updated_at": row[3].isoformat() if row[3] else None,
+    }
+
+
+# CSV import — header aliases (case-insensitive) accepted for each logical field.
+_OUTREACH_IMPORT_KEY_ALIASES = ("parcel id", "parcel_id", "cad id", "cad_id", "parcel_key", "account_num", "account #", "account")
+_OUTREACH_IMPORT_PHONE_ALIASES = ("phone number", "phone_number", "phone", "phone 1", "phone1")
+_OUTREACH_IMPORT_MAILER_SENT_ALIASES = ("mailer sent", "mailer_sent", "mailed", "mailer")
+_OUTREACH_IMPORT_MAILER_DATE_ALIASES = ("mailer date", "mailer_date", "date mailed", "date_mailed")
+
+_OUTREACH_IMPORT_MAX_BYTES = 10 * 1024 * 1024     # 10 MB
+_OUTREACH_IMPORT_MAX_ROWS = 50_000
+
+
+def _normalize_csv_header(h: str) -> str:
+    return (h or "").strip().lower().replace("﻿", "")
+
+
+def _find_csv_column(headers: list[str], aliases: tuple[str, ...]) -> str | None:
+    """Case-insensitive header lookup. Returns the original header name (so
+    DictReader can find it) or None when no alias matches."""
+    norm_to_original: dict[str, str] = {_normalize_csv_header(h): h for h in headers}
+    for alias in aliases:
+        if alias in norm_to_original:
+            return norm_to_original[alias]
+    return None
+
+
+def _parse_outreach_mailer_sent_cell(raw: str) -> bool | None:
+    """Parse a Mailer Sent CSV cell. Accept 'yes'/'y'/'true'/'1' → True,
+    'no'/'n'/'false'/'0'/'' → False, anything else → None (treated as 'no change').
+    """
+    text = str(raw or "").strip().lower()
+    if text in ("yes", "y", "true", "1", "sent", "mailed"):
+        return True
+    if text in ("no", "n", "false", "0", "", "unsent", "not sent"):
+        return False
+    return None
+
+
+@app.post("/api/parcels/outreach/import")
+async def import_parcel_outreach(
+    req: Request,
+    file: UploadFile = File(...),
+    mode: str = Query("commit", regex=r"^(preview|commit)$"),
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Bulk CSV import for outreach data (Mailer + Phone Tracking, spec v2 §5.3).
+
+    Staging-table + batched set-based UPSERT pattern (NOT per-row UPSERT).
+    Per Copilot critique 2026-06-03: per-row would have created N transactions
+    on shared Cloud SQL; staging approach is one INSERT batch + 4 county
+    resolution UPDATEs + N/1000 chunked UPSERTs.
+
+    Modes:
+      preview — SELECT-only diff computation; nothing written to
+                parcel_outreach_notes. Returns counts + sample unmatched ids.
+      commit  — Same diff + UPSERT into parcel_outreach_notes.
+    """
+    require_csrf(req)
+    if not _user_can_see_outreach(user):
+        raise HTTPException(status_code=403, detail="Outreach import requires power_user role or higher")
+
+    raw_bytes = await file.read()
+    file_size = len(raw_bytes)
+    if file_size > _OUTREACH_IMPORT_MAX_BYTES:
+        raise HTTPException(status_code=413, detail=f"CSV too large (>10MB): {file_size} bytes")
+
+    # Parse CSV.
+    import csv as csv_module
+    import io as io_module
+    try:
+        text = raw_bytes.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        try:
+            text = raw_bytes.decode("latin-1")
+        except UnicodeDecodeError as e:
+            raise HTTPException(status_code=400, detail=f"CSV encoding not readable: {e}")
+
+    reader = csv_module.DictReader(io_module.StringIO(text))
+    headers = reader.fieldnames or []
+    if not headers:
+        raise HTTPException(status_code=400, detail="CSV has no header row")
+
+    key_col = _find_csv_column(headers, _OUTREACH_IMPORT_KEY_ALIASES)
+    if key_col is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Required column not found. Add a 'Parcel ID' column (or 'parcel_key' / 'account_num') "
+                f"to your CSV. Headers seen: {headers}"
+            ),
+        )
+    phone_col = _find_csv_column(headers, _OUTREACH_IMPORT_PHONE_ALIASES)
+    mailer_sent_col = _find_csv_column(headers, _OUTREACH_IMPORT_MAILER_SENT_ALIASES)
+    mailer_date_col = _find_csv_column(headers, _OUTREACH_IMPORT_MAILER_DATE_ALIASES)
+
+    # Read rows into memory (already capped at MAX_BYTES; row cap separately).
+    parsed_rows: list[tuple[int, str, str | None, bool | None, "date_module.date | None"]] = []
+    import datetime as date_module
+    for idx, raw_row in enumerate(reader):
+        if idx >= _OUTREACH_IMPORT_MAX_ROWS:
+            raise HTTPException(status_code=413, detail=f"CSV too many rows (>{_OUTREACH_IMPORT_MAX_ROWS})")
+        parcel_id = str(raw_row.get(key_col) or "").strip()
+        if not parcel_id:
+            continue
+        phone = str(raw_row.get(phone_col) or "").strip() if phone_col else None
+        if phone == "":
+            phone = None
+        mailer_sent = _parse_outreach_mailer_sent_cell(raw_row.get(mailer_sent_col) or "") if mailer_sent_col else None
+        mailer_date = _parse_iso_date(str(raw_row.get(mailer_date_col) or "")) if mailer_date_col else None
+        parsed_rows.append((idx, parcel_id, phone, mailer_sent, mailer_date))
+
+    if not parsed_rows:
+        raise HTTPException(status_code=400, detail="CSV had no data rows after the header")
+
+    user_id = int(user["id"])
+    conn = get_conn()
+    matched = 0
+    updated = 0
+    unmatched_ids: list[str] = []
+    sample_unmatched: list[str] = []
+    try:
+        with conn.cursor() as cur:
+            # Staging table — temp, dropped at txn end.
+            cur.execute("SET LOCAL lock_timeout = '5s'")
+            cur.execute("SET LOCAL statement_timeout = '120s'")
+            cur.execute(
+                """
+                CREATE TEMP TABLE outreach_staging (
+                    row_idx INTEGER PRIMARY KEY,
+                    parcel_id TEXT NOT NULL,
+                    phone TEXT,
+                    mailer_sent BOOLEAN,
+                    mailer_date DATE,
+                    matched_county TEXT,
+                    phone_set BOOLEAN NOT NULL DEFAULT false,
+                    mailer_sent_set BOOLEAN NOT NULL DEFAULT false,
+                    mailer_date_set BOOLEAN NOT NULL DEFAULT false
+                ) ON COMMIT DROP
+                """
+            )
+
+            # Batched INSERT into staging via execute_values.
+            from psycopg2.extras import execute_values
+            execute_values(
+                cur,
+                """
+                INSERT INTO outreach_staging
+                    (row_idx, parcel_id, phone, mailer_sent, mailer_date,
+                     phone_set, mailer_sent_set, mailer_date_set)
+                VALUES %s
+                """,
+                [
+                    (
+                        idx, pid, phone, ms, md,
+                        phone_col is not None,
+                        mailer_sent_col is not None,
+                        mailer_date_col is not None,
+                    )
+                    for idx, pid, phone, ms, md in parsed_rows
+                ],
+                page_size=1000,
+            )
+
+            # Resolve county via set-based join — one UPDATE per county table.
+            for county_key, (table, pk) in _OUTREACH_PARCEL_TABLES.items():
+                # Defensive multi-county-match warning: count rows already matched
+                # in a different county before this UPDATE. Should be 0 (verified
+                # globally unique across 2.3M parcels).
+                cur.execute(
+                    f"""
+                    UPDATE outreach_staging s
+                    SET matched_county = %s
+                    FROM {table} p
+                    WHERE p.{pk} = s.parcel_id
+                      AND s.matched_county IS NULL
+                    """,
+                    (county_key,),
+                )
+
+            cur.execute(
+                """
+                SELECT
+                    COUNT(*),
+                    COUNT(*) FILTER (WHERE matched_county IS NOT NULL),
+                    COUNT(*) FILTER (WHERE matched_county IS NULL)
+                FROM outreach_staging
+                """
+            )
+            row_total, row_matched, row_unmatched = cur.fetchone()
+            matched = int(row_matched or 0)
+
+            if row_unmatched:
+                cur.execute(
+                    "SELECT parcel_id FROM outreach_staging WHERE matched_county IS NULL ORDER BY row_idx LIMIT 10"
+                )
+                sample_unmatched = [r[0] for r in cur.fetchall()]
+
+            if mode == "commit":
+                # Chunked UPSERT — 1000-row chunks via WHERE row_idx ranges.
+                chunk_size = 1000
+                row_idx = 0
+                while True:
+                    cur.execute(
+                        """
+                        WITH upserted AS (
+                            INSERT INTO parcel_outreach_notes
+                                (county, parcel_id, phone_number, mailer_sent, mailer_date,
+                                 last_updated_by_user_id, last_updated_at)
+                            SELECT
+                                s.matched_county,
+                                s.parcel_id,
+                                CASE WHEN s.phone_set THEN s.phone ELSE NULL END,
+                                CASE WHEN s.mailer_sent_set THEN COALESCE(s.mailer_sent, false) ELSE false END,
+                                CASE WHEN s.mailer_date_set THEN s.mailer_date ELSE NULL END,
+                                %s,
+                                now()
+                            FROM outreach_staging s
+                            WHERE s.matched_county IS NOT NULL
+                              AND s.row_idx >= %s AND s.row_idx < %s
+                            ON CONFLICT (county, parcel_id) DO UPDATE SET
+                                phone_number = CASE WHEN EXCLUDED.phone_number IS NOT NULL OR (
+                                    SELECT s2.phone_set FROM outreach_staging s2
+                                    WHERE s2.matched_county = parcel_outreach_notes.county
+                                      AND s2.parcel_id = parcel_outreach_notes.parcel_id
+                                    LIMIT 1
+                                ) THEN EXCLUDED.phone_number ELSE parcel_outreach_notes.phone_number END,
+                                mailer_sent = CASE WHEN (
+                                    SELECT s2.mailer_sent_set FROM outreach_staging s2
+                                    WHERE s2.matched_county = parcel_outreach_notes.county
+                                      AND s2.parcel_id = parcel_outreach_notes.parcel_id
+                                    LIMIT 1
+                                ) THEN EXCLUDED.mailer_sent ELSE parcel_outreach_notes.mailer_sent END,
+                                mailer_date = CASE WHEN (
+                                    SELECT s2.mailer_date_set FROM outreach_staging s2
+                                    WHERE s2.matched_county = parcel_outreach_notes.county
+                                      AND s2.parcel_id = parcel_outreach_notes.parcel_id
+                                    LIMIT 1
+                                ) THEN EXCLUDED.mailer_date ELSE parcel_outreach_notes.mailer_date END,
+                                last_updated_by_user_id = EXCLUDED.last_updated_by_user_id,
+                                last_updated_at = EXCLUDED.last_updated_at
+                            RETURNING county, parcel_id
+                        )
+                        SELECT COUNT(*) FROM upserted
+                        """,
+                        (user_id, row_idx, row_idx + chunk_size),
+                    )
+                    chunk_count = int(cur.fetchone()[0])
+                    updated += chunk_count
+                    row_idx += chunk_size
+                    if row_idx >= row_total:
+                        break
+
+            # Audit row.
+            cur.execute(
+                """
+                INSERT INTO outreach_import_log
+                    (user_id, file_name, file_size_bytes, mode,
+                     rows_total, rows_matched, rows_unmatched, rows_updated)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING import_id
+                """,
+                (
+                    user_id,
+                    file.filename or "(unnamed)",
+                    file_size,
+                    mode,
+                    int(row_total),
+                    int(row_matched),
+                    int(row_unmatched),
+                    updated,
+                ),
+            )
+            import_id = cur.fetchone()[0]
+        conn.commit()
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        release_conn(conn)
+
+    return {
+        "import_id": str(import_id),
+        "mode": mode,
+        "total": int(row_total),
+        "matched": int(row_matched),
+        "unmatched": int(row_unmatched),
+        "updated": updated,
+        "sample_unmatched_ids": sample_unmatched,
+    }
+
+
+@app.get("/api/parcels/outreach/imports")
+async def list_parcel_outreach_imports(
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Return recent CSV imports (last 20) for diagnostics."""
+    if not _user_can_see_outreach(user):
+        raise HTTPException(status_code=403, detail="Outreach data not available for this role")
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT import_id, user_id, started_at, file_name, file_size_bytes,
+                       mode, rows_total, rows_matched, rows_unmatched, rows_updated, notes
+                FROM outreach_import_log
+                ORDER BY started_at DESC
+                LIMIT 20
+                """
+            )
+            rows = cur.fetchall()
+    finally:
+        release_conn(conn)
+
+    return {
+        "imports": [
+            {
+                "import_id": str(r[0]),
+                "user_id": int(r[1]) if r[1] is not None else None,
+                "started_at": r[2].isoformat() if r[2] else None,
+                "file_name": r[3],
+                "file_size_bytes": int(r[4]) if r[4] is not None else None,
+                "mode": r[5],
+                "rows_total": int(r[6] or 0),
+                "rows_matched": int(r[7] or 0),
+                "rows_unmatched": int(r[8] or 0),
+                "rows_updated": int(r[9] or 0),
+                "notes": r[10],
+            }
+            for r in rows
+        ]
+    }
 
 
 @app.get("/", include_in_schema=False)
