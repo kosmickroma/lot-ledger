@@ -8257,26 +8257,46 @@ async def import_parcel_outreach(
 
             if mode == "commit":
                 # Chunked UPSERT — 1000-row chunks via WHERE row_idx ranges.
+                # DISTINCT ON dedupes within the chunk's selected rows so we
+                # never present the same (county, parcel_id) twice to ON
+                # CONFLICT (which would raise CardinalityViolation). Last
+                # row in the CSV wins (ORDER BY row_idx DESC). Cross-chunk
+                # duplicates are handled naturally — second chunk's UPSERT
+                # just updates whatever the first chunk inserted.
+                # KK FUB round-trip 2026-06-03: this fires when Mike's
+                # saved area has comp rows + parcel rows pointing at the
+                # same underlying CAD parcel (intentional in CSV output;
+                # duplicates here).
                 chunk_size = 1000
                 row_idx = 0
                 while True:
                     cur.execute(
                         """
-                        WITH upserted AS (
+                        WITH deduped AS (
+                            SELECT DISTINCT ON (s.matched_county, s.parcel_id)
+                                s.matched_county,
+                                s.parcel_id,
+                                CASE WHEN s.phone_set THEN s.phone ELSE NULL END AS phone,
+                                CASE WHEN s.mailer_sent_set THEN COALESCE(s.mailer_sent, false) ELSE false END AS mailer_sent,
+                                CASE WHEN s.mailer_date_set THEN s.mailer_date ELSE NULL END AS mailer_date
+                            FROM outreach_staging s
+                            WHERE s.matched_county IS NOT NULL
+                              AND s.row_idx >= %s AND s.row_idx < %s
+                            ORDER BY s.matched_county, s.parcel_id, s.row_idx DESC
+                        ),
+                        upserted AS (
                             INSERT INTO parcel_outreach_notes
                                 (county, parcel_id, phone_number, mailer_sent, mailer_date,
                                  last_updated_by_user_id, last_updated_at)
                             SELECT
-                                s.matched_county,
-                                s.parcel_id,
-                                CASE WHEN s.phone_set THEN s.phone ELSE NULL END,
-                                CASE WHEN s.mailer_sent_set THEN COALESCE(s.mailer_sent, false) ELSE false END,
-                                CASE WHEN s.mailer_date_set THEN s.mailer_date ELSE NULL END,
+                                d.matched_county,
+                                d.parcel_id,
+                                d.phone,
+                                d.mailer_sent,
+                                d.mailer_date,
                                 %s,
                                 now()
-                            FROM outreach_staging s
-                            WHERE s.matched_county IS NOT NULL
-                              AND s.row_idx >= %s AND s.row_idx < %s
+                            FROM deduped d
                             ON CONFLICT (county, parcel_id) DO UPDATE SET
                                 phone_number = CASE WHEN EXCLUDED.phone_number IS NOT NULL OR (
                                     SELECT s2.phone_set FROM outreach_staging s2
@@ -8302,7 +8322,7 @@ async def import_parcel_outreach(
                         )
                         SELECT COUNT(*) FROM upserted
                         """,
-                        (user_id, row_idx, row_idx + chunk_size),
+                        (row_idx, row_idx + chunk_size, user_id),
                     )
                     chunk_count = int(cur.fetchone()[0])
                     updated += chunk_count
