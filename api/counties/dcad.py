@@ -544,8 +544,13 @@ def query_parcels(polygon: list[list[float]]) -> ParcelQueryResult:
                     r.roof_mat_desc AS roof_material,
                     r.pct_complete AS pct_complete,
                     l.zoning, l.front_dim, l.depth_dim, l.area_size, l.area_uom, l.area_estimated,
-                    (e.account_num IS NOT NULL) AS is_exempt
+                    (e.account_num IS NOT NULL) AS is_exempt,
+                    pon.phone_number AS outreach_phone,
+                    pon.mailer_sent  AS outreach_mailer_sent,
+                    pon.mailer_date  AS outreach_mailer_date
                 FROM parcels p
+                LEFT JOIN parcel_outreach_notes pon
+                       ON pon.county = 'dcad' AND pon.parcel_id = p.account_num
                 LEFT JOIN appraisal a ON a.account_num = p.account_num
                 LEFT JOIN LATERAL (
                     -- v3: lateral one-row pick for res_detail. Mirrors the
@@ -1013,6 +1018,19 @@ def build_feature(row: dict[str, Any], prop_type: str, on_redfin: bool, redfin_l
         "special_dist_taxable_val": _safe_float(row.get("special_dist_taxable_val")),
         # === v4a §2.6.c — full additional_owners array (seq>=2) ===
         "additional_owners": row.get("additional_owners") or [],
+        # Mailer + Phone Tracking (2026-06-03). Threaded through from the
+        # per-county bbox / by-account SELECTs via LEFT JOIN
+        # parcel_outreach_notes. Role-gating happens at the response level
+        # (see _strip_outreach_if_not_allowed in api/main.py) — these keys
+        # are stripped before serialization when the requesting user is
+        # not power_user / owner / developer.
+        "outreach_phone": _clean_text(row.get("outreach_phone")) or None,
+        "outreach_mailer_sent": bool(row.get("outreach_mailer_sent")),
+        "outreach_mailer_date": (
+            row.get("outreach_mailer_date").isoformat()
+            if hasattr(row.get("outreach_mailer_date"), "isoformat")
+            else (row.get("outreach_mailer_date") or None)
+        ),
         "lat": lat,
         "lng": lng,
     }

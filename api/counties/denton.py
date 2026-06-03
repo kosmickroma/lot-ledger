@@ -154,7 +154,10 @@ def _denton_bbox_filter(min_lat: float, min_lng: float, max_lat: float, max_lng:
                     d.half_baths         AS half_baths,
                     d.total_rooms        AS total_rooms,
                     d.outdoor_fireplaces AS outdoor_fireplaces,
-                    d.end_unit           AS end_unit
+                    d.end_unit           AS end_unit,
+                    pon.phone_number AS outreach_phone,
+                    pon.mailer_sent  AS outreach_mailer_sent,
+                    pon.mailer_date  AS outreach_mailer_date
                 FROM denton_parcels p_outer
                 LEFT JOIN LATERAL (
                     -- Single-row pick per parcel — prop_id is the canonical
@@ -168,6 +171,8 @@ def _denton_bbox_filter(min_lat: float, min_lng: float, max_lat: float, max_lng:
                     WHERE prop_id = p_outer.account_num
                     LIMIT 1
                 ) d ON TRUE
+                LEFT JOIN parcel_outreach_notes pon
+                       ON pon.county = 'denton' AND pon.parcel_id = p_outer.parcel_key
                 WHERE ST_Intersects(p_outer.centroid, ST_MakeEnvelope(%s, %s, %s, %s, 4326))
                 """,
                 (min_lng, min_lat, max_lng, max_lat),
@@ -286,6 +291,10 @@ def _normalize_denton_row(raw: dict[str, Any]) -> dict[str, Any]:
         "property_city": _clean_text(raw.get("property_city")),
         # Display as zip5 — Denton raw stores "5-4" format (e.g. "75077-1833").
         "property_zip": _clean_text(raw.get("property_zip"))[:5],
+        # outreach (Mailer + Phone Tracking, 2026-06-03) — None when no row.
+        "outreach_phone": raw.get("outreach_phone"),
+        "outreach_mailer_sent": raw.get("outreach_mailer_sent"),
+        "outreach_mailer_date": raw.get("outreach_mailer_date"),
         "division_cd": "DENTON",
         "sptd_code": sptd_code,
         "nbhd_cd": _clean_text(raw.get("subdivision")),

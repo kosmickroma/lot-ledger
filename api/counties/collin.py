@@ -146,6 +146,9 @@ def _collin_bbox_filter(min_lat: float, min_lng: float, max_lat: float, max_lng:
                     ag_acres,
                     ag_value,
                     ag_market_value,
+                    pon.phone_number AS outreach_phone,
+                    pon.mailer_sent  AS outreach_mailer_sent,
+                    pon.mailer_date  AS outreach_mailer_date,
                     ST_Area(ST_OrientedEnvelope(geom)::geography) / NULLIF(ST_Area(geom::geography), 0) AS envelope_ratio,
                     ST_Perimeter(ST_OrientedEnvelope(geom)::geography) * 3.28084 AS envelope_perim_ft,
                     ST_Area(ST_OrientedEnvelope(geom)::geography) * 10.763910416709722 AS envelope_area_sqft,
@@ -153,6 +156,8 @@ def _collin_bbox_filter(min_lat: float, min_lng: float, max_lat: float, max_lng:
                     ST_AsGeoJSON(geom)::json AS polygon_geojson,
                     ST_AsGeoJSON(centroid)::json AS centroid_json
                 FROM collin_parcels
+                LEFT JOIN parcel_outreach_notes pon
+                       ON pon.county = 'collin' AND pon.parcel_id = collin_parcels.parcel_key
                 WHERE ST_Intersects(centroid, ST_MakeEnvelope(%s, %s, %s, %s, 4326))
                 """,
                 (min_lng, min_lat, max_lng, max_lat),
@@ -296,6 +301,10 @@ def _normalize_collin_row(raw: dict[str, Any]) -> dict[str, Any]:
         "property_address": property_address,
         # Display as zip5 (uniform with other counties).
         "property_zip": _clean_text(raw.get("property_zip"))[:5],
+        # outreach (Mailer + Phone Tracking, 2026-06-03) — None when no row.
+        "outreach_phone": raw.get("outreach_phone"),
+        "outreach_mailer_sent": raw.get("outreach_mailer_sent"),
+        "outreach_mailer_date": raw.get("outreach_mailer_date"),
         "division_cd": "COLLIN",
         "sptd_code": sptd_code,
         "nbhd_cd": _clean_text(raw.get("subdivision")) or _clean_text(raw.get("city_code")),

@@ -1329,6 +1329,7 @@ def _session_exists(session_id: str, user_id: int) -> bool:
 def _build_features_from_rows(
     rows: list[dict[str, Any]],
     area_id: str | None = None,
+    user: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     """Rebuild GeoJSON features from cached raw parcel rows.
 
@@ -1339,6 +1340,11 @@ def _build_features_from_rows(
     Per PARCEL_RATINGS_SPEC.md v2 §2E: when area_id is provided, hydrate
     user_rating on each feature from parcel_ratings. Backwards-compatible —
     callers that don't pass area_id get no rating hydrate (None default).
+
+    Mailer + Phone Tracking (2026-06-03): when user is provided and their
+    role is not power_user / owner / developer, strip outreach_* keys from
+    each feature's properties before returning. user=None preserves outreach
+    keys (callers that don't know about user must not be public-facing).
     """
     exempt_set: set[str] = set()
     features: list[dict[str, Any]] = []
@@ -1385,6 +1391,10 @@ def _build_features_from_rows(
             features.append(feature)
         except Exception:
             continue
+    # Outreach role gate (Mailer + Phone Tracking, 2026-06-03). Strip
+    # outreach_* keys for users below power_user. No-op when user is None
+    # (caller doesn't know about user — internal-only path).
+    _strip_outreach_from_features(features, user)
     return features, counts
 
 
@@ -3174,8 +3184,13 @@ def _fetch_dcad_parcel_by_account(account_num: str) -> tuple[dict[str, Any] | No
                        r.roof_mat_desc AS roof_material,
                        r.pct_complete AS pct_complete,
                       l.zoning, l.front_dim, l.depth_dim, l.area_size, l.area_uom, l.area_estimated,
-                       (e.account_num IS NOT NULL) AS is_exempt_account
+                       (e.account_num IS NOT NULL) AS is_exempt_account,
+                       pon.phone_number AS outreach_phone,
+                       pon.mailer_sent  AS outreach_mailer_sent,
+                       pon.mailer_date  AS outreach_mailer_date
                 FROM parcels p
+                LEFT JOIN parcel_outreach_notes pon
+                       ON pon.county = 'dcad' AND pon.parcel_id = p.account_num
                 LEFT JOIN appraisal a ON p.account_num = a.account_num
                 LEFT JOIN res_detail r ON p.account_num = r.account_num
                 LEFT JOIN LATERAL (
@@ -3249,7 +3264,7 @@ def _fetch_tad_parcel_by_account(account_num: str) -> dict[str, Any] | None:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT parcel_key, account_num, taxpin,
+                SELECT tad_parcels.parcel_key, tad_parcels.account_num, taxpin,
                        owner_name, owner_addr, owner_city, owner_citystate,
                        owner_zip, situs_addr, property_city, property_zip,
                        property_class, state_use_code,
@@ -3257,6 +3272,9 @@ def _fetch_tad_parcel_by_account(account_num: str) -> dict[str, Any] | None:
                        acres, land_acres, land_sqft,
                        year_built, living_area,
                        land_value, improvement_value, total_value,
+                       pon.phone_number AS outreach_phone,
+                       pon.mailer_sent  AS outreach_mailer_sent,
+                       pon.mailer_date  AS outreach_mailer_date,
                        ST_Area(ST_OrientedEnvelope(geom)::geography) / NULLIF(ST_Area(geom::geography), 0) AS envelope_ratio,
                        ST_Perimeter(ST_OrientedEnvelope(geom)::geography) * 3.28084 AS envelope_perim_ft,
                        ST_Area(ST_OrientedEnvelope(geom)::geography) * 10.763910416709722 AS envelope_area_sqft,
@@ -3264,7 +3282,9 @@ def _fetch_tad_parcel_by_account(account_num: str) -> dict[str, Any] | None:
                        ST_Y(centroid) AS _lat,
                        ST_X(centroid) AS _lng
                 FROM tad_parcels
-                WHERE account_num = %s
+                LEFT JOIN parcel_outreach_notes pon
+                       ON pon.county = 'tad' AND pon.parcel_id = tad_parcels.parcel_key
+                WHERE tad_parcels.account_num = %s
                 LIMIT 1
                 """,
                 (account_num,),
@@ -3355,6 +3375,9 @@ def _fetch_collin_parcel_by_account(account_num: str) -> dict[str, Any] | None:
                     ag_acres,
                     ag_value,
                     ag_market_value,
+                    pon.phone_number AS outreach_phone,
+                    pon.mailer_sent  AS outreach_mailer_sent,
+                    pon.mailer_date  AS outreach_mailer_date,
                     ST_Area(ST_OrientedEnvelope(geom)::geography) / NULLIF(ST_Area(geom::geography), 0) AS envelope_ratio,
                     ST_Perimeter(ST_OrientedEnvelope(geom)::geography) * 3.28084 AS envelope_perim_ft,
                     ST_Area(ST_OrientedEnvelope(geom)::geography) * 10.763910416709722 AS envelope_area_sqft,
@@ -3363,7 +3386,9 @@ def _fetch_collin_parcel_by_account(account_num: str) -> dict[str, Any] | None:
                     ST_Y(centroid) AS _lat,
                     ST_X(centroid) AS _lng
                 FROM collin_parcels
-                WHERE account_num = %s
+                LEFT JOIN parcel_outreach_notes pon
+                       ON pon.county = 'collin' AND pon.parcel_id = collin_parcels.parcel_key
+                WHERE collin_parcels.account_num = %s
                 LIMIT 1
                 """,
                 (account_num,),
@@ -3457,7 +3482,10 @@ def _fetch_denton_parcel_by_account(account_num: str) -> dict[str, Any] | None:
                     d.half_baths,
                     d.total_rooms,
                     d.outdoor_fireplaces,
-                    d.end_unit
+                    d.end_unit,
+                    pon.phone_number AS outreach_phone,
+                    pon.mailer_sent  AS outreach_mailer_sent,
+                    pon.mailer_date  AS outreach_mailer_date
                 FROM denton_parcels p
                 LEFT JOIN LATERAL (
                     SELECT *
@@ -3465,6 +3493,8 @@ def _fetch_denton_parcel_by_account(account_num: str) -> dict[str, Any] | None:
                     WHERE prop_id = p.account_num
                     LIMIT 1
                 ) d ON TRUE
+                LEFT JOIN parcel_outreach_notes pon
+                       ON pon.county = 'denton' AND pon.parcel_id = p.parcel_key
                 WHERE p.account_num = %s
                 LIMIT 1
                 """,
@@ -3618,12 +3648,19 @@ def _find_denton_near(lat: float, lng: float) -> str | None:
 
 
 @app.get("/api/parcel/near")
-async def get_parcel_near(lat: float, lng: float) -> dict[str, Any]:
+async def get_parcel_near(
+    lat: float,
+    lng: float,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
     """
     Nearest-parcel lookup by lat/lng coordinate.
     Used by address search to reliably find the parcel footprint at a geocoded point.
     Tries DCAD, TAD, Collin, then Denton using polygon containment + centroid proximity.
     Returns a GeoJSON Feature in the same shape as /api/parcel/{county}/{account_num}.
+
+    Outreach gate: strips outreach_* keys before returning when the
+    requesting user is below power_user (Mailer + Phone Tracking, 2026-06-03).
     """
     dcad_account = _find_dcad_near(lat, lng)
     if dcad_account:
@@ -3632,6 +3669,7 @@ async def get_parcel_near(lat: float, lng: float) -> dict[str, Any]:
             prop_type = classify_parcel(row, exempt_set)
             feature = build_feature(row, prop_type, False, None)
             feature["properties"]["source_county"] = "dcad"
+            _strip_outreach_from_feature(feature, user)
             return feature
 
     tad_account = _find_tad_near(lat, lng)
@@ -3641,6 +3679,7 @@ async def get_parcel_near(lat: float, lng: float) -> dict[str, Any]:
             prop_type = _classify_tad(row)
             feature = build_feature(row, prop_type, False, None)
             feature["properties"]["source_county"] = "tad"
+            _strip_outreach_from_feature(feature, user)
             return feature
 
     collin_account = _find_collin_near(lat, lng)
@@ -3650,6 +3689,7 @@ async def get_parcel_near(lat: float, lng: float) -> dict[str, Any]:
             prop_type = _classify_collin(row)
             feature = build_feature(row, prop_type, False, None)
             feature["properties"]["source_county"] = "collin"
+            _strip_outreach_from_feature(feature, user)
             return feature
 
     denton_account = _find_denton_near(lat, lng)
@@ -3659,12 +3699,53 @@ async def get_parcel_near(lat: float, lng: float) -> dict[str, Any]:
             prop_type = _classify_denton(row)
             feature = build_feature(row, prop_type, False, None)
             feature["properties"]["source_county"] = "denton"
+            _strip_outreach_from_feature(feature, user)
             return feature
 
     raise HTTPException(status_code=404, detail="No parcel found near this point")
 
 
 _OWNER_HISTORY_POPUP_ROLES = {"developer", "owner", "power_user"}
+
+# Mailer + Phone Tracking (2026-06-03). Same role set as owner-history —
+# both are PII / outreach-tracking data restricted to power_user+. Regular
+# users + members do NOT see these fields anywhere (popup, CSV, API).
+_OUTREACH_ALLOWED_ROLES = {"developer", "owner", "power_user"}
+_OUTREACH_FEATURE_KEYS = ("outreach_phone", "outreach_mailer_sent", "outreach_mailer_date")
+
+
+def _user_can_see_outreach(user: dict[str, Any] | None) -> bool:
+    """Single source of truth for outreach visibility. Mirror of
+    frontend `_isPowerUserOrAbove()` at map.js:12120. NOT the same as
+    `_canDownloadCsv()` (which lets member through) — outreach is stricter.
+    """
+    role = str((user or {}).get("role") or "").strip().lower()
+    return role in _OUTREACH_ALLOWED_ROLES
+
+
+def _strip_outreach_from_features(features: list[dict[str, Any]], user: dict[str, Any] | None) -> None:
+    """Remove outreach keys from feature properties when the requesting user
+    is not allowed to see them. Mutates the features list in place. Defense-
+    in-depth: even if frontend wouldn't render the data, we don't ship it
+    over the wire to ineligible roles.
+    """
+    if _user_can_see_outreach(user):
+        return
+    for feature in features or []:
+        props = feature.get("properties") if isinstance(feature, dict) else None
+        if not isinstance(props, dict):
+            continue
+        for key in _OUTREACH_FEATURE_KEYS:
+            props.pop(key, None)
+
+
+def _strip_outreach_from_feature(feature: dict[str, Any] | None, user: dict[str, Any] | None) -> None:
+    """Single-feature variant of _strip_outreach_from_features. Same role
+    semantics. No-op when feature is None or already stripped.
+    """
+    if feature is None:
+        return
+    _strip_outreach_from_features([feature], user)
 
 
 def _format_live_deed_for_popup(raw: Any) -> str:
@@ -3842,6 +3923,8 @@ async def get_parcel_detail(
     )
     if block is not None:
         feature["properties"]["owner_history"] = block
+    # Outreach role gate — strip if user is not power_user+.
+    _strip_outreach_from_feature(feature, user)
     return feature
 
 
@@ -4118,6 +4201,9 @@ async def analyze(request: AnalyzeRequest, req: Request, user: dict[str, Any] = 
             area_id,
         )
     )
+    # Outreach role gate (Mailer + Phone Tracking, 2026-06-03). Strip
+    # outreach_* keys for non-power_user roles. Mutates features in place.
+    _strip_outreach_from_features(features, user)
     return {
         "type": "FeatureCollection",
         "features": features,
@@ -5861,7 +5947,8 @@ async def get_session_data(session_id: str, user: dict[str, Any] = Depends(get_c
     sold_points = list(cached.get("sold_points", []))
     _apply_session_tags(session_id, uid, rows)
     # Pass area_id so parcel ratings hydrate per PARCEL_RATINGS_SPEC.md v2.
-    features, counts = _build_features_from_rows(rows, area_id=session_saved_area_id)
+    # Pass user so outreach_* keys are stripped for non-power_user roles.
+    features, counts = _build_features_from_rows(rows, area_id=session_saved_area_id, user=user)
     return {
         "type": "FeatureCollection",
         "session_id": session_id,

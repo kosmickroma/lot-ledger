@@ -157,12 +157,17 @@ def _tad_bbox_filter(
                        acres, land_acres, land_sqft,
                        year_built, living_area,
                        land_value, improvement_value, total_value,
+                       pon.phone_number AS outreach_phone,
+                       pon.mailer_sent  AS outreach_mailer_sent,
+                       pon.mailer_date  AS outreach_mailer_date,
                       ST_Area(ST_OrientedEnvelope(geom)::geography) / NULLIF(ST_Area(geom::geography), 0) AS envelope_ratio,
                       ST_Perimeter(ST_OrientedEnvelope(geom)::geography) * 3.28084 AS envelope_perim_ft,
                       ST_Area(ST_OrientedEnvelope(geom)::geography) * 10.763910416709722 AS envelope_area_sqft,
                        ST_AsGeoJSON(geom)::json  AS polygon_geojson,
                        ST_AsGeoJSON(centroid)::json AS centroid_json
                 FROM tad_parcels
+                LEFT JOIN parcel_outreach_notes pon
+                       ON pon.county = 'tad' AND pon.parcel_id = tad_parcels.parcel_key
                 WHERE ST_Intersects(centroid, ST_MakeEnvelope(%s, %s, %s, %s, 4326))
                 """,
                 (min_lng, min_lat, max_lng, max_lat),
@@ -297,6 +302,11 @@ def _normalize_tad_row(raw: dict[str, Any]) -> dict[str, Any]:
         "property_address": property_address,
         "property_city": _clean_text(raw.get("property_city")),
         "property_zip": property_zip,
+        # outreach (Mailer + Phone Tracking, 2026-06-03) — populated via
+        # LEFT JOIN parcel_outreach_notes; None when no outreach row exists.
+        "outreach_phone": raw.get("outreach_phone"),
+        "outreach_mailer_sent": raw.get("outreach_mailer_sent"),
+        "outreach_mailer_date": raw.get("outreach_mailer_date"),
         # classification
         "division_cd": "TAD",
         "sptd_code": property_class,       # detailed code used for classify + label
