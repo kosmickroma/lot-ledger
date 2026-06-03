@@ -1346,6 +1346,13 @@ def _build_features_from_rows(
     each feature's properties before returning. user=None preserves outreach
     keys (callers that don't know about user must not be public-facing).
     """
+    # Re-hydrate outreach data from live DB on every session restore /
+    # share-link open. Cached jobs hold rows snapshotted at the initial
+    # bbox query — stale by the time a second user opens the share link
+    # or the same user re-loads after editing. See KK preview smoke
+    # 2026-06-03 for the user-visible bug this fixes.
+    _hydrate_outreach_for_rows(rows, user)
+
     exempt_set: set[str] = set()
     features: list[dict[str, Any]] = []
     parcel_ratings_map: dict[tuple[str, str], str] = _load_parcel_ratings_for_workspace(area_id)
@@ -3768,6 +3775,117 @@ def _strip_outreach_from_feature(feature: dict[str, Any] | None, user: dict[str,
     _strip_outreach_from_features([feature], user)
 
 
+def _row_outreach_key(row: dict[str, Any]) -> tuple[str, str] | None:
+    """Return (county_lower, parcel_id) for a row, or None if not addressable.
+    DCAD uses account_num; others use parcel_key. Mirror of frontend matchKey
+    logic in _buildPanelOutreachHtml.
+    """
+    county = str(row.get("source_county") or row.get("division_cd") or "").strip().lower()
+    if county not in _OUTREACH_PARCEL_TABLES:
+        return None
+    if county == "dcad":
+        parcel_id = str(row.get("account_num") or "").strip()
+    else:
+        parcel_id = str(row.get("parcel_key") or row.get("account_num") or "").strip()
+    if not parcel_id:
+        return None
+    return (county, parcel_id)
+
+
+def _hydrate_outreach_for_rows(rows: list[dict[str, Any]], user: dict[str, Any] | None) -> None:
+    """Mutate rows in place, refreshing outreach_* fields from the live
+    parcel_outreach_notes table.
+
+    Mailer + Phone Tracking (2026-06-03 polish): cached jobs (CSV export,
+    session restore, share link) hold rows snapshotted at the initial bbox
+    query. If a user edits outreach via the popup PUT, the DB has new data
+    but the cache has stale data. KK reported this in preview smoke — checked
+    Mailer Sent in popup, exported CSV, cell was blank.
+
+    Resolution: every cache-consumption site calls this helper to refresh
+    outreach fields. Behavior:
+      - user below power_user → clear outreach_* on every row (also serves
+        as defense-in-depth strip when CSV writer or session restore feeds
+        cached data)
+      - user is power_user+ → query parcel_outreach_notes for all rows in
+        one batch (WHERE (county, parcel_id) IN (...)), stamp fresh values
+        onto rows.
+
+    Single query regardless of row count. Rows with no matching outreach
+    record get cleared outreach_* fields (so an UNSET parcel doesn't display
+    stale data from when it was first fetched and the popup user then
+    cleared the phone).
+    """
+    if not rows:
+        return
+
+    if not _user_can_see_outreach(user):
+        for row in rows:
+            for key in _OUTREACH_FEATURE_KEYS:
+                row.pop(key, None)
+        return
+
+    # Build the list of unique (county, parcel_id) keys.
+    keys: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for row in rows:
+        k = _row_outreach_key(row)
+        if k is None or k in seen:
+            continue
+        seen.add(k)
+        keys.append(k)
+
+    if not keys:
+        # Nothing to hydrate; clear any stale values to be safe.
+        for row in rows:
+            for key in _OUTREACH_FEATURE_KEYS:
+                row[key] = None
+        return
+
+    # Single batched fetch.
+    conn = get_conn()
+    fresh: dict[tuple[str, str], tuple[str | None, bool, "date_module.date | None"]] = {}
+    try:
+        from psycopg2.extras import execute_values
+        with conn.cursor() as cur:
+            execute_values(
+                cur,
+                """
+                SELECT pon.county, pon.parcel_id, pon.phone_number, pon.mailer_sent, pon.mailer_date
+                FROM parcel_outreach_notes pon
+                JOIN (VALUES %s) AS v(county, parcel_id)
+                  ON v.county = pon.county AND v.parcel_id = pon.parcel_id
+                """,
+                keys,
+                template="(%s, %s)",
+                page_size=1000,
+            )
+            for c, pid, phone, mailer_sent, mailer_date in cur.fetchall():
+                fresh[(c, pid)] = (phone, bool(mailer_sent), mailer_date)
+    finally:
+        release_conn(conn)
+
+    # Stamp values onto rows. Rows whose (county, parcel_id) isn't in the
+    # fresh map have no outreach record — explicitly set the three fields
+    # to None so any stale cached value is overwritten.
+    for row in rows:
+        k = _row_outreach_key(row)
+        if k is None:
+            row["outreach_phone"] = None
+            row["outreach_mailer_sent"] = False
+            row["outreach_mailer_date"] = None
+            continue
+        if k in fresh:
+            phone, mailer_sent, mailer_date = fresh[k]
+            row["outreach_phone"] = phone
+            row["outreach_mailer_sent"] = mailer_sent
+            row["outreach_mailer_date"] = mailer_date.isoformat() if hasattr(mailer_date, "isoformat") and mailer_date else mailer_date
+        else:
+            row["outreach_phone"] = None
+            row["outreach_mailer_sent"] = False
+            row["outreach_mailer_date"] = None
+
+
 def _outreach_csv_cells(row: dict[str, Any] | None, user: dict[str, Any] | None) -> tuple[str, str, str, str]:
     """Return the 4 right-edge CSV cells: (Parcel ID, Phone, Mailer Sent, Mailer Date).
 
@@ -4667,6 +4785,11 @@ async def _run_download_csv(
         raise HTTPException(status_code=404, detail="Job not found")
 
     rows = job.get("rows", [])
+    # Re-hydrate outreach data from live DB so CSV export reflects edits
+    # made AFTER the job was cached (popup PUT, bulk import). Without this,
+    # KK's preview-smoke bug repeats: check Mailer Sent → export → blank cell.
+    # Helper is a no-op (or clear) for non-power_user roles.
+    _hydrate_outreach_for_rows(rows, user)
     redfin_data: dict[str, dict] = job.get("redfin_data", {})
     sold_points: list[dict[str, Any]] = job.get("sold_points", []) or []
     propelio_sold_points: list[dict[str, Any]] = _load_propelio_sold_points(job_id) or []

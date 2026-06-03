@@ -7831,7 +7831,42 @@ async function _putOutreachField(county, parcelId, field, value) {
     const txt = await resp.text().catch(() => "");
     throw new Error(`Outreach save failed (${resp.status}): ${txt}`);
   }
-  return await resp.json().catch(() => null);
+  const data = await resp.json().catch(() => null);
+
+  // Update the in-memory feature so popup re-open / CSV path within the
+  // same client session see the new value WITHOUT a full page reload.
+  // KK reported 2026-06-03: edit popup → export CSV → cell was blank
+  // because the cached job rows + cached feature properties hadn't been
+  // updated. Backend now re-hydrates on cache-read; frontend mirrors that
+  // discipline by updating the local feature properties in place.
+  try {
+    _updateLocalFeatureOutreach(county, parcelId, field, value);
+  } catch (err) {
+    console.warn("[outreach] local feature update failed", err);
+  }
+  return data;
+}
+
+function _updateLocalFeatureOutreach(county, parcelId, field, value) {
+  if (!lastAnalysisGeojson || !Array.isArray(lastAnalysisGeojson.features)) return;
+  for (const feat of lastAnalysisGeojson.features) {
+    const props = feat?.properties;
+    if (!props) continue;
+    const featCounty = String(props.source_county || "").trim().toLowerCase();
+    if (featCounty !== county) continue;
+    const featKey = featCounty === "dcad"
+      ? String(props.account_num || "").trim()
+      : String(props.parcel_key || props.account_num || "").trim();
+    if (featKey !== parcelId) continue;
+    if (field === "phone_number") {
+      props.outreach_phone = value || null;
+    } else if (field === "mailer_sent") {
+      props.outreach_mailer_sent = Boolean(value);
+    } else if (field === "mailer_date") {
+      props.outreach_mailer_date = value || null;
+    }
+    break;
+  }
 }
 
 document.addEventListener("change", (ev) => {
