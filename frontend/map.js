@@ -6640,6 +6640,40 @@ const propelioCmaChip = new PropelioCmaChip().addTo(map);
 
 const PROPELIO_STATUS_PRIORITY = { sold: 3, pending: 2, active: 1 };
 
+// Compute the dedup key for one comp. Pure function — no side effects.
+// Strongest signal first: parcel_geom shape (when present, multiple
+// listings on the same building/parcel collapse to one), then
+// account+county (single-family fallback), then rounded lat/lng
+// (geocode-drift fallback), then comp_address_key (last resort).
+// Returns "" when nothing usable found (comp gets pushed into noKey list
+// and rendered separately).
+//
+// EXTRACTED 2026-06-03 PM from _dedupCompsForRender so the click handler
+// can reuse the same logic to find the winning comp when a dedup-loser
+// is clicked from the sidebar list. KK bug: "1825 & 1827 Pollard Street"
+// in the comps list does nothing on click because that listing lost its
+// dedup election to another 1827 Pollard comp on the same parcel.
+function _compDedupKey(c) {
+  const round4 = (n) => {
+    const x = Number(n);
+    return Number.isFinite(x) ? x.toFixed(4) : null;
+  };
+  const geom = c?.parcel_geom;
+  if (geom && (geom.type === "Polygon" || geom.type === "MultiPolygon")) {
+    const gkey = geometryKey(geom);
+    if (gkey) return `geom:${gkey}`;
+  }
+  const acct = String(c?.parcel_account_num || "").trim();
+  const county = String(c?.parcel_county || "").trim().toLowerCase();
+  if (acct && county) return `acct:${county}|${acct}`;
+  const latlng = _propelioCompLatLng(c);
+  const lat = latlng ? round4(latlng[0]) : null;
+  const lng = latlng ? round4(latlng[1]) : null;
+  if (lat && lng) return `ll:${lat},${lng}`;
+  return String(c?.comp_address_key || "").trim();
+}
+
+
 function _dedupCompsForRender(comps) {
   // "One comp per footprint" — multiple condo units share a single
   // parcel_geom (the building outline) but each unit has its own
@@ -6649,41 +6683,16 @@ function _dedupCompsForRender(comps) {
   // via condoOutlineSeen + geometryKey() (see renderFeatures line ~7219);
   // mirror the same approach here for comp footprints.
   //
-  // Layered dedup, strongest signal first:
-  //   1. parcel_geom shape (geometryKey) — one comp per footprint,
-  //      regardless of how many units share that footprint
-  //   2. parcel_account_num + parcel_county — for non-shared-footprint
-  //      cases (single-family, etc.)
-  //   3. Rounded lat/lng (4-decimal, ~10m) — geocode-drift fallback
-  //   4. comp_address_key — last-resort string fallback
+  // Dedup-key calculation extracted into _compDedupKey() so the click
+  // handler can find the winning comp when a dedup-loser is clicked
+  // from the sidebar list.
   //
   // Winner-resolution tie-break: good-rating > status priority
   // (sold > pending > active per PROPELIO_STATUS_PRIORITY).
   const winners = new Map();
   const noKey = [];
-  const round4 = (n) => {
-    const x = Number(n);
-    return Number.isFinite(x) ? x.toFixed(4) : null;
-  };
   for (const c of comps) {
-    let key = "";
-    const geom = c?.parcel_geom;
-    if (geom && (geom.type === "Polygon" || geom.type === "MultiPolygon")) {
-      const gkey = geometryKey(geom);
-      if (gkey) key = `geom:${gkey}`;
-    }
-    if (!key) {
-      const acct = String(c?.parcel_account_num || "").trim();
-      const county = String(c?.parcel_county || "").trim().toLowerCase();
-      if (acct && county) key = `acct:${county}|${acct}`;
-    }
-    if (!key) {
-      const latlng = _propelioCompLatLng(c);
-      const lat = latlng ? round4(latlng[0]) : null;
-      const lng = latlng ? round4(latlng[1]) : null;
-      if (lat && lng) key = `ll:${lat},${lng}`;
-    }
-    if (!key) key = String(c?.comp_address_key || "").trim();
+    const key = _compDedupKey(c);
     if (!key) {
       noKey.push(c);
       continue;
@@ -7909,7 +7918,44 @@ document.addEventListener("keydown", (ev) => {
 });
 
 async function flyToAndOpenPropelioComp(compKey) {
-  const layer = propelioCompLayerByKey.get(String(compKey || "").trim());
+  let layer = propelioCompLayerByKey.get(String(compKey || "").trim());
+
+  // Dedup-loser fallback (KK reported 2026-06-03 PM):
+  // The sidebar comp list shows ALL comps (including ones that lost the
+  // _dedupCompsForRender election); only the WINNERS are registered in
+  // propelioCompLayerByKey. Without this fallback, clicking a loser comp
+  // (e.g. multi-address listing "1825 & 1827 Pollard Street" that shares
+  // a parcel with another 1827 Pollard listing) is a silent no-op.
+  //
+  // When we don't find a direct layer, look up the clicked comp's data,
+  // compute its dedup key, and walk the registered winners to find one
+  // that shares the same dedup key. Use the winner's layer for fly-to +
+  // outline. Visible behavior: clicking any of the duplicates flies to
+  // the same parcel footprint (the winner's), which is what the analyst
+  // expects since they all share a parcel.
+  if (!layer) {
+    const all = (window._propelioLast && Array.isArray(window._propelioLast.comps))
+      ? window._propelioLast.comps
+      : [];
+    const clicked = all.find(
+      (c) => String(c?.comp_address_key || "").trim() === String(compKey || "").trim()
+    );
+    if (clicked) {
+      const targetDedupKey = _compDedupKey(clicked);
+      if (targetDedupKey) {
+        for (const [renderedKey, candidateLayer] of propelioCompLayerByKey.entries()) {
+          const winner = all.find(
+            (c) => String(c?.comp_address_key || "").trim() === renderedKey
+          );
+          if (winner && _compDedupKey(winner) === targetDedupKey) {
+            layer = candidateLayer;
+            break;
+          }
+        }
+      }
+    }
+  }
+
   if (!layer) return;
 
   // Show a crisp purple outline on the map for the clicked comp. If the
@@ -8614,6 +8660,13 @@ const AddressSearch = L.Control.extend({
 
     const highlightSearchResult = (latlng) => {
       window._clearSearchHighlight?.();
+      // Also clear the click-to-select purple outline (a separate mechanism
+      // from _searchHighlight). Without this, doing an address search after
+      // selecting a parcel by click leaves BOTH purple outlines on the map.
+      // KK reported 2026-06-03 PM. Map-click handler at line ~12235 already
+      // clears _searchHighlight on the other side of this asymmetry; this
+      // line restores symmetry the other way.
+      try { _clearSelectedOutline(); } catch (_) {}
       if (window._searchMoveEndHandler) map.off("moveend", window._searchMoveEndHandler);
 
       window._clearSearchHighlight = () => {
