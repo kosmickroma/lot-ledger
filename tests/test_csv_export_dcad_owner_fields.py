@@ -51,6 +51,10 @@ def _writerow_cell_counts() -> list[int]:
                     n += 12  # K4 (2026-05-27): 10 original + 2 NBV cells
                 elif isinstance(elt.value, ast.Call) and isinstance(elt.value.func, ast.Name) and elt.value.func.id == "_additional_owner_cells":
                     n += 4
+                elif isinstance(elt.value, ast.Call) and isinstance(elt.value.func, ast.Name) and elt.value.func.id == "_outreach_csv_cells":
+                    # Mailer + Phone Tracking (2026-06-03). 4-tuple: Parcel ID,
+                    # Phone Number, Mailer Sent, Mailer Date.
+                    n += 4
                 else:
                     ok = False
                     break
@@ -75,11 +79,13 @@ def test_writerow_cell_counts_match():
     )
 
 
-def test_total_columns_is_at_least_188():
+def test_total_columns_is_at_least_192():
     # 151 baseline + 31 v4a + 6 ownership-history (v2: Current Owner +
-    # Current Owner Acquired + Prior Owner 1..4).
+    # Current Owner Acquired + Prior Owner 1..4) + 4 outreach right-edge
+    # (Mailer + Phone Tracking, 2026-06-03: Parcel ID, Phone Number,
+    # Mailer Sent, Mailer Date).
     counts = _writerow_cell_counts()
-    assert counts and counts[0] >= 188, (
-        f"Expected at least 188 cells (151 baseline + 31 v4a + 6 ownership). "
+    assert counts and counts[0] >= 192, (
+        f"Expected at least 192 cells (151 baseline + 31 v4a + 6 ownership + 4 outreach). "
         f"Got {counts[0] if counts else 'no rows'}."
     )

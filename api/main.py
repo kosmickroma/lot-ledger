@@ -3768,6 +3768,49 @@ def _strip_outreach_from_feature(feature: dict[str, Any] | None, user: dict[str,
     _strip_outreach_from_features([feature], user)
 
 
+def _outreach_csv_cells(row: dict[str, Any] | None, user: dict[str, Any] | None) -> tuple[str, str, str, str]:
+    """Return the 4 right-edge CSV cells: (Parcel ID, Phone, Mailer Sent, Mailer Date).
+
+    - Parcel ID is always emitted regardless of role (it's the match key for
+      FUB round-trip; same data is already in feature.properties.account_num
+      / parcel_key visible everywhere).
+    - The 3 outreach cells are blanked when the user is below power_user+.
+    - row=None (e.g. orphan comp with no matched CAD parcel) → 4 empty cells.
+
+    Per-county PK lookup:
+      DCAD     → row['account_num'] (17-char alphanumeric)
+      TAD      → row['parcel_key']  ('<acct>:<seq>')
+      Collin   → row['parcel_key']
+      Denton   → row['parcel_key']
+    All globally unique, no collisions across counties.
+    """
+    if not row:
+        return ("", "", "", "")
+    county = _csv_county_source(row).lower()
+    if county == "dcad":
+        parcel_id_value = str(row.get("account_num") or "").strip()
+    else:
+        parcel_id_value = (
+            str(row.get("parcel_key") or "").strip()
+            or str(row.get("account_num") or "").strip()
+        )
+
+    if not _user_can_see_outreach(user):
+        return (parcel_id_value, "", "", "")
+
+    phone = str(row.get("outreach_phone") or "").strip()
+    mailer_sent_raw = row.get("outreach_mailer_sent")
+    mailer_sent_cell = "yes" if mailer_sent_raw else ""
+    mailer_date_raw = row.get("outreach_mailer_date")
+    if hasattr(mailer_date_raw, "isoformat"):
+        mailer_date_cell = mailer_date_raw.isoformat()
+    elif mailer_date_raw:
+        mailer_date_cell = str(mailer_date_raw)
+    else:
+        mailer_date_cell = ""
+    return (parcel_id_value, phone, mailer_sent_cell, mailer_date_cell)
+
+
 def _format_live_deed_for_popup(raw: Any) -> str:
     """Coerce a live deed_date (datetime.date | 'YYYY-MM-DD' str | '' | None)
     into the popup's MM/DD/YYYY display format. Returns "" when nothing
@@ -5129,6 +5172,16 @@ async def _run_download_csv(
                 "Prior Owner 2",
                 "Prior Owner 3",
                 "Prior Owner 4",
+                # Mailer + Phone Tracking (2026-06-03). Right-edge block;
+                # appended after Prior Owner 4 to keep existing columns
+                # byte-stable. Outreach cells (Phone / Mailer Sent / Mailer
+                # Date) are blanked for non-power_user roles via the helper
+                # _outreach_csv_cells (which still emits the Parcel ID match
+                # key — that's not outreach data).
+                "Parcel ID",
+                "Phone Number",
+                "Mailer Sent",
+                "Mailer Date",
             ]
         )
         buffer.seek(0)
@@ -5436,6 +5489,9 @@ async def _run_download_csv(
                     round(_safe_float(row.get("special_dist_taxable_val")), 0) if _safe_float(row.get("special_dist_taxable_val")) is not None else "",
                     *_additional_owner_cells(row.get("additional_owners")),
                     _own[0], _own[1], _own[2], _own[3], _own[4], _own[5],
+                    # Mailer + Phone Tracking — 4 cells (Parcel ID always
+                    # emitted; outreach 3 blanked for non-power_user roles).
+                    *_outreach_csv_cells(row, user),
                 ]
             )
             buffer.seek(0)
@@ -5769,6 +5825,9 @@ async def _run_download_csv(
                     round(_safe_float(_cad.get("special_dist_taxable_val")), 0) if _cad and _safe_float(_cad.get("special_dist_taxable_val")) is not None else "",
                     *_additional_owner_cells(_cad.get("additional_owners") if _cad else []),
                     _own_orphan[0], _own_orphan[1], _own_orphan[2], _own_orphan[3], _own_orphan[4], _own_orphan[5],
+                    # Mailer + Phone Tracking — 4 cells. _outreach_csv_cells
+                    # handles _cad=None internally (returns 4 blanks).
+                    *_outreach_csv_cells(_cad, user),
                 ]
             )
             buffer.seek(0)
