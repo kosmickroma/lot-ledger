@@ -7805,6 +7805,70 @@ document.addEventListener("click", (ev) => {
   if (k) flyToAndOpenPropelioComp(k);
 });
 
+// Outreach save-on-blur / change handler (Mailer + Phone Tracking, 2026-06-03).
+// Delegated at document level so it survives every popup re-render. Each
+// outreach input PUTs to /api/parcels/outreach with the correct _set flag.
+async function _putOutreachField(county, parcelId, field, value) {
+  const body = { county, parcel_id: parcelId };
+  if (field === "phone_number") {
+    body.phone_number = value;
+    body.phone_number_set = true;
+  } else if (field === "mailer_sent") {
+    body.mailer_sent = Boolean(value);
+    body.mailer_sent_set = true;
+  } else if (field === "mailer_date") {
+    body.mailer_date = value || null;
+    body.mailer_date_set = true;
+  } else {
+    throw new Error(`Unknown outreach field: ${field}`);
+  }
+  const resp = await fetch("/api/parcels/outreach", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) {
+    const txt = await resp.text().catch(() => "");
+    throw new Error(`Outreach save failed (${resp.status}): ${txt}`);
+  }
+  return await resp.json().catch(() => null);
+}
+
+document.addEventListener("change", (ev) => {
+  const el = ev.target;
+  if (!(el instanceof HTMLElement)) return;
+  if (!el.classList.contains("parcel-panel-outreach-input")) return;
+  const field = el.getAttribute("data-outreach-field");
+  const county = el.getAttribute("data-outreach-county");
+  const parcelId = el.getAttribute("data-outreach-parcel-id");
+  if (!field || !county || !parcelId) return;
+
+  let value;
+  if (field === "mailer_sent") {
+    value = el.checked;
+    // Live label update next to the checkbox.
+    const labelEl = el.parentElement?.querySelector(".parcel-panel-outreach-mailer-label");
+    if (labelEl) labelEl.textContent = value ? "yes" : "no";
+  } else {
+    value = el.value || "";
+  }
+
+  // Optimistic UI — assume save will succeed. Revert + toast on failure.
+  void _putOutreachField(county, parcelId, field, value).catch((err) => {
+    console.warn("[outreach] save failed", err);
+    // Best-effort revert. For checkbox: flip back. For text/date: leave
+    // the user's value (they can retry).
+    if (field === "mailer_sent" && el instanceof HTMLInputElement) {
+      el.checked = !value;
+      const labelEl = el.parentElement?.querySelector(".parcel-panel-outreach-mailer-label");
+      if (labelEl) labelEl.textContent = el.checked ? "yes" : "no";
+    }
+    try {
+      window?.alert?.(`Outreach save failed — please retry. ${String(err).slice(0, 120)}`);
+    } catch (_) {}
+  });
+});
+
 document.addEventListener("keydown", (ev) => {
   if (ev.key !== "Enter" && ev.key !== " ") return;
   const card = ev.target.closest(".propelio-good-comp-card");
@@ -9342,6 +9406,78 @@ function _buildPanelAgentBlockHtml(title, agent, emptyText) {
 //
 // Per Mike's 2026-06-01 ask, this section sits above Remarks in the
 // parcel detail panel.
+// Outreach section (Mailer + Phone Tracking, 2026-06-03).
+//
+// Renders 3 editable fields: Phone Number (text), Mailer Sent (checkbox),
+// Mailer Date (date input). Only rendered when current user role is
+// power_user / owner / developer. Server already strips outreach_* keys
+// for non-eligible roles (defense-in-depth), but we also guard at render
+// time — both for correctness and to avoid showing a section with all-
+// blank values to ineligible users.
+//
+// Save-on-blur pattern (mirrors filter-state autosave). Each field PUTs
+// to /api/parcels/outreach with the appropriate _set flag on. No save
+// button. Optimistic UI — failed PUT reverts the field value + shows toast.
+function _buildPanelOutreachHtml(p) {
+  if (!_isPowerUserOrAbove()) return "";
+  const county = String(p?.source_county || "").trim().toLowerCase();
+  const parcelKey = String(p?.parcel_key || p?.account_num || "").trim();
+  const accountNum = String(p?.account_num || "").trim();
+  if (!county || !parcelKey || !accountNum) return "";
+  // DCAD matches by account_num; the others by parcel_key. The server
+  // accepts whichever string is the per-county PK.
+  const matchKey = county === "dcad" ? accountNum : (p?.parcel_key || parcelKey);
+  const phone = String(p?.outreach_phone || "").trim();
+  const mailerSent = Boolean(p?.outreach_mailer_sent);
+  const mailerDate = String(p?.outreach_mailer_date || "").trim();
+  const escapedKey = _propelioEscape(matchKey);
+  const escapedCounty = _propelioEscape(county);
+  return `
+        <section class="parcel-panel-outreach" data-outreach-section>
+          <div class="parcel-panel-section-title">Outreach</div>
+          <table class="popup-table">
+            <tr>
+              <td class="popup-label">Phone</td>
+              <td class="popup-val">
+                <input type="text" class="parcel-panel-outreach-input"
+                       data-outreach-field="phone_number"
+                       data-outreach-county="${escapedCounty}"
+                       data-outreach-parcel-id="${escapedKey}"
+                       value="${_propelioEscape(phone)}"
+                       placeholder="214-555-0100, 469-555-0200"
+                       autocomplete="off"
+                       style="width:100%;box-sizing:border-box;padding:2px 4px;font:inherit;">
+              </td>
+            </tr>
+            <tr>
+              <td class="popup-label">Mailer Sent</td>
+              <td class="popup-val">
+                <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;">
+                  <input type="checkbox" class="parcel-panel-outreach-input"
+                         data-outreach-field="mailer_sent"
+                         data-outreach-county="${escapedCounty}"
+                         data-outreach-parcel-id="${escapedKey}"
+                         ${mailerSent ? "checked" : ""}>
+                  <span class="parcel-panel-outreach-mailer-label">${mailerSent ? "yes" : "no"}</span>
+                </label>
+              </td>
+            </tr>
+            <tr>
+              <td class="popup-label">Mailer Date</td>
+              <td class="popup-val">
+                <input type="date" class="parcel-panel-outreach-input"
+                       data-outreach-field="mailer_date"
+                       data-outreach-county="${escapedCounty}"
+                       data-outreach-parcel-id="${escapedKey}"
+                       value="${_propelioEscape(mailerDate)}"
+                       style="font:inherit;padding:2px 4px;">
+              </td>
+            </tr>
+          </table>
+        </section>`;
+}
+
+
 function _buildPanelOwnerHistoryHtml(p) {
   const block = p?.owner_history && typeof p.owner_history === "object" ? p.owner_history : null;
   if (!block) return "";
@@ -9565,6 +9701,7 @@ function _buildParcelDetailPanelHtml(p, matchedComp) {
             : _buildPanelAgentBlockHtml("Buyer Agent", null, "Buyer agent only appears on sold comps.")}
         </section>
         ${_buildPanelOwnerHistoryHtml(p)}
+        ${_buildPanelOutreachHtml(p)}
         <section class="parcel-panel-remarks">
           <div class="parcel-panel-section-title">Remarks</div>
           ${compDetails?.remarks
