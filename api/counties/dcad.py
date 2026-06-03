@@ -829,6 +829,15 @@ def build_feature(row: dict[str, Any], prop_type: str, on_redfin: bool, redfin_l
         "on_redfin": bool(on_redfin),
         "prop_type": prop_type,
         "account_num": _clean_text(row.get("account_num")),
+        # parcel_key is the per-county PK for TAD/Collin/Denton (format
+        # '<account>:<seq>' for TAD). Needed by the frontend to compose the
+        # correct match key for /api/parcels/outreach PUT — without it, the
+        # popup falls back to account_num and gets a 404 because outreach
+        # validation lookups go through parcel_key for those 3 counties.
+        # DCAD has parcel_key too (often == account_num but differs for
+        # condos / mineral rights); keep it for symmetry. KK preview-smoke
+        # 2026-06-03: "Parcel not found: tad/00239275".
+        "parcel_key": _clean_text(row.get("parcel_key")),
         "addr": _clean_text(row.get("property_address")),
         "city": _clean_text(row.get("property_city")),
         "owner": _clean_text(row.get("owner_name")),
