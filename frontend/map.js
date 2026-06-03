@@ -7848,7 +7848,7 @@ document.addEventListener("change", (ev) => {
     value = el.checked;
     // Live label update next to the checkbox.
     const labelEl = el.parentElement?.querySelector(".parcel-panel-outreach-mailer-label");
-    if (labelEl) labelEl.textContent = value ? "yes" : "no";
+    if (labelEl) labelEl.textContent = value ? "yes" : "";
   } else {
     value = el.value || "";
   }
@@ -7861,7 +7861,7 @@ document.addEventListener("change", (ev) => {
     if (field === "mailer_sent" && el instanceof HTMLInputElement) {
       el.checked = !value;
       const labelEl = el.parentElement?.querySelector(".parcel-panel-outreach-mailer-label");
-      if (labelEl) labelEl.textContent = el.checked ? "yes" : "no";
+      if (labelEl) labelEl.textContent = el.checked ? "yes" : "";
     }
     try {
       window?.alert?.(`Outreach save failed — please retry. ${String(err).slice(0, 120)}`);
@@ -9444,7 +9444,7 @@ function _buildPanelOutreachHtml(p) {
                        data-outreach-county="${escapedCounty}"
                        data-outreach-parcel-id="${escapedKey}"
                        value="${_propelioEscape(phone)}"
-                       placeholder="214-555-0100, 469-555-0200"
+                       placeholder=""
                        autocomplete="off"
                        style="width:100%;box-sizing:border-box;padding:2px 4px;font:inherit;">
               </td>
@@ -9458,7 +9458,7 @@ function _buildPanelOutreachHtml(p) {
                          data-outreach-county="${escapedCounty}"
                          data-outreach-parcel-id="${escapedKey}"
                          ${mailerSent ? "checked" : ""}>
-                  <span class="parcel-panel-outreach-mailer-label">${mailerSent ? "yes" : "no"}</span>
+                  <span class="parcel-panel-outreach-mailer-label">${mailerSent ? "yes" : ""}</span>
                 </label>
               </td>
             </tr>
