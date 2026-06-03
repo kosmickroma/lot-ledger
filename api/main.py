@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import parse_qs, quote_plus
 
-from fastapi import Body, Depends, FastAPI, HTTPException, Path as FastAPIPath, Request, Response
+from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Path as FastAPIPath, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from psycopg2.errors import UniqueViolation
@@ -1329,6 +1329,7 @@ def _session_exists(session_id: str, user_id: int) -> bool:
 def _build_features_from_rows(
     rows: list[dict[str, Any]],
     area_id: str | None = None,
+    user: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     """Rebuild GeoJSON features from cached raw parcel rows.
 
@@ -1339,7 +1340,19 @@ def _build_features_from_rows(
     Per PARCEL_RATINGS_SPEC.md v2 §2E: when area_id is provided, hydrate
     user_rating on each feature from parcel_ratings. Backwards-compatible —
     callers that don't pass area_id get no rating hydrate (None default).
+
+    Mailer + Phone Tracking (2026-06-03): when user is provided and their
+    role is not power_user / owner / developer, strip outreach_* keys from
+    each feature's properties before returning. user=None preserves outreach
+    keys (callers that don't know about user must not be public-facing).
     """
+    # Re-hydrate outreach data from live DB on every session restore /
+    # share-link open. Cached jobs hold rows snapshotted at the initial
+    # bbox query — stale by the time a second user opens the share link
+    # or the same user re-loads after editing. See KK preview smoke
+    # 2026-06-03 for the user-visible bug this fixes.
+    _hydrate_outreach_for_rows(rows, user)
+
     exempt_set: set[str] = set()
     features: list[dict[str, Any]] = []
     parcel_ratings_map: dict[tuple[str, str], str] = _load_parcel_ratings_for_workspace(area_id)
@@ -1385,6 +1398,10 @@ def _build_features_from_rows(
             features.append(feature)
         except Exception:
             continue
+    # Outreach role gate (Mailer + Phone Tracking, 2026-06-03). Strip
+    # outreach_* keys for users below power_user. No-op when user is None
+    # (caller doesn't know about user — internal-only path).
+    _strip_outreach_from_features(features, user)
     return features, counts
 
 
@@ -1605,6 +1622,27 @@ class StoredValueGetResponse(BaseModel):
     rehab_needed: dict[str, Any]
     mao_arv: dict[str, Any]
     tdpp_minus_mao_arv: dict[str, Any]
+
+
+class OutreachPutRequest(BaseModel):
+    """Manual outreach edit from the popup (Mailer + Phone Tracking v2, 2026-06-03).
+
+    Partial-update semantics: omitted keys are not touched. To explicitly
+    clear a field, send the literal null/None.
+
+    v2 model: phone_number removed (Mike's phones live in his CRM), mailer_sent
+    boolean removed (mailer_date IS NOT NULL replaces its semantic). New
+    contact_info_retrieved boolean indicates whether outreach prep is done.
+    """
+    county: Literal["dcad", "tad", "collin", "denton"]
+    parcel_id: str
+    contact_info_retrieved: bool | None = None
+    mailer_date: str | None = None  # ISO 'YYYY-MM-DD' or None
+    # _set fields tell the server WHICH keys were intentionally supplied
+    # vs simply absent. Pydantic doesn't distinguish missing-from-payload
+    # from sent-as-None natively in v1 — these booleans make it explicit.
+    contact_info_retrieved_set: bool = False
+    mailer_date_set: bool = False
 
 
 class StoredValuePutRequest(BaseModel):
@@ -3174,8 +3212,12 @@ def _fetch_dcad_parcel_by_account(account_num: str) -> tuple[dict[str, Any] | No
                        r.roof_mat_desc AS roof_material,
                        r.pct_complete AS pct_complete,
                       l.zoning, l.front_dim, l.depth_dim, l.area_size, l.area_uom, l.area_estimated,
-                       (e.account_num IS NOT NULL) AS is_exempt_account
+                       (e.account_num IS NOT NULL) AS is_exempt_account,
+                       pon.contact_info_retrieved AS outreach_contact_info_retrieved,
+                       pon.mailer_date            AS outreach_mailer_date
                 FROM parcels p
+                LEFT JOIN parcel_outreach_notes pon
+                       ON pon.county = 'dcad' AND pon.parcel_id = p.account_num
                 LEFT JOIN appraisal a ON p.account_num = a.account_num
                 LEFT JOIN res_detail r ON p.account_num = r.account_num
                 LEFT JOIN LATERAL (
@@ -3249,7 +3291,7 @@ def _fetch_tad_parcel_by_account(account_num: str) -> dict[str, Any] | None:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT parcel_key, account_num, taxpin,
+                SELECT tad_parcels.parcel_key, tad_parcels.account_num, taxpin,
                        owner_name, owner_addr, owner_city, owner_citystate,
                        owner_zip, situs_addr, property_city, property_zip,
                        property_class, state_use_code,
@@ -3257,6 +3299,8 @@ def _fetch_tad_parcel_by_account(account_num: str) -> dict[str, Any] | None:
                        acres, land_acres, land_sqft,
                        year_built, living_area,
                        land_value, improvement_value, total_value,
+                       pon.contact_info_retrieved AS outreach_contact_info_retrieved,
+                       pon.mailer_date            AS outreach_mailer_date,
                        ST_Area(ST_OrientedEnvelope(geom)::geography) / NULLIF(ST_Area(geom::geography), 0) AS envelope_ratio,
                        ST_Perimeter(ST_OrientedEnvelope(geom)::geography) * 3.28084 AS envelope_perim_ft,
                        ST_Area(ST_OrientedEnvelope(geom)::geography) * 10.763910416709722 AS envelope_area_sqft,
@@ -3264,7 +3308,9 @@ def _fetch_tad_parcel_by_account(account_num: str) -> dict[str, Any] | None:
                        ST_Y(centroid) AS _lat,
                        ST_X(centroid) AS _lng
                 FROM tad_parcels
-                WHERE account_num = %s
+                LEFT JOIN parcel_outreach_notes pon
+                       ON pon.county = 'tad' AND pon.parcel_id = tad_parcels.parcel_key
+                WHERE tad_parcels.account_num = %s
                 LIMIT 1
                 """,
                 (account_num,),
@@ -3355,6 +3401,8 @@ def _fetch_collin_parcel_by_account(account_num: str) -> dict[str, Any] | None:
                     ag_acres,
                     ag_value,
                     ag_market_value,
+                    pon.contact_info_retrieved AS outreach_contact_info_retrieved,
+                    pon.mailer_date            AS outreach_mailer_date,
                     ST_Area(ST_OrientedEnvelope(geom)::geography) / NULLIF(ST_Area(geom::geography), 0) AS envelope_ratio,
                     ST_Perimeter(ST_OrientedEnvelope(geom)::geography) * 3.28084 AS envelope_perim_ft,
                     ST_Area(ST_OrientedEnvelope(geom)::geography) * 10.763910416709722 AS envelope_area_sqft,
@@ -3363,7 +3411,9 @@ def _fetch_collin_parcel_by_account(account_num: str) -> dict[str, Any] | None:
                     ST_Y(centroid) AS _lat,
                     ST_X(centroid) AS _lng
                 FROM collin_parcels
-                WHERE account_num = %s
+                LEFT JOIN parcel_outreach_notes pon
+                       ON pon.county = 'collin' AND pon.parcel_id = collin_parcels.parcel_key
+                WHERE collin_parcels.account_num = %s
                 LIMIT 1
                 """,
                 (account_num,),
@@ -3457,7 +3507,9 @@ def _fetch_denton_parcel_by_account(account_num: str) -> dict[str, Any] | None:
                     d.half_baths,
                     d.total_rooms,
                     d.outdoor_fireplaces,
-                    d.end_unit
+                    d.end_unit,
+                    pon.contact_info_retrieved AS outreach_contact_info_retrieved,
+                    pon.mailer_date            AS outreach_mailer_date
                 FROM denton_parcels p
                 LEFT JOIN LATERAL (
                     SELECT *
@@ -3465,6 +3517,8 @@ def _fetch_denton_parcel_by_account(account_num: str) -> dict[str, Any] | None:
                     WHERE prop_id = p.account_num
                     LIMIT 1
                 ) d ON TRUE
+                LEFT JOIN parcel_outreach_notes pon
+                       ON pon.county = 'denton' AND pon.parcel_id = p.parcel_key
                 WHERE p.account_num = %s
                 LIMIT 1
                 """,
@@ -3618,12 +3672,19 @@ def _find_denton_near(lat: float, lng: float) -> str | None:
 
 
 @app.get("/api/parcel/near")
-async def get_parcel_near(lat: float, lng: float) -> dict[str, Any]:
+async def get_parcel_near(
+    lat: float,
+    lng: float,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
     """
     Nearest-parcel lookup by lat/lng coordinate.
     Used by address search to reliably find the parcel footprint at a geocoded point.
     Tries DCAD, TAD, Collin, then Denton using polygon containment + centroid proximity.
     Returns a GeoJSON Feature in the same shape as /api/parcel/{county}/{account_num}.
+
+    Outreach gate: strips outreach_* keys before returning when the
+    requesting user is below power_user (Mailer + Phone Tracking, 2026-06-03).
     """
     dcad_account = _find_dcad_near(lat, lng)
     if dcad_account:
@@ -3632,6 +3693,7 @@ async def get_parcel_near(lat: float, lng: float) -> dict[str, Any]:
             prop_type = classify_parcel(row, exempt_set)
             feature = build_feature(row, prop_type, False, None)
             feature["properties"]["source_county"] = "dcad"
+            _strip_outreach_from_feature(feature, user)
             return feature
 
     tad_account = _find_tad_near(lat, lng)
@@ -3641,6 +3703,7 @@ async def get_parcel_near(lat: float, lng: float) -> dict[str, Any]:
             prop_type = _classify_tad(row)
             feature = build_feature(row, prop_type, False, None)
             feature["properties"]["source_county"] = "tad"
+            _strip_outreach_from_feature(feature, user)
             return feature
 
     collin_account = _find_collin_near(lat, lng)
@@ -3650,6 +3713,7 @@ async def get_parcel_near(lat: float, lng: float) -> dict[str, Any]:
             prop_type = _classify_collin(row)
             feature = build_feature(row, prop_type, False, None)
             feature["properties"]["source_county"] = "collin"
+            _strip_outreach_from_feature(feature, user)
             return feature
 
     denton_account = _find_denton_near(lat, lng)
@@ -3659,12 +3723,207 @@ async def get_parcel_near(lat: float, lng: float) -> dict[str, Any]:
             prop_type = _classify_denton(row)
             feature = build_feature(row, prop_type, False, None)
             feature["properties"]["source_county"] = "denton"
+            _strip_outreach_from_feature(feature, user)
             return feature
 
     raise HTTPException(status_code=404, detail="No parcel found near this point")
 
 
 _OWNER_HISTORY_POPUP_ROLES = {"developer", "owner", "power_user"}
+
+# Mailer + Phone Tracking (2026-06-03). Same role set as owner-history —
+# both are PII / outreach-tracking data restricted to power_user+. Regular
+# users + members do NOT see these fields anywhere (popup, CSV, API).
+_OUTREACH_ALLOWED_ROLES = {"developer", "owner", "power_user"}
+# v2 (2026-06-03): drop outreach_phone (LotLedger doesn't store phones — they
+# live in Mike's CRM), drop outreach_mailer_sent boolean (mailer_date IS NOT
+# NULL replaces its semantic), add outreach_contact_info_retrieved.
+_OUTREACH_FEATURE_KEYS = ("outreach_contact_info_retrieved", "outreach_mailer_date")
+
+
+def _user_can_see_outreach(user: dict[str, Any] | None) -> bool:
+    """Single source of truth for outreach visibility. Mirror of
+    frontend `_isPowerUserOrAbove()` at map.js:12120. NOT the same as
+    `_canDownloadCsv()` (which lets member through) — outreach is stricter.
+    """
+    role = str((user or {}).get("role") or "").strip().lower()
+    return role in _OUTREACH_ALLOWED_ROLES
+
+
+def _strip_outreach_from_features(features: list[dict[str, Any]], user: dict[str, Any] | None) -> None:
+    """Remove outreach keys from feature properties when the requesting user
+    is not allowed to see them. Mutates the features list in place. Defense-
+    in-depth: even if frontend wouldn't render the data, we don't ship it
+    over the wire to ineligible roles.
+    """
+    if _user_can_see_outreach(user):
+        return
+    for feature in features or []:
+        props = feature.get("properties") if isinstance(feature, dict) else None
+        if not isinstance(props, dict):
+            continue
+        for key in _OUTREACH_FEATURE_KEYS:
+            props.pop(key, None)
+
+
+def _strip_outreach_from_feature(feature: dict[str, Any] | None, user: dict[str, Any] | None) -> None:
+    """Single-feature variant of _strip_outreach_from_features. Same role
+    semantics. No-op when feature is None or already stripped.
+    """
+    if feature is None:
+        return
+    _strip_outreach_from_features([feature], user)
+
+
+def _row_outreach_key(row: dict[str, Any]) -> tuple[str, str] | None:
+    """Return (county_lower, parcel_id) for a row, or None if not addressable.
+    DCAD uses account_num; others use parcel_key. Mirror of frontend matchKey
+    logic in _buildPanelOutreachHtml.
+    """
+    county = str(row.get("source_county") or row.get("division_cd") or "").strip().lower()
+    if county not in _OUTREACH_PARCEL_TABLES:
+        return None
+    if county == "dcad":
+        parcel_id = str(row.get("account_num") or "").strip()
+    else:
+        parcel_id = str(row.get("parcel_key") or row.get("account_num") or "").strip()
+    if not parcel_id:
+        return None
+    return (county, parcel_id)
+
+
+def _hydrate_outreach_for_rows(rows: list[dict[str, Any]], user: dict[str, Any] | None) -> None:
+    """Mutate rows in place, refreshing outreach_* fields from the live
+    parcel_outreach_notes table.
+
+    Mailer + Phone Tracking (2026-06-03 polish): cached jobs (CSV export,
+    session restore, share link) hold rows snapshotted at the initial bbox
+    query. If a user edits outreach via the popup PUT, the DB has new data
+    but the cache has stale data. KK reported this in preview smoke — checked
+    Mailer Sent in popup, exported CSV, cell was blank.
+
+    Resolution: every cache-consumption site calls this helper to refresh
+    outreach fields. Behavior:
+      - user below power_user → clear outreach_* on every row (also serves
+        as defense-in-depth strip when CSV writer or session restore feeds
+        cached data)
+      - user is power_user+ → query parcel_outreach_notes for all rows in
+        one batch (WHERE (county, parcel_id) IN (...)), stamp fresh values
+        onto rows.
+
+    Single query regardless of row count. Rows with no matching outreach
+    record get cleared outreach_* fields (so an UNSET parcel doesn't display
+    stale data from when it was first fetched and the popup user then
+    cleared the phone).
+    """
+    if not rows:
+        return
+
+    if not _user_can_see_outreach(user):
+        for row in rows:
+            for key in _OUTREACH_FEATURE_KEYS:
+                row.pop(key, None)
+        return
+
+    # Build the list of unique (county, parcel_id) keys.
+    keys: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for row in rows:
+        k = _row_outreach_key(row)
+        if k is None or k in seen:
+            continue
+        seen.add(k)
+        keys.append(k)
+
+    if not keys:
+        # Nothing to hydrate; clear any stale values to be safe.
+        for row in rows:
+            for key in _OUTREACH_FEATURE_KEYS:
+                row[key] = None
+        return
+
+    # Single batched fetch.
+    conn = get_conn()
+    fresh: dict[tuple[str, str], tuple[bool, "date_module.date | None"]] = {}
+    try:
+        from psycopg2.extras import execute_values
+        with conn.cursor() as cur:
+            execute_values(
+                cur,
+                """
+                SELECT pon.county, pon.parcel_id, pon.contact_info_retrieved, pon.mailer_date
+                FROM parcel_outreach_notes pon
+                JOIN (VALUES %s) AS v(county, parcel_id)
+                  ON v.county = pon.county AND v.parcel_id = pon.parcel_id
+                """,
+                keys,
+                template="(%s, %s)",
+                page_size=1000,
+            )
+            for c, pid, contact_retrieved, mailer_date in cur.fetchall():
+                fresh[(c, pid)] = (bool(contact_retrieved), mailer_date)
+    finally:
+        release_conn(conn)
+
+    # Stamp values onto rows. Rows whose (county, parcel_id) isn't in the
+    # fresh map have no outreach record — explicitly clear the cached fields
+    # so any stale value is overwritten.
+    for row in rows:
+        k = _row_outreach_key(row)
+        if k is None:
+            row["outreach_contact_info_retrieved"] = False
+            row["outreach_mailer_date"] = None
+            continue
+        if k in fresh:
+            contact_retrieved, mailer_date = fresh[k]
+            row["outreach_contact_info_retrieved"] = contact_retrieved
+            row["outreach_mailer_date"] = mailer_date.isoformat() if hasattr(mailer_date, "isoformat") and mailer_date else mailer_date
+        else:
+            row["outreach_contact_info_retrieved"] = False
+            row["outreach_mailer_date"] = None
+
+
+def _outreach_csv_cells(row: dict[str, Any] | None, user: dict[str, Any] | None) -> tuple[str, str, str]:
+    """Return the 3 right-edge CSV cells: (Parcel ID, Contact Info Retrieved, Last Mailer Sent).
+
+    v2 (2026-06-03): dropped Phone Number column (LotLedger doesn't store
+    phones — they live in Mike's CRM) and dropped the standalone Mailer
+    Sent boolean (presence of Last Mailer Sent date IS the "sent" signal).
+
+    - Parcel ID is always emitted regardless of role (it's the FUB-match
+      key, not outreach PII).
+    - The 2 outreach cells are blanked when the user is below power_user+.
+    - row=None (e.g. orphan comp with no matched CAD parcel) → 3 empty cells.
+
+    Per-county PK lookup:
+      DCAD     → row['account_num'] (17-char alphanumeric)
+      TAD/Collin/Denton → row['parcel_key']
+    All globally unique, no collisions across counties.
+    """
+    if not row:
+        return ("", "", "")
+    county = _csv_county_source(row).lower()
+    if county == "dcad":
+        parcel_id_value = str(row.get("account_num") or "").strip()
+    else:
+        parcel_id_value = (
+            str(row.get("parcel_key") or "").strip()
+            or str(row.get("account_num") or "").strip()
+        )
+
+    if not _user_can_see_outreach(user):
+        return (parcel_id_value, "", "")
+
+    contact_retrieved_raw = row.get("outreach_contact_info_retrieved")
+    contact_retrieved_cell = "yes" if contact_retrieved_raw else ""
+    mailer_date_raw = row.get("outreach_mailer_date")
+    if hasattr(mailer_date_raw, "isoformat"):
+        mailer_date_cell = mailer_date_raw.isoformat()
+    elif mailer_date_raw:
+        mailer_date_cell = str(mailer_date_raw)
+    else:
+        mailer_date_cell = ""
+    return (parcel_id_value, contact_retrieved_cell, mailer_date_cell)
 
 
 def _format_live_deed_for_popup(raw: Any) -> str:
@@ -3842,6 +4101,8 @@ async def get_parcel_detail(
     )
     if block is not None:
         feature["properties"]["owner_history"] = block
+    # Outreach role gate — strip if user is not power_user+.
+    _strip_outreach_from_feature(feature, user)
     return feature
 
 
@@ -4118,6 +4379,9 @@ async def analyze(request: AnalyzeRequest, req: Request, user: dict[str, Any] = 
             area_id,
         )
     )
+    # Outreach role gate (Mailer + Phone Tracking, 2026-06-03). Strip
+    # outreach_* keys for non-power_user roles. Mutates features in place.
+    _strip_outreach_from_features(features, user)
     return {
         "type": "FeatureCollection",
         "features": features,
@@ -4518,6 +4782,11 @@ async def _run_download_csv(
         raise HTTPException(status_code=404, detail="Job not found")
 
     rows = job.get("rows", [])
+    # Re-hydrate outreach data from live DB so CSV export reflects edits
+    # made AFTER the job was cached (popup PUT, bulk import). Without this,
+    # KK's preview-smoke bug repeats: check Mailer Sent → export → blank cell.
+    # Helper is a no-op (or clear) for non-power_user roles.
+    _hydrate_outreach_for_rows(rows, user)
     redfin_data: dict[str, dict] = job.get("redfin_data", {})
     sold_points: list[dict[str, Any]] = job.get("sold_points", []) or []
     propelio_sold_points: list[dict[str, Any]] = _load_propelio_sold_points(job_id) or []
@@ -5023,6 +5292,18 @@ async def _run_download_csv(
                 "Prior Owner 2",
                 "Prior Owner 3",
                 "Prior Owner 4",
+                # Mailer + Phone Tracking v2 (2026-06-03). Right-edge block;
+                # appended after Prior Owner 4 to keep existing columns
+                # byte-stable. Outreach cells are blanked for non-power_user
+                # roles via _outreach_csv_cells (which still emits the
+                # Parcel ID match key — that's not PII).
+                # v2 removed Phone Number (Mike's phones live in CRM) and
+                # the Mailer Sent boolean (presence of Last Mailer Sent
+                # date replaces it). Renamed Mailer Date column header to
+                # Last Mailer Sent for clarity.
+                "Parcel ID",
+                "Contact Info Retrieved",
+                "Last Mailer Sent",
             ]
         )
         buffer.seek(0)
@@ -5330,6 +5611,9 @@ async def _run_download_csv(
                     round(_safe_float(row.get("special_dist_taxable_val")), 0) if _safe_float(row.get("special_dist_taxable_val")) is not None else "",
                     *_additional_owner_cells(row.get("additional_owners")),
                     _own[0], _own[1], _own[2], _own[3], _own[4], _own[5],
+                    # Mailer + Phone Tracking — 4 cells (Parcel ID always
+                    # emitted; outreach 3 blanked for non-power_user roles).
+                    *_outreach_csv_cells(row, user),
                 ]
             )
             buffer.seek(0)
@@ -5663,6 +5947,9 @@ async def _run_download_csv(
                     round(_safe_float(_cad.get("special_dist_taxable_val")), 0) if _cad and _safe_float(_cad.get("special_dist_taxable_val")) is not None else "",
                     *_additional_owner_cells(_cad.get("additional_owners") if _cad else []),
                     _own_orphan[0], _own_orphan[1], _own_orphan[2], _own_orphan[3], _own_orphan[4], _own_orphan[5],
+                    # Mailer + Phone Tracking — 4 cells. _outreach_csv_cells
+                    # handles _cad=None internally (returns 4 blanks).
+                    *_outreach_csv_cells(_cad, user),
                 ]
             )
             buffer.seek(0)
@@ -5861,7 +6148,8 @@ async def get_session_data(session_id: str, user: dict[str, Any] = Depends(get_c
     sold_points = list(cached.get("sold_points", []))
     _apply_session_tags(session_id, uid, rows)
     # Pass area_id so parcel ratings hydrate per PARCEL_RATINGS_SPEC.md v2.
-    features, counts = _build_features_from_rows(rows, area_id=session_saved_area_id)
+    # Pass user so outreach_* keys are stripped for non-power_user roles.
+    features, counts = _build_features_from_rows(rows, area_id=session_saved_area_id, user=user)
     return {
         "type": "FeatureCollection",
         "session_id": session_id,
@@ -7535,6 +7823,557 @@ async def rate_parcel(request: ParcelRateRequest, req: Request, user: dict[str, 
     finally:
         release_session_conn(conn)
     return {"ok": True, "rating": rating}
+
+
+# =============================================================================
+# Mailer + Phone Tracking endpoints (spec v2, 2026-06-03)
+# =============================================================================
+#
+# Three endpoints:
+#   PUT  /api/parcels/outreach           — single-field edit from popup
+#   POST /api/parcels/outreach/import    — bulk CSV upload from CRM round-trip
+#   GET  /api/parcels/outreach/imports   — recent import history
+#
+# All gated to power_user / owner / developer via _user_can_see_outreach.
+# Data lives on the DATA DB (parcel_outreach_notes table).
+
+
+_OUTREACH_PARCEL_TABLES = {
+    "dcad":   ("parcels",         "account_num"),
+    "tad":    ("tad_parcels",     "parcel_key"),
+    "collin": ("collin_parcels",  "parcel_key"),
+    "denton": ("denton_parcels",  "parcel_key"),
+}
+
+
+def _validate_outreach_parcel_id(county: str, parcel_id: str) -> bool:
+    """Return True if the (county, parcel_id) actually exists in the
+    corresponding parcel table. Cheap existence check before UPSERT so
+    we don't accumulate ghost rows in parcel_outreach_notes."""
+    if county not in _OUTREACH_PARCEL_TABLES:
+        return False
+    table, pk = _OUTREACH_PARCEL_TABLES[county]
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            # Identifier interpolation is safe — `table` and `pk` come from
+            # the hardcoded _OUTREACH_PARCEL_TABLES dict, not user input.
+            cur.execute(
+                f"SELECT 1 FROM {table} WHERE {pk} = %s LIMIT 1",
+                (parcel_id,),
+            )
+            return cur.fetchone() is not None
+    finally:
+        release_conn(conn)
+
+
+def _parse_iso_date(text: str | None) -> "date_module.date | None":
+    """Parse 'YYYY-MM-DD' into a date. Returns None on empty/invalid."""
+    import datetime as date_module
+    if not text:
+        return None
+    text = text.strip()
+    if not text:
+        return None
+    try:
+        return date_module.date.fromisoformat(text)
+    except (ValueError, TypeError):
+        return None
+
+
+@app.put("/api/parcels/outreach")
+async def put_parcel_outreach(
+    request: OutreachPutRequest,
+    req: Request,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Manual edit of outreach data from the popup. UPSERTs into
+    parcel_outreach_notes. Partial update — only sets fields where the
+    corresponding _set flag is true. Empty phone_number string is treated
+    as null (clear)."""
+    require_csrf(req)
+    if not _user_can_see_outreach(user):
+        raise HTTPException(status_code=403, detail="Outreach editing requires power_user role or higher")
+
+    county = str(request.county).strip().lower()
+    parcel_id = str(request.parcel_id or "").strip()
+    if not parcel_id:
+        raise HTTPException(status_code=400, detail="parcel_id required")
+
+    if not _validate_outreach_parcel_id(county, parcel_id):
+        raise HTTPException(status_code=404, detail=f"Parcel not found: {county}/{parcel_id}")
+
+    # Normalize values. mailer_date must parse as ISO date if supplied.
+    contact_info_retrieved_value: bool | None = None
+    if request.contact_info_retrieved_set:
+        contact_info_retrieved_value = bool(request.contact_info_retrieved) if request.contact_info_retrieved is not None else False
+
+    mailer_date_value = None
+    if request.mailer_date_set:
+        if request.mailer_date is None:
+            mailer_date_value = None
+        else:
+            mailer_date_value = _parse_iso_date(str(request.mailer_date))
+            if request.mailer_date and mailer_date_value is None:
+                raise HTTPException(status_code=400, detail="mailer_date must be ISO YYYY-MM-DD")
+
+    if not (request.contact_info_retrieved_set or request.mailer_date_set):
+        raise HTTPException(status_code=400, detail="Nothing to update — set at least one of contact_info_retrieved / mailer_date")
+
+    user_id = int(user["id"])
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            # Read existing row (so partial-update preserves untouched fields).
+            cur.execute(
+                "SELECT contact_info_retrieved, mailer_date "
+                "FROM parcel_outreach_notes WHERE county = %s AND parcel_id = %s",
+                (county, parcel_id),
+            )
+            existing = cur.fetchone()
+            existing_contact_retrieved, existing_mailer_date = (existing or (False, None))
+
+            new_contact_retrieved = contact_info_retrieved_value if request.contact_info_retrieved_set else (existing_contact_retrieved or False)
+            new_mailer_date = mailer_date_value if request.mailer_date_set else existing_mailer_date
+
+            cur.execute(
+                """
+                INSERT INTO parcel_outreach_notes
+                    (county, parcel_id, contact_info_retrieved, mailer_date,
+                     last_updated_by_user_id, last_updated_at)
+                VALUES (%s, %s, %s, %s, %s, now())
+                ON CONFLICT (county, parcel_id) DO UPDATE SET
+                    contact_info_retrieved = EXCLUDED.contact_info_retrieved,
+                    mailer_date            = EXCLUDED.mailer_date,
+                    last_updated_by_user_id = EXCLUDED.last_updated_by_user_id,
+                    last_updated_at = EXCLUDED.last_updated_at
+                RETURNING contact_info_retrieved, mailer_date, last_updated_at
+                """,
+                (county, parcel_id, new_contact_retrieved, new_mailer_date, user_id),
+            )
+            row = cur.fetchone()
+        conn.commit()
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        release_conn(conn)
+
+    return {
+        "ok": True,
+        "county": county,
+        "parcel_id": parcel_id,
+        "outreach_contact_info_retrieved": bool(row[0]),
+        "outreach_mailer_date": row[1].isoformat() if row[1] else None,
+        "last_updated_at": row[2].isoformat() if row[2] else None,
+    }
+
+
+# CSV import — header aliases (case-insensitive) accepted for each logical field.
+# v2 2026-06-03: dropped phone + mailer_sent aliases (model removed those
+# fields); added contact_info_retrieved aliases.
+_OUTREACH_IMPORT_KEY_ALIASES = ("parcel id", "parcel_id", "cad id", "cad_id", "parcel_key", "account_num", "account #", "account")
+_OUTREACH_IMPORT_CONTACT_RETRIEVED_ALIASES = (
+    "contact info retrieved", "contact_info_retrieved", "contact retrieved",
+    "skip traced", "skip_traced", "contacted",
+)
+_OUTREACH_IMPORT_MAILER_DATE_ALIASES = (
+    "last mailer sent date", "last_mailer_sent_date", "last mailer sent",
+    "mailer date", "mailer_date", "date mailed", "date_mailed",
+)
+_OUTREACH_IMPORT_TAGS_ALIASES = ("tags", "tag", "labels")
+
+# FUB-fallback constants. When the LotLedger→FUB import put the parcel_key
+# into the Tags column (because the operator didn't create a `parcel_key`
+# custom field in FUB before importing), the FUB export comes back with an
+# empty `parcel_key` column and the actual ID inside Tags like:
+#     "00239925:000, Import"
+# Our parser handles that case by parsing Tags when parcel_key is empty.
+_OUTREACH_FUB_TAG_NOISE_LOWER = {"import", "imported", "lead", "client"}
+
+
+def _extract_parcel_id_from_fub_tags(tags_value: str) -> str:
+    """When FUB stores parcel_key inside the Tags column, the export comes
+    back like "00239925:000, Import". Pick the first non-noise tag that
+    looks like a parcel_id (alphanumeric with optional colon/dash, contains
+    at least one digit).
+
+    Returns "" when nothing usable found.
+    """
+    import re as re_module
+    if not tags_value:
+        return ""
+    PARCEL_ID_SHAPE = re_module.compile(r"^[\w:.\-]+$")
+    for raw_tag in tags_value.split(","):
+        tag = raw_tag.strip()
+        if not tag:
+            continue
+        if tag.lower() in _OUTREACH_FUB_TAG_NOISE_LOWER:
+            continue
+        if not PARCEL_ID_SHAPE.match(tag):
+            continue
+        if not any(c.isdigit() for c in tag):
+            continue
+        return tag
+    return ""
+
+_OUTREACH_IMPORT_MAX_BYTES = 10 * 1024 * 1024     # 10 MB
+_OUTREACH_IMPORT_MAX_ROWS = 50_000
+
+
+def _normalize_csv_header(h: str) -> str:
+    return (h or "").strip().lower().replace("﻿", "")
+
+
+def _find_csv_column(headers: list[str], aliases: tuple[str, ...]) -> str | None:
+    """Case-insensitive header lookup. Returns the original header name (so
+    DictReader can find it) or None when no alias matches."""
+    norm_to_original: dict[str, str] = {_normalize_csv_header(h): h for h in headers}
+    for alias in aliases:
+        if alias in norm_to_original:
+            return norm_to_original[alias]
+    return None
+
+
+def _parse_outreach_yes_no_cell(raw: str) -> bool | None:
+    """Parse a yes/no-style CSV cell. Accept 'yes'/'y'/'true'/'1' → True,
+    'no'/'n'/'false'/'0'/'' → False, anything else → None ('no change').
+    Used for Contact Info Retrieved + other boolean outreach fields.
+    """
+    text = str(raw or "").strip().lower()
+    if text in ("yes", "y", "true", "1", "contacted", "retrieved", "done"):
+        return True
+    if text in ("no", "n", "false", "0", "", "uncontacted", "not contacted"):
+        return False
+    return None
+
+
+@app.post("/api/parcels/outreach/import")
+async def import_parcel_outreach(
+    req: Request,
+    file: UploadFile = File(...),
+    mode: str = Query("commit", regex=r"^(preview|commit)$"),
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Bulk CSV import for outreach data (Mailer + Phone Tracking, spec v2 §5.3).
+
+    Staging-table + batched set-based UPSERT pattern (NOT per-row UPSERT).
+    Per Copilot critique 2026-06-03: per-row would have created N transactions
+    on shared Cloud SQL; staging approach is one INSERT batch + 4 county
+    resolution UPDATEs + N/1000 chunked UPSERTs.
+
+    Modes:
+      preview — SELECT-only diff computation; nothing written to
+                parcel_outreach_notes. Returns counts + sample unmatched ids.
+      commit  — Same diff + UPSERT into parcel_outreach_notes.
+    """
+    require_csrf(req)
+    if not _user_can_see_outreach(user):
+        raise HTTPException(status_code=403, detail="Outreach import requires power_user role or higher")
+
+    raw_bytes = await file.read()
+    file_size = len(raw_bytes)
+    if file_size > _OUTREACH_IMPORT_MAX_BYTES:
+        raise HTTPException(status_code=413, detail=f"CSV too large (>10MB): {file_size} bytes")
+
+    # Parse CSV.
+    import csv as csv_module
+    import io as io_module
+    try:
+        text = raw_bytes.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        try:
+            text = raw_bytes.decode("latin-1")
+        except UnicodeDecodeError as e:
+            raise HTTPException(status_code=400, detail=f"CSV encoding not readable: {e}")
+
+    reader = csv_module.DictReader(io_module.StringIO(text))
+    headers = reader.fieldnames or []
+    if not headers:
+        raise HTTPException(status_code=400, detail="CSV has no header row")
+
+    key_col = _find_csv_column(headers, _OUTREACH_IMPORT_KEY_ALIASES)
+    contact_retrieved_col = _find_csv_column(headers, _OUTREACH_IMPORT_CONTACT_RETRIEVED_ALIASES)
+    mailer_date_col = _find_csv_column(headers, _OUTREACH_IMPORT_MAILER_DATE_ALIASES)
+    # FUB fallback: when the LotLedger→FUB import didn't have a parcel_key
+    # custom field set up, FUB stuffs the Parcel ID into the Tags column.
+    # The Tags column comes back as "00239925:000, Import" — we parse it
+    # below per-row when the dedicated key column is missing or empty.
+    tags_col = _find_csv_column(headers, _OUTREACH_IMPORT_TAGS_ALIASES)
+
+    if key_col is None and tags_col is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Required column not found. Add a 'Parcel ID' column (or 'parcel_key' / 'account_num') "
+                f"to your CSV, OR include a 'Tags' column containing the parcel IDs (FUB fallback). "
+                f"Headers seen: {headers}"
+            ),
+        )
+
+    # Read rows into memory (already capped at MAX_BYTES; row cap separately).
+    parsed_rows: list[tuple[int, str, bool | None, "date_module.date | None"]] = []
+    import datetime as date_module
+    rows_skipped_no_id = 0
+    for idx, raw_row in enumerate(reader):
+        if idx >= _OUTREACH_IMPORT_MAX_ROWS:
+            raise HTTPException(status_code=413, detail=f"CSV too many rows (>{_OUTREACH_IMPORT_MAX_ROWS})")
+        # Primary path: dedicated parcel_id column.
+        parcel_id = str(raw_row.get(key_col) or "").strip() if key_col else ""
+        # FUB fallback: pull from Tags when the dedicated column was missing
+        # or this specific row's cell is empty.
+        tags_value = str(raw_row.get(tags_col) or "") if tags_col else ""
+        if not parcel_id and tags_value:
+            parcel_id = _extract_parcel_id_from_fub_tags(tags_value)
+        if not parcel_id:
+            rows_skipped_no_id += 1
+            continue
+        contact_retrieved = (
+            _parse_outreach_yes_no_cell(raw_row.get(contact_retrieved_col) or "")
+            if contact_retrieved_col else None
+        )
+        mailer_date = _parse_iso_date(str(raw_row.get(mailer_date_col) or "")) if mailer_date_col else None
+        parsed_rows.append((idx, parcel_id, contact_retrieved, mailer_date))
+
+    if not parsed_rows:
+        raise HTTPException(status_code=400, detail="CSV had no data rows after the header")
+
+    user_id = int(user["id"])
+    conn = get_conn()
+    matched = 0
+    updated = 0
+    unmatched_ids: list[str] = []
+    sample_unmatched: list[str] = []
+    try:
+        with conn.cursor() as cur:
+            # Staging table — temp, dropped at txn end.
+            cur.execute("SET LOCAL lock_timeout = '5s'")
+            cur.execute("SET LOCAL statement_timeout = '120s'")
+            cur.execute(
+                """
+                CREATE TEMP TABLE outreach_staging (
+                    row_idx INTEGER PRIMARY KEY,
+                    parcel_id TEXT NOT NULL,
+                    contact_info_retrieved BOOLEAN,
+                    mailer_date DATE,
+                    matched_county TEXT,
+                    contact_info_retrieved_set BOOLEAN NOT NULL DEFAULT false,
+                    mailer_date_set BOOLEAN NOT NULL DEFAULT false
+                ) ON COMMIT DROP
+                """
+            )
+
+            # Batched INSERT into staging via execute_values.
+            from psycopg2.extras import execute_values
+            execute_values(
+                cur,
+                """
+                INSERT INTO outreach_staging
+                    (row_idx, parcel_id, contact_info_retrieved, mailer_date,
+                     contact_info_retrieved_set, mailer_date_set)
+                VALUES %s
+                """,
+                [
+                    (
+                        idx, pid, cir, md,
+                        contact_retrieved_col is not None,
+                        mailer_date_col is not None,
+                    )
+                    for idx, pid, cir, md in parsed_rows
+                ],
+                page_size=1000,
+            )
+
+            # Resolve county via set-based join — one UPDATE per county table.
+            for county_key, (table, pk) in _OUTREACH_PARCEL_TABLES.items():
+                # Defensive multi-county-match warning: count rows already matched
+                # in a different county before this UPDATE. Should be 0 (verified
+                # globally unique across 2.3M parcels).
+                cur.execute(
+                    f"""
+                    UPDATE outreach_staging s
+                    SET matched_county = %s
+                    FROM {table} p
+                    WHERE p.{pk} = s.parcel_id
+                      AND s.matched_county IS NULL
+                    """,
+                    (county_key,),
+                )
+
+            cur.execute(
+                """
+                SELECT
+                    COUNT(*),
+                    COUNT(*) FILTER (WHERE matched_county IS NOT NULL),
+                    COUNT(*) FILTER (WHERE matched_county IS NULL)
+                FROM outreach_staging
+                """
+            )
+            row_total, row_matched, row_unmatched = cur.fetchone()
+            matched = int(row_matched or 0)
+
+            if row_unmatched:
+                cur.execute(
+                    "SELECT parcel_id FROM outreach_staging WHERE matched_county IS NULL ORDER BY row_idx LIMIT 10"
+                )
+                sample_unmatched = [r[0] for r in cur.fetchall()]
+
+            if mode == "commit":
+                # Chunked UPSERT — 1000-row chunks via WHERE row_idx ranges.
+                # DISTINCT ON dedupes within the chunk's selected rows so we
+                # never present the same (county, parcel_id) twice to ON
+                # CONFLICT (which would raise CardinalityViolation). Last
+                # row in the CSV wins (ORDER BY row_idx DESC). Cross-chunk
+                # duplicates are handled naturally — second chunk's UPSERT
+                # just updates whatever the first chunk inserted.
+                # KK FUB round-trip 2026-06-03: this fires when Mike's
+                # saved area has comp rows + parcel rows pointing at the
+                # same underlying CAD parcel (intentional in CSV output;
+                # duplicates here).
+                chunk_size = 1000
+                row_idx = 0
+                while True:
+                    cur.execute(
+                        """
+                        WITH deduped AS (
+                            SELECT DISTINCT ON (s.matched_county, s.parcel_id)
+                                s.matched_county,
+                                s.parcel_id,
+                                CASE WHEN s.contact_info_retrieved_set
+                                     THEN COALESCE(s.contact_info_retrieved, false)
+                                     ELSE false END AS contact_info_retrieved,
+                                CASE WHEN s.mailer_date_set THEN s.mailer_date ELSE NULL END AS mailer_date
+                            FROM outreach_staging s
+                            WHERE s.matched_county IS NOT NULL
+                              AND s.row_idx >= %s AND s.row_idx < %s
+                            ORDER BY s.matched_county, s.parcel_id, s.row_idx DESC
+                        ),
+                        upserted AS (
+                            INSERT INTO parcel_outreach_notes
+                                (county, parcel_id, contact_info_retrieved, mailer_date,
+                                 last_updated_by_user_id, last_updated_at)
+                            SELECT
+                                d.matched_county,
+                                d.parcel_id,
+                                d.contact_info_retrieved,
+                                d.mailer_date,
+                                %s,
+                                now()
+                            FROM deduped d
+                            ON CONFLICT (county, parcel_id) DO UPDATE SET
+                                contact_info_retrieved = CASE WHEN (
+                                    SELECT s2.contact_info_retrieved_set FROM outreach_staging s2
+                                    WHERE s2.matched_county = parcel_outreach_notes.county
+                                      AND s2.parcel_id = parcel_outreach_notes.parcel_id
+                                    LIMIT 1
+                                ) THEN EXCLUDED.contact_info_retrieved ELSE parcel_outreach_notes.contact_info_retrieved END,
+                                mailer_date = CASE WHEN (
+                                    SELECT s2.mailer_date_set FROM outreach_staging s2
+                                    WHERE s2.matched_county = parcel_outreach_notes.county
+                                      AND s2.parcel_id = parcel_outreach_notes.parcel_id
+                                    LIMIT 1
+                                ) THEN EXCLUDED.mailer_date ELSE parcel_outreach_notes.mailer_date END,
+                                last_updated_by_user_id = EXCLUDED.last_updated_by_user_id,
+                                last_updated_at = EXCLUDED.last_updated_at
+                            RETURNING county, parcel_id
+                        )
+                        SELECT COUNT(*) FROM upserted
+                        """,
+                        (row_idx, row_idx + chunk_size, user_id),
+                    )
+                    chunk_count = int(cur.fetchone()[0])
+                    updated += chunk_count
+                    row_idx += chunk_size
+                    if row_idx >= row_total:
+                        break
+
+            # Audit row.
+            cur.execute(
+                """
+                INSERT INTO outreach_import_log
+                    (user_id, file_name, file_size_bytes, mode,
+                     rows_total, rows_matched, rows_unmatched, rows_updated)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING import_id
+                """,
+                (
+                    user_id,
+                    file.filename or "(unnamed)",
+                    file_size,
+                    mode,
+                    int(row_total),
+                    int(row_matched),
+                    int(row_unmatched),
+                    updated,
+                ),
+            )
+            import_id = cur.fetchone()[0]
+        conn.commit()
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        release_conn(conn)
+
+    return {
+        "import_id": str(import_id),
+        "mode": mode,
+        "total": int(row_total),
+        "matched": int(row_matched),
+        "unmatched": int(row_unmatched),
+        "updated": updated,
+        "sample_unmatched_ids": sample_unmatched,
+    }
+
+
+@app.get("/api/parcels/outreach/imports")
+async def list_parcel_outreach_imports(
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Return recent CSV imports (last 20) for diagnostics."""
+    if not _user_can_see_outreach(user):
+        raise HTTPException(status_code=403, detail="Outreach data not available for this role")
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT import_id, user_id, started_at, file_name, file_size_bytes,
+                       mode, rows_total, rows_matched, rows_unmatched, rows_updated, notes
+                FROM outreach_import_log
+                ORDER BY started_at DESC
+                LIMIT 20
+                """
+            )
+            rows = cur.fetchall()
+    finally:
+        release_conn(conn)
+
+    return {
+        "imports": [
+            {
+                "import_id": str(r[0]),
+                "user_id": int(r[1]) if r[1] is not None else None,
+                "started_at": r[2].isoformat() if r[2] else None,
+                "file_name": r[3],
+                "file_size_bytes": int(r[4]) if r[4] is not None else None,
+                "mode": r[5],
+                "rows_total": int(r[6] or 0),
+                "rows_matched": int(r[7] or 0),
+                "rows_unmatched": int(r[8] or 0),
+                "rows_updated": int(r[9] or 0),
+                "notes": r[10],
+            }
+            for r in rows
+        ]
+    }
 
 
 @app.get("/", include_in_schema=False)

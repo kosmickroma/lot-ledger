@@ -7805,6 +7805,97 @@ document.addEventListener("click", (ev) => {
   if (k) flyToAndOpenPropelioComp(k);
 });
 
+// Outreach save-on-blur / change handler (Mailer + Phone Tracking, 2026-06-03).
+// Delegated at document level so it survives every popup re-render. Each
+// outreach input PUTs to /api/parcels/outreach with the correct _set flag.
+async function _putOutreachField(county, parcelId, field, value) {
+  const body = { county, parcel_id: parcelId };
+  if (field === "contact_info_retrieved") {
+    body.contact_info_retrieved = Boolean(value);
+    body.contact_info_retrieved_set = true;
+  } else if (field === "mailer_date") {
+    body.mailer_date = value || null;
+    body.mailer_date_set = true;
+  } else {
+    throw new Error(`Unknown outreach field: ${field}`);
+  }
+  const resp = await fetch("/api/parcels/outreach", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) {
+    const txt = await resp.text().catch(() => "");
+    throw new Error(`Outreach save failed (${resp.status}): ${txt}`);
+  }
+  const data = await resp.json().catch(() => null);
+
+  // Update the in-memory feature so popup re-open / CSV path within the
+  // same client session see the new value WITHOUT a full page reload.
+  // KK reported 2026-06-03: edit popup → export CSV → cell was blank
+  // because the cached job rows + cached feature properties hadn't been
+  // updated. Backend now re-hydrates on cache-read; frontend mirrors that
+  // discipline by updating the local feature properties in place.
+  try {
+    _updateLocalFeatureOutreach(county, parcelId, field, value);
+  } catch (err) {
+    console.warn("[outreach] local feature update failed", err);
+  }
+  return data;
+}
+
+function _updateLocalFeatureOutreach(county, parcelId, field, value) {
+  if (!lastAnalysisGeojson || !Array.isArray(lastAnalysisGeojson.features)) return;
+  for (const feat of lastAnalysisGeojson.features) {
+    const props = feat?.properties;
+    if (!props) continue;
+    const featCounty = String(props.source_county || "").trim().toLowerCase();
+    if (featCounty !== county) continue;
+    const featKey = featCounty === "dcad"
+      ? String(props.account_num || "").trim()
+      : String(props.parcel_key || props.account_num || "").trim();
+    if (featKey !== parcelId) continue;
+    if (field === "contact_info_retrieved") {
+      props.outreach_contact_info_retrieved = Boolean(value);
+    } else if (field === "mailer_date") {
+      props.outreach_mailer_date = value || null;
+    }
+    break;
+  }
+}
+
+document.addEventListener("change", (ev) => {
+  const el = ev.target;
+  if (!(el instanceof HTMLElement)) return;
+  if (!el.classList.contains("parcel-panel-outreach-input")) return;
+  const field = el.getAttribute("data-outreach-field");
+  const county = el.getAttribute("data-outreach-county");
+  const parcelId = el.getAttribute("data-outreach-parcel-id");
+  if (!field || !county || !parcelId) return;
+
+  let value;
+  if (field === "contact_info_retrieved") {
+    value = el.checked;
+    const labelEl = el.parentElement?.querySelector(".parcel-panel-outreach-contact-label");
+    if (labelEl) labelEl.textContent = value ? "yes" : "";
+  } else {
+    value = el.value || "";
+  }
+
+  // Optimistic UI — assume save will succeed. Revert + toast on failure.
+  void _putOutreachField(county, parcelId, field, value).catch((err) => {
+    console.warn("[outreach] save failed", err);
+    if (field === "contact_info_retrieved" && el instanceof HTMLInputElement) {
+      el.checked = !value;
+      const labelEl = el.parentElement?.querySelector(".parcel-panel-outreach-contact-label");
+      if (labelEl) labelEl.textContent = el.checked ? "yes" : "";
+    }
+    try {
+      window?.alert?.(`Outreach save failed — please retry. ${String(err).slice(0, 120)}`);
+    } catch (_) {}
+  });
+});
+
 document.addEventListener("keydown", (ev) => {
   if (ev.key !== "Enter" && ev.key !== " ") return;
   const card = ev.target.closest(".propelio-good-comp-card");
@@ -9342,6 +9433,65 @@ function _buildPanelAgentBlockHtml(title, agent, emptyText) {
 //
 // Per Mike's 2026-06-01 ask, this section sits above Remarks in the
 // parcel detail panel.
+// Outreach section v2 (Mailer + Phone Tracking, 2026-06-03 PM).
+//
+// Two editable fields per parcel:
+//   - Contact Info Retrieved (checkbox) — "have I done skip-trace prep?"
+//   - Last Mailer Sent (date input) — when the last physical mail went out
+//
+// v1 had three fields (Phone Number text + Mailer Sent boolean + Mailer
+// Date). Mike's call after preview smoke: LotLedger doesn't store phones
+// (those live in his CRM), and a single date field is cleaner than a
+// redundant boolean+date pair.
+//
+// Save-on-change pattern (mirrors filter-state autosave). Each field PUTs
+// to /api/parcels/outreach with the appropriate _set flag on. No save
+// button. Optimistic UI — failed PUT reverts + shows toast.
+function _buildPanelOutreachHtml(p) {
+  if (!_isPowerUserOrAbove()) return "";
+  const county = String(p?.source_county || "").trim().toLowerCase();
+  const parcelKey = String(p?.parcel_key || p?.account_num || "").trim();
+  const accountNum = String(p?.account_num || "").trim();
+  if (!county || !parcelKey || !accountNum) return "";
+  // DCAD matches by account_num; the others by parcel_key.
+  const matchKey = county === "dcad" ? accountNum : (p?.parcel_key || parcelKey);
+  const contactRetrieved = Boolean(p?.outreach_contact_info_retrieved);
+  const mailerDate = String(p?.outreach_mailer_date || "").trim();
+  const escapedKey = _propelioEscape(matchKey);
+  const escapedCounty = _propelioEscape(county);
+  return `
+        <section class="parcel-panel-outreach" data-outreach-section>
+          <div class="parcel-panel-section-title">Outreach</div>
+          <table class="popup-table">
+            <tr>
+              <td class="popup-label">Contact info retrieved</td>
+              <td class="popup-val">
+                <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;">
+                  <input type="checkbox" class="parcel-panel-outreach-input"
+                         data-outreach-field="contact_info_retrieved"
+                         data-outreach-county="${escapedCounty}"
+                         data-outreach-parcel-id="${escapedKey}"
+                         ${contactRetrieved ? "checked" : ""}>
+                  <span class="parcel-panel-outreach-contact-label">${contactRetrieved ? "yes" : ""}</span>
+                </label>
+              </td>
+            </tr>
+            <tr>
+              <td class="popup-label">Last mailer sent date</td>
+              <td class="popup-val">
+                <input type="date" class="parcel-panel-outreach-input"
+                       data-outreach-field="mailer_date"
+                       data-outreach-county="${escapedCounty}"
+                       data-outreach-parcel-id="${escapedKey}"
+                       value="${_propelioEscape(mailerDate)}"
+                       style="font:inherit;padding:2px 4px;">
+              </td>
+            </tr>
+          </table>
+        </section>`;
+}
+
+
 function _buildPanelOwnerHistoryHtml(p) {
   const block = p?.owner_history && typeof p.owner_history === "object" ? p.owner_history : null;
   if (!block) return "";
@@ -9565,6 +9715,7 @@ function _buildParcelDetailPanelHtml(p, matchedComp) {
             : _buildPanelAgentBlockHtml("Buyer Agent", null, "Buyer agent only appears on sold comps.")}
         </section>
         ${_buildPanelOwnerHistoryHtml(p)}
+        ${_buildPanelOutreachHtml(p)}
         <section class="parcel-panel-remarks">
           <div class="parcel-panel-section-title">Remarks</div>
           ${compDetails?.remarks
@@ -11447,6 +11598,124 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
+// "Import from CRM" outreach upload (Mailer + Phone Tracking, 2026-06-03).
+// File input is hidden; the button triggers the picker. After file selection,
+// the flow is: POST preview → confirm dialog with diff counts → POST commit → toast.
+let _outreachImportInFlight = false;
+
+function _showOutreachToast(text) {
+  // Reuse the existing setShareStatus toast if available; else alert.
+  try {
+    if (typeof setShareStatus === "function") {
+      setShareStatus(text);
+      return;
+    }
+  } catch (_) {}
+  try { window.alert(text); } catch (_) {}
+}
+
+async function _postOutreachImport(file, mode) {
+  const form = new FormData();
+  form.append("file", file);
+  const resp = await fetch(`/api/parcels/outreach/import?mode=${encodeURIComponent(mode)}`, {
+    method: "POST",
+    headers: { ...authHeaders() },
+    body: form,
+  });
+  const data = await resp.json().catch(() => null);
+  if (!resp.ok) {
+    const detail = data?.detail || `${resp.status} ${resp.statusText}`;
+    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+  }
+  return data;
+}
+
+function _formatOutreachPreviewMessage(preview) {
+  const total = preview.total ?? 0;
+  const matched = preview.matched ?? 0;
+  const unmatched = preview.unmatched ?? 0;
+  let msg = `CSV preview\n\nTotal rows: ${total}\nMatched to a parcel: ${matched}\nUnmatched (will be skipped): ${unmatched}`;
+  const samples = Array.isArray(preview.sample_unmatched_ids) ? preview.sample_unmatched_ids : [];
+  if (samples.length) {
+    msg += `\n\nSample unmatched IDs:\n  ${samples.slice(0, 10).join("\n  ")}`;
+  }
+  msg += `\n\nProceed with import? (${matched} matching rows will be upserted into the outreach database.)`;
+  return msg;
+}
+
+document.getElementById("btn-import-outreach")?.addEventListener("click", () => {
+  if (_outreachImportInFlight) return;
+  if (!_isPowerUserOrAbove()) {
+    window.alert("Import from CRM requires power_user role or higher.");
+    return;
+  }
+  const fileEl = document.getElementById("outreach-import-file");
+  if (!fileEl) return;
+  fileEl.value = "";  // reset so picking the same file twice re-fires change
+  fileEl.click();
+});
+
+document.getElementById("outreach-import-file")?.addEventListener("change", async (ev) => {
+  const file = ev.target?.files?.[0];
+  if (!file) return;
+  if (_outreachImportInFlight) return;
+  _outreachImportInFlight = true;
+  const btn = document.getElementById("btn-import-outreach");
+  const originalLabel = btn?.textContent || "Import from CRM";
+  try {
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = "Previewing…";
+    }
+    const preview = await _postOutreachImport(file, "preview");
+    const total = preview.total ?? 0;
+    const matched = preview.matched ?? 0;
+    if (total === 0) {
+      _showOutreachToast("CSV has no data rows.");
+      return;
+    }
+    if (matched === 0) {
+      _showOutreachToast(
+        `CSV has ${total} rows but none matched a parcel in our DB. ` +
+        `Check your "Parcel ID" column values. Nothing was changed.`
+      );
+      return;
+    }
+    const proceed = window.confirm(_formatOutreachPreviewMessage(preview));
+    if (!proceed) {
+      _showOutreachToast("Import cancelled. Nothing was changed.");
+      return;
+    }
+    if (btn) btn.textContent = "Importing…";
+    const commit = await _postOutreachImport(file, "commit");
+    const updated = commit.updated ?? 0;
+    const unmatched = commit.unmatched ?? 0;
+    _showOutreachToast(
+      `Outreach import complete. Updated ${updated} parcels.` +
+      (unmatched ? ` ${unmatched} rows skipped (no matching parcel).` : "")
+    );
+    // Trigger an in-place refetch so newly-imported phones / mailers show
+    // up in popups without a full page reload. Best-effort — no-op if
+    // the current job context doesn't support it.
+    try {
+      if (typeof reloadCurrentArea === "function") {
+        await reloadCurrentArea();
+      } else if (typeof applyMapVisibilityFilters === "function") {
+        applyMapVisibilityFilters();
+      }
+    } catch (_) {}
+  } catch (err) {
+    console.error("[outreach-import] failed", err);
+    window.alert(`Outreach import failed: ${String(err?.message || err).slice(0, 400)}`);
+  } finally {
+    _outreachImportInFlight = false;
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = originalLabel;
+    }
+  }
+});
+
 document.getElementById("btn-download").addEventListener("click", async () => {
   if (_downloadInFlight) return;
   if (!currentJobId) return;
@@ -12547,6 +12816,15 @@ function _renderUserBar(user) {
   // Gate CSV download button visibility by role
   const dlBtn = document.getElementById("btn-download");
   if (dlBtn) dlBtn.classList.toggle("hidden", !_canDownloadCsv());
+  // Gate "Import from CRM" (outreach upload) — stricter gate than CSV
+  // download. Only power_user / owner / developer (Mailer + Phone Tracking,
+  // 2026-06-03). Members can download CSVs but can't upload outreach data.
+  //
+  // Toggle the WHOLE container (outreach-tools section), not just the
+  // button — the button no longer lives inside active-item-actions so
+  // we can't rely on the workspace-loaded gate to hide it.
+  const outreachTools = document.getElementById("outreach-tools");
+  if (outreachTools) outreachTools.classList.toggle("hidden", !_isPowerUserOrAbove());
 
   bar.innerHTML = `
     <div style="position:relative;">
