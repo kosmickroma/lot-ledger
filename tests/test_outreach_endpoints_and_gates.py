@@ -160,7 +160,14 @@ def test_frontend_import_button_in_index_html() -> None:
 
 
 def test_csv_outreach_columns_present_in_header() -> None:
+    """v2 (2026-06-03) shape: 3 outreach columns (Parcel ID, Contact Info
+    Retrieved, Last Mailer Sent). v1 had 4 (also Phone Number, Mailer Sent
+    boolean); both were dropped."""
     src = _read(MAIN_PY)
-    # The 4 new column headers must appear in the CSV header literal.
-    for col in ("\"Parcel ID\"", "\"Phone Number\"", "\"Mailer Sent\"", "\"Mailer Date\""):
+    for col in ("\"Parcel ID\"", "\"Contact Info Retrieved\"", "\"Last Mailer Sent\""):
         assert col in src, f"CSV header missing column literal: {col}"
+    # Old v1 columns must NOT be present anywhere in main.py.
+    for stale in ("\"Phone Number\"", "\"Mailer Sent\"", "\"Mailer Date\""):
+        assert stale not in src, (
+            f"v2 must not have stale column literal {stale} in api/main.py"
+        )

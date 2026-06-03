@@ -1625,22 +1625,23 @@ class StoredValueGetResponse(BaseModel):
 
 
 class OutreachPutRequest(BaseModel):
-    """Manual outreach edit from the popup (Mailer + Phone Tracking, 2026-06-03).
+    """Manual outreach edit from the popup (Mailer + Phone Tracking v2, 2026-06-03).
 
     Partial-update semantics: omitted keys are not touched. To explicitly
-    clear a field, send the literal null/None. Empty string on phone_number
-    is treated as None (clear).
+    clear a field, send the literal null/None.
+
+    v2 model: phone_number removed (Mike's phones live in his CRM), mailer_sent
+    boolean removed (mailer_date IS NOT NULL replaces its semantic). New
+    contact_info_retrieved boolean indicates whether outreach prep is done.
     """
     county: Literal["dcad", "tad", "collin", "denton"]
     parcel_id: str
-    phone_number: str | None = None
-    mailer_sent: bool | None = None
+    contact_info_retrieved: bool | None = None
     mailer_date: str | None = None  # ISO 'YYYY-MM-DD' or None
     # _set fields tell the server WHICH keys were intentionally supplied
     # vs simply absent. Pydantic doesn't distinguish missing-from-payload
     # from sent-as-None natively in v1 — these booleans make it explicit.
-    phone_number_set: bool = False
-    mailer_sent_set: bool = False
+    contact_info_retrieved_set: bool = False
     mailer_date_set: bool = False
 
 
@@ -3212,9 +3213,8 @@ def _fetch_dcad_parcel_by_account(account_num: str) -> tuple[dict[str, Any] | No
                        r.pct_complete AS pct_complete,
                       l.zoning, l.front_dim, l.depth_dim, l.area_size, l.area_uom, l.area_estimated,
                        (e.account_num IS NOT NULL) AS is_exempt_account,
-                       pon.phone_number AS outreach_phone,
-                       pon.mailer_sent  AS outreach_mailer_sent,
-                       pon.mailer_date  AS outreach_mailer_date
+                       pon.contact_info_retrieved AS outreach_contact_info_retrieved,
+                       pon.mailer_date            AS outreach_mailer_date
                 FROM parcels p
                 LEFT JOIN parcel_outreach_notes pon
                        ON pon.county = 'dcad' AND pon.parcel_id = p.account_num
@@ -3299,9 +3299,8 @@ def _fetch_tad_parcel_by_account(account_num: str) -> dict[str, Any] | None:
                        acres, land_acres, land_sqft,
                        year_built, living_area,
                        land_value, improvement_value, total_value,
-                       pon.phone_number AS outreach_phone,
-                       pon.mailer_sent  AS outreach_mailer_sent,
-                       pon.mailer_date  AS outreach_mailer_date,
+                       pon.contact_info_retrieved AS outreach_contact_info_retrieved,
+                       pon.mailer_date            AS outreach_mailer_date,
                        ST_Area(ST_OrientedEnvelope(geom)::geography) / NULLIF(ST_Area(geom::geography), 0) AS envelope_ratio,
                        ST_Perimeter(ST_OrientedEnvelope(geom)::geography) * 3.28084 AS envelope_perim_ft,
                        ST_Area(ST_OrientedEnvelope(geom)::geography) * 10.763910416709722 AS envelope_area_sqft,
@@ -3402,9 +3401,8 @@ def _fetch_collin_parcel_by_account(account_num: str) -> dict[str, Any] | None:
                     ag_acres,
                     ag_value,
                     ag_market_value,
-                    pon.phone_number AS outreach_phone,
-                    pon.mailer_sent  AS outreach_mailer_sent,
-                    pon.mailer_date  AS outreach_mailer_date,
+                    pon.contact_info_retrieved AS outreach_contact_info_retrieved,
+                    pon.mailer_date            AS outreach_mailer_date,
                     ST_Area(ST_OrientedEnvelope(geom)::geography) / NULLIF(ST_Area(geom::geography), 0) AS envelope_ratio,
                     ST_Perimeter(ST_OrientedEnvelope(geom)::geography) * 3.28084 AS envelope_perim_ft,
                     ST_Area(ST_OrientedEnvelope(geom)::geography) * 10.763910416709722 AS envelope_area_sqft,
@@ -3510,9 +3508,8 @@ def _fetch_denton_parcel_by_account(account_num: str) -> dict[str, Any] | None:
                     d.total_rooms,
                     d.outdoor_fireplaces,
                     d.end_unit,
-                    pon.phone_number AS outreach_phone,
-                    pon.mailer_sent  AS outreach_mailer_sent,
-                    pon.mailer_date  AS outreach_mailer_date
+                    pon.contact_info_retrieved AS outreach_contact_info_retrieved,
+                    pon.mailer_date            AS outreach_mailer_date
                 FROM denton_parcels p
                 LEFT JOIN LATERAL (
                     SELECT *
@@ -3738,7 +3735,10 @@ _OWNER_HISTORY_POPUP_ROLES = {"developer", "owner", "power_user"}
 # both are PII / outreach-tracking data restricted to power_user+. Regular
 # users + members do NOT see these fields anywhere (popup, CSV, API).
 _OUTREACH_ALLOWED_ROLES = {"developer", "owner", "power_user"}
-_OUTREACH_FEATURE_KEYS = ("outreach_phone", "outreach_mailer_sent", "outreach_mailer_date")
+# v2 (2026-06-03): drop outreach_phone (LotLedger doesn't store phones — they
+# live in Mike's CRM), drop outreach_mailer_sent boolean (mailer_date IS NOT
+# NULL replaces its semantic), add outreach_contact_info_retrieved.
+_OUTREACH_FEATURE_KEYS = ("outreach_contact_info_retrieved", "outreach_mailer_date")
 
 
 def _user_can_see_outreach(user: dict[str, Any] | None) -> bool:
@@ -3844,14 +3844,14 @@ def _hydrate_outreach_for_rows(rows: list[dict[str, Any]], user: dict[str, Any] 
 
     # Single batched fetch.
     conn = get_conn()
-    fresh: dict[tuple[str, str], tuple[str | None, bool, "date_module.date | None"]] = {}
+    fresh: dict[tuple[str, str], tuple[bool, "date_module.date | None"]] = {}
     try:
         from psycopg2.extras import execute_values
         with conn.cursor() as cur:
             execute_values(
                 cur,
                 """
-                SELECT pon.county, pon.parcel_id, pon.phone_number, pon.mailer_sent, pon.mailer_date
+                SELECT pon.county, pon.parcel_id, pon.contact_info_retrieved, pon.mailer_date
                 FROM parcel_outreach_notes pon
                 JOIN (VALUES %s) AS v(county, parcel_id)
                   ON v.county = pon.county AND v.parcel_id = pon.parcel_id
@@ -3860,50 +3860,48 @@ def _hydrate_outreach_for_rows(rows: list[dict[str, Any]], user: dict[str, Any] 
                 template="(%s, %s)",
                 page_size=1000,
             )
-            for c, pid, phone, mailer_sent, mailer_date in cur.fetchall():
-                fresh[(c, pid)] = (phone, bool(mailer_sent), mailer_date)
+            for c, pid, contact_retrieved, mailer_date in cur.fetchall():
+                fresh[(c, pid)] = (bool(contact_retrieved), mailer_date)
     finally:
         release_conn(conn)
 
     # Stamp values onto rows. Rows whose (county, parcel_id) isn't in the
-    # fresh map have no outreach record — explicitly set the three fields
-    # to None so any stale cached value is overwritten.
+    # fresh map have no outreach record — explicitly clear the cached fields
+    # so any stale value is overwritten.
     for row in rows:
         k = _row_outreach_key(row)
         if k is None:
-            row["outreach_phone"] = None
-            row["outreach_mailer_sent"] = False
+            row["outreach_contact_info_retrieved"] = False
             row["outreach_mailer_date"] = None
             continue
         if k in fresh:
-            phone, mailer_sent, mailer_date = fresh[k]
-            row["outreach_phone"] = phone
-            row["outreach_mailer_sent"] = mailer_sent
+            contact_retrieved, mailer_date = fresh[k]
+            row["outreach_contact_info_retrieved"] = contact_retrieved
             row["outreach_mailer_date"] = mailer_date.isoformat() if hasattr(mailer_date, "isoformat") and mailer_date else mailer_date
         else:
-            row["outreach_phone"] = None
-            row["outreach_mailer_sent"] = False
+            row["outreach_contact_info_retrieved"] = False
             row["outreach_mailer_date"] = None
 
 
-def _outreach_csv_cells(row: dict[str, Any] | None, user: dict[str, Any] | None) -> tuple[str, str, str, str]:
-    """Return the 4 right-edge CSV cells: (Parcel ID, Phone, Mailer Sent, Mailer Date).
+def _outreach_csv_cells(row: dict[str, Any] | None, user: dict[str, Any] | None) -> tuple[str, str, str]:
+    """Return the 3 right-edge CSV cells: (Parcel ID, Contact Info Retrieved, Last Mailer Sent).
 
-    - Parcel ID is always emitted regardless of role (it's the match key for
-      FUB round-trip; same data is already in feature.properties.account_num
-      / parcel_key visible everywhere).
-    - The 3 outreach cells are blanked when the user is below power_user+.
-    - row=None (e.g. orphan comp with no matched CAD parcel) → 4 empty cells.
+    v2 (2026-06-03): dropped Phone Number column (LotLedger doesn't store
+    phones — they live in Mike's CRM) and dropped the standalone Mailer
+    Sent boolean (presence of Last Mailer Sent date IS the "sent" signal).
+
+    - Parcel ID is always emitted regardless of role (it's the FUB-match
+      key, not outreach PII).
+    - The 2 outreach cells are blanked when the user is below power_user+.
+    - row=None (e.g. orphan comp with no matched CAD parcel) → 3 empty cells.
 
     Per-county PK lookup:
       DCAD     → row['account_num'] (17-char alphanumeric)
-      TAD      → row['parcel_key']  ('<acct>:<seq>')
-      Collin   → row['parcel_key']
-      Denton   → row['parcel_key']
+      TAD/Collin/Denton → row['parcel_key']
     All globally unique, no collisions across counties.
     """
     if not row:
-        return ("", "", "", "")
+        return ("", "", "")
     county = _csv_county_source(row).lower()
     if county == "dcad":
         parcel_id_value = str(row.get("account_num") or "").strip()
@@ -3914,11 +3912,10 @@ def _outreach_csv_cells(row: dict[str, Any] | None, user: dict[str, Any] | None)
         )
 
     if not _user_can_see_outreach(user):
-        return (parcel_id_value, "", "", "")
+        return (parcel_id_value, "", "")
 
-    phone = str(row.get("outreach_phone") or "").strip()
-    mailer_sent_raw = row.get("outreach_mailer_sent")
-    mailer_sent_cell = "yes" if mailer_sent_raw else ""
+    contact_retrieved_raw = row.get("outreach_contact_info_retrieved")
+    contact_retrieved_cell = "yes" if contact_retrieved_raw else ""
     mailer_date_raw = row.get("outreach_mailer_date")
     if hasattr(mailer_date_raw, "isoformat"):
         mailer_date_cell = mailer_date_raw.isoformat()
@@ -3926,7 +3923,7 @@ def _outreach_csv_cells(row: dict[str, Any] | None, user: dict[str, Any] | None)
         mailer_date_cell = str(mailer_date_raw)
     else:
         mailer_date_cell = ""
-    return (parcel_id_value, phone, mailer_sent_cell, mailer_date_cell)
+    return (parcel_id_value, contact_retrieved_cell, mailer_date_cell)
 
 
 def _format_live_deed_for_popup(raw: Any) -> str:
@@ -5295,16 +5292,18 @@ async def _run_download_csv(
                 "Prior Owner 2",
                 "Prior Owner 3",
                 "Prior Owner 4",
-                # Mailer + Phone Tracking (2026-06-03). Right-edge block;
+                # Mailer + Phone Tracking v2 (2026-06-03). Right-edge block;
                 # appended after Prior Owner 4 to keep existing columns
-                # byte-stable. Outreach cells (Phone / Mailer Sent / Mailer
-                # Date) are blanked for non-power_user roles via the helper
-                # _outreach_csv_cells (which still emits the Parcel ID match
-                # key — that's not outreach data).
+                # byte-stable. Outreach cells are blanked for non-power_user
+                # roles via _outreach_csv_cells (which still emits the
+                # Parcel ID match key — that's not PII).
+                # v2 removed Phone Number (Mike's phones live in CRM) and
+                # the Mailer Sent boolean (presence of Last Mailer Sent
+                # date replaces it). Renamed Mailer Date column header to
+                # Last Mailer Sent for clarity.
                 "Parcel ID",
-                "Phone Number",
-                "Mailer Sent",
-                "Mailer Date",
+                "Contact Info Retrieved",
+                "Last Mailer Sent",
             ]
         )
         buffer.seek(0)
@@ -7904,18 +7903,10 @@ async def put_parcel_outreach(
     if not _validate_outreach_parcel_id(county, parcel_id):
         raise HTTPException(status_code=404, detail=f"Parcel not found: {county}/{parcel_id}")
 
-    # Normalize values. Empty phone string → None (clear). mailer_date must
-    # parse as ISO date if supplied.
-    phone_value: str | None = None
-    if request.phone_number_set:
-        if request.phone_number is None:
-            phone_value = None
-        else:
-            phone_value = str(request.phone_number).strip() or None
-
-    mailer_sent_value: bool | None = None
-    if request.mailer_sent_set:
-        mailer_sent_value = bool(request.mailer_sent) if request.mailer_sent is not None else False
+    # Normalize values. mailer_date must parse as ISO date if supplied.
+    contact_info_retrieved_value: bool | None = None
+    if request.contact_info_retrieved_set:
+        contact_info_retrieved_value = bool(request.contact_info_retrieved) if request.contact_info_retrieved is not None else False
 
     mailer_date_value = None
     if request.mailer_date_set:
@@ -7926,8 +7917,8 @@ async def put_parcel_outreach(
             if request.mailer_date and mailer_date_value is None:
                 raise HTTPException(status_code=400, detail="mailer_date must be ISO YYYY-MM-DD")
 
-    if not (request.phone_number_set or request.mailer_sent_set or request.mailer_date_set):
-        raise HTTPException(status_code=400, detail="Nothing to update — set at least one of phone_number / mailer_sent / mailer_date")
+    if not (request.contact_info_retrieved_set or request.mailer_date_set):
+        raise HTTPException(status_code=400, detail="Nothing to update — set at least one of contact_info_retrieved / mailer_date")
 
     user_id = int(user["id"])
     conn = get_conn()
@@ -7935,32 +7926,30 @@ async def put_parcel_outreach(
         with conn.cursor() as cur:
             # Read existing row (so partial-update preserves untouched fields).
             cur.execute(
-                "SELECT phone_number, mailer_sent, mailer_date "
+                "SELECT contact_info_retrieved, mailer_date "
                 "FROM parcel_outreach_notes WHERE county = %s AND parcel_id = %s",
                 (county, parcel_id),
             )
             existing = cur.fetchone()
-            existing_phone, existing_mailer_sent, existing_mailer_date = (existing or (None, False, None))
+            existing_contact_retrieved, existing_mailer_date = (existing or (False, None))
 
-            new_phone = phone_value if request.phone_number_set else existing_phone
-            new_mailer_sent = mailer_sent_value if request.mailer_sent_set else (existing_mailer_sent or False)
+            new_contact_retrieved = contact_info_retrieved_value if request.contact_info_retrieved_set else (existing_contact_retrieved or False)
             new_mailer_date = mailer_date_value if request.mailer_date_set else existing_mailer_date
 
             cur.execute(
                 """
                 INSERT INTO parcel_outreach_notes
-                    (county, parcel_id, phone_number, mailer_sent, mailer_date,
+                    (county, parcel_id, contact_info_retrieved, mailer_date,
                      last_updated_by_user_id, last_updated_at)
-                VALUES (%s, %s, %s, %s, %s, %s, now())
+                VALUES (%s, %s, %s, %s, %s, now())
                 ON CONFLICT (county, parcel_id) DO UPDATE SET
-                    phone_number = EXCLUDED.phone_number,
-                    mailer_sent  = EXCLUDED.mailer_sent,
-                    mailer_date  = EXCLUDED.mailer_date,
+                    contact_info_retrieved = EXCLUDED.contact_info_retrieved,
+                    mailer_date            = EXCLUDED.mailer_date,
                     last_updated_by_user_id = EXCLUDED.last_updated_by_user_id,
                     last_updated_at = EXCLUDED.last_updated_at
-                RETURNING phone_number, mailer_sent, mailer_date, last_updated_at
+                RETURNING contact_info_retrieved, mailer_date, last_updated_at
                 """,
-                (county, parcel_id, new_phone, new_mailer_sent, new_mailer_date, user_id),
+                (county, parcel_id, new_contact_retrieved, new_mailer_date, user_id),
             )
             row = cur.fetchone()
         conn.commit()
@@ -7977,18 +7966,24 @@ async def put_parcel_outreach(
         "ok": True,
         "county": county,
         "parcel_id": parcel_id,
-        "outreach_phone": row[0],
-        "outreach_mailer_sent": bool(row[1]),
-        "outreach_mailer_date": row[2].isoformat() if row[2] else None,
-        "last_updated_at": row[3].isoformat() if row[3] else None,
+        "outreach_contact_info_retrieved": bool(row[0]),
+        "outreach_mailer_date": row[1].isoformat() if row[1] else None,
+        "last_updated_at": row[2].isoformat() if row[2] else None,
     }
 
 
 # CSV import — header aliases (case-insensitive) accepted for each logical field.
+# v2 2026-06-03: dropped phone + mailer_sent aliases (model removed those
+# fields); added contact_info_retrieved aliases.
 _OUTREACH_IMPORT_KEY_ALIASES = ("parcel id", "parcel_id", "cad id", "cad_id", "parcel_key", "account_num", "account #", "account")
-_OUTREACH_IMPORT_PHONE_ALIASES = ("phone number", "phone_number", "phone", "phone 1", "phone1")
-_OUTREACH_IMPORT_MAILER_SENT_ALIASES = ("mailer sent", "mailer_sent", "mailed", "mailer")
-_OUTREACH_IMPORT_MAILER_DATE_ALIASES = ("mailer date", "mailer_date", "date mailed", "date_mailed")
+_OUTREACH_IMPORT_CONTACT_RETRIEVED_ALIASES = (
+    "contact info retrieved", "contact_info_retrieved", "contact retrieved",
+    "skip traced", "skip_traced", "contacted",
+)
+_OUTREACH_IMPORT_MAILER_DATE_ALIASES = (
+    "last mailer sent date", "last_mailer_sent_date", "last mailer sent",
+    "mailer date", "mailer_date", "date mailed", "date_mailed",
+)
 _OUTREACH_IMPORT_TAGS_ALIASES = ("tags", "tag", "labels")
 
 # FUB-fallback constants. When the LotLedger→FUB import put the parcel_key
@@ -7998,10 +7993,6 @@ _OUTREACH_IMPORT_TAGS_ALIASES = ("tags", "tag", "labels")
 #     "00239925:000, Import"
 # Our parser handles that case by parsing Tags when parcel_key is empty.
 _OUTREACH_FUB_TAG_NOISE_LOWER = {"import", "imported", "lead", "client"}
-_OUTREACH_FUB_MAILER_SENT_TAG_VALUES_LOWER = {
-    "mailer-sent", "mailer_sent", "mailer sent",
-    "mailed", "mailer",
-}
 
 
 def _extract_parcel_id_from_fub_tags(tags_value: str) -> str:
@@ -8022,24 +8013,12 @@ def _extract_parcel_id_from_fub_tags(tags_value: str) -> str:
             continue
         if tag.lower() in _OUTREACH_FUB_TAG_NOISE_LOWER:
             continue
-        if tag.lower() in _OUTREACH_FUB_MAILER_SENT_TAG_VALUES_LOWER:
-            continue
         if not PARCEL_ID_SHAPE.match(tag):
             continue
         if not any(c.isdigit() for c in tag):
             continue
         return tag
     return ""
-
-
-def _detect_mailer_sent_from_fub_tags(tags_value: str) -> bool:
-    """True if the FUB Tags column contains a 'mailed'/'mailer-sent' marker."""
-    if not tags_value:
-        return False
-    for raw_tag in tags_value.split(","):
-        if raw_tag.strip().lower() in _OUTREACH_FUB_MAILER_SENT_TAG_VALUES_LOWER:
-            return True
-    return False
 
 _OUTREACH_IMPORT_MAX_BYTES = 10 * 1024 * 1024     # 10 MB
 _OUTREACH_IMPORT_MAX_ROWS = 50_000
@@ -8059,14 +8038,15 @@ def _find_csv_column(headers: list[str], aliases: tuple[str, ...]) -> str | None
     return None
 
 
-def _parse_outreach_mailer_sent_cell(raw: str) -> bool | None:
-    """Parse a Mailer Sent CSV cell. Accept 'yes'/'y'/'true'/'1' → True,
-    'no'/'n'/'false'/'0'/'' → False, anything else → None (treated as 'no change').
+def _parse_outreach_yes_no_cell(raw: str) -> bool | None:
+    """Parse a yes/no-style CSV cell. Accept 'yes'/'y'/'true'/'1' → True,
+    'no'/'n'/'false'/'0'/'' → False, anything else → None ('no change').
+    Used for Contact Info Retrieved + other boolean outreach fields.
     """
     text = str(raw or "").strip().lower()
-    if text in ("yes", "y", "true", "1", "sent", "mailed"):
+    if text in ("yes", "y", "true", "1", "contacted", "retrieved", "done"):
         return True
-    if text in ("no", "n", "false", "0", "", "unsent", "not sent"):
+    if text in ("no", "n", "false", "0", "", "uncontacted", "not contacted"):
         return False
     return None
 
@@ -8116,8 +8096,7 @@ async def import_parcel_outreach(
         raise HTTPException(status_code=400, detail="CSV has no header row")
 
     key_col = _find_csv_column(headers, _OUTREACH_IMPORT_KEY_ALIASES)
-    phone_col = _find_csv_column(headers, _OUTREACH_IMPORT_PHONE_ALIASES)
-    mailer_sent_col = _find_csv_column(headers, _OUTREACH_IMPORT_MAILER_SENT_ALIASES)
+    contact_retrieved_col = _find_csv_column(headers, _OUTREACH_IMPORT_CONTACT_RETRIEVED_ALIASES)
     mailer_date_col = _find_csv_column(headers, _OUTREACH_IMPORT_MAILER_DATE_ALIASES)
     # FUB fallback: when the LotLedger→FUB import didn't have a parcel_key
     # custom field set up, FUB stuffs the Parcel ID into the Tags column.
@@ -8136,7 +8115,7 @@ async def import_parcel_outreach(
         )
 
     # Read rows into memory (already capped at MAX_BYTES; row cap separately).
-    parsed_rows: list[tuple[int, str, str | None, bool | None, "date_module.date | None"]] = []
+    parsed_rows: list[tuple[int, str, bool | None, "date_module.date | None"]] = []
     import datetime as date_module
     rows_skipped_no_id = 0
     for idx, raw_row in enumerate(reader):
@@ -8152,22 +8131,12 @@ async def import_parcel_outreach(
         if not parcel_id:
             rows_skipped_no_id += 1
             continue
-        phone = str(raw_row.get(phone_col) or "").strip() if phone_col else None
-        if phone == "":
-            phone = None
-        mailer_sent = (
-            _parse_outreach_mailer_sent_cell(raw_row.get(mailer_sent_col) or "")
-            if mailer_sent_col else None
+        contact_retrieved = (
+            _parse_outreach_yes_no_cell(raw_row.get(contact_retrieved_col) or "")
+            if contact_retrieved_col else None
         )
-        # FUB fallback: if there's no dedicated mailer column but the Tags
-        # contain a 'mailer-sent' / 'mailed' marker, treat that as
-        # mailer_sent=true. (Tags without that marker → mailer_sent stays
-        # None / unset, so existing values are preserved.)
-        if mailer_sent is None and tags_value:
-            if _detect_mailer_sent_from_fub_tags(tags_value):
-                mailer_sent = True
         mailer_date = _parse_iso_date(str(raw_row.get(mailer_date_col) or "")) if mailer_date_col else None
-        parsed_rows.append((idx, parcel_id, phone, mailer_sent, mailer_date))
+        parsed_rows.append((idx, parcel_id, contact_retrieved, mailer_date))
 
     if not parsed_rows:
         raise HTTPException(status_code=400, detail="CSV had no data rows after the header")
@@ -8188,12 +8157,10 @@ async def import_parcel_outreach(
                 CREATE TEMP TABLE outreach_staging (
                     row_idx INTEGER PRIMARY KEY,
                     parcel_id TEXT NOT NULL,
-                    phone TEXT,
-                    mailer_sent BOOLEAN,
+                    contact_info_retrieved BOOLEAN,
                     mailer_date DATE,
                     matched_county TEXT,
-                    phone_set BOOLEAN NOT NULL DEFAULT false,
-                    mailer_sent_set BOOLEAN NOT NULL DEFAULT false,
+                    contact_info_retrieved_set BOOLEAN NOT NULL DEFAULT false,
                     mailer_date_set BOOLEAN NOT NULL DEFAULT false
                 ) ON COMMIT DROP
                 """
@@ -8205,18 +8172,17 @@ async def import_parcel_outreach(
                 cur,
                 """
                 INSERT INTO outreach_staging
-                    (row_idx, parcel_id, phone, mailer_sent, mailer_date,
-                     phone_set, mailer_sent_set, mailer_date_set)
+                    (row_idx, parcel_id, contact_info_retrieved, mailer_date,
+                     contact_info_retrieved_set, mailer_date_set)
                 VALUES %s
                 """,
                 [
                     (
-                        idx, pid, phone, ms, md,
-                        phone_col is not None,
-                        mailer_sent_col is not None,
+                        idx, pid, cir, md,
+                        contact_retrieved_col is not None,
                         mailer_date_col is not None,
                     )
-                    for idx, pid, phone, ms, md in parsed_rows
+                    for idx, pid, cir, md in parsed_rows
                 ],
                 page_size=1000,
             )
@@ -8276,8 +8242,9 @@ async def import_parcel_outreach(
                             SELECT DISTINCT ON (s.matched_county, s.parcel_id)
                                 s.matched_county,
                                 s.parcel_id,
-                                CASE WHEN s.phone_set THEN s.phone ELSE NULL END AS phone,
-                                CASE WHEN s.mailer_sent_set THEN COALESCE(s.mailer_sent, false) ELSE false END AS mailer_sent,
+                                CASE WHEN s.contact_info_retrieved_set
+                                     THEN COALESCE(s.contact_info_retrieved, false)
+                                     ELSE false END AS contact_info_retrieved,
                                 CASE WHEN s.mailer_date_set THEN s.mailer_date ELSE NULL END AS mailer_date
                             FROM outreach_staging s
                             WHERE s.matched_county IS NOT NULL
@@ -8286,30 +8253,23 @@ async def import_parcel_outreach(
                         ),
                         upserted AS (
                             INSERT INTO parcel_outreach_notes
-                                (county, parcel_id, phone_number, mailer_sent, mailer_date,
+                                (county, parcel_id, contact_info_retrieved, mailer_date,
                                  last_updated_by_user_id, last_updated_at)
                             SELECT
                                 d.matched_county,
                                 d.parcel_id,
-                                d.phone,
-                                d.mailer_sent,
+                                d.contact_info_retrieved,
                                 d.mailer_date,
                                 %s,
                                 now()
                             FROM deduped d
                             ON CONFLICT (county, parcel_id) DO UPDATE SET
-                                phone_number = CASE WHEN EXCLUDED.phone_number IS NOT NULL OR (
-                                    SELECT s2.phone_set FROM outreach_staging s2
+                                contact_info_retrieved = CASE WHEN (
+                                    SELECT s2.contact_info_retrieved_set FROM outreach_staging s2
                                     WHERE s2.matched_county = parcel_outreach_notes.county
                                       AND s2.parcel_id = parcel_outreach_notes.parcel_id
                                     LIMIT 1
-                                ) THEN EXCLUDED.phone_number ELSE parcel_outreach_notes.phone_number END,
-                                mailer_sent = CASE WHEN (
-                                    SELECT s2.mailer_sent_set FROM outreach_staging s2
-                                    WHERE s2.matched_county = parcel_outreach_notes.county
-                                      AND s2.parcel_id = parcel_outreach_notes.parcel_id
-                                    LIMIT 1
-                                ) THEN EXCLUDED.mailer_sent ELSE parcel_outreach_notes.mailer_sent END,
+                                ) THEN EXCLUDED.contact_info_retrieved ELSE parcel_outreach_notes.contact_info_retrieved END,
                                 mailer_date = CASE WHEN (
                                     SELECT s2.mailer_date_set FROM outreach_staging s2
                                     WHERE s2.matched_county = parcel_outreach_notes.county

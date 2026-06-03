@@ -52,9 +52,10 @@ def _writerow_cell_counts() -> list[int]:
                 elif isinstance(elt.value, ast.Call) and isinstance(elt.value.func, ast.Name) and elt.value.func.id == "_additional_owner_cells":
                     n += 4
                 elif isinstance(elt.value, ast.Call) and isinstance(elt.value.func, ast.Name) and elt.value.func.id == "_outreach_csv_cells":
-                    # Mailer + Phone Tracking (2026-06-03). 4-tuple: Parcel ID,
-                    # Phone Number, Mailer Sent, Mailer Date.
-                    n += 4
+                    # Mailer + Phone Tracking v2 (2026-06-03). 3-tuple:
+                    # Parcel ID, Contact Info Retrieved, Last Mailer Sent.
+                    # (v1 was 4 cells including Phone Number; v2 dropped it.)
+                    n += 3
                 else:
                     ok = False
                     break
@@ -79,13 +80,12 @@ def test_writerow_cell_counts_match():
     )
 
 
-def test_total_columns_is_at_least_192():
-    # 151 baseline + 31 v4a + 6 ownership-history (v2: Current Owner +
-    # Current Owner Acquired + Prior Owner 1..4) + 4 outreach right-edge
-    # (Mailer + Phone Tracking, 2026-06-03: Parcel ID, Phone Number,
-    # Mailer Sent, Mailer Date).
+def test_total_columns_is_at_least_191():
+    # 151 baseline + 31 v4a + 6 ownership-history + 3 outreach v2 right-edge
+    # (Parcel ID, Contact Info Retrieved, Last Mailer Sent). v2 dropped
+    # Phone Number + Mailer Sent boolean (was 4, now 3).
     counts = _writerow_cell_counts()
-    assert counts and counts[0] >= 192, (
-        f"Expected at least 192 cells (151 baseline + 31 v4a + 6 ownership + 4 outreach). "
+    assert counts and counts[0] >= 191, (
+        f"Expected at least 191 cells (151 baseline + 31 v4a + 6 ownership + 3 outreach v2). "
         f"Got {counts[0] if counts else 'no rows'}."
     )
