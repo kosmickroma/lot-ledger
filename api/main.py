@@ -7989,6 +7989,57 @@ _OUTREACH_IMPORT_KEY_ALIASES = ("parcel id", "parcel_id", "cad id", "cad_id", "p
 _OUTREACH_IMPORT_PHONE_ALIASES = ("phone number", "phone_number", "phone", "phone 1", "phone1")
 _OUTREACH_IMPORT_MAILER_SENT_ALIASES = ("mailer sent", "mailer_sent", "mailed", "mailer")
 _OUTREACH_IMPORT_MAILER_DATE_ALIASES = ("mailer date", "mailer_date", "date mailed", "date_mailed")
+_OUTREACH_IMPORT_TAGS_ALIASES = ("tags", "tag", "labels")
+
+# FUB-fallback constants. When the LotLedger→FUB import put the parcel_key
+# into the Tags column (because the operator didn't create a `parcel_key`
+# custom field in FUB before importing), the FUB export comes back with an
+# empty `parcel_key` column and the actual ID inside Tags like:
+#     "00239925:000, Import"
+# Our parser handles that case by parsing Tags when parcel_key is empty.
+_OUTREACH_FUB_TAG_NOISE_LOWER = {"import", "imported", "lead", "client"}
+_OUTREACH_FUB_MAILER_SENT_TAG_VALUES_LOWER = {
+    "mailer-sent", "mailer_sent", "mailer sent",
+    "mailed", "mailer",
+}
+
+
+def _extract_parcel_id_from_fub_tags(tags_value: str) -> str:
+    """When FUB stores parcel_key inside the Tags column, the export comes
+    back like "00239925:000, Import". Pick the first non-noise tag that
+    looks like a parcel_id (alphanumeric with optional colon/dash, contains
+    at least one digit).
+
+    Returns "" when nothing usable found.
+    """
+    import re as re_module
+    if not tags_value:
+        return ""
+    PARCEL_ID_SHAPE = re_module.compile(r"^[\w:.\-]+$")
+    for raw_tag in tags_value.split(","):
+        tag = raw_tag.strip()
+        if not tag:
+            continue
+        if tag.lower() in _OUTREACH_FUB_TAG_NOISE_LOWER:
+            continue
+        if tag.lower() in _OUTREACH_FUB_MAILER_SENT_TAG_VALUES_LOWER:
+            continue
+        if not PARCEL_ID_SHAPE.match(tag):
+            continue
+        if not any(c.isdigit() for c in tag):
+            continue
+        return tag
+    return ""
+
+
+def _detect_mailer_sent_from_fub_tags(tags_value: str) -> bool:
+    """True if the FUB Tags column contains a 'mailed'/'mailer-sent' marker."""
+    if not tags_value:
+        return False
+    for raw_tag in tags_value.split(","):
+        if raw_tag.strip().lower() in _OUTREACH_FUB_MAILER_SENT_TAG_VALUES_LOWER:
+            return True
+    return False
 
 _OUTREACH_IMPORT_MAX_BYTES = 10 * 1024 * 1024     # 10 MB
 _OUTREACH_IMPORT_MAX_ROWS = 50_000
@@ -8065,31 +8116,56 @@ async def import_parcel_outreach(
         raise HTTPException(status_code=400, detail="CSV has no header row")
 
     key_col = _find_csv_column(headers, _OUTREACH_IMPORT_KEY_ALIASES)
-    if key_col is None:
+    phone_col = _find_csv_column(headers, _OUTREACH_IMPORT_PHONE_ALIASES)
+    mailer_sent_col = _find_csv_column(headers, _OUTREACH_IMPORT_MAILER_SENT_ALIASES)
+    mailer_date_col = _find_csv_column(headers, _OUTREACH_IMPORT_MAILER_DATE_ALIASES)
+    # FUB fallback: when the LotLedger→FUB import didn't have a parcel_key
+    # custom field set up, FUB stuffs the Parcel ID into the Tags column.
+    # The Tags column comes back as "00239925:000, Import" — we parse it
+    # below per-row when the dedicated key column is missing or empty.
+    tags_col = _find_csv_column(headers, _OUTREACH_IMPORT_TAGS_ALIASES)
+
+    if key_col is None and tags_col is None:
         raise HTTPException(
             status_code=400,
             detail=(
                 "Required column not found. Add a 'Parcel ID' column (or 'parcel_key' / 'account_num') "
-                f"to your CSV. Headers seen: {headers}"
+                f"to your CSV, OR include a 'Tags' column containing the parcel IDs (FUB fallback). "
+                f"Headers seen: {headers}"
             ),
         )
-    phone_col = _find_csv_column(headers, _OUTREACH_IMPORT_PHONE_ALIASES)
-    mailer_sent_col = _find_csv_column(headers, _OUTREACH_IMPORT_MAILER_SENT_ALIASES)
-    mailer_date_col = _find_csv_column(headers, _OUTREACH_IMPORT_MAILER_DATE_ALIASES)
 
     # Read rows into memory (already capped at MAX_BYTES; row cap separately).
     parsed_rows: list[tuple[int, str, str | None, bool | None, "date_module.date | None"]] = []
     import datetime as date_module
+    rows_skipped_no_id = 0
     for idx, raw_row in enumerate(reader):
         if idx >= _OUTREACH_IMPORT_MAX_ROWS:
             raise HTTPException(status_code=413, detail=f"CSV too many rows (>{_OUTREACH_IMPORT_MAX_ROWS})")
-        parcel_id = str(raw_row.get(key_col) or "").strip()
+        # Primary path: dedicated parcel_id column.
+        parcel_id = str(raw_row.get(key_col) or "").strip() if key_col else ""
+        # FUB fallback: pull from Tags when the dedicated column was missing
+        # or this specific row's cell is empty.
+        tags_value = str(raw_row.get(tags_col) or "") if tags_col else ""
+        if not parcel_id and tags_value:
+            parcel_id = _extract_parcel_id_from_fub_tags(tags_value)
         if not parcel_id:
+            rows_skipped_no_id += 1
             continue
         phone = str(raw_row.get(phone_col) or "").strip() if phone_col else None
         if phone == "":
             phone = None
-        mailer_sent = _parse_outreach_mailer_sent_cell(raw_row.get(mailer_sent_col) or "") if mailer_sent_col else None
+        mailer_sent = (
+            _parse_outreach_mailer_sent_cell(raw_row.get(mailer_sent_col) or "")
+            if mailer_sent_col else None
+        )
+        # FUB fallback: if there's no dedicated mailer column but the Tags
+        # contain a 'mailer-sent' / 'mailed' marker, treat that as
+        # mailer_sent=true. (Tags without that marker → mailer_sent stays
+        # None / unset, so existing values are preserved.)
+        if mailer_sent is None and tags_value:
+            if _detect_mailer_sent_from_fub_tags(tags_value):
+                mailer_sent = True
         mailer_date = _parse_iso_date(str(raw_row.get(mailer_date_col) or "")) if mailer_date_col else None
         parsed_rows.append((idx, parcel_id, phone, mailer_sent, mailer_date))
 
