@@ -12840,8 +12840,12 @@ function _renderUserBar(user) {
   // Gate "Import from CRM" (outreach upload) — stricter gate than CSV
   // download. Only power_user / owner / developer (Mailer + Phone Tracking,
   // 2026-06-03). Members can download CSVs but can't upload outreach data.
-  const importBtn = document.getElementById("btn-import-outreach");
-  if (importBtn) importBtn.classList.toggle("hidden", !_isPowerUserOrAbove());
+  //
+  // Toggle the WHOLE container (outreach-tools section), not just the
+  // button — the button no longer lives inside active-item-actions so
+  // we can't rely on the workspace-loaded gate to hide it.
+  const outreachTools = document.getElementById("outreach-tools");
+  if (outreachTools) outreachTools.classList.toggle("hidden", !_isPowerUserOrAbove());
 
   bar.innerHTML = `
     <div style="position:relative;">
