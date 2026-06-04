@@ -52,10 +52,11 @@ def _writerow_cell_counts() -> list[int]:
                 elif isinstance(elt.value, ast.Call) and isinstance(elt.value.func, ast.Name) and elt.value.func.id == "_additional_owner_cells":
                     n += 4
                 elif isinstance(elt.value, ast.Call) and isinstance(elt.value.func, ast.Name) and elt.value.func.id == "_outreach_csv_cells":
-                    # Mailer + Phone Tracking v2 (2026-06-03). 3-tuple:
-                    # Parcel ID, Contact Info Retrieved, Last Mailer Sent.
-                    # (v1 was 4 cells including Phone Number; v2 dropped it.)
-                    n += 3
+                    # Mailer + Phone Tracking v3 (2026-06-03 PM). 2-tuple:
+                    # Contact Info Retrieved, Last Mailer Sent.
+                    # (Parcel ID moved out to column B as a separate cell —
+                    # _outreach_parcel_id_cell — per Mike's request.)
+                    n += 2
                 else:
                     ok = False
                     break
