@@ -3779,8 +3779,17 @@ def _row_outreach_key(row: dict[str, Any]) -> tuple[str, str] | None:
     """Return (county_lower, parcel_id) for a row, or None if not addressable.
     DCAD uses account_num; others use parcel_key. Mirror of frontend matchKey
     logic in _buildPanelOutreachHtml.
+
+    KK reported bug 2026-06-03 PM: cached_jobs rows cache DCAD's raw
+    division_cd as "RES" (Residential) or "COM" (Commercial) — NOT "DCAD".
+    Raw string comparison against the {dcad,tad,collin,denton} set failed
+    for cached rows → hydrate skipped → CSV outreach cells came back blank
+    even though the DB had data. Fix: route through _csv_county_source
+    which already knows the RES/COM → DCAD mapping (see
+    _CSV_COUNTY_SOURCE_MAP), then lowercase its output.
     """
-    county = str(row.get("source_county") or row.get("division_cd") or "").strip().lower()
+    pascal_county = _csv_county_source(row)  # handles "RES"/"COM" → "DCAD"
+    county = pascal_county.lower()
     if county not in _OUTREACH_PARCEL_TABLES:
         return None
     if county == "dcad":
