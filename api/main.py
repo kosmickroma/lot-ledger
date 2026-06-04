@@ -3883,17 +3883,13 @@ def _hydrate_outreach_for_rows(rows: list[dict[str, Any]], user: dict[str, Any] 
             row["outreach_mailer_date"] = None
 
 
-def _outreach_csv_cells(row: dict[str, Any] | None, user: dict[str, Any] | None) -> tuple[str, str, str]:
-    """Return the 3 right-edge CSV cells: (Parcel ID, Contact Info Retrieved, Last Mailer Sent).
+def _outreach_parcel_id_cell(row: dict[str, Any] | None) -> str:
+    """Return the Parcel ID for one CSV row.
 
-    v2 (2026-06-03): dropped Phone Number column (LotLedger doesn't store
-    phones — they live in Mike's CRM) and dropped the standalone Mailer
-    Sent boolean (presence of Last Mailer Sent date IS the "sent" signal).
-
-    - Parcel ID is always emitted regardless of role (it's the FUB-match
-      key, not outreach PII).
-    - The 2 outreach cells are blanked when the user is below power_user+.
-    - row=None (e.g. orphan comp with no matched CAD parcel) → 3 empty cells.
+    v3 (2026-06-03 PM, Mike request): Parcel ID was pulled out of the
+    right-edge outreach block and placed at column B (position 2). It's
+    the FUB-match key, not outreach PII, so always emitted regardless of
+    user role. row=None → empty string.
 
     Per-county PK lookup:
       DCAD     → row['account_num'] (17-char alphanumeric)
@@ -3901,18 +3897,31 @@ def _outreach_csv_cells(row: dict[str, Any] | None, user: dict[str, Any] | None)
     All globally unique, no collisions across counties.
     """
     if not row:
-        return ("", "", "")
+        return ""
     county = _csv_county_source(row).lower()
     if county == "dcad":
-        parcel_id_value = str(row.get("account_num") or "").strip()
-    else:
-        parcel_id_value = (
-            str(row.get("parcel_key") or "").strip()
-            or str(row.get("account_num") or "").strip()
-        )
+        return str(row.get("account_num") or "").strip()
+    return (
+        str(row.get("parcel_key") or "").strip()
+        or str(row.get("account_num") or "").strip()
+    )
 
+
+def _outreach_csv_cells(row: dict[str, Any] | None, user: dict[str, Any] | None) -> tuple[str, str]:
+    """Return the 2 right-edge outreach CSV cells: (Contact Info Retrieved, Last Mailer Sent).
+
+    v3 (2026-06-03 PM): Parcel ID moved out to column B via the separate
+    _outreach_parcel_id_cell helper. This helper now only handles the role-
+    gated outreach data.
+
+    - Both cells blanked when the user is below power_user+ (Mike's outreach
+      data is PII).
+    - row=None (e.g. orphan comp with no matched CAD parcel) → 2 empty cells.
+    """
+    if not row:
+        return ("", "")
     if not _user_can_see_outreach(user):
-        return (parcel_id_value, "", "")
+        return ("", "")
 
     contact_retrieved_raw = row.get("outreach_contact_info_retrieved")
     contact_retrieved_cell = "yes" if contact_retrieved_raw else ""
@@ -3923,7 +3932,7 @@ def _outreach_csv_cells(row: dict[str, Any] | None, user: dict[str, Any] | None)
         mailer_date_cell = str(mailer_date_raw)
     else:
         mailer_date_cell = ""
-    return (parcel_id_value, contact_retrieved_cell, mailer_date_cell)
+    return (contact_retrieved_cell, mailer_date_cell)
 
 
 def _format_live_deed_for_popup(raw: Any) -> str:
@@ -5071,7 +5080,8 @@ async def _run_download_csv(
         writer.writerow(
             [
                 "Row Type",
-                "County Source",  # 2 (Phase 2 — 2026-05-21): "DCAD" / "TAD" / "Collin" / "Denton"
+                "Parcel ID",      # 2 (Mike request 2026-06-03 PM): convenient at column B
+                "County Source",  # 3 (Phase 2 — 2026-05-21): "DCAD" / "TAD" / "Collin" / "Denton"
                 "Intended Target",
                 "MLS Status",
                 "Property Address",
@@ -5292,16 +5302,11 @@ async def _run_download_csv(
                 "Prior Owner 2",
                 "Prior Owner 3",
                 "Prior Owner 4",
-                # Mailer + Phone Tracking v2 (2026-06-03). Right-edge block;
-                # appended after Prior Owner 4 to keep existing columns
-                # byte-stable. Outreach cells are blanked for non-power_user
-                # roles via _outreach_csv_cells (which still emits the
-                # Parcel ID match key — that's not PII).
-                # v2 removed Phone Number (Mike's phones live in CRM) and
-                # the Mailer Sent boolean (presence of Last Mailer Sent
-                # date replaces it). Renamed Mailer Date column header to
-                # Last Mailer Sent for clarity.
-                "Parcel ID",
+                # Mailer + Phone Tracking v3 (2026-06-03 PM). Right-edge
+                # block now holds only the role-gated outreach cells.
+                # v3 (Mike request): Parcel ID moved out of this block to
+                # column B (position 2) for convenience — column-letter
+                # formulas for everything from column B onward shifted +1.
                 "Contact Info Retrieved",
                 "Last Mailer Sent",
             ]
@@ -5425,7 +5430,8 @@ async def _run_download_csv(
             writer.writerow(
                 [
                     "Parcel",
-                    _csv_county_source(row),  # 2 (Phase 2)
+                    _outreach_parcel_id_cell(row),  # 2 (Mike request 2026-06-03 PM): Parcel ID at column B
+                    _csv_county_source(row),         # 3 (Phase 2)
                     "yes" if _is_intended_target else "",
                     "Active" if on_redfin else "Off Market",
                     display_address,
@@ -5767,8 +5773,9 @@ async def _run_download_csv(
             writer.writerow(
                 [
                     "Comp",                                                                                     # 1
-                    _csv_county_source(_cad) if _cad else "",                                                   # 2 County Source (Phase 2)
-                    "",                                                                                          # 3 Intended Target
+                    _outreach_parcel_id_cell(_cad),                                                              # 2 Parcel ID (Mike request 2026-06-03 PM)
+                    _csv_county_source(_cad) if _cad else "",                                                   # 3 County Source (Phase 2)
+                    "",                                                                                          # 4 Intended Target
                     _comp_status_titled,                                                                         # 4 MLS Status (comp's own status)
                     _row_address,                                                                                # 5 Property Address
                     _cad.get("property_city", "") or "",                                                         # 6 Property City
