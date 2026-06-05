@@ -8264,6 +8264,26 @@ async def import_parcel_outreach(
                     (county_key,),
                 )
 
+            # DCAD-only second pass: Excel strips leading zeros when a user
+            # opens an exported CSV and re-saves it. DCAD's account_num is
+            # canonically 17 digits, zero-padded ('00000424978000000'); after
+            # Excel mangling, Mike's CSV cell looks like '424978000000'. Pad
+            # numeric-only ids back to 17 and retry. Mike bug 2026-06-05:
+            # entire re-import wrote nothing because the row went silently to
+            # the unmatched bucket. Only DCAD needs this: TAD parcel_keys
+            # contain colons, Collin contains letters, Denton isn't zero-
+            # padded — none of those get mangled by Excel.
+            cur.execute(
+                """
+                UPDATE outreach_staging s
+                SET matched_county = 'dcad'
+                FROM parcels p
+                WHERE p.account_num = LPAD(s.parcel_id, 17, '0')
+                  AND s.matched_county IS NULL
+                  AND s.parcel_id ~ '^[0-9]+$'
+                """
+            )
+
             cur.execute(
                 """
                 SELECT
