@@ -8057,13 +8057,22 @@ def _find_csv_column(headers: list[str], aliases: tuple[str, ...]) -> str | None
 
 def _parse_outreach_yes_no_cell(raw: str) -> bool | None:
     """Parse a yes/no-style CSV cell. Accept 'yes'/'y'/'true'/'1' → True,
-    'no'/'n'/'false'/'0'/'' → False, anything else → None ('no change').
-    Used for Contact Info Retrieved + other boolean outreach fields.
+    'no'/'n'/'false'/'0' → False, EMPTY or unrecognized → None.
+
+    Mike bug 2026-06-05 (post-LPAD-fix): Mike's CSV is a saved-area export
+    where the same parcel appears twice (once as a parcel row with the Yes
+    cell filled in, once as a comp row with the Yes cell empty). The
+    dedup picked the later (empty) row and the empty cell was being
+    parsed as False, silently overwriting Mike's actual entries. Empty
+    cells must mean "no change," not "clear to False." If Mike ever wants
+    to explicitly clear, he types "no"/"false"/"0".
     """
     text = str(raw or "").strip().lower()
+    if not text:
+        return None
     if text in ("yes", "y", "true", "1", "contacted", "retrieved", "done"):
         return True
-    if text in ("no", "n", "false", "0", "", "uncontacted", "not contacted"):
+    if text in ("no", "n", "false", "0", "uncontacted", "not contacted"):
         return False
     return None
 
@@ -8228,6 +8237,12 @@ async def import_parcel_outreach(
             )
 
             # Batched INSERT into staging via execute_values.
+            # Per-row *_set flags (Mike bug 2026-06-05): set is True only when
+            # the cell had explicit content. Empty cells = "no change" not
+            # "clear to False". This matters because Mike's saved-area CSV
+            # has the same parcel in two rows (parcel section with data +
+            # comp section with empty cells); a column-level set flag plus
+            # row_idx-DESC dedup picked the empty row and wiped his entries.
             from psycopg2.extras import execute_values
             execute_values(
                 cur,
@@ -8240,8 +8255,8 @@ async def import_parcel_outreach(
                 [
                     (
                         idx, pid, cir, md,
-                        contact_retrieved_col is not None,
-                        mailer_date_col is not None,
+                        cir is not None,
+                        md is not None,
                     )
                     for idx, pid, cir, md in parsed_rows
                 ],
@@ -8328,17 +8343,41 @@ async def import_parcel_outreach(
                     cur.execute(
                         """
                         WITH deduped AS (
+                            -- Pick the most data-bearing row per parcel. Mike's
+                            -- saved-area CSV exports each parcel twice — once
+                            -- in the parcel section with outreach cells filled
+                            -- in, once in the comp section with empty cells.
+                            -- Previous "row_idx DESC" dedup picked the empty
+                            -- (later) row and silently wiped Mike's entries.
                             SELECT DISTINCT ON (s.matched_county, s.parcel_id)
                                 s.matched_county,
                                 s.parcel_id,
-                                CASE WHEN s.contact_info_retrieved_set
-                                     THEN COALESCE(s.contact_info_retrieved, false)
-                                     ELSE false END AS contact_info_retrieved,
-                                CASE WHEN s.mailer_date_set THEN s.mailer_date ELSE NULL END AS mailer_date
+                                s.contact_info_retrieved,
+                                s.contact_info_retrieved_set,
+                                s.mailer_date,
+                                s.mailer_date_set
                             FROM outreach_staging s
                             WHERE s.matched_county IS NOT NULL
                               AND s.row_idx >= %s AND s.row_idx < %s
-                            ORDER BY s.matched_county, s.parcel_id, s.row_idx DESC
+                              -- Skip no-op rows (neither flag set) entirely so
+                              -- a CSV row with all-empty outreach cells doesn't
+                              -- create or touch a parcel_outreach_notes row.
+                              AND (s.contact_info_retrieved_set OR s.mailer_date_set)
+                            ORDER BY s.matched_county, s.parcel_id,
+                                     (s.contact_info_retrieved_set::int + s.mailer_date_set::int) DESC,
+                                     s.row_idx DESC
+                        ),
+                        existing AS (
+                            -- Pull current values for parcels that already have
+                            -- a row, so the SELECT below can preserve untouched
+                            -- fields without needing CASE/EXCLUDED gymnastics in
+                            -- the ON CONFLICT clause.
+                            SELECT pon.county, pon.parcel_id,
+                                   pon.contact_info_retrieved AS old_cir,
+                                   pon.mailer_date AS old_md
+                            FROM parcel_outreach_notes pon
+                            JOIN deduped d ON d.matched_county = pon.county
+                                          AND d.parcel_id      = pon.parcel_id
                         ),
                         upserted AS (
                             INSERT INTO parcel_outreach_notes
@@ -8347,24 +8386,20 @@ async def import_parcel_outreach(
                             SELECT
                                 d.matched_county,
                                 d.parcel_id,
-                                d.contact_info_retrieved,
-                                d.mailer_date,
+                                CASE WHEN d.contact_info_retrieved_set
+                                     THEN COALESCE(d.contact_info_retrieved, false)
+                                     ELSE COALESCE(e.old_cir, false) END,
+                                CASE WHEN d.mailer_date_set
+                                     THEN d.mailer_date
+                                     ELSE e.old_md END,
                                 %s,
                                 now()
                             FROM deduped d
+                            LEFT JOIN existing e ON e.county = d.matched_county
+                                                AND e.parcel_id = d.parcel_id
                             ON CONFLICT (county, parcel_id) DO UPDATE SET
-                                contact_info_retrieved = CASE WHEN (
-                                    SELECT s2.contact_info_retrieved_set FROM outreach_staging s2
-                                    WHERE s2.matched_county = parcel_outreach_notes.county
-                                      AND s2.parcel_id = parcel_outreach_notes.parcel_id
-                                    LIMIT 1
-                                ) THEN EXCLUDED.contact_info_retrieved ELSE parcel_outreach_notes.contact_info_retrieved END,
-                                mailer_date = CASE WHEN (
-                                    SELECT s2.mailer_date_set FROM outreach_staging s2
-                                    WHERE s2.matched_county = parcel_outreach_notes.county
-                                      AND s2.parcel_id = parcel_outreach_notes.parcel_id
-                                    LIMIT 1
-                                ) THEN EXCLUDED.mailer_date ELSE parcel_outreach_notes.mailer_date END,
+                                contact_info_retrieved = EXCLUDED.contact_info_retrieved,
+                                mailer_date            = EXCLUDED.mailer_date,
                                 last_updated_by_user_id = EXCLUDED.last_updated_by_user_id,
                                 last_updated_at = EXCLUDED.last_updated_at
                             RETURNING county, parcel_id, contact_info_retrieved, mailer_date
