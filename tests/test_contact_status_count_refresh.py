@@ -80,3 +80,26 @@ def test_sse_filter_apply_refreshes_count_badge() -> None:
         "SSE filter-apply path must call _updateMergedSidebarCounts() "
         "so count badges stay in sync with remote filter changes."
     )
+
+
+def test_clear_button_clears_outreach_overlay_layer() -> None:
+    """Mike report 2026-06-05: blue phone overlays stayed on the map
+    after hitting Clear. clearDrawResults() clears every other live-
+    overlay layer (CAD ratings, propelio comps, redfin, sold, badges) —
+    the outreach overlay must be in that list too, otherwise icons
+    linger at coordinates with no underlying parcel context."""
+    src = _read()
+    # The fix sits right after cadRatingLayer + propelioCompLayer clears
+    pat = re.compile(
+        r"propelioCompLayer\.clearLayers\(\);\s*"
+        r"cadRatingLayer\.clearLayers\(\);.*?"
+        r"outreachOverlayLayer\.clearLayers\(\);\s*"
+        r"outreachOverlayLayerByKey\.clear\(\);\s*"
+        r"outreachOverlayGeomSeen\.clear\(\);",
+        re.DOTALL,
+    )
+    assert pat.search(src), (
+        "clearDrawResults must wipe outreachOverlayLayer + "
+        "outreachOverlayLayerByKey + outreachOverlayGeomSeen alongside the "
+        "other live-overlay layers it already clears."
+    )

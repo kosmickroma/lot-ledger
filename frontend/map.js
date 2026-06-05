@@ -11612,6 +11612,14 @@ function clearDrawResults() {
   cadRatingLayer.clearLayers();
   cadRatingLayerByKey.clear();
   propelioCompLayerByKey.clear();
+  // Mike report 2026-06-05: blue phone overlays were lingering on the
+  // map after Clear. Same pattern as the CAD rating + propelio comp
+  // layers above — Clear must wipe the live-overlay state we attach to
+  // the saved area, otherwise the icons stay glued to coordinates with
+  // no underlying parcel.
+  outreachOverlayLayer.clearLayers();
+  outreachOverlayLayerByKey.clear();
+  outreachOverlayGeomSeen.clear();
   window._propelioLast = null;
   _updatePropelioStatusCounts();
   propelioCmaChip.hide();
