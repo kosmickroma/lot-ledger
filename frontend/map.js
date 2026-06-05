@@ -2530,6 +2530,7 @@ function getVisibleFeatureCounts(features, options = {}) {
     duplexes: 0,
     commercial: 0,
     exempt: 0,
+    contact_status: 0,
   };
 
   const list = Array.isArray(features) ? features : [];
@@ -2566,6 +2567,14 @@ function getVisibleFeatureCounts(features, options = {}) {
     }
 
     counts[bucket] += 1;
+
+    // Contact Status is orthogonal to the property-type bucket — a parcel
+    // can be off_market AND have outreach data. Count it independently so
+    // the sidebar badge reflects "how many parcels in this area have any
+    // outreach activity," not "how many are bucketed as contact_status."
+    if (p.outreach_contact_info_retrieved || p.outreach_mailer_date) {
+      counts.contact_status += 1;
+    }
   });
 
   if (rawSeen > 0) {
@@ -7096,8 +7105,12 @@ function _maybeAddOutreachOverlay(parcel, feature) {
   }
   if (!baseTarget) return;
 
+  // Anchor ABOVE the parcel centroid. A horizontal offset pushes the
+  // overlay toward the lot edge on narrow residential lots ("front door"
+  // look). Moving it up keeps it centered over the parcel and naturally
+  // stacks above any CAD rating mark at the centroid.
   const point = map.latLngToContainerPoint(baseTarget);
-  const offsetLatLng = map.containerPointToLatLng(L.point(point.x + 18, point.y));
+  const offsetLatLng = map.containerPointToLatLng(L.point(point.x, point.y - 26));
   const key = `${county}:${accountNum}`;
   const existing = outreachOverlayLayerByKey.get(key);
   if (existing) {
@@ -9117,6 +9130,7 @@ function _updateMergedSidebarCounts() {
   const rows = [
     ["active", visibleCounts.active],
     ["sold", soldCount],
+    ["contact_status", visibleCounts.contact_status],
     ["off_market", visibleCounts.off_market],
     ["vacant", visibleCounts.vacant],
     ["multifamily", visibleCounts.multifamily],
@@ -10805,6 +10819,7 @@ function renderSidebar(counts, markers) {
       duplexes: counts.duplexes,
       commercial: counts.commercial,
       exempt: counts.exempt,
+      contact_status: counts.contact_status,
     };
   const soldCount = Array.isArray(lastSoldPanelPoints) && lastSoldPanelPoints.length
     ? lastSoldPanelPoints.length
@@ -10812,6 +10827,7 @@ function renderSidebar(counts, markers) {
   const orderedCountRows = [
     ["active", visibleCounts.active],
     ["sold", soldCount],
+    ["contact_status", visibleCounts.contact_status],
     ["off_market", visibleCounts.off_market],
     ["vacant", visibleCounts.vacant],
     ["multifamily", visibleCounts.multifamily],
