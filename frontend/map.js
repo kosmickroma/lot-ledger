@@ -1956,6 +1956,10 @@ function _writeFilterFieldDirect(fieldKey, value) {
     try { applyAndRenderSoldFilters(); } catch (_) {}
     try { applyMapVisibilityFilters(); } catch (_) {}
     try { _rebuildOutreachOverlays(); } catch (_) {}
+    // Mirror the popup-edit + CSV-import fix: keep the sidebar count
+    // badges fresh when filter state arrives via SSE from another tab
+    // or user.
+    try { _updateMergedSidebarCounts(); } catch (_) {}
   }
   // Sprint 3 hotfix (2026-06-02): propelio comp layer + comp list also
   // need to re-render when ANY filter changes remotely. parcelType*
@@ -7949,6 +7953,12 @@ async function _putOutreachField(county, parcelId, field, value) {
   try {
     _updateLocalFeatureOutreach(county, parcelId, field, value);
     _rebuildOutreachOverlays();
+    // Mike report 2026-06-05: typing a date in the popup didn't bump the
+    // Contact Status filter count badge — overlay refreshed but the
+    // sidebar number stayed stale until something else triggered a
+    // re-render. Count is derived from feature.outreach_* properties,
+    // so refresh it now that we've mutated them locally.
+    _updateMergedSidebarCounts();
   } catch (err) {
     console.warn("[outreach] local feature update failed", err);
   }
@@ -11901,6 +11911,9 @@ document.getElementById("outreach-import-file")?.addEventListener("change", asyn
     // popup if currently open on a touched parcel) refreshes immediately.
     try { applyMapVisibilityFilters(); } catch (_) {}
     try { _rebuildOutreachOverlays(); } catch (_) {}
+    // Mike report 2026-06-05: CSV import didn't refresh the Contact
+    // Status count badge either. Same root cause as the popup-edit gap.
+    try { _updateMergedSidebarCounts(); } catch (_) {}
   } catch (err) {
     console.error("[outreach-import] failed", err);
     window.alert(`Outreach import failed: ${String(err?.message || err).slice(0, 400)}`);
