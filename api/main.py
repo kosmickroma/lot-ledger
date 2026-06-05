@@ -8237,6 +8237,14 @@ async def import_parcel_outreach(
                 )
                 sample_unmatched = [r[0] for r in cur.fetchall()]
 
+            # Collected committed rows per chunk (commit mode only). Frontend
+            # uses these to update lastAnalysisGeojson in place so popups
+            # reflect the re-imported data without a full page refetch.
+            # KK bug 2026-06-05: typing a date into the CSV and re-importing
+            # didn't surface in the popup because the in-memory feature
+            # properties stayed stale; only a fresh /api/analyze would
+            # pick up DB changes.
+            committed_rows: list[dict[str, Any]] = []
             if mode == "commit":
                 # Chunked UPSERT — 1000-row chunks via WHERE row_idx ranges.
                 # DISTINCT ON dedupes within the chunk's selected rows so we
@@ -8294,13 +8302,23 @@ async def import_parcel_outreach(
                                 ) THEN EXCLUDED.mailer_date ELSE parcel_outreach_notes.mailer_date END,
                                 last_updated_by_user_id = EXCLUDED.last_updated_by_user_id,
                                 last_updated_at = EXCLUDED.last_updated_at
-                            RETURNING county, parcel_id
+                            RETURNING county, parcel_id, contact_info_retrieved, mailer_date
                         )
-                        SELECT COUNT(*) FROM upserted
+                        SELECT county, parcel_id, contact_info_retrieved, mailer_date FROM upserted
                         """,
                         (row_idx, row_idx + chunk_size, user_id),
                     )
-                    chunk_count = int(cur.fetchone()[0])
+                    chunk_rows = cur.fetchall()
+                    chunk_count = len(chunk_rows)
+                    for (cnty, pid, cir, md) in chunk_rows:
+                        committed_rows.append({
+                            "county": cnty,
+                            "parcel_id": pid,
+                            "outreach_contact_info_retrieved": bool(cir),
+                            "outreach_mailer_date": (
+                                md.isoformat() if hasattr(md, "isoformat") and md else None
+                            ),
+                        })
                     updated += chunk_count
                     row_idx += chunk_size
                     if row_idx >= row_total:
@@ -8345,6 +8363,10 @@ async def import_parcel_outreach(
         "unmatched": int(row_unmatched),
         "updated": updated,
         "sample_unmatched_ids": sample_unmatched,
+        # Commit mode includes the actual upserted rows so the frontend
+        # can refresh in-memory feature props without a full refetch.
+        # KK bug 2026-06-05 — popup state stale after re-import.
+        "committed_rows": committed_rows,
     }
 
 

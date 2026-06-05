@@ -9752,6 +9752,19 @@ function _buildParcelDetailPanelHtml(p, matchedComp) {
               ${_buildParcelDetailTableRow("Flooring", _panelDisplayValue(p.flooring))}
               ${p.on_redfin && p.redfin_url ? _buildParcelDetailTableRow("Listing", `<a href="${p.redfin_url}" target="_blank" rel="noopener noreferrer">View listing</a>`) : ""}
               ${soldCompRows}
+              ${(() => {
+                // Parcel ID at the bottom of the CAD detail table (KK
+                // request 2026-06-05) — same value as the "Parcel ID"
+                // CSV column at position B. DCAD uses account_num; the
+                // other 3 counties use parcel_key.
+                const _cnty = String(p?.source_county || "").trim().toLowerCase();
+                const _pid = _cnty === "dcad"
+                  ? String(p?.account_num || "").trim()
+                  : (String(p?.parcel_key || "").trim() || String(p?.account_num || "").trim());
+                return _pid
+                  ? _buildParcelDetailTableRow("Parcel ID", _propelioEscape(_pid))
+                  : "";
+              })()}
             </table>
           </section>
           <section class="parcel-panel-mls">
@@ -11714,7 +11727,7 @@ document.getElementById("outreach-import-file")?.addEventListener("change", asyn
   if (_outreachImportInFlight) return;
   _outreachImportInFlight = true;
   const btn = document.getElementById("btn-import-outreach");
-  const originalLabel = btn?.textContent || "Import from CRM";
+  const originalLabel = btn?.textContent || "Import";
   try {
     if (btn) {
       btn.disabled = true;
@@ -11747,16 +11760,29 @@ document.getElementById("outreach-import-file")?.addEventListener("change", asyn
       `Outreach import complete. Updated ${updated} parcels.` +
       (unmatched ? ` ${unmatched} rows skipped (no matching parcel).` : "")
     );
-    // Trigger an in-place refetch so newly-imported phones / mailers show
-    // up in popups without a full page reload. Best-effort — no-op if
-    // the current job context doesn't support it.
-    try {
-      if (typeof reloadCurrentArea === "function") {
-        await reloadCurrentArea();
-      } else if (typeof applyMapVisibilityFilters === "function") {
-        applyMapVisibilityFilters();
+    // Update lastAnalysisGeojson in place using the committed rows the
+    // server returned. Without this, re-opening a parcel popup shows
+    // STALE outreach state until the user re-runs analyze or reloads
+    // the area. KK bug 2026-06-05: typing a date in the CSV column +
+    // re-import → popup date stayed blank, checkbox stayed off.
+    if (Array.isArray(commit.committed_rows)) {
+      for (const cr of commit.committed_rows) {
+        const cnty = String(cr?.county || "").trim().toLowerCase();
+        const pid = String(cr?.parcel_id || "").trim();
+        if (!cnty || !pid) continue;
+        // _updateLocalFeatureOutreach mutates feature.properties for the
+        // matching parcel in lastAnalysisGeojson.
+        try {
+          _updateLocalFeatureOutreach(cnty, pid, "contact_info_retrieved", Boolean(cr.outreach_contact_info_retrieved));
+          _updateLocalFeatureOutreach(cnty, pid, "mailer_date", cr.outreach_mailer_date || null);
+        } catch (e) {
+          console.warn("[outreach-import] local update failed for", cnty, pid, e);
+        }
       }
-    } catch (_) {}
+    }
+    // Cheap re-render so any visible parcel state (color, bucket counts,
+    // popup if currently open on a touched parcel) refreshes immediately.
+    try { applyMapVisibilityFilters(); } catch (_) {}
   } catch (err) {
     console.error("[outreach-import] failed", err);
     window.alert(`Outreach import failed: ${String(err?.message || err).slice(0, 400)}`);
