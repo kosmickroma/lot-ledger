@@ -7105,12 +7105,12 @@ function _maybeAddOutreachOverlay(parcel, feature) {
   }
   if (!baseTarget) return;
 
-  // Anchor ABOVE the parcel centroid. A horizontal offset pushes the
-  // overlay toward the lot edge on narrow residential lots ("front door"
-  // look). Moving it up keeps it centered over the parcel and naturally
-  // stacks above any CAD rating mark at the centroid.
-  const point = map.latLngToContainerPoint(baseTarget);
-  const offsetLatLng = map.containerPointToLatLng(L.point(point.x, point.y - 26));
+  // Anchor at the parcel centroid in lat/lng (no container-pixel offset).
+  // A pixel offset is fixed on screen but the parcel scales with zoom, so
+  // any offset that looks fine at high zoom drifts off the parcel as the
+  // map zooms out. Matches the CAD rating mark behavior, which stays
+  // glued to the centroid at all zoom levels.
+  const offsetLatLng = baseTarget;
   const key = `${county}:${accountNum}`;
   const existing = outreachOverlayLayerByKey.get(key);
   if (existing) {
