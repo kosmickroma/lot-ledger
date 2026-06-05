@@ -8068,6 +8068,50 @@ def _parse_outreach_yes_no_cell(raw: str) -> bool | None:
     return None
 
 
+def _parse_outreach_csv_date(text: str | None) -> "date_module.date | None":
+    """Parse a date cell from a re-imported outreach CSV. More permissive than
+    _parse_iso_date because Excel auto-formats ISO dates into US locale
+    (M/D/YYYY) the moment a user opens the file — silently mangling the export.
+
+    Accepts:
+      - YYYY-MM-DD   (LotLedger's own export format)
+      - YYYY/MM/DD   (defensive)
+      - M/D/YYYY     (Excel US auto-format after opening + saving)
+      - MM/DD/YYYY   (same with zero-padding)
+
+    Returns None on empty / unparseable so the import loop can decide whether
+    to treat it as "no change" vs. "explicit clear" via the *_set flags.
+    """
+    import datetime as date_module
+    if not text:
+        return None
+    s = str(text).strip()
+    if not s:
+        return None
+    # ISO first — fast path + matches our own export
+    try:
+        return date_module.date.fromisoformat(s)
+    except (ValueError, TypeError):
+        pass
+    # ISO with slashes
+    if "/" in s and len(s) == 10 and s[4] == "/" and s[7] == "/":
+        try:
+            return date_module.date.fromisoformat(s.replace("/", "-"))
+        except (ValueError, TypeError):
+            pass
+    # US M/D/YYYY or MM/DD/YYYY (Excel default for en-US locale)
+    if "/" in s:
+        parts = s.split("/")
+        if len(parts) == 3:
+            try:
+                month, day, year = (int(p) for p in parts)
+                if 1 <= month <= 12 and 1 <= day <= 31 and 1000 <= year <= 9999:
+                    return date_module.date(year, month, day)
+            except (ValueError, TypeError):
+                pass
+    return None
+
+
 @app.post("/api/parcels/outreach/import")
 async def import_parcel_outreach(
     req: Request,
@@ -8152,7 +8196,7 @@ async def import_parcel_outreach(
             _parse_outreach_yes_no_cell(raw_row.get(contact_retrieved_col) or "")
             if contact_retrieved_col else None
         )
-        mailer_date = _parse_iso_date(str(raw_row.get(mailer_date_col) or "")) if mailer_date_col else None
+        mailer_date = _parse_outreach_csv_date(raw_row.get(mailer_date_col) or "") if mailer_date_col else None
         parsed_rows.append((idx, parcel_id, contact_retrieved, mailer_date))
 
     if not parsed_rows:
@@ -8219,6 +8263,26 @@ async def import_parcel_outreach(
                     """,
                     (county_key,),
                 )
+
+            # DCAD-only second pass: Excel strips leading zeros when a user
+            # opens an exported CSV and re-saves it. DCAD's account_num is
+            # canonically 17 digits, zero-padded ('00000424978000000'); after
+            # Excel mangling, Mike's CSV cell looks like '424978000000'. Pad
+            # numeric-only ids back to 17 and retry. Mike bug 2026-06-05:
+            # entire re-import wrote nothing because the row went silently to
+            # the unmatched bucket. Only DCAD needs this: TAD parcel_keys
+            # contain colons, Collin contains letters, Denton isn't zero-
+            # padded — none of those get mangled by Excel.
+            cur.execute(
+                """
+                UPDATE outreach_staging s
+                SET matched_county = 'dcad'
+                FROM parcels p
+                WHERE p.account_num = LPAD(s.parcel_id, 17, '0')
+                  AND s.matched_county IS NULL
+                  AND s.parcel_id ~ '^[0-9]+$'
+                """
+            )
 
             cur.execute(
                 """
