@@ -31,7 +31,7 @@
            (not workspace-scoped), so the import button shouldn't require an
            area to be open. Mailer + Phone Tracking, 2026-06-03. -->
       <div id="outreach-tools" class="sidebar-section hidden">
-        <button id="btn-import-outreach" class="btn-secondary" type="button" title="Import phone numbers + mailer status from a CRM CSV export">Import from CRM</button>
+        <button id="btn-import-outreach" class="btn-secondary" type="button" title="Import outreach data (contact info retrieved, last mailer sent) from a CSV">Import</button>
         <input id="outreach-import-file" type="file" accept=".csv,text/csv" style="display:none;">
       </div>
       <div id="import-banner" class="import-banner hidden" role="status" aria-live="polite">
@@ -210,6 +210,13 @@
             <button id="btn-filters-reset" class="filter-reset-btn" type="button">Reset</button>
           </div>
           <div class="filter-list" id="filter-list">
+            <label class="filter-row power-user-only">
+              <span class="filter-swatch swatch-contact-status"></span>
+              <span class="filter-name">Contact Status</span>
+              <span class="filter-count" id="filter-count-contact_status">0</span>
+              <input type="checkbox" id="filter-contact-status">
+            </label>
+            <hr class="filter-section-divider power-user-only">
             <label class="filter-row">
               <span class="filter-swatch" style="--sw:#2980b9"></span>
               <span class="filter-name">Off Market</span>

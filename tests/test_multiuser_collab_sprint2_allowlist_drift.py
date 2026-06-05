@@ -14,10 +14,11 @@ from api import main as api_main
 
 
 _EXPECTED_KEYS = frozenset({
-    # checkboxes (8)
+    # checkboxes (9)
     "checkboxes.active", "checkboxes.sold", "checkboxes.off_market",
     "checkboxes.vacant", "checkboxes.multifamily", "checkboxes.duplexes",
     "checkboxes.commercial", "checkboxes.exempt",
+    "checkboxes.contact_status",
     # numeric Property Filters (8)
     "numeric.lot_sqft_min", "numeric.lot_sqft_max",
     "numeric.appr_val_min", "numeric.appr_val_max",
@@ -69,13 +70,13 @@ def test_filter_field_keys_no_unknown():
 
 def test_filter_field_keys_count_matches_spec():
     actual = getattr(api_main, "_FILTER_FIELD_KEYS")
-    # 8 checkboxes + 8 numeric + 5 sold + 8 comp + 22 propelio = 51.
+    # 9 checkboxes + 8 numeric + 5 sold + 8 comp + 22 propelio = 52.
     # Sprint 2 smoke catch 2026-06-02: readPropelioFiltersFromUI() spreads
     # 6 additional parcelType* keys into the propelio object at capture
     # time (mirrors of the parcel-side checkboxes). They must be in the
     # allowlist or PATCH 400s on every checkbox toggle.
-    assert len(actual) == 51, (
-        f"Sprint 2 captures 51 distinct filter fields; constant has {len(actual)}."
+    assert len(actual) == 52, (
+        f"Sprint 2 captures 52 distinct filter fields; constant has {len(actual)}."
     )
 
 

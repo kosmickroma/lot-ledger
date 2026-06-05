@@ -226,6 +226,7 @@ const DEFAULT_FILTERS = {
   // They live in the collapsed Legacy Filters card and are opt-in only.
   active: false,
   sold: false,
+  contact_status: false,
   off_market: true,
   vacant: true,
   multifamily: false,
@@ -237,6 +238,7 @@ const DEFAULT_FILTERS = {
 const FILTER_INPUT_IDS = {
   active: "filter-active",
   sold: "filter-sold",
+  contact_status: "filter-contact-status",
   off_market: "filter-off-market",
   vacant: "filter-vacant",
   multifamily: "filter-multifamily",
@@ -827,6 +829,11 @@ const measureLayer = L.layerGroup().addTo(map);
 // Parcel geometry is preferred (purple glowing footprints); missing geometry
 // falls back to compact purple dots.
 const propelioCompLayer = L.layerGroup().addTo(map);
+// Outreach overlay layer. Kept below cadRatingLayer so CAD rating marks stay
+// readable when both are present on the same parcel.
+const outreachOverlayLayer = L.layerGroup().addTo(map);
+const outreachOverlayLayerByKey = new Map();
+const outreachOverlayGeomSeen = new Set();
 // Parcel (CAD) rating marks layer. Independent from propelioCompLayer
 // so the marks survive comp re-renders. Per PARCEL_RATINGS_SPEC.md v2.
 const cadRatingLayer = L.layerGroup().addTo(map);
@@ -1948,6 +1955,7 @@ function _writeFilterFieldDirect(fieldKey, value) {
   if (lastAnalysisGeojson) {
     try { applyAndRenderSoldFilters(); } catch (_) {}
     try { applyMapVisibilityFilters(); } catch (_) {}
+    try { _rebuildOutreachOverlays(); } catch (_) {}
   }
   // Sprint 3 hotfix (2026-06-02): propelio comp layer + comp list also
   // need to re-render when ANY filter changes remotely. parcelType*
@@ -2522,6 +2530,7 @@ function getVisibleFeatureCounts(features, options = {}) {
     duplexes: 0,
     commercial: 0,
     exempt: 0,
+    contact_status: 0,
   };
 
   const list = Array.isArray(features) ? features : [];
@@ -2558,6 +2567,14 @@ function getVisibleFeatureCounts(features, options = {}) {
     }
 
     counts[bucket] += 1;
+
+    // Contact Status is orthogonal to the property-type bucket — a parcel
+    // can be off_market AND have outreach data. Count it independently so
+    // the sidebar badge reflects "how many parcels in this area have any
+    // outreach activity," not "how many are bucketed as contact_status."
+    if (p.outreach_contact_info_retrieved || p.outreach_mailer_date) {
+      counts.contact_status += 1;
+    }
   });
 
   if (rawSeen > 0) {
@@ -7055,6 +7072,90 @@ function _maybeAddParcelRatingMark(parcel, footprint, fallbackLatLng) {
   cadRatingLayerByKey.set(key, marker);
 }
 
+
+function _formatMailerDateUS(iso) {
+  const m = String(iso || "").match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return String(iso || "");
+  return `${m[2]}/${m[3]}/${m[1]}`;
+}
+
+function _maybeAddOutreachOverlay(parcel, feature) {
+  if (!filterState.contact_status) return;
+  const contactRetrieved = Boolean(parcel?.outreach_contact_info_retrieved);
+  const mailerDateRaw = parcel?.outreach_mailer_date;
+  const hasMailer = Boolean(mailerDateRaw);
+  if (!contactRetrieved && !hasMailer) return;
+
+  const county = String(parcel?.source_county || "").trim().toLowerCase();
+  const accountNum = String(parcel?.account_num || "").trim();
+  if (!county || !accountNum) return;
+
+  const geom = feature?.geometry;
+  const gkey = (geom && (geom.type === "Polygon" || geom.type === "MultiPolygon"))
+    ? geometryKey(geom)
+    : "";
+  if (gkey) {
+    if (outreachOverlayGeomSeen.has(gkey)) return;
+    outreachOverlayGeomSeen.add(gkey);
+  }
+
+  let baseTarget = _resolveParcelAnchor(county, accountNum);
+  if (!baseTarget && Number.isFinite(parcel?.lat) && Number.isFinite(parcel?.lng)) {
+    baseTarget = L.latLng(parcel.lat, parcel.lng);
+  }
+  if (!baseTarget) return;
+
+  // Anchor at the parcel centroid in lat/lng (no container-pixel offset).
+  // A pixel offset is fixed on screen but the parcel scales with zoom, so
+  // any offset that looks fine at high zoom drifts off the parcel as the
+  // map zooms out. Matches the CAD rating mark behavior, which stays
+  // glued to the centroid at all zoom levels.
+  const offsetLatLng = baseTarget;
+  const key = `${county}:${accountNum}`;
+  const existing = outreachOverlayLayerByKey.get(key);
+  if (existing) {
+    outreachOverlayLayer.removeLayer(existing);
+    outreachOverlayLayerByKey.delete(key);
+  }
+
+  const dateDisplay = hasMailer ? _formatMailerDateUS(String(mailerDateRaw)) : "";
+  const phoneSvg = `<svg viewBox="0 0 24 24" width="11" height="11" aria-hidden="true">
+    <path fill="currentColor" d="M6.6 10.8c1.4 2.8 3.7 5.1 6.5 6.5l2.2-2.2c.3-.3.7-.4 1-.2 1.1.4 2.3.6 3.6.6.6 0 1 .4 1 1V20c0 .6-.4 1-1 1-9.4 0-17-7.6-17-17 0-.6.4-1 1-1h3.5c.6 0 1 .4 1 1 0 1.3.2 2.5.6 3.6.1.4 0 .8-.2 1.1L6.6 10.8z"/>
+  </svg>`;
+  const html = `<div class="outreach-overlay-stack">
+    <div class="outreach-overlay-icon">${phoneSvg}</div>
+    ${dateDisplay ? `<div class="outreach-overlay-date">${dateDisplay}</div>` : ""}
+  </div>`;
+  const iconHeight = dateDisplay ? 34 : 18;
+  const icon = L.divIcon({
+    className: "outreach-overlay-wrap",
+    html,
+    iconSize: [60, iconHeight],
+    iconAnchor: [30, iconHeight / 2],
+  });
+  const marker = L.marker(offsetLatLng, {
+    icon,
+    interactive: false,
+    keyboard: false,
+    zIndexOffset: -50,
+  });
+  marker.addTo(outreachOverlayLayer);
+  outreachOverlayLayerByKey.set(key, marker);
+}
+
+function _rebuildOutreachOverlays() {
+  outreachOverlayLayer.clearLayers();
+  outreachOverlayLayerByKey.clear();
+  outreachOverlayGeomSeen.clear();
+  if (!filterState.contact_status) return;
+  if (!lastAnalysisGeojson || !Array.isArray(lastAnalysisGeojson.features)) return;
+  for (const feature of lastAnalysisGeojson.features) {
+    const p = feature?.properties;
+    if (!p) continue;
+    if (!isFeatureVisible(feature)) continue;
+    _maybeAddOutreachOverlay(p, feature);
+  }
+}
 // (_buildParcelRatingButtonsHtml removed 2026-05-24 — replaced by
 // _buildRatingButtonsHtml accepting an optional `parcel` arg, which
 // emits a SINGLE button row with both data-comp-key + data-county +
@@ -7847,6 +7948,7 @@ async function _putOutreachField(county, parcelId, field, value) {
   // discipline by updating the local feature properties in place.
   try {
     _updateLocalFeatureOutreach(county, parcelId, field, value);
+    _rebuildOutreachOverlays();
   } catch (err) {
     console.warn("[outreach] local feature update failed", err);
   }
@@ -9028,6 +9130,7 @@ function _updateMergedSidebarCounts() {
   const rows = [
     ["active", visibleCounts.active],
     ["sold", soldCount],
+    ["contact_status", visibleCounts.contact_status],
     ["off_market", visibleCounts.off_market],
     ["vacant", visibleCounts.vacant],
     ["multifamily", visibleCounts.multifamily],
@@ -9111,6 +9214,9 @@ Object.entries(FILTER_INPUT_IDS).forEach(([key, id]) => {
     _refreshLoadedAreaUi();
     // v1 §2.1 — auto-save filter_state after checkbox toggle.
     _filterSaveQueueSave();
+    if (key === "contact_status") {
+      _rebuildOutreachOverlays();
+    }
   });
 });
 
@@ -9124,6 +9230,7 @@ document.getElementById("btn-filters-reset")?.addEventListener("click", () => {
   _refreshLoadedAreaUi();
   // v1 §2.1 — auto-save filter_state after filter reset.
   _filterSaveQueueSave();
+  _rebuildOutreachOverlays();
 });
 
 // Comp Filters: read from nf-comp-* inputs and apply
@@ -9752,6 +9859,19 @@ function _buildParcelDetailPanelHtml(p, matchedComp) {
               ${_buildParcelDetailTableRow("Flooring", _panelDisplayValue(p.flooring))}
               ${p.on_redfin && p.redfin_url ? _buildParcelDetailTableRow("Listing", `<a href="${p.redfin_url}" target="_blank" rel="noopener noreferrer">View listing</a>`) : ""}
               ${soldCompRows}
+              ${(() => {
+                // Parcel ID at the bottom of the CAD detail table (KK
+                // request 2026-06-05) — same value as the "Parcel ID"
+                // CSV column at position B. DCAD uses account_num; the
+                // other 3 counties use parcel_key.
+                const _cnty = String(p?.source_county || "").trim().toLowerCase();
+                const _pid = _cnty === "dcad"
+                  ? String(p?.account_num || "").trim()
+                  : (String(p?.parcel_key || "").trim() || String(p?.account_num || "").trim());
+                return _pid
+                  ? _buildParcelDetailTableRow("Parcel ID", _propelioEscape(_pid))
+                  : "";
+              })()}
             </table>
           </section>
           <section class="parcel-panel-mls">
@@ -10373,6 +10493,9 @@ function renderFeatures(geojson) {
   targetBadgeLayer.clearLayers();
   verificationBadgeMarkers.clear();
   targetBadgeMarkers.clear();
+  outreachOverlayLayer.clearLayers();
+  outreachOverlayLayerByKey.clear();
+  outreachOverlayGeomSeen.clear();
   // Clear stale parcel rating marks — they get re-added below from the
   // fresh feature data (per PARCEL_RATINGS_SPEC.md v2 §4D lifecycle).
   cadRatingLayer.clearLayers();
@@ -10534,6 +10657,11 @@ function renderFeatures(geojson) {
       ? L.latLng(p.lat, p.lng)
       : null;
     _maybeAddParcelRatingMark(p, null, fallbackLatLng);
+  });
+  geojson.features.forEach((feature) => {
+    const p = feature?.properties;
+    if (!p) return;
+    _maybeAddOutreachOverlay(p, feature);
   });
   return markers;
 }
@@ -10704,6 +10832,7 @@ function renderSidebar(counts, markers) {
       duplexes: counts.duplexes,
       commercial: counts.commercial,
       exempt: counts.exempt,
+      contact_status: counts.contact_status,
     };
   const soldCount = Array.isArray(lastSoldPanelPoints) && lastSoldPanelPoints.length
     ? lastSoldPanelPoints.length
@@ -10711,6 +10840,7 @@ function renderSidebar(counts, markers) {
   const orderedCountRows = [
     ["active", visibleCounts.active],
     ["sold", soldCount],
+    ["contact_status", visibleCounts.contact_status],
     ["off_market", visibleCounts.off_market],
     ["vacant", visibleCounts.vacant],
     ["multifamily", visibleCounts.multifamily],
@@ -11714,7 +11844,7 @@ document.getElementById("outreach-import-file")?.addEventListener("change", asyn
   if (_outreachImportInFlight) return;
   _outreachImportInFlight = true;
   const btn = document.getElementById("btn-import-outreach");
-  const originalLabel = btn?.textContent || "Import from CRM";
+  const originalLabel = btn?.textContent || "Import";
   try {
     if (btn) {
       btn.disabled = true;
@@ -11747,16 +11877,30 @@ document.getElementById("outreach-import-file")?.addEventListener("change", asyn
       `Outreach import complete. Updated ${updated} parcels.` +
       (unmatched ? ` ${unmatched} rows skipped (no matching parcel).` : "")
     );
-    // Trigger an in-place refetch so newly-imported phones / mailers show
-    // up in popups without a full page reload. Best-effort — no-op if
-    // the current job context doesn't support it.
-    try {
-      if (typeof reloadCurrentArea === "function") {
-        await reloadCurrentArea();
-      } else if (typeof applyMapVisibilityFilters === "function") {
-        applyMapVisibilityFilters();
+    // Update lastAnalysisGeojson in place using the committed rows the
+    // server returned. Without this, re-opening a parcel popup shows
+    // STALE outreach state until the user re-runs analyze or reloads
+    // the area. KK bug 2026-06-05: typing a date in the CSV column +
+    // re-import → popup date stayed blank, checkbox stayed off.
+    if (Array.isArray(commit.committed_rows)) {
+      for (const cr of commit.committed_rows) {
+        const cnty = String(cr?.county || "").trim().toLowerCase();
+        const pid = String(cr?.parcel_id || "").trim();
+        if (!cnty || !pid) continue;
+        // _updateLocalFeatureOutreach mutates feature.properties for the
+        // matching parcel in lastAnalysisGeojson.
+        try {
+          _updateLocalFeatureOutreach(cnty, pid, "contact_info_retrieved", Boolean(cr.outreach_contact_info_retrieved));
+          _updateLocalFeatureOutreach(cnty, pid, "mailer_date", cr.outreach_mailer_date || null);
+        } catch (e) {
+          console.warn("[outreach-import] local update failed for", cnty, pid, e);
+        }
       }
-    } catch (_) {}
+    }
+    // Cheap re-render so any visible parcel state (color, bucket counts,
+    // popup if currently open on a touched parcel) refreshes immediately.
+    try { applyMapVisibilityFilters(); } catch (_) {}
+    try { _rebuildOutreachOverlays(); } catch (_) {}
   } catch (err) {
     console.error("[outreach-import] failed", err);
     window.alert(`Outreach import failed: ${String(err?.message || err).slice(0, 400)}`);
