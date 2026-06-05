@@ -1819,10 +1819,11 @@ _STORED_VALUE_CALC_FIELD_KEYS: tuple[str, ...] = ("mao_arv", "tdpp_minus_mao_arv
 # Test: tests/test_multiuser_collab_sprint2_allowlist_drift.py guards
 # against frontend additions that miss this allowlist.
 _FILTER_FIELD_KEYS: frozenset[str] = frozenset({
-    # checkboxes (8)
+    # checkboxes (9)
     "checkboxes.active", "checkboxes.sold", "checkboxes.off_market",
     "checkboxes.vacant", "checkboxes.multifamily", "checkboxes.duplexes",
     "checkboxes.commercial", "checkboxes.exempt",
+    "checkboxes.contact_status",
     # numeric Property Filters (8)
     "numeric.lot_sqft_min", "numeric.lot_sqft_max",
     "numeric.appr_val_min", "numeric.appr_val_max",
