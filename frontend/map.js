@@ -230,7 +230,7 @@ const DEFAULT_FILTERS = {
   off_market: true,
   vacant: true,
   multifamily: false,
-  duplexes: false,  // new types default OFF per filter-defaults convention (2026-06-01)
+  duplexes: true,  // Mike request 2026-06-06: Duplexes is a primary deal type, default ON
   commercial: false,
   exempt: false,
 };
@@ -8976,6 +8976,14 @@ const AddressSearch = L.Control.extend({
       // clears _searchHighlight on the other side of this asymmetry; this
       // line restores symmetry the other way.
       try { _clearSelectedOutline(); } catch (_) {}
+      // Mike report 2026-06-06: a parcel that was selected by click and
+      // THEN the user does an address search → the previous parcel's
+      // popup state (_activeParcelPopupState) was never reset, so the
+      // user couldn't unselect it (clicking the map elsewhere reopened
+      // the OLD parcel's popup because the state still held it). The
+      // outline got cleared above; the in-memory popup state needs the
+      // same treatment so the map.click reset path works.
+      _activeParcelPopupState = null;
       if (window._searchMoveEndHandler) map.off("moveend", window._searchMoveEndHandler);
 
       window._clearSearchHighlight = () => {

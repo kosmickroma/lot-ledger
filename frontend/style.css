@@ -1494,6 +1494,20 @@ body.is-not-power-user .power-user-only {
   border-color: #134a35;
   box-shadow: 0 0 0 2px rgba(26, 90, 66, 0.22);
 }
+/* KK preview-smoke 2026-06-06: the base ".map-toolbar a.active" rule sets
+   color:#fff (white) on any active anchor inside the toolbar. The popover
+   row IS inside the toolbar, so on click the row's label turned white and
+   disappeared against the white card background. Pin the row's color +
+   background explicitly here so the active state never tinkers with
+   either. The dot is the only active indicator we want. */
+.map-toolbar-popover-row.active {
+  color: #1f2937 !important;
+  background: transparent !important;
+}
+.map-toolbar-popover-row.active:hover {
+  background: #f8fafc !important;
+  color: #0f172a !important;
+}
 .map-toolbar-popover-label {
   flex: 1;
   white-space: nowrap;
