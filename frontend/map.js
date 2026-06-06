@@ -3693,7 +3693,26 @@ async function _reloadSavedResources() {
         const stagedC = staged ? String(staged.county || "").trim().toLowerCase() : null;
         const stagedA = staged ? String(staged.account || "").trim() : null;
         if (c !== stagedC || a !== stagedA) {
-          _setCurrentTargetParcel({ county: c, account: a });
+          // KK / Copilot debug 2026-06-06: pull lat/lng from the freshly-
+          // populated _subjectPropertiesByKey (built right above from
+          // the /api/areas response) so _setCurrentTargetParcel receives
+          // finite coords on the same tick. Without this, the call below
+          // passes only county/account → _normalizeTargetParcel stores
+          // lat/lng as null → _ensureCurrentTargetParcelCoords starts an
+          // async fetch → _renderSubjectProperties fires RIGHT AFTER
+          // with stale (null) coords → high-zoom staged-star branch
+          // skips (Number.isFinite check fails) → no star until the
+          // next moveend triggers a re-render. Reader-tab specific bug:
+          // outline came from _subjectPropertiesByKey (had coords) but
+          // star came from _currentTargetParcel (didn't).
+          const _subjectKey = _subjectPropertyKey(c, a);
+          const _subjectEntry = _subjectPropertiesByKey.get(_subjectKey);
+          _setCurrentTargetParcel({
+            county: c,
+            account: a,
+            lat: _subjectEntry ? _subjectEntry.lat : undefined,
+            lng: _subjectEntry ? _subjectEntry.lng : undefined,
+          });
         }
       }
     }

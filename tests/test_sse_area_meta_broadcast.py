@@ -159,11 +159,11 @@ def test_reload_saved_resources_updates_target_parcel_before_render() -> None:
     _renderSubjectProperties() call so the star and the outline use the
     same current state."""
     src = _read(MAP_JS)
-    # In _reloadSavedResources, the _setCurrentTargetParcel block must
+    # In _reloadSavedResources, the _setCurrentTargetParcel call must
     # appear BEFORE the _renderSubjectProperties() call.
     pat = re.compile(
         r"async function _reloadSavedResources\(\).*?"
-        r"_setCurrentTargetParcel\(\{ county: c, account: a \}\);.*?"
+        r"_setCurrentTargetParcel\(\{.*?county: c,.*?account: a.*?\}\);.*?"
         r"_renderSubjectProperties\(\);",
         re.DOTALL,
     )
@@ -172,6 +172,40 @@ def test_reload_saved_resources_updates_target_parcel_before_render() -> None:
         "loaded area's persisted originator BEFORE calling "
         "_renderSubjectProperties so the high-zoom staged-star branch "
         "sees current state, not stale state."
+    )
+
+
+def test_reload_saved_resources_passes_subject_coords_to_target_parcel() -> None:
+    """KK / Copilot debug 2026-06-06: tab B's reader saw the outline
+    migrate but the STAR stayed on the old subject until a map wiggle.
+    Root cause: _reloadSavedResources called _setCurrentTargetParcel
+    with only { county, account } — no lat/lng. _normalizeTargetParcel
+    then stored lat/lng as null. _ensureCurrentTargetParcelCoords
+    started an async fetch. _renderSubjectProperties fired immediately
+    after, with null staged coords. The high-zoom staged-star branch
+    has a `Number.isFinite(staged.lat)` guard → skipped the render.
+    Outline rendered fine because it reads from _subjectPropertiesByKey
+    which has the backend-provided coords.
+
+    Fix: pull lat/lng from _subjectPropertiesByKey (which was just
+    populated right above this code from the same /api/areas response)
+    and pass them through so the render-on-same-tick has finite coords."""
+    src = _read(MAP_JS)
+    pat = re.compile(
+        r"const _subjectKey = _subjectPropertyKey\(c, a\);\s*"
+        r"const _subjectEntry = _subjectPropertiesByKey\.get\(_subjectKey\);\s*"
+        r"_setCurrentTargetParcel\(\{\s*"
+        r"county: c,\s*"
+        r"account: a,\s*"
+        r"lat: _subjectEntry \? _subjectEntry\.lat : undefined,\s*"
+        r"lng: _subjectEntry \? _subjectEntry\.lng : undefined,\s*"
+        r"\}\);",
+        re.DOTALL,
+    )
+    assert pat.search(src), (
+        "_reloadSavedResources must pass lat/lng from _subjectPropertiesByKey "
+        "into _setCurrentTargetParcel so the staged target has finite "
+        "coords at first render — otherwise the star skips until moveend."
     )
 
 
