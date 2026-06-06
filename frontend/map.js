@@ -2044,6 +2044,18 @@ function _openSseStream(areaId) {
     try { msg = JSON.parse(e.data); } catch (_) { return; }
     _handleSseStoredValue(msg);
   });
+  // Mike report 2026-06-06: "stars don't show up when my assistants are
+  // adding areas with saved parcels until I view the area with a saved
+  // parcel." The backend now fires this event when create_saved_parcel
+  // bonds a parcel to a shared area (or delete_saved_parcel removes one).
+  // Refetch the saved-resources cache so the gold star renders immediately
+  // for every other connected member of this area.
+  es.addEventListener("saved_parcel_change", () => {
+    console.debug("[sse] saved_parcel_change — refreshing saved resources");
+    _reloadSavedResources().catch((err) =>
+      console.warn("[sse] _reloadSavedResources after saved_parcel_change failed:", err)
+    );
+  });
   es.addEventListener("error", () => {
     // EventSource enters CLOSED only on non-200 response. Transport
     // blips DON'T close — native reconnect handles those. If CLOSED,
@@ -2064,10 +2076,10 @@ function _closeSseStream() {
 
 function _handleSseFieldChange(msg) {
   if (!msg) return;
-  // Type-tagged messages (resync / blob_explode) are handled by
-  // their dedicated addEventListener bindings; this catches only
-  // field-change deltas.
-  if (msg.type === "resync" || msg.type === "blob_explode") return;
+  // Type-tagged messages (resync / blob_explode / saved_parcel_change)
+  // are handled by their dedicated addEventListener bindings; this
+  // catches only field-change deltas.
+  if (msg.type === "resync" || msg.type === "blob_explode" || msg.type === "saved_parcel_change") return;
   const { field_key, value, client_seq, by_session_id } = msg;
   if (!field_key) return;
   // Sprint 3 hotfix (2026-06-02 evening): seq-based self-echo + LWW filter.
