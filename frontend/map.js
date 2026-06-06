@@ -13847,10 +13847,28 @@ async function _storedValueSaveField(fieldKey) {
 
   _storedValueSetStatus("saving", "Saving…");
 
+  // Mike report 2026-06-06: "stored values still not saving... fresh
+  // browser fixes." Root cause: this fetch had no timeout, so a hung
+  // network kept the outer await pending indefinitely. _storedValueProcessQueue
+  // has a try/finally that clears _storedValueInflightField — but only
+  // when this function returns. A never-resolving fetch never returns,
+  // so the inflight gate stays locked forever and every subsequent
+  // field save is silently skipped at the `if (_storedValueInflightField)
+  // return;` check. New browser = fresh JS state = no lock.
+  //
+  // 15s timeout via AbortController bounds the wait. On abort, the
+  // fetch rejects with AbortError, the existing catch (below) maps it
+  // to a Retry status, the inflight gate releases, the next field can
+  // save. Bound is generous enough that real Cloud SQL latency
+  // (typical <500ms) never triggers it.
+  const saveAbortController = new AbortController();
+  const saveAbortTimer = setTimeout(() => saveAbortController.abort(), 15_000);
+
   try {
     const resp = await fetch(`/api/areas/${encodeURIComponent(areaIdAtCall)}/stored-value`, {
       method: "PUT",
       credentials: "same-origin",
+      signal: saveAbortController.signal,
       headers: {
         "Content-Type": "application/json",
         "X-Session-Id": _sseSessionUuid,  // Sprint 3 hotfix: echo for self-echo filter
@@ -13911,9 +13929,20 @@ async function _storedValueSaveField(fieldKey) {
     }
     _storedValueSetStatus("flash");
   } catch (err) {
-    if (err.name === "AbortError") return;
+    if (err.name === "AbortError") {
+      // Distinguish timeout (saveAbortController.abort fired) from a
+      // navigation-time cancel (existing _storedValueAbortController.abort
+      // path). Either way the gate releases via the outer finally and the
+      // user can retry; the timeout case warns so we can see the symptom
+      // in production logs.
+      console.warn("[stored-value] save aborted (timeout or navigation) for", fieldKey);
+      _storedValueSetStatus("error", "Retry");
+      return;
+    }
     console.error("[stored-value] save failed:", err);
     _storedValueSetStatus("error", "Retry");
+  } finally {
+    clearTimeout(saveAbortTimer);
   }
 }
 
