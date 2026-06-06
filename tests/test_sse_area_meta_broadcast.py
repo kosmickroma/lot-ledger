@@ -104,42 +104,47 @@ def test_frontend_listens_for_area_meta_change() -> None:
     )
 
 
-def test_area_meta_change_handler_skips_self_echo_when_local_save_in_flight() -> None:
-    """KK regression 2026-06-06: when the user clicks Save Parcel, the
-    local code calls _commitOriginatorToArea and then _reloadSavedResources
-    itself. If the SSE self-echo from area_meta_change ALSO triggers a
-    reload, the subject-property outline gets cleared and re-fetched
-    out from under the local render — visible flicker / blank state.
+def test_area_meta_change_handler_has_no_self_echo_gate() -> None:
+    """Copilot deep dive 2026-06-06: the self-echo gate I added at commit
+    99be884 was over-engineered for a speculative race that doesn't
+    actually exist. _renderSubjectPropertyOutlineLazy already has an
+    _subjectPropertyGeometryInFlight early-return preventing the duplicate
+    fetch. What the gate actually did was kill the FAST path for the
+    writer's own tab — SSE self-echo arrives ~100ms after backend commit,
+    well before the local awaited PUT chain returns, so suppressing it
+    meant the writer waited the full HTTP round trip before the new gold
+    star appeared. Pre-99be884 behavior was instant because the SSE
+    self-echo was the fast path.
 
-    Gate: skip the SSE-triggered reload while
-    _pendingSubjectSaves + _pendingFilterSaves > 0. The local code's
-    finally block will reload after the save commits."""
+    Guard: assert the gate is GONE."""
     src = _read(MAP_JS)
-    pat = re.compile(
-        r'es\.addEventListener\("area_meta_change", \(\) => \{.*?'
-        r"if \(_pendingSubjectSaves \+ _pendingFilterSaves > 0\) return;",
+    # Pull the area_meta_change handler body
+    m = re.search(
+        r'es\.addEventListener\("area_meta_change", \(\) => \{(.*?)\}\);',
+        src,
         re.DOTALL,
     )
-    assert pat.search(src), (
-        "area_meta_change handler must skip the reload when a local save "
-        "is in flight to avoid the self-echo race."
+    assert m, "area_meta_change handler missing"
+    body = m.group(1)
+    assert "_pendingSubjectSaves" not in body, (
+        "area_meta_change handler must NOT have a _pendingSubjectSaves gate. "
+        "The gate is what regressed the writer-own-tab UX."
     )
 
 
-def test_saved_parcel_change_handler_skips_self_echo_when_local_save_in_flight() -> None:
-    """Same gate on saved_parcel_change for the same reason — local Save
-    Parcel triggers both create_saved_parcel (saved_parcel_change pg_notify)
-    and _commitOriginatorToArea (area_meta_change pg_notify). Both come
-    back as self-echoes and both need to skip."""
+def test_saved_parcel_change_handler_has_no_self_echo_gate() -> None:
+    """Same reasoning as area_meta_change — gate must be absent."""
     src = _read(MAP_JS)
-    pat = re.compile(
-        r'es\.addEventListener\("saved_parcel_change", \(\) => \{.*?'
-        r"if \(_pendingSubjectSaves \+ _pendingFilterSaves > 0\) return;",
+    m = re.search(
+        r'es\.addEventListener\("saved_parcel_change", \(\) => \{(.*?)\}\);',
+        src,
         re.DOTALL,
     )
-    assert pat.search(src), (
-        "saved_parcel_change handler must skip the reload when a local "
-        "save is in flight to avoid the self-echo race."
+    assert m, "saved_parcel_change handler missing"
+    body = m.group(1)
+    assert "_pendingSubjectSaves" not in body, (
+        "saved_parcel_change handler must NOT have a _pendingSubjectSaves gate. "
+        "Removing the gate restores the pre-99be884 fast-path behavior."
     )
 
 

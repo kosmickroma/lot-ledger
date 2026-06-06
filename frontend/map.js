@@ -2075,14 +2075,17 @@ function _openSseStream(areaId) {
   // for every other connected member of this area.
   es.addEventListener("saved_parcel_change", () => {
     _sseLastMessageAt = Date.now();
-    // Self-echo skip: if a local save is in flight, the post-PUT
-    // _reloadSavedResources will run on commit anyway. Letting the SSE
-    // self-echo also reload causes a race — the SSE clears the subject-
-    // property outline before the local geometry fetch resolves, leaving
-    // a brief blank window until something else triggers a re-render
-    // (KK 2026-06-06 regression report). Same gate as the visibility
-    // change handler at line 198.
-    if (_pendingSubjectSaves + _pendingFilterSaves > 0) return;
+    // No self-echo gate. Copilot deep dive 2026-06-06: the gate I added
+    // at commit 99be884 was over-engineered for a speculative race that
+    // doesn't actually exist (`_renderSubjectPropertyOutlineLazy` has
+    // an `_subjectPropertyGeometryInFlight` early-return that prevents
+    // the duplicate fetch). What the gate actually did was kill the
+    // FAST path for the writer's own tab: the SSE self-echo arrives
+    // ~100ms after the backend commits, well before the local awaited
+    // PUT chain returns. Suppressing it meant the writer had to wait
+    // the full HTTP round trip + post-PUT reload before the new gold
+    // star appeared. The OLD pre-99be884 behavior was instant precisely
+    // because the SSE self-echo was the fast path.
     console.debug("[sse] saved_parcel_change — refreshing saved resources");
     _reloadSavedResources().catch((err) =>
       console.warn("[sse] _reloadSavedResources after saved_parcel_change failed:", err)
@@ -2094,13 +2097,7 @@ function _openSseStream(areaId) {
   // area-name display refresh live instead of waiting for tab refocus.
   es.addEventListener("area_meta_change", () => {
     _sseLastMessageAt = Date.now();
-    // Same self-echo gate as saved_parcel_change above. The local Save
-    // Parcel flow at line ~4737 awaits _commitOriginatorToArea then
-    // calls _reloadSavedResources itself — if we also reload from this
-    // SSE echo, the subject-property outline gets cleared and re-fetched
-    // out from under the local render, producing a visible flicker /
-    // blank state on the writer's own tab.
-    if (_pendingSubjectSaves + _pendingFilterSaves > 0) return;
+    // Same reasoning as saved_parcel_change above — gate removed.
     console.debug("[sse] area_meta_change — refreshing saved resources");
     _reloadSavedResources().catch((err) =>
       console.warn("[sse] _reloadSavedResources after area_meta_change failed:", err)
