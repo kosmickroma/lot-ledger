@@ -4212,6 +4212,14 @@ async def get_parcel_detail(
         row, exempt_set = _fetch_dcad_parcel_by_account(account_num)
         if row is None:
             raise HTTPException(status_code=404, detail="Parcel not found")
+        # KK debug 2026-06-06: per-parcel fetch helpers don't run the flood
+        # spatial join the way query_parcels does (Phase 2 enrichment lives
+        # in the per-county adapter's batch flow, not the single-parcel
+        # helper). Every popup click was showing "Flood Zone: N/A" because
+        # this endpoint is what powers fresh popup loads from PMTiles
+        # browse mode. Hydrate one row, same helper used by saved-area
+        # replays.
+        _hydrate_flood_for_rows([row])
         prop_type = classify_parcel(row, exempt_set)
         feature = build_feature(row, prop_type, False, None)
         feature["properties"]["source_county"] = "dcad"
@@ -4219,6 +4227,7 @@ async def get_parcel_detail(
         row = _fetch_tad_parcel_by_account(account_num)
         if row is None:
             raise HTTPException(status_code=404, detail="Parcel not found")
+        _hydrate_flood_for_rows([row])
         prop_type = _classify_tad(row)
         feature = build_feature(row, prop_type, False, None)
         feature["properties"]["source_county"] = "tad"
@@ -4226,6 +4235,7 @@ async def get_parcel_detail(
         row = _fetch_collin_parcel_by_account(account_num)
         if row is None:
             raise HTTPException(status_code=404, detail="Parcel not found")
+        _hydrate_flood_for_rows([row])
         prop_type = _classify_collin(row)
         feature = build_feature(row, prop_type, False, None)
         feature["properties"]["source_county"] = "collin"
@@ -4233,6 +4243,7 @@ async def get_parcel_detail(
         row = _fetch_denton_parcel_by_account(account_num)
         if row is None:
             raise HTTPException(status_code=404, detail="Parcel not found")
+        _hydrate_flood_for_rows([row])
         prop_type = _classify_denton(row)
         feature = build_feature(row, prop_type, False, None)
         feature["properties"]["source_county"] = "denton"
