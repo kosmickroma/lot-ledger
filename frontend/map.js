@@ -10067,16 +10067,19 @@ function _buildParcelDetailPanelHtml(p, matchedComp) {
               ${p.on_redfin && p.redfin_url ? _buildParcelDetailTableRow("Listing", `<a href="${p.redfin_url}" target="_blank" rel="noopener noreferrer">View listing</a>`) : ""}
               ${soldCompRows}
               ${(() => {
-                // Flood Zone row (FEMA NFHL, Phase 3). Verbose plain-English
-                // wording mirrors the CSV column formatter
-                // (api/main.py:_flood_zone_csv_cell). FLOODWAY gets a
-                // distinct "no build" warning so Mike can't miss it.
+                // Flood Zone row (FEMA NFHL, Phase 3). Always rendered
+                // per KK 2026-06-06 — parcels outside any mapped FEMA
+                // polygon show "N/A" (matching every other CAD row's
+                // unknown-data convention), parcels inside get the
+                // verbose plain-English wording. FLOODWAY warning stays
+                // loud so Mike can't miss it.
                 const _fz = String(p?.flood_zone || "").trim();
-                if (!_fz) return "";
                 const _sub = String(p?.flood_zone_subtype || "").trim().toUpperCase();
                 const _bfe = p?.flood_bfe;
                 let _label;
-                if (_sub === "FLOODWAY") {
+                if (!_fz) {
+                  _label = "N/A";
+                } else if (_sub === "FLOODWAY") {
                   _label = `${_fz} — FLOODWAY (no build)`;
                 } else if (["AE","A","AH","AO","V","VE"].includes(_fz)) {
                   _label = (_bfe !== null && _bfe !== undefined && Number.isFinite(Number(_bfe)))
