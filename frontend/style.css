@@ -1434,6 +1434,67 @@ body.is-not-power-user .power-user-only {
   letter-spacing: 0.04em;
 }
 
+/* LYRS popover — opens to the right of the LYRS toolbar button. Holds
+   the HOA / Flood / County overlay toggles that used to be 3 stacked
+   buttons. Positioned absolutely from the toolbar container; the toolbar
+   sits at top-left of the map so a right-anchored popover lands inside
+   the visible map area cleanly. */
+.map-toolbar-popover {
+  position: absolute;
+  top: 0;
+  left: 48px;
+  min-width: 160px;
+  background: #fff;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.18);
+  z-index: 1000;
+  padding: 4px 0;
+}
+.map-toolbar-popover.hidden {
+  display: none;
+}
+.map-toolbar-popover-row {
+  display: flex !important;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #333 !important;
+  text-decoration: none !important;
+  background: transparent !important;
+  border: none !important;
+  width: auto !important;
+  height: auto !important;
+}
+.map-toolbar-popover-row:hover {
+  background: #f0f0f0 !important;
+  color: #111 !important;
+}
+.map-toolbar-popover-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #d1d5db;
+  border: 1px solid #9ca3af;
+  flex-shrink: 0;
+}
+.map-toolbar-popover-row.active .map-toolbar-popover-dot {
+  background: #1a5a42;
+  border-color: #134a35;
+  box-shadow: 0 0 0 2px rgba(26, 90, 66, 0.22);
+}
+.map-toolbar-popover-label {
+  flex: 1;
+}
+/* The LYRS button itself gets a subtle visual treatment when the popover
+   is open, distinct from the .active state (which means "an overlay is
+   currently rendered"). */
+.map-toolbar a#btn-layers-toggle.popover-open {
+  background: #eef2ff;
+}
+
 /* Empty-state for saved-area / saved-target lists when the search has
    no matches. Keeps the section visible so the user can clear the
    search instead of having to refresh. */

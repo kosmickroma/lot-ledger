@@ -6123,34 +6123,98 @@ const MapToolbar = L.Control.extend({
       _setMeasureModeEnabled(!_measureModeEnabled);
     });
 
-    const hoaBtn = L.DomUtil.create("a", "", container);
-    hoaBtn.id = "btn-hoa-toggle";
-    hoaBtn.href = "#";
-    hoaBtn.title = "Toggle HOA zone boundaries";
-    hoaBtn.textContent = "HOA";
+    // LYRS dropdown — collapses HOA / FLOOD / CNTY into a single toolbar
+    // slot with a popover. Was 3 buttons before; the chevron in the
+    // toolbar's vertical track started overlapping the bottom two
+    // after FLOOD was added. Future overlays (PMTiles or otherwise) slot
+    // into the popover instead of growing the toolbar height.
+    const lyrsBtn = L.DomUtil.create("a", "", container);
+    lyrsBtn.id = "btn-layers-toggle";
+    lyrsBtn.href = "#";
+    lyrsBtn.title = "Map overlay layers";
+    lyrsBtn.textContent = "LYRS";
+
+    const lyrsPopover = L.DomUtil.create("div", "map-toolbar-popover hidden", container);
+    lyrsPopover.id = "map-layers-popover";
+    lyrsPopover.innerHTML = `
+      <a href="#" class="map-toolbar-popover-row" id="btn-hoa-toggle"
+         title="Toggle HOA zone boundaries">
+        <span class="map-toolbar-popover-dot" aria-hidden="true"></span>
+        <span class="map-toolbar-popover-label">HOA</span>
+      </a>
+      <a href="#" class="map-toolbar-popover-row" id="btn-flood-toggle"
+         title="Toggle FEMA flood zones overlay">
+        <span class="map-toolbar-popover-dot" aria-hidden="true"></span>
+        <span class="map-toolbar-popover-label">Flood Zones</span>
+      </a>
+      <a href="#" class="map-toolbar-popover-row" id="btn-county-toggle"
+         title="Toggle county boundary lines">
+        <span class="map-toolbar-popover-dot" aria-hidden="true"></span>
+        <span class="map-toolbar-popover-label">County Lines</span>
+      </a>
+    `;
+
+    // Stop popover clicks from propagating to the map (avoid drag/select).
+    L.DomEvent.disableClickPropagation(lyrsPopover);
+    L.DomEvent.disableScrollPropagation(lyrsPopover);
+
+    function _closeLyrsPopover() {
+      lyrsPopover.classList.add("hidden");
+      lyrsBtn.classList.remove("popover-open");
+    }
+    function _toggleLyrsPopover() {
+      const isOpen = !lyrsPopover.classList.contains("hidden");
+      if (isOpen) {
+        _closeLyrsPopover();
+      } else {
+        lyrsPopover.classList.remove("hidden");
+        lyrsBtn.classList.add("popover-open");
+      }
+    }
+    function _refreshLyrsActiveState() {
+      // Tint the LYRS button "active" if ANY overlay is on, so the user
+      // sees something is enabled even with the popover closed.
+      const anyOn = hoaVisible || floodZonesVisible || countyVisible;
+      lyrsBtn.classList.toggle("active", anyOn);
+    }
+    // Expose so the underlying togglers can call it after they flip
+    // their visibility state.
+    window._refreshLyrsActiveState = _refreshLyrsActiveState;
+
+    L.DomEvent.on(lyrsBtn, "click", (e) => {
+      L.DomEvent.preventDefault(e);
+      L.DomEvent.stopPropagation(e);
+      _toggleLyrsPopover();
+    });
+
+    // Click-outside-to-close. Use mousedown so we don't fight inner clicks.
+    document.addEventListener("mousedown", (e) => {
+      if (lyrsPopover.classList.contains("hidden")) return;
+      if (lyrsPopover.contains(e.target) || lyrsBtn.contains(e.target)) return;
+      _closeLyrsPopover();
+    });
+
+    // Wire each popover row to the existing toggle function. Each row keeps
+    // its own id ("btn-hoa-toggle" etc.) so the existing toggleHoaLayer /
+    // toggleCountyLayer / toggleFloodZonesLayer functions can keep flipping
+    // .active on those elements unchanged.
+    const hoaBtn = lyrsPopover.querySelector("#btn-hoa-toggle");
     L.DomEvent.on(hoaBtn, "click", (e) => {
       L.DomEvent.preventDefault(e);
       toggleHoaLayer();
+      _refreshLyrsActiveState();
     });
-
-    const floodBtn = L.DomUtil.create("a", "", container);
-    floodBtn.id = "btn-flood-toggle";
-    floodBtn.href = "#";
-    floodBtn.title = "Toggle FEMA flood zones overlay";
-    floodBtn.textContent = "FLOOD";
+    const floodBtn = lyrsPopover.querySelector("#btn-flood-toggle");
     L.DomEvent.on(floodBtn, "click", (e) => {
       L.DomEvent.preventDefault(e);
       toggleFloodZonesLayer();
+      _refreshLyrsActiveState();
     });
-
-    const countyBtn = L.DomUtil.create("a", "", container);
-    countyBtn.id = "btn-county-toggle";
-    countyBtn.href = "#";
-    countyBtn.title = "Toggle county boundary lines";
-    countyBtn.textContent = "CNTY";
+    const countyBtn = lyrsPopover.querySelector("#btn-county-toggle");
     L.DomEvent.on(countyBtn, "click", (e) => {
       L.DomEvent.preventDefault(e);
       toggleCountyLayer();
+      _refreshLyrsActiveState();
     });
 
     // ZOOM toggle — click-mode (jump = zoom on click, stay = keep current

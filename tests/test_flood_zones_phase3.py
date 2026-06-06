@@ -36,23 +36,63 @@ def _read() -> str:
 # ---- Toolbar -------------------------------------------------------------
 
 
-def test_toolbar_flood_button_defined_programmatically() -> None:
-    """Per Copilot critique fold (spec decision #20): the toggle is
-    defined in the map.js control panel, NOT as static HTML in
-    index.html (which would create dead UI)."""
+def test_toolbar_flood_toggle_lives_in_lyrs_popover() -> None:
+    """LYRS dropdown introduced 2026-06-06 after the chevron started
+    overlapping HOA/FLOOD/CNTY when those were 3 stacked buttons. The
+    flood toggle is now inside the LYRS popover with id=btn-flood-toggle
+    so the existing toggleFloodZonesLayer() code keeps working unchanged."""
     src = _read()
-    assert 'floodBtn.id = "btn-flood-toggle"' in src
-    assert 'floodBtn.textContent = "FLOOD"' in src
+    assert 'lyrsBtn.id = "btn-layers-toggle"' in src, (
+        "Top-level LYRS toolbar button missing."
+    )
+    assert 'lyrsBtn.textContent = "LYRS"' in src
+    # The popover HTML must contain a row with the flood toggle id.
+    assert 'id="btn-flood-toggle"' in src, (
+        "Popover row for flood toggle missing — would break "
+        "toggleFloodZonesLayer's getElementById call."
+    )
+    # The flood row's click handler must call toggleFloodZonesLayer.
+    pat = re.compile(
+        r'lyrsPopover\.querySelector\("#btn-flood-toggle"\).*?'
+        r"toggleFloodZonesLayer\(\)",
+        re.DOTALL,
+    )
+    assert pat.search(src), (
+        "LYRS popover click handler for flood row must invoke "
+        "toggleFloodZonesLayer."
+    )
+
+
+def test_lyrs_popover_includes_hoa_and_county_too() -> None:
+    """All 3 overlay toggles live in the popover so the toolbar stays
+    short and future overlays slot in here instead of growing taller."""
+    src = _read()
+    assert 'id="btn-hoa-toggle"' in src
+    assert 'id="btn-county-toggle"' in src
+    assert 'id="btn-flood-toggle"' in src
+    # All 3 togglers wired to their respective functions inside the
+    # popover's row click handlers.
+    assert "toggleHoaLayer()" in src
+    assert "toggleCountyLayer()" in src
     assert "toggleFloodZonesLayer()" in src
 
 
-def test_toolbar_flood_button_lives_next_to_hoa() -> None:
-    """Place FLOOD next to HOA so the related-overlay toggles cluster."""
+def test_lyrs_popover_active_state_reflects_any_overlay() -> None:
+    """The LYRS button itself shows .active when ANY overlay is on, so
+    the user can see something is enabled even with the popover closed."""
     src = _read()
-    hoa_idx = src.find('hoaBtn.id = "btn-hoa-toggle"')
-    flood_idx = src.find('floodBtn.id = "btn-flood-toggle"')
-    assert hoa_idx > 0 and flood_idx > 0
-    assert hoa_idx < flood_idx, "FLOOD button must be defined after HOA button"
+    pat = re.compile(
+        r"function _refreshLyrsActiveState\(\).*?"
+        r"const anyOn = hoaVisible \|\| floodZonesVisible \|\| countyVisible",
+        re.DOTALL,
+    )
+    assert pat.search(src), "_refreshLyrsActiveState must OR the 3 visibility flags."
+
+
+def test_lyrs_popover_closes_on_outside_click() -> None:
+    src = _read()
+    assert 'document.addEventListener("mousedown"' in src
+    assert "_closeLyrsPopover" in src
 
 
 # ---- Pane ---------------------------------------------------------------
