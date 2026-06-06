@@ -383,6 +383,58 @@ def _fetch_hoa_lookup(parcels: list[dict[str, Any]]) -> dict[str, dict[str, str]
         release_conn(conn)
 
 
+def _fetch_flood_lookup_dcad(account_nums: list[str]) -> dict[str, dict[str, Any]]:
+    """Batch spatial join: returns
+    {account_num: {flood_zone, flood_zone_subtype, flood_bfe}}
+    for parcels whose centroid falls inside a FEMA flood polygon.
+
+    Centroid-based ST_Contains lookup. DCAD's `parcels` table doesn't
+    carry a polygon geom column — only centroid — so polygon-polygon
+    largest-area-wins (spec decision #10) isn't possible here. Centroid
+    is what FEMA's own NFHL viewer uses anyway. Same approach as
+    _fetch_hoa_lookup.
+
+    Returns empty dict gracefully if flood_zones is missing or the query
+    fails — the feature stays usable on systems where the loader hasn't
+    been run yet.
+    """
+    if not account_nums:
+        return {}
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT ON (p.account_num)
+                       p.account_num,
+                       f.fld_zone,
+                       f.zone_subty,
+                       f.static_bfe
+                FROM parcels p
+                JOIN flood_zones f
+                     ON f.source_county = 'dallas'
+                    AND ST_Contains(f.geom, p.centroid)
+                WHERE p.account_num = ANY(%s)
+                ORDER BY p.account_num, ST_Area(f.geom) DESC
+                """,
+                (account_nums,),
+            )
+            return {
+                row[0]: {
+                    "flood_zone": row[1] or "",
+                    "flood_zone_subtype": row[2] or "",
+                    "flood_bfe": float(row[3]) if row[3] is not None else None,
+                }
+                for row in cur.fetchall()
+            }
+    except Exception as exc:
+        logger.warning("Flood zone lookup failed (table missing or query error): %s", exc)
+        return {}
+    finally:
+        release_conn(conn)
+
+
 def _compose_dcad_owner_address(row: dict[str, Any]) -> str:
     """v4b §3 Rule A (DCAD-only): canonical owner mailing address.
 
@@ -745,6 +797,20 @@ def query_parcels(polygon: list[list[float]]) -> ParcelQueryResult:
         if hoa:
             row["hoa_name"] = hoa["hoa_name"]
             row["hoa_url"] = hoa["hoa_url"]
+
+    flood_lookup = _fetch_flood_lookup_dcad(
+        [r["account_num"] for r in merged_rows if r.get("account_num")]
+    )
+    for row in merged_rows:
+        flood = flood_lookup.get(row["account_num"])
+        if flood:
+            row["flood_zone"] = flood["flood_zone"]
+            row["flood_zone_subtype"] = flood["flood_zone_subtype"]
+            row["flood_bfe"] = flood["flood_bfe"]
+        else:
+            row["flood_zone"] = ""
+            row["flood_zone_subtype"] = ""
+            row["flood_bfe"] = None
 
     additional_by_acct = _fetch_additional_owners(
         [r["account_num"] for r in merged_rows if r.get("account_num")]
