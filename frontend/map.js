@@ -3159,8 +3159,11 @@ async function toggleHoaLayer() {
     btn.classList.add("active");
     return;
   }
-  // First load — fetch from API
-  btn.textContent = "Loading...";
+  // First load — fetch from API. NOTE: do NOT touch btn.textContent — the
+  // HOA button is now a row inside the LYRS popover with child spans
+  // (dot + label), and textContent would wipe those. The .active class
+  // is sufficient feedback; fetch is fast enough that a loading state
+  // is barely visible.
   try {
     const res = await fetch("/api/hoa");
     const geojson = await res.json();
@@ -3182,10 +3185,8 @@ async function toggleHoaLayer() {
       },
     }).addTo(map);
     hoaVisible = true;
-    btn.textContent = "HOA";
     btn.classList.add("active");
   } catch (e) {
-    btn.textContent = "HOA";
     console.error("HOA layer load failed", e);
   }
 }
@@ -3310,7 +3311,10 @@ async function toggleCountyLayer() {
     return;
   }
 
-  if (btn) btn.textContent = "...";
+  // NOTE: do NOT touch btn.textContent — the County button is now a row
+  // inside the LYRS popover with child spans (dot + label), and
+  // textContent would wipe those. The .active class is sufficient
+  // feedback.
   try {
     const res = await fetch("/api/counties/boundaries");
     const geojson = await res.json();
@@ -3345,13 +3349,9 @@ async function toggleCountyLayer() {
       }).addTo(countyLabelLayer);
     });
     countyVisible = true;
-    if (btn) {
-      btn.textContent = "CNTY";
-      btn.classList.add("active");
-    }
+    btn?.classList.add("active");
     _updateCountyLabelVisibility();
   } catch (e) {
-    if (btn) btn.textContent = "CNTY";
     console.error("County layer load failed", e);
   }
 }

@@ -1352,6 +1352,11 @@ def _build_features_from_rows(
     # or the same user re-loads after editing. See KK preview smoke
     # 2026-06-03 for the user-visible bug this fixes.
     _hydrate_outreach_for_rows(rows, user)
+    # Flood enrichment shipped 2026-06-06 — older cached_jobs rows pre-date
+    # it and don't carry flood fields. Re-hydrate from the live spatial
+    # join here too so saved-area replays show the same data as fresh
+    # /api/analyze calls.
+    _hydrate_flood_for_rows(rows)
 
     exempt_set: set[str] = set()
     features: list[dict[str, Any]] = []
@@ -3802,6 +3807,87 @@ def _row_outreach_key(row: dict[str, Any]) -> tuple[str, str] | None:
     return (county, parcel_id)
 
 
+def _hydrate_flood_for_rows(rows: list[dict[str, Any]]) -> None:
+    """Mutate rows in place, populating flood_zone / flood_zone_subtype /
+    flood_bfe via one batched centroid-based spatial join.
+
+    Same architectural pattern as _hydrate_outreach_for_rows: cached parcel
+    rows in cached_jobs were snapshotted BEFORE flood enrichment shipped
+    (2026-06-06), so loading a saved area replays rows with no flood
+    fields. Without this helper, every popup row reads N/A even though the
+    DB has the data.
+
+    Centroid is grabbed from row['lat'] / row['lng'] which every parcel
+    row carries — same fallback used by _resolveParcelAnchor on the
+    frontend. Single SQL query regardless of row count via unnest()
+    arrays. Rows whose centroid lands in no FEMA polygon get empty
+    flood_zone (frontend then displays "N/A").
+    """
+    if not rows:
+        return
+
+    # Collect (idx, lng, lat) for rows that have a centroid.
+    candidates: list[tuple[int, float, float]] = []
+    for idx, row in enumerate(rows):
+        lat = row.get("lat")
+        lng = row.get("lng")
+        try:
+            lat_f = float(lat) if lat is not None else None
+            lng_f = float(lng) if lng is not None else None
+        except (TypeError, ValueError):
+            lat_f = lng_f = None
+        if lat_f is None or lng_f is None:
+            row["flood_zone"] = ""
+            row["flood_zone_subtype"] = ""
+            row["flood_bfe"] = None
+            continue
+        candidates.append((idx, lng_f, lat_f))
+
+    if not candidates:
+        return
+
+    indices = [c[0] for c in candidates]
+    lngs = [c[1] for c in candidates]
+    lats = [c[2] for c in candidates]
+
+    # Default everyone to empty; the SELECT below overrides matches.
+    for idx in indices:
+        rows[idx]["flood_zone"] = ""
+        rows[idx]["flood_zone_subtype"] = ""
+        rows[idx]["flood_bfe"] = None
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT ON (p.idx)
+                       p.idx, f.fld_zone, f.zone_subty, f.static_bfe
+                FROM (
+                    SELECT unnest(%s::int[])     AS idx,
+                           unnest(%s::float8[])  AS lng,
+                           unnest(%s::float8[])  AS lat
+                ) p
+                JOIN flood_zones f
+                  ON ST_Contains(
+                       f.geom,
+                       ST_SetSRID(ST_MakePoint(p.lng, p.lat), 4326)
+                     )
+                ORDER BY p.idx, ST_Area(f.geom) DESC
+                """,
+                (indices, lngs, lats),
+            )
+            for idx, fld_zone, zone_subty, static_bfe in cur.fetchall():
+                row = rows[idx]
+                row["flood_zone"] = fld_zone or ""
+                row["flood_zone_subtype"] = zone_subty or ""
+                row["flood_bfe"] = float(static_bfe) if static_bfe is not None else None
+    except Exception as exc:
+        logger.warning("Flood hydration failed (table missing?): %s", exc)
+    finally:
+        release_conn(conn)
+
+
 def _hydrate_outreach_for_rows(rows: list[dict[str, Any]], user: dict[str, Any] | None) -> None:
     """Mutate rows in place, refreshing outreach_* fields from the live
     parcel_outreach_notes table.
@@ -4842,6 +4928,10 @@ async def _run_download_csv(
     # KK's preview-smoke bug repeats: check Mailer Sent → export → blank cell.
     # Helper is a no-op (or clear) for non-power_user roles.
     _hydrate_outreach_for_rows(rows, user)
+    # Flood enrichment shipped 2026-06-06 — older cached_jobs rows pre-date
+    # it and don't carry flood fields. Re-hydrate same as above so CSV
+    # export rights the column even for pre-flood snapshots.
+    _hydrate_flood_for_rows(rows)
     redfin_data: dict[str, dict] = job.get("redfin_data", {})
     sold_points: list[dict[str, Any]] = job.get("sold_points", []) or []
     propelio_sold_points: list[dict[str, Any]] = _load_propelio_sold_points(job_id) or []
