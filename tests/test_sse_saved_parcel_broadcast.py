@@ -132,11 +132,13 @@ def test_delete_saved_parcel_skips_notify_when_only_standalone() -> None:
 def test_sse_stream_recognizes_saved_parcel_change_type() -> None:
     """stream_area_events must emit `event: saved_parcel_change` (named)
     so the frontend's addEventListener picks it up. Without this it would
-    fall through to the default `message` event and get filtered out."""
+    fall through to the default `message` event and get filtered out.
+
+    Tolerant of the type tuple being split across multiple lines (e.g.,
+    after area_meta_change was added 2026-06-06 PM)."""
     src = _read(MAIN_PY)
     pat = re.compile(
-        r'msg\.get\("type"\) in \(\s*'
-        r'"resync", "blob_explode", "stored_value", "saved_parcel_change",?\s*\)',
+        r'msg\.get\("type"\) in \([^)]*"saved_parcel_change"[^)]*\)',
         re.DOTALL,
     )
     assert pat.search(src), (
@@ -167,13 +169,13 @@ def test_frontend_listens_for_saved_parcel_change() -> None:
 def test_frontend_default_message_handler_skips_saved_parcel_change() -> None:
     """_handleSseFieldChange must early-return on saved_parcel_change
     type — that event has its own dedicated listener and the field-change
-    handler would otherwise try to apply it as a filter delta and warn."""
+    handler would otherwise try to apply it as a filter delta and warn.
+
+    Tolerant of the early-return chain being on one line OR spread
+    across multiple lines (refactored 2026-06-06 PM when area_meta_change
+    was added)."""
     src = _read(MAP_JS)
-    pat = re.compile(
-        r'msg\.type === "resync" \|\| msg\.type === "blob_explode" \|\| '
-        r'msg\.type === "saved_parcel_change"',
-    )
-    assert pat.search(src), (
+    assert 'msg.type === "saved_parcel_change"' in src, (
         "_handleSseFieldChange must include saved_parcel_change in its "
         "early-return list alongside the other type-tagged events."
     )

@@ -7267,7 +7267,8 @@ async def stream_area_events(
                 # Determine event type.
                 event_type = "message"
                 if isinstance(msg, dict) and msg.get("type") in (
-                    "resync", "blob_explode", "stored_value", "saved_parcel_change",
+                    "resync", "blob_explode", "stored_value",
+                    "saved_parcel_change", "area_meta_change",
                 ):
                     event_type = msg["type"]
                 yield {
@@ -7753,6 +7754,37 @@ async def update_saved_area(area_id: str, request: SavedAreaUpdateRequest, req: 
                     (_json_blob_notify.dumps({
                         "area_id": area_id,
                         "type": "blob_explode",
+                        "by_user_id": int(user["id"]),
+                        "by_session_id": req.headers.get("x-session-id", ""),
+                    }),),
+                )
+
+            # KK debug 2026-06-06: name + originator changes on this PUT
+            # had no SSE broadcast — User B only saw them on tab refocus
+            # (via the visibilitychange handler at frontend/map.js:198).
+            # Now fire an area_meta_change event so other connected
+            # members of the area refetch /api/areas and see the new name
+            # / originator within a second instead of "eventually."
+            # Filter_state changes already broadcast via blob_explode
+            # above; this handles the remaining mutation surface on the
+            # generic PUT.
+            name_or_originator_changed = (
+                request.name is not None
+                or request.originator_parcel_county is not None
+                or request.originator_parcel_account_num is not None
+            )
+            if name_or_originator_changed:
+                import json as _json_meta_notify
+                cur.execute(
+                    "SELECT pg_notify('saved_area_filter_changes', %s)",
+                    (_json_meta_notify.dumps({
+                        "area_id": area_id,
+                        "type": "area_meta_change",
+                        "name_changed": request.name is not None,
+                        "originator_changed": (
+                            request.originator_parcel_county is not None
+                            or request.originator_parcel_account_num is not None
+                        ),
                         "by_user_id": int(user["id"]),
                         "by_session_id": req.headers.get("x-session-id", ""),
                     }),),
