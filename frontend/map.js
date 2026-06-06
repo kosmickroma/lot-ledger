@@ -6167,6 +6167,12 @@ const MapToolbar = L.Control.extend({
       if (isOpen) {
         _closeLyrsPopover();
       } else {
+        // Vertically anchor the popover to the LYRS button so it aligns
+        // with the button regardless of where in the toolbar stack the
+        // button sits. Without this the popover renders at top: 0 of the
+        // toolbar container (aligned with the topmost button) which is
+        // way above LYRS.
+        lyrsPopover.style.top = `${lyrsBtn.offsetTop}px`;
         lyrsPopover.classList.remove("hidden");
         lyrsBtn.classList.add("popover-open");
       }
