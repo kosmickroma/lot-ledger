@@ -1104,6 +1104,18 @@ def build_feature(row: dict[str, Any], prop_type: str, on_redfin: bool, redfin_l
             if hasattr(row.get("outreach_mailer_date"), "isoformat")
             else (row.get("outreach_mailer_date") or None)
         ),
+        # Flood Zone (FEMA NFHL, Phase 2 enrichment per county). build_feature
+        # is an explicit allowlist — without these three fields the frontend
+        # popup reads p.flood_zone as undefined and the row is hidden, even
+        # though the CSV (which uses row dict directly) sees the data fine.
+        # Frontend popup: frontend/map.js _buildParcelDetailPanelHtml.
+        "flood_zone": _clean_text(row.get("flood_zone")),
+        "flood_zone_subtype": _clean_text(row.get("flood_zone_subtype")),
+        "flood_bfe": (
+            float(row.get("flood_bfe"))
+            if row.get("flood_bfe") is not None
+            else None
+        ),
         "lat": lat,
         "lng": lng,
     }
