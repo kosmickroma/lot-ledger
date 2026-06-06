@@ -7251,6 +7251,33 @@ async def stream_area_events(
                 "event": "connected",
                 "data": _json.dumps({"area_id": area_id, "user_id": int(user["id"])}),
             }
+            # KK debug 2026-06-06: synthetic resync immediately after
+            # connected. PostgreSQL LISTEN/NOTIFY does NOT buffer for
+            # disconnected subscribers — any pg_notify fired while a
+            # client EventSource was zombie / reconnecting is LOST.
+            # _broadcast_resync_to_all in api/sse.py only fires on the
+            # server-side LISTEN connection reconnect (very rare). The
+            # much more common client EventSource reconnect (Edge tab
+            # throttling, network blips, watchdog force-close) had no
+            # resync mechanism — leading to "tab B's star didn't update
+            # because the area_meta_change event fired during a zombie
+            # window." Frontend resync handler already calls
+            # _reloadSavedResources via _sseRefetchArea; reusing it
+            # avoids any new frontend code.
+            #
+            # Trade-off: every connect (initial page load AND every
+            # reconnect) triggers one extra GET /api/areas + /api/parcels
+            # + /api/sessions on the client. On page load this is
+            # near-zero overhead since those endpoints get hit anyway by
+            # other init code. The much bigger fix is "users don't lose
+            # state silently."
+            yield {
+                "event": "resync",
+                "data": _json.dumps({
+                    "area_id": area_id,
+                    "reason": "client_connect",
+                }),
+            }
             while True:
                 # Agent C catch: timeout-with-disconnect-check pattern.
                 # Without timeout, the generator parks forever on dead clients.
