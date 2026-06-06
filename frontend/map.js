@@ -3661,7 +3661,6 @@ async function _reloadSavedResources() {
   _restoreAllSavedParcelOutlines();
   renderSavedAreasList();
   renderSavedSessionsList();
-  _renderSubjectProperties();
 
   // v1.1 §2.3 — when another tab auto-saves a new subject for a loaded
   // area, _savedAreasCache here gets refreshed by the lines above, but
@@ -3671,6 +3670,17 @@ async function _reloadSavedResources() {
   // originator through _setCurrentTargetParcel so the sidebar label
   // catches up. No-op when no area is loaded or loaded area has no
   // subject.
+  //
+  // KK regression 2026-06-06: this block USED to sit AFTER
+  // _renderSubjectProperties() below — which meant the high-zoom "staged
+  // target star" branch (frontend/map.js ~4467) rendered using the STALE
+  // _currentTargetParcel before this code corrected it. Result: on
+  // tab B, the outline migrated to the new subject (driven by
+  // _subjectPropertiesByKey) but the star stayed pinned on the old
+  // subject until the next moveend re-render. Moved the block above
+  // _renderSubjectProperties so the staged identity is current at
+  // render time. _setCurrentTargetParcel has no map-render side effects
+  // (only sidebar label + optional coord resolve), so the move is safe.
   if (_currentLoadedAreaId) {
     const loaded = _savedAreasCache.find(
       (a) => a.id === _currentLoadedAreaId && a.type === "area",
@@ -3691,6 +3701,8 @@ async function _reloadSavedResources() {
       }
     }
   }
+
+  _renderSubjectProperties();
 }
 
 // Sync the browser tab title AND the ?area=<share_id> URL param to the

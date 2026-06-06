@@ -143,6 +143,33 @@ def test_saved_parcel_change_handler_skips_self_echo_when_local_save_in_flight()
     )
 
 
+def test_reload_saved_resources_updates_target_parcel_before_render() -> None:
+    """KK regression 2026-06-06: on tab B, the outline migrated to the
+    new subject but the star stayed pinned on the old subject. The
+    _setCurrentTargetParcel block lived AFTER _renderSubjectProperties(),
+    so the high-zoom "staged target star" branch read stale state at
+    render time.
+
+    Fix: the loaded-area-current-subject sync must happen BEFORE the
+    _renderSubjectProperties() call so the star and the outline use the
+    same current state."""
+    src = _read(MAP_JS)
+    # In _reloadSavedResources, the _setCurrentTargetParcel block must
+    # appear BEFORE the _renderSubjectProperties() call.
+    pat = re.compile(
+        r"async function _reloadSavedResources\(\).*?"
+        r"_setCurrentTargetParcel\(\{ county: c, account: a \}\);.*?"
+        r"_renderSubjectProperties\(\);",
+        re.DOTALL,
+    )
+    assert pat.search(src), (
+        "_reloadSavedResources must sync _currentTargetParcel from the "
+        "loaded area's persisted originator BEFORE calling "
+        "_renderSubjectProperties so the high-zoom staged-star branch "
+        "sees current state, not stale state."
+    )
+
+
 def test_frontend_default_message_handler_skips_area_meta_change() -> None:
     src = _read(MAP_JS)
     assert "msg.type === \"area_meta_change\"" in src, (
