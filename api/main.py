@@ -7251,6 +7251,33 @@ async def stream_area_events(
                 "event": "connected",
                 "data": _json.dumps({"area_id": area_id, "user_id": int(user["id"])}),
             }
+            # KK debug 2026-06-06: synthetic resync immediately after
+            # connected. PostgreSQL LISTEN/NOTIFY does NOT buffer for
+            # disconnected subscribers — any pg_notify fired while a
+            # client EventSource was zombie / reconnecting is LOST.
+            # _broadcast_resync_to_all in api/sse.py only fires on the
+            # server-side LISTEN connection reconnect (very rare). The
+            # much more common client EventSource reconnect (Edge tab
+            # throttling, network blips, watchdog force-close) had no
+            # resync mechanism — leading to "tab B's star didn't update
+            # because the area_meta_change event fired during a zombie
+            # window." Frontend resync handler already calls
+            # _reloadSavedResources via _sseRefetchArea; reusing it
+            # avoids any new frontend code.
+            #
+            # Trade-off: every connect (initial page load AND every
+            # reconnect) triggers one extra GET /api/areas + /api/parcels
+            # + /api/sessions on the client. On page load this is
+            # near-zero overhead since those endpoints get hit anyway by
+            # other init code. The much bigger fix is "users don't lose
+            # state silently."
+            yield {
+                "event": "resync",
+                "data": _json.dumps({
+                    "area_id": area_id,
+                    "reason": "client_connect",
+                }),
+            }
             while True:
                 # Agent C catch: timeout-with-disconnect-check pattern.
                 # Without timeout, the generator parks forever on dead clients.
@@ -7266,7 +7293,10 @@ async def stream_area_events(
                     break
                 # Determine event type.
                 event_type = "message"
-                if isinstance(msg, dict) and msg.get("type") in ("resync", "blob_explode", "stored_value"):
+                if isinstance(msg, dict) and msg.get("type") in (
+                    "resync", "blob_explode", "stored_value",
+                    "saved_parcel_change", "area_meta_change",
+                ):
                     event_type = msg["type"]
                 yield {
                     "event": event_type,
@@ -7755,6 +7785,37 @@ async def update_saved_area(area_id: str, request: SavedAreaUpdateRequest, req: 
                         "by_session_id": req.headers.get("x-session-id", ""),
                     }),),
                 )
+
+            # KK debug 2026-06-06: name + originator changes on this PUT
+            # had no SSE broadcast — User B only saw them on tab refocus
+            # (via the visibilitychange handler at frontend/map.js:198).
+            # Now fire an area_meta_change event so other connected
+            # members of the area refetch /api/areas and see the new name
+            # / originator within a second instead of "eventually."
+            # Filter_state changes already broadcast via blob_explode
+            # above; this handles the remaining mutation surface on the
+            # generic PUT.
+            name_or_originator_changed = (
+                request.name is not None
+                or request.originator_parcel_county is not None
+                or request.originator_parcel_account_num is not None
+            )
+            if name_or_originator_changed:
+                import json as _json_meta_notify
+                cur.execute(
+                    "SELECT pg_notify('saved_area_filter_changes', %s)",
+                    (_json_meta_notify.dumps({
+                        "area_id": area_id,
+                        "type": "area_meta_change",
+                        "name_changed": request.name is not None,
+                        "originator_changed": (
+                            request.originator_parcel_county is not None
+                            or request.originator_parcel_account_num is not None
+                        ),
+                        "by_user_id": int(user["id"]),
+                        "by_session_id": req.headers.get("x-session-id", ""),
+                    }),),
+                )
         conn.commit()
     except Exception:
         conn.rollback()
@@ -7888,6 +7949,28 @@ async def create_saved_parcel(request: SavedParcelCreateRequest, req: Request, u
                         (account_num, county, Json(payload_data), int(user["id"]), target_area_id),
                     )
                     bonded_row = cur.fetchone()
+
+                    # Mike report 2026-06-06: "stars don't show up when my
+                    # assistants are adding areas with saved parcels until I
+                    # view the area with a saved parcel." Phase 1 SSE only
+                    # broadcast filter / stored_value mutations — saved
+                    # parcel adds never reached other connected users. Fire
+                    # a saved_parcel_change event so subscribers of this
+                    # area_id refetch their saved-parcel list (and the gold
+                    # star renders without requiring an area open).
+                    import json as _json_sp_add
+                    cur.execute(
+                        "SELECT pg_notify('saved_area_filter_changes', %s)",
+                        (_json_sp_add.dumps({
+                            "area_id": target_area_id,
+                            "type": "saved_parcel_change",
+                            "action": "add",
+                            "account_num": account_num,
+                            "county": county,
+                            "by_user_id": int(user["id"]),
+                            "by_session_id": req.headers.get("x-session-id", ""),
+                        }),),
+                    )
         conn.commit()
     except Exception:
         conn.rollback()
@@ -7914,13 +7997,48 @@ async def create_saved_parcel(request: SavedParcelCreateRequest, req: Request, u
 async def delete_saved_parcel(county: str, account_num: str, req: Request, user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
     require_csrf(req)
     conn = get_session_conn()
+    deleted_area_ids: list[str] = []
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "DELETE FROM saved_parcels WHERE county = %s AND account_num = %s AND user_id = %s",
+                """
+                DELETE FROM saved_parcels
+                WHERE county = %s AND account_num = %s AND user_id = %s
+                RETURNING area_id
+                """,
                 (str(county or "dcad").strip().lower() or "dcad", str(account_num or "").strip(), int(user["id"])),
             )
-            deleted = cur.rowcount or 0
+            rows = cur.fetchall()
+            deleted = len(rows)
+            # Same Mike report 2026-06-06: collect every distinct area_id we
+            # just removed a bonded copy from so the SSE broadcast below can
+            # fan out to all affected areas in one transaction. RETURNING is
+            # how we know which areas were touched — the DELETE WHERE clause
+            # doesn't filter by area_id (it nukes all copies for this user).
+            for row in rows:
+                aid = row[0]
+                if aid:
+                    deleted_area_ids.append(str(aid))
+
+            if deleted_area_ids:
+                import json as _json_sp_del
+                target_account = str(account_num or "").strip()
+                target_county = str(county or "dcad").strip().lower() or "dcad"
+                user_id_int = int(user["id"])
+                session_id_hdr = req.headers.get("x-session-id", "")
+                for affected_area_id in set(deleted_area_ids):
+                    cur.execute(
+                        "SELECT pg_notify('saved_area_filter_changes', %s)",
+                        (_json_sp_del.dumps({
+                            "area_id": affected_area_id,
+                            "type": "saved_parcel_change",
+                            "action": "delete",
+                            "account_num": target_account,
+                            "county": target_county,
+                            "by_user_id": user_id_int,
+                            "by_session_id": session_id_hdr,
+                        }),),
+                    )
         conn.commit()
     except Exception:
         conn.rollback()

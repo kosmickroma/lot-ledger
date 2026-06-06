@@ -952,6 +952,15 @@ let _filterSaveLastSnapshot = null;
 // Per docs/MULTIUSER_COLLAB_SPRINT3_SPEC.md v1 §4.1.
 let _sseEventSource = null;           // current EventSource instance
 let _sseAreaId = null;                 // which area it's subscribed to
+// KK debug 2026-06-06: zombie-connection watchdog. _sseLastMessageAt
+// updated by every SSE event handler (including the synthetic 'connected'
+// fired at stream open). The 60s watchdog (see _sseWatchdogTick) checks
+// the gap and force-reconnects if no events arrived for >90s while the
+// tab is visible and an area is loaded. Covers the Edge tab-throttling
+// case where the EventSource thinks it's open but the backend's keepalive
+// is being silently swallowed.
+let _sseLastMessageAt = 0;
+let _sseWatchdogInterval = null;
 const _sseSessionUuid = (typeof crypto !== "undefined" && crypto.randomUUID)
   ? crypto.randomUUID()
   : `sess-${Math.random().toString(36).slice(2)}-${Date.now()}`;
@@ -2019,30 +2028,80 @@ function _openSseStream(areaId) {
     { withCredentials: true }
   );
   _sseEventSource = es;
+  // KK debug 2026-06-06 watchdog (paired with area_meta_change broadcast):
+  // track the most recent SSE message timestamp so the 60s health probe
+  // (declared below the listeners) can detect a zombie EventSource and
+  // force-reconnect. EventSource.readyState only flips to CLOSED on a
+  // non-200 response; transport blips + Edge tab throttling can leave the
+  // stream "open" but silently dead. Backend sse-starlette pings every
+  // 30s as SSE comments (`: ping\n\n`) which the EventSource API hides
+  // from JavaScript, so we can't use pings — only real events bump this.
+  _sseLastMessageAt = Date.now();
   es.addEventListener("connected", (e) => {
+    _sseLastMessageAt = Date.now();
     try {
       const data = JSON.parse(e.data);
       console.debug("[sse] connected", data);
     } catch (_) {}
   });
   es.addEventListener("message", (e) => {
+    _sseLastMessageAt = Date.now();
     let msg;
     try { msg = JSON.parse(e.data); } catch (_) { return; }
     _handleSseFieldChange(msg);
   });
   es.addEventListener("resync", () => {
+    _sseLastMessageAt = Date.now();
     console.debug("[sse] resync event — refetching area state");
     _sseRefetchArea(areaId);
   });
   es.addEventListener("blob_explode", () => {
+    _sseLastMessageAt = Date.now();
     console.debug("[sse] blob_explode event — refetching area state");
     _sseRefetchArea(areaId);
   });
   // Sprint 3 hotfix (2026-06-02): stored value live sync.
   es.addEventListener("stored_value", (e) => {
+    _sseLastMessageAt = Date.now();
     let msg;
     try { msg = JSON.parse(e.data); } catch (_) { return; }
     _handleSseStoredValue(msg);
+  });
+  // Mike report 2026-06-06: "stars don't show up when my assistants are
+  // adding areas with saved parcels until I view the area with a saved
+  // parcel." The backend now fires this event when create_saved_parcel
+  // bonds a parcel to a shared area (or delete_saved_parcel removes one).
+  // Refetch the saved-resources cache so the gold star renders immediately
+  // for every other connected member of this area.
+  es.addEventListener("saved_parcel_change", () => {
+    _sseLastMessageAt = Date.now();
+    // No self-echo gate. Copilot deep dive 2026-06-06: the gate I added
+    // at commit 99be884 was over-engineered for a speculative race that
+    // doesn't actually exist (`_renderSubjectPropertyOutlineLazy` has
+    // an `_subjectPropertyGeometryInFlight` early-return that prevents
+    // the duplicate fetch). What the gate actually did was kill the
+    // FAST path for the writer's own tab: the SSE self-echo arrives
+    // ~100ms after the backend commits, well before the local awaited
+    // PUT chain returns. Suppressing it meant the writer had to wait
+    // the full HTTP round trip + post-PUT reload before the new gold
+    // star appeared. The OLD pre-99be884 behavior was instant precisely
+    // because the SSE self-echo was the fast path.
+    console.debug("[sse] saved_parcel_change — refreshing saved resources");
+    _reloadSavedResources().catch((err) =>
+      console.warn("[sse] _reloadSavedResources after saved_parcel_change failed:", err)
+    );
+  });
+  // KK debug 2026-06-06: PUT /api/areas/{id} now fires this for name +
+  // originator changes (was previously silent — only blob_explode fired
+  // when filter_state was in the body). User B's subject-property and
+  // area-name display refresh live instead of waiting for tab refocus.
+  es.addEventListener("area_meta_change", () => {
+    _sseLastMessageAt = Date.now();
+    // Same reasoning as saved_parcel_change above — gate removed.
+    console.debug("[sse] area_meta_change — refreshing saved resources");
+    _reloadSavedResources().catch((err) =>
+      console.warn("[sse] _reloadSavedResources after area_meta_change failed:", err)
+    );
   });
   es.addEventListener("error", () => {
     // EventSource enters CLOSED only on non-200 response. Transport
@@ -2062,12 +2121,47 @@ function _closeSseStream() {
   _sseAreaId = null;
 }
 
+// KK debug 2026-06-06 watchdog: detect zombie EventSource that thinks it's
+// open but isn't delivering events (Edge tab throttling, dropped TCP that
+// the browser didn't notice, etc.). Backend sends ping every 30s as an SSE
+// comment which the API hides from JS — so we only see "real" events. A
+// healthy stream WILL see at least one real message per minute under any
+// normal usage. We're generous: only force-reconnect after 90s of silence.
+function _sseWatchdogTick() {
+  if (!_sseEventSource) return;
+  if (!_sseAreaId) return;
+  // Don't fire while tab is hidden — browser may have legitimately frozen
+  // the timer + EventSource together; tab-focus visibilitychange handler
+  // will trigger _reloadSavedResources anyway.
+  if (document.visibilityState !== "visible") return;
+  const silenceMs = Date.now() - _sseLastMessageAt;
+  if (silenceMs <= 90_000) return;
+  // Zombie. Force-reconnect.
+  const areaId = _sseAreaId;
+  console.warn(
+    `[sse] watchdog: no events for ${Math.round(silenceMs / 1000)}s; force-reconnect`
+  );
+  _closeSseStream();
+  _openSseStream(areaId);
+}
+
+// Single global interval — starts when the module loads, ticks every 30s,
+// is a no-op when no stream is open or tab is hidden. Cheap, idempotent.
+if (typeof window !== "undefined" && !_sseWatchdogInterval) {
+  _sseWatchdogInterval = setInterval(_sseWatchdogTick, 30_000);
+}
+
 function _handleSseFieldChange(msg) {
   if (!msg) return;
-  // Type-tagged messages (resync / blob_explode) are handled by
-  // their dedicated addEventListener bindings; this catches only
-  // field-change deltas.
-  if (msg.type === "resync" || msg.type === "blob_explode") return;
+  // Type-tagged messages (resync / blob_explode / saved_parcel_change /
+  // area_meta_change) are handled by their dedicated addEventListener
+  // bindings; this catches only field-change deltas.
+  if (
+    msg.type === "resync"
+    || msg.type === "blob_explode"
+    || msg.type === "saved_parcel_change"
+    || msg.type === "area_meta_change"
+  ) return;
   const { field_key, value, client_seq, by_session_id } = msg;
   if (!field_key) return;
   // Sprint 3 hotfix (2026-06-02 evening): seq-based self-echo + LWW filter.
@@ -3564,7 +3658,6 @@ async function _reloadSavedResources() {
   _restoreAllSavedParcelOutlines();
   renderSavedAreasList();
   renderSavedSessionsList();
-  _renderSubjectProperties();
 
   // v1.1 §2.3 — when another tab auto-saves a new subject for a loaded
   // area, _savedAreasCache here gets refreshed by the lines above, but
@@ -3574,6 +3667,17 @@ async function _reloadSavedResources() {
   // originator through _setCurrentTargetParcel so the sidebar label
   // catches up. No-op when no area is loaded or loaded area has no
   // subject.
+  //
+  // KK regression 2026-06-06: this block USED to sit AFTER
+  // _renderSubjectProperties() below — which meant the high-zoom "staged
+  // target star" branch (frontend/map.js ~4467) rendered using the STALE
+  // _currentTargetParcel before this code corrected it. Result: on
+  // tab B, the outline migrated to the new subject (driven by
+  // _subjectPropertiesByKey) but the star stayed pinned on the old
+  // subject until the next moveend re-render. Moved the block above
+  // _renderSubjectProperties so the staged identity is current at
+  // render time. _setCurrentTargetParcel has no map-render side effects
+  // (only sidebar label + optional coord resolve), so the move is safe.
   if (_currentLoadedAreaId) {
     const loaded = _savedAreasCache.find(
       (a) => a.id === _currentLoadedAreaId && a.type === "area",
@@ -3589,11 +3693,32 @@ async function _reloadSavedResources() {
         const stagedC = staged ? String(staged.county || "").trim().toLowerCase() : null;
         const stagedA = staged ? String(staged.account || "").trim() : null;
         if (c !== stagedC || a !== stagedA) {
-          _setCurrentTargetParcel({ county: c, account: a });
+          // KK / Copilot debug 2026-06-06: pull lat/lng from the freshly-
+          // populated _subjectPropertiesByKey (built right above from
+          // the /api/areas response) so _setCurrentTargetParcel receives
+          // finite coords on the same tick. Without this, the call below
+          // passes only county/account → _normalizeTargetParcel stores
+          // lat/lng as null → _ensureCurrentTargetParcelCoords starts an
+          // async fetch → _renderSubjectProperties fires RIGHT AFTER
+          // with stale (null) coords → high-zoom staged-star branch
+          // skips (Number.isFinite check fails) → no star until the
+          // next moveend triggers a re-render. Reader-tab specific bug:
+          // outline came from _subjectPropertiesByKey (had coords) but
+          // star came from _currentTargetParcel (didn't).
+          const _subjectKey = _subjectPropertyKey(c, a);
+          const _subjectEntry = _subjectPropertiesByKey.get(_subjectKey);
+          _setCurrentTargetParcel({
+            county: c,
+            account: a,
+            lat: _subjectEntry ? _subjectEntry.lat : undefined,
+            lng: _subjectEntry ? _subjectEntry.lng : undefined,
+          });
         }
       }
     }
   }
+
+  _renderSubjectProperties();
 }
 
 // Sync the browser tab title AND the ?area=<share_id> URL param to the
