@@ -556,6 +556,15 @@ map.createPane("selectedOutlinePane");
 map.getPane("selectedOutlinePane").style.zIndex = "625";
 map.getPane("selectedOutlinePane").style.pointerEvents = "none";
 
+// Flood zone overlay pane — sits ABOVE the basemap (default tile pane at
+// 200) but BELOW the parcel polygon panes (620+). Lets parcel polygons
+// stay readable on top while flood fills tint the surrounding map. Spec
+// decision (Phase 3): pane below parcels, above basemap, with debounced
+// viewport-bounded refetch on moveend.
+map.createPane("floodZonesPane");
+map.getPane("floodZonesPane").style.zIndex = "410";
+map.getPane("floodZonesPane").style.pointerEvents = "none";
+
 // Apply saved basemap BEFORE browseLayer is added. If we switch after protomaps
 // is on the map, the tile layer removal fires viewprereset → _invalidateAll on
 // protomaps → _tileZoom = undefined → browse layer goes blank until next pan/zoom.
@@ -847,6 +856,15 @@ let countyLabelLayer = null;
 let countyVisible = false;
 let hoaLayer = null;
 let hoaVisible = false;
+// Flood zones overlay state (Phase 3). Layer is created on first toggle-on,
+// then refilled per-viewport via _refetchFloodZonesForViewport. Visibility
+// follows the OFF-by-default contract from spec decision; user opts in
+// via the FLOOD toggle in the map toolbar.
+let floodZonesLayer = null;
+let floodZonesVisible = false;
+let _floodZonesFetchInFlight = false;
+let _floodZonesFetchTimer = null;
+let _floodZonesLastBboxKey = "";
 let currentJobId = null;
 let lastPolygon = null;
 let lastDrawnLatLngs = null;
@@ -3175,6 +3193,117 @@ async function toggleHoaLayer() {
     console.error("HOA layer load failed", e);
   }
 }
+
+// FEMA NFHL flood zone overlay — Phase 3 of the flood zones feature.
+// Severity-gradient style function (locked palette in spec):
+//   FLOODWAY              → dark red #8B0000, 50% opacity, bold outline
+//   AE / A / AH / AO / V  → red #DC2626, 35% opacity
+//   X (500-yr / shaded)   → amber #F59E0B, 25% opacity
+//   X (minimal)           → faint outline only, no fill
+//   anything else (D, B…) → gray outline fallback (defensive against
+//                            FEMA adding new zone codes in future)
+function _floodZoneStyle(feature) {
+  const p = feature?.properties || {};
+  const zone = String(p.fld_zone || "").trim();
+  const subty = String(p.zone_subty || "").trim().toUpperCase();
+
+  if (subty === "FLOODWAY") {
+    return { color: "#660000", weight: 1.5, fillColor: "#8B0000", fillOpacity: 0.50 };
+  }
+  if (zone === "AE" || zone === "A" || zone === "AH" || zone === "AO" || zone === "V" || zone === "VE") {
+    return { color: "#991b1b", weight: 1, fillColor: "#DC2626", fillOpacity: 0.35 };
+  }
+  if (zone === "X" && subty.indexOf("0.2 PCT") !== -1) {
+    return { color: "#b45309", weight: 0.8, fillColor: "#F59E0B", fillOpacity: 0.25 };
+  }
+  if (zone === "X") {
+    return { color: "#9ca3af", weight: 0.5, fillColor: "#9ca3af", fillOpacity: 0.05 };
+  }
+  return { color: "#6b7280", weight: 0.5, fillColor: "#6b7280", fillOpacity: 0.08 };
+}
+
+function _floodZoneFeatureLabel(p) {
+  // Mirrors api/main.py:_flood_zone_csv_cell verbose plain-English format.
+  const zone = String(p?.fld_zone || "").trim();
+  if (!zone) return "";
+  const subty = String(p?.zone_subty || "").trim().toUpperCase();
+  const bfe = p?.static_bfe;
+  if (subty === "FLOODWAY") return `${zone} — FLOODWAY (no build)`;
+  if (zone === "AE" || zone === "A" || zone === "AH" || zone === "AO" || zone === "V" || zone === "VE") {
+    if (bfe !== null && bfe !== undefined && Number.isFinite(Number(bfe))) {
+      return `${zone} (BFE ${Number(bfe).toFixed(1)} ft)`;
+    }
+    return zone;
+  }
+  if (zone === "X" && subty.indexOf("0.2 PCT") !== -1) return "X — 500-yr floodplain";
+  if (zone === "X" && subty.indexOf("MINIMAL") !== -1) return "X — minimal risk";
+  return zone;
+}
+
+async function _refetchFloodZonesForViewport() {
+  if (!floodZonesVisible) return;
+  if (_floodZonesFetchInFlight) return;
+  const b = map.getBounds();
+  const sw = b.getSouthWest();
+  const ne = b.getNorthEast();
+  const bboxStr = `${sw.lng.toFixed(5)},${sw.lat.toFixed(5)},${ne.lng.toFixed(5)},${ne.lat.toFixed(5)}`;
+  // Same bbox as the last fetch → skip (pan inside the cached extent).
+  if (bboxStr === _floodZonesLastBboxKey) return;
+  _floodZonesFetchInFlight = true;
+  try {
+    const res = await fetch(`/api/flood-zones?bbox=${bboxStr}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const geojson = await res.json();
+    if (!floodZonesLayer) {
+      floodZonesLayer = L.geoJSON(null, {
+        pane: "floodZonesPane",
+        style: _floodZoneStyle,
+        onEachFeature(feature, layer) {
+          const lbl = _floodZoneFeatureLabel(feature?.properties);
+          if (lbl) {
+            layer.bindTooltip(lbl, { sticky: true, opacity: 0.92, direction: "top" });
+          }
+        },
+      });
+    }
+    floodZonesLayer.clearLayers();
+    floodZonesLayer.addData(geojson);
+    if (!map.hasLayer(floodZonesLayer)) floodZonesLayer.addTo(map);
+    _floodZonesLastBboxKey = bboxStr;
+  } catch (e) {
+    console.warn("[flood-zones] fetch failed", e);
+  } finally {
+    _floodZonesFetchInFlight = false;
+  }
+}
+
+function _scheduleFloodZonesRefetch() {
+  // 250ms debounce so a rapid pan/zoom sequence only triggers one fetch.
+  clearTimeout(_floodZonesFetchTimer);
+  _floodZonesFetchTimer = setTimeout(_refetchFloodZonesForViewport, 250);
+}
+
+async function toggleFloodZonesLayer() {
+  const btn = document.getElementById("btn-flood-toggle");
+  if (floodZonesVisible) {
+    if (floodZonesLayer) {
+      map.removeLayer(floodZonesLayer);
+      floodZonesLayer.clearLayers();
+    }
+    _floodZonesLastBboxKey = "";
+    floodZonesVisible = false;
+    if (btn) btn.classList.remove("active");
+    return;
+  }
+  floodZonesVisible = true;
+  if (btn) btn.classList.add("active");
+  await _refetchFloodZonesForViewport();
+}
+
+// Hook viewport changes so flood polygons follow the user's panning + zoom.
+// The handler self-gates on floodZonesVisible so it's a cheap no-op when
+// the toggle is OFF (default).
+map.on("moveend", _scheduleFloodZonesRefetch);
 
 async function toggleCountyLayer() {
   const btn = document.getElementById("btn-county-toggle");
@@ -6014,6 +6143,16 @@ const MapToolbar = L.Control.extend({
     L.DomEvent.on(hoaBtn, "click", (e) => {
       L.DomEvent.preventDefault(e);
       toggleHoaLayer();
+    });
+
+    const floodBtn = L.DomUtil.create("a", "", container);
+    floodBtn.id = "btn-flood-toggle";
+    floodBtn.href = "#";
+    floodBtn.title = "Toggle FEMA flood zones overlay";
+    floodBtn.textContent = "FLOOD";
+    L.DomEvent.on(floodBtn, "click", (e) => {
+      L.DomEvent.preventDefault(e);
+      toggleFloodZonesLayer();
     });
 
     const countyBtn = L.DomUtil.create("a", "", container);
@@ -9869,6 +10008,31 @@ function _buildParcelDetailPanelHtml(p, matchedComp) {
               ${_buildParcelDetailTableRow("Flooring", _panelDisplayValue(p.flooring))}
               ${p.on_redfin && p.redfin_url ? _buildParcelDetailTableRow("Listing", `<a href="${p.redfin_url}" target="_blank" rel="noopener noreferrer">View listing</a>`) : ""}
               ${soldCompRows}
+              ${(() => {
+                // Flood Zone row (FEMA NFHL, Phase 3). Verbose plain-English
+                // wording mirrors the CSV column formatter
+                // (api/main.py:_flood_zone_csv_cell). FLOODWAY gets a
+                // distinct "no build" warning so Mike can't miss it.
+                const _fz = String(p?.flood_zone || "").trim();
+                if (!_fz) return "";
+                const _sub = String(p?.flood_zone_subtype || "").trim().toUpperCase();
+                const _bfe = p?.flood_bfe;
+                let _label;
+                if (_sub === "FLOODWAY") {
+                  _label = `${_fz} — FLOODWAY (no build)`;
+                } else if (["AE","A","AH","AO","V","VE"].includes(_fz)) {
+                  _label = (_bfe !== null && _bfe !== undefined && Number.isFinite(Number(_bfe)))
+                    ? `${_fz} (BFE ${Number(_bfe).toFixed(1)} ft)`
+                    : _fz;
+                } else if (_fz === "X" && _sub.indexOf("0.2 PCT") !== -1) {
+                  _label = "X — 500-yr floodplain";
+                } else if (_fz === "X" && _sub.indexOf("MINIMAL") !== -1) {
+                  _label = "X — minimal risk";
+                } else {
+                  _label = _fz;
+                }
+                return _buildParcelDetailTableRow("Flood Zone", _propelioEscape(_label));
+              })()}
               ${(() => {
                 // Parcel ID at the bottom of the CAD detail table (KK
                 // request 2026-06-05) — same value as the "Parcel ID"
