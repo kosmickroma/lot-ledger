@@ -104,6 +104,45 @@ def test_frontend_listens_for_area_meta_change() -> None:
     )
 
 
+def test_area_meta_change_handler_skips_self_echo_when_local_save_in_flight() -> None:
+    """KK regression 2026-06-06: when the user clicks Save Parcel, the
+    local code calls _commitOriginatorToArea and then _reloadSavedResources
+    itself. If the SSE self-echo from area_meta_change ALSO triggers a
+    reload, the subject-property outline gets cleared and re-fetched
+    out from under the local render — visible flicker / blank state.
+
+    Gate: skip the SSE-triggered reload while
+    _pendingSubjectSaves + _pendingFilterSaves > 0. The local code's
+    finally block will reload after the save commits."""
+    src = _read(MAP_JS)
+    pat = re.compile(
+        r'es\.addEventListener\("area_meta_change", \(\) => \{.*?'
+        r"if \(_pendingSubjectSaves \+ _pendingFilterSaves > 0\) return;",
+        re.DOTALL,
+    )
+    assert pat.search(src), (
+        "area_meta_change handler must skip the reload when a local save "
+        "is in flight to avoid the self-echo race."
+    )
+
+
+def test_saved_parcel_change_handler_skips_self_echo_when_local_save_in_flight() -> None:
+    """Same gate on saved_parcel_change for the same reason — local Save
+    Parcel triggers both create_saved_parcel (saved_parcel_change pg_notify)
+    and _commitOriginatorToArea (area_meta_change pg_notify). Both come
+    back as self-echoes and both need to skip."""
+    src = _read(MAP_JS)
+    pat = re.compile(
+        r'es\.addEventListener\("saved_parcel_change", \(\) => \{.*?'
+        r"if \(_pendingSubjectSaves \+ _pendingFilterSaves > 0\) return;",
+        re.DOTALL,
+    )
+    assert pat.search(src), (
+        "saved_parcel_change handler must skip the reload when a local "
+        "save is in flight to avoid the self-echo race."
+    )
+
+
 def test_frontend_default_message_handler_skips_area_meta_change() -> None:
     src = _read(MAP_JS)
     assert "msg.type === \"area_meta_change\"" in src, (

@@ -2075,6 +2075,14 @@ function _openSseStream(areaId) {
   // for every other connected member of this area.
   es.addEventListener("saved_parcel_change", () => {
     _sseLastMessageAt = Date.now();
+    // Self-echo skip: if a local save is in flight, the post-PUT
+    // _reloadSavedResources will run on commit anyway. Letting the SSE
+    // self-echo also reload causes a race — the SSE clears the subject-
+    // property outline before the local geometry fetch resolves, leaving
+    // a brief blank window until something else triggers a re-render
+    // (KK 2026-06-06 regression report). Same gate as the visibility
+    // change handler at line 198.
+    if (_pendingSubjectSaves + _pendingFilterSaves > 0) return;
     console.debug("[sse] saved_parcel_change — refreshing saved resources");
     _reloadSavedResources().catch((err) =>
       console.warn("[sse] _reloadSavedResources after saved_parcel_change failed:", err)
@@ -2086,6 +2094,13 @@ function _openSseStream(areaId) {
   // area-name display refresh live instead of waiting for tab refocus.
   es.addEventListener("area_meta_change", () => {
     _sseLastMessageAt = Date.now();
+    // Same self-echo gate as saved_parcel_change above. The local Save
+    // Parcel flow at line ~4737 awaits _commitOriginatorToArea then
+    // calls _reloadSavedResources itself — if we also reload from this
+    // SSE echo, the subject-property outline gets cleared and re-fetched
+    // out from under the local render, producing a visible flicker /
+    // blank state on the writer's own tab.
+    if (_pendingSubjectSaves + _pendingFilterSaves > 0) return;
     console.debug("[sse] area_meta_change — refreshing saved resources");
     _reloadSavedResources().catch((err) =>
       console.warn("[sse] _reloadSavedResources after area_meta_change failed:", err)
