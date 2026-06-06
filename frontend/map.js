@@ -230,7 +230,7 @@ const DEFAULT_FILTERS = {
   off_market: true,
   vacant: true,
   multifamily: false,
-  duplexes: false,  // new types default OFF per filter-defaults convention (2026-06-01)
+  duplexes: true,  // Mike request 2026-06-06: Duplexes is a primary deal type, default ON
   commercial: false,
   exempt: false,
 };
@@ -556,6 +556,15 @@ map.createPane("selectedOutlinePane");
 map.getPane("selectedOutlinePane").style.zIndex = "625";
 map.getPane("selectedOutlinePane").style.pointerEvents = "none";
 
+// Flood zone overlay pane — sits ABOVE the basemap (default tile pane at
+// 200) but BELOW the parcel polygon panes (620+). Lets parcel polygons
+// stay readable on top while flood fills tint the surrounding map. Spec
+// decision (Phase 3): pane below parcels, above basemap, with debounced
+// viewport-bounded refetch on moveend.
+map.createPane("floodZonesPane");
+map.getPane("floodZonesPane").style.zIndex = "410";
+map.getPane("floodZonesPane").style.pointerEvents = "none";
+
 // Apply saved basemap BEFORE browseLayer is added. If we switch after protomaps
 // is on the map, the tile layer removal fires viewprereset → _invalidateAll on
 // protomaps → _tileZoom = undefined → browse layer goes blank until next pan/zoom.
@@ -847,6 +856,11 @@ let countyLabelLayer = null;
 let countyVisible = false;
 let hoaLayer = null;
 let hoaVisible = false;
+// Flood zones overlay state. PMTiles-backed via protomaps-leaflet — the
+// layer is created lazily on first toggle-on and reused across toggles.
+// OFF by default; user opts in via the FLOOD button in the map toolbar.
+let floodZonesLayer = null;
+let floodZonesVisible = false;
 let currentJobId = null;
 let lastPolygon = null;
 let lastDrawnLatLngs = null;
@@ -3145,8 +3159,11 @@ async function toggleHoaLayer() {
     btn.classList.add("active");
     return;
   }
-  // First load — fetch from API
-  btn.textContent = "Loading...";
+  // First load — fetch from API. NOTE: do NOT touch btn.textContent — the
+  // HOA button is now a row inside the LYRS popover with child spans
+  // (dot + label), and textContent would wipe those. The .active class
+  // is sufficient feedback; fetch is fast enough that a loading state
+  // is barely visible.
   try {
     const res = await fetch("/api/hoa");
     const geojson = await res.json();
@@ -3168,12 +3185,113 @@ async function toggleHoaLayer() {
       },
     }).addTo(map);
     hoaVisible = true;
-    btn.textContent = "HOA";
     btn.classList.add("active");
   } catch (e) {
-    btn.textContent = "HOA";
     console.error("HOA layer load failed", e);
   }
+}
+
+// FEMA NFHL flood zone overlay — PMTiles-backed via protomaps-leaflet.
+//
+// Original Phase 3 used a live GET /api/flood-zones?bbox=... endpoint serving
+// GeoJSON. At wide zoom it OOM'd the Cloud Run preview instance (1Gi memory)
+// → 503 errors. PMTiles serves pre-rendered vector tiles directly from GCS:
+// browser pulls ~10KB tiles for the current viewport, zero per-request DB
+// work, GPU-accelerated rendering. Build pipeline:
+//   1. scripts/build_flood_pmtiles.py emits flood_zones.geojsonl from PostGIS
+//   2. tippecanoe converts to flood_zones.pmtiles (Z8-Z16)
+//   3. gsutil uploads to gs://lot-ledger-tiles/flood_zones.pmtiles
+//   4. This layer fetches the .pmtiles file at toggle-on time and
+//      protomaps-leaflet does the rest.
+//
+// Severity-gradient palette (locked spec, unchanged from the live-API
+// implementation):
+//   FLOODWAY              → dark red #8B0000, 45% opacity
+//   AE / A / AH / AO / V  → red #DC2626, 30% opacity
+//   X (500-yr / shaded)   → amber #F59E0B, 22% opacity
+//   X (minimal)           → faint gray, basically invisible
+//   anything else (D, B…) → gray outline fallback (defensive)
+//
+// Severity numeric code (computed at build time via PostGIS) lets the
+// symbolizer fast-switch without parsing strings per feature:
+//   5 = FLOODWAY, 4 = AE/A/AH/AO/V/VE, 3 = X-shaded, 2 = X-unshaded, 1 = other
+const FLOOD_PMTILES_URL = (window.LL_CONFIG && window.LL_CONFIG.floodTilesUrl
+                          && window.LL_CONFIG.floodTilesUrl !== "__FLOOD_TILES_URL__")
+  ? window.LL_CONFIG.floodTilesUrl
+  : "https://storage.googleapis.com/lot-ledger-tiles/flood_zones.pmtiles";
+
+function _floodZoneFillByFeature(zoom, feature) {
+  const sev = Number(feature?.props?.severity || 0);
+  if (sev === 5) return "rgba(139,0,0,0.45)";       // FLOODWAY
+  if (sev === 4) return "rgba(220,38,38,0.30)";     // AE / A / V
+  if (sev === 3) return "rgba(245,158,11,0.22)";    // X-shaded (500-yr)
+  if (sev === 2) return "rgba(156,163,175,0.05)";   // X-unshaded
+  return "rgba(107,114,128,0.08)";                  // fallback
+}
+
+function _floodZoneStrokeByFeature(zoom, feature) {
+  const sev = Number(feature?.props?.severity || 0);
+  if (sev === 5) return "rgba(102,0,0,0.85)";
+  if (sev === 4) return "rgba(153,27,27,0.7)";
+  if (sev === 3) return "rgba(180,83,9,0.6)";
+  if (sev === 2) return "rgba(156,163,175,0.4)";
+  return "rgba(107,114,128,0.5)";
+}
+
+function _floodZonePaintRules() {
+  return [{
+    dataLayer: "flood_zones",
+    symbolizer: new protomapsL.PolygonSymbolizer({
+      fill: _floodZoneFillByFeature,
+      stroke: _floodZoneStrokeByFeature,
+      width: 1.0,
+      opacity: 1.0,
+      perFeature: true,
+    }),
+  }];
+}
+
+function _floodZoneFeatureLabel(p) {
+  // Mirrors api/main.py:_flood_zone_csv_cell verbose plain-English format.
+  const zone = String(p?.fld_zone || "").trim();
+  if (!zone) return "";
+  const subty = String(p?.zone_subty || "").trim().toUpperCase();
+  const bfe = p?.static_bfe;
+  if (subty === "FLOODWAY") return `${zone} — FLOODWAY (no build)`;
+  if (zone === "AE" || zone === "A" || zone === "AH" || zone === "AO" || zone === "V" || zone === "VE") {
+    if (bfe !== null && bfe !== undefined && Number.isFinite(Number(bfe))) {
+      return `${zone} (BFE ${Number(bfe).toFixed(1)} ft)`;
+    }
+    return zone;
+  }
+  if (zone === "X" && subty.indexOf("0.2 PCT") !== -1) return "X — 500-yr floodplain";
+  if (zone === "X" && subty.indexOf("MINIMAL") !== -1) return "X — minimal risk";
+  return zone;
+}
+
+function toggleFloodZonesLayer() {
+  const btn = document.getElementById("btn-flood-toggle");
+  if (floodZonesVisible && floodZonesLayer) {
+    map.removeLayer(floodZonesLayer);
+    floodZonesVisible = false;
+    if (btn) btn.classList.remove("active");
+    return;
+  }
+  if (!floodZonesLayer) {
+    floodZonesLayer = protomapsL.leafletLayer({
+      url: FLOOD_PMTILES_URL,
+      paintRules: _floodZonePaintRules(),
+      labelRules: [],
+      pane: "floodZonesPane",
+    });
+    // Match the browse layer pattern: disable pointer events so parcel
+    // popups still receive clicks normally.
+    const _container = floodZonesLayer.getContainer && floodZonesLayer.getContainer();
+    if (_container) _container.style.pointerEvents = "none";
+  }
+  floodZonesLayer.addTo(map);
+  floodZonesVisible = true;
+  if (btn) btn.classList.add("active");
 }
 
 async function toggleCountyLayer() {
@@ -3193,7 +3311,10 @@ async function toggleCountyLayer() {
     return;
   }
 
-  if (btn) btn.textContent = "...";
+  // NOTE: do NOT touch btn.textContent — the County button is now a row
+  // inside the LYRS popover with child spans (dot + label), and
+  // textContent would wipe those. The .active class is sufficient
+  // feedback.
   try {
     const res = await fetch("/api/counties/boundaries");
     const geojson = await res.json();
@@ -3228,13 +3349,9 @@ async function toggleCountyLayer() {
       }).addTo(countyLabelLayer);
     });
     countyVisible = true;
-    if (btn) {
-      btn.textContent = "CNTY";
-      btn.classList.add("active");
-    }
+    btn?.classList.add("active");
     _updateCountyLabelVisibility();
   } catch (e) {
-    if (btn) btn.textContent = "CNTY";
     console.error("County layer load failed", e);
   }
 }
@@ -6006,24 +6123,104 @@ const MapToolbar = L.Control.extend({
       _setMeasureModeEnabled(!_measureModeEnabled);
     });
 
-    const hoaBtn = L.DomUtil.create("a", "", container);
-    hoaBtn.id = "btn-hoa-toggle";
-    hoaBtn.href = "#";
-    hoaBtn.title = "Toggle HOA zone boundaries";
-    hoaBtn.textContent = "HOA";
+    // LYRS dropdown — collapses HOA / FLOOD / CNTY into a single toolbar
+    // slot with a popover. Was 3 buttons before; the chevron in the
+    // toolbar's vertical track started overlapping the bottom two
+    // after FLOOD was added. Future overlays (PMTiles or otherwise) slot
+    // into the popover instead of growing the toolbar height.
+    const lyrsBtn = L.DomUtil.create("a", "", container);
+    lyrsBtn.id = "btn-layers-toggle";
+    lyrsBtn.href = "#";
+    lyrsBtn.title = "Map overlay layers";
+    lyrsBtn.textContent = "LYRS";
+
+    const lyrsPopover = L.DomUtil.create("div", "map-toolbar-popover hidden", container);
+    lyrsPopover.id = "map-layers-popover";
+    lyrsPopover.innerHTML = `
+      <a href="#" class="map-toolbar-popover-row" id="btn-hoa-toggle"
+         title="Toggle HOA zone boundaries">
+        <span class="map-toolbar-popover-dot" aria-hidden="true"></span>
+        <span class="map-toolbar-popover-label">HOA</span>
+      </a>
+      <a href="#" class="map-toolbar-popover-row" id="btn-flood-toggle"
+         title="Toggle FEMA flood zones overlay">
+        <span class="map-toolbar-popover-dot" aria-hidden="true"></span>
+        <span class="map-toolbar-popover-label">Flood Zones</span>
+      </a>
+      <a href="#" class="map-toolbar-popover-row" id="btn-county-toggle"
+         title="Toggle county boundary lines">
+        <span class="map-toolbar-popover-dot" aria-hidden="true"></span>
+        <span class="map-toolbar-popover-label">County Lines</span>
+      </a>
+    `;
+
+    // Stop popover clicks from propagating to the map (avoid drag/select).
+    L.DomEvent.disableClickPropagation(lyrsPopover);
+    L.DomEvent.disableScrollPropagation(lyrsPopover);
+
+    function _closeLyrsPopover() {
+      lyrsPopover.classList.add("hidden");
+      lyrsBtn.classList.remove("popover-open");
+    }
+    function _toggleLyrsPopover() {
+      const isOpen = !lyrsPopover.classList.contains("hidden");
+      if (isOpen) {
+        _closeLyrsPopover();
+      } else {
+        // Vertically anchor the popover to the LYRS button so it aligns
+        // with the button regardless of where in the toolbar stack the
+        // button sits. Without this the popover renders at top: 0 of the
+        // toolbar container (aligned with the topmost button) which is
+        // way above LYRS.
+        lyrsPopover.style.top = `${lyrsBtn.offsetTop}px`;
+        lyrsPopover.classList.remove("hidden");
+        lyrsBtn.classList.add("popover-open");
+      }
+    }
+    function _refreshLyrsActiveState() {
+      // Tint the LYRS button "active" if ANY overlay is on, so the user
+      // sees something is enabled even with the popover closed.
+      const anyOn = hoaVisible || floodZonesVisible || countyVisible;
+      lyrsBtn.classList.toggle("active", anyOn);
+    }
+    // Expose so the underlying togglers can call it after they flip
+    // their visibility state.
+    window._refreshLyrsActiveState = _refreshLyrsActiveState;
+
+    L.DomEvent.on(lyrsBtn, "click", (e) => {
+      L.DomEvent.preventDefault(e);
+      L.DomEvent.stopPropagation(e);
+      _toggleLyrsPopover();
+    });
+
+    // Click-outside-to-close. Use mousedown so we don't fight inner clicks.
+    document.addEventListener("mousedown", (e) => {
+      if (lyrsPopover.classList.contains("hidden")) return;
+      if (lyrsPopover.contains(e.target) || lyrsBtn.contains(e.target)) return;
+      _closeLyrsPopover();
+    });
+
+    // Wire each popover row to the existing toggle function. Each row keeps
+    // its own id ("btn-hoa-toggle" etc.) so the existing toggleHoaLayer /
+    // toggleCountyLayer / toggleFloodZonesLayer functions can keep flipping
+    // .active on those elements unchanged.
+    const hoaBtn = lyrsPopover.querySelector("#btn-hoa-toggle");
     L.DomEvent.on(hoaBtn, "click", (e) => {
       L.DomEvent.preventDefault(e);
       toggleHoaLayer();
+      _refreshLyrsActiveState();
     });
-
-    const countyBtn = L.DomUtil.create("a", "", container);
-    countyBtn.id = "btn-county-toggle";
-    countyBtn.href = "#";
-    countyBtn.title = "Toggle county boundary lines";
-    countyBtn.textContent = "CNTY";
+    const floodBtn = lyrsPopover.querySelector("#btn-flood-toggle");
+    L.DomEvent.on(floodBtn, "click", (e) => {
+      L.DomEvent.preventDefault(e);
+      toggleFloodZonesLayer();
+      _refreshLyrsActiveState();
+    });
+    const countyBtn = lyrsPopover.querySelector("#btn-county-toggle");
     L.DomEvent.on(countyBtn, "click", (e) => {
       L.DomEvent.preventDefault(e);
       toggleCountyLayer();
+      _refreshLyrsActiveState();
     });
 
     // ZOOM toggle — click-mode (jump = zoom on click, stay = keep current
@@ -8779,6 +8976,14 @@ const AddressSearch = L.Control.extend({
       // clears _searchHighlight on the other side of this asymmetry; this
       // line restores symmetry the other way.
       try { _clearSelectedOutline(); } catch (_) {}
+      // Mike report 2026-06-06: a parcel that was selected by click and
+      // THEN the user does an address search → the previous parcel's
+      // popup state (_activeParcelPopupState) was never reset, so the
+      // user couldn't unselect it (clicking the map elsewhere reopened
+      // the OLD parcel's popup because the state still held it). The
+      // outline got cleared above; the in-memory popup state needs the
+      // same treatment so the map.click reset path works.
+      _activeParcelPopupState = null;
       if (window._searchMoveEndHandler) map.off("moveend", window._searchMoveEndHandler);
 
       window._clearSearchHighlight = () => {
@@ -9869,6 +10074,34 @@ function _buildParcelDetailPanelHtml(p, matchedComp) {
               ${_buildParcelDetailTableRow("Flooring", _panelDisplayValue(p.flooring))}
               ${p.on_redfin && p.redfin_url ? _buildParcelDetailTableRow("Listing", `<a href="${p.redfin_url}" target="_blank" rel="noopener noreferrer">View listing</a>`) : ""}
               ${soldCompRows}
+              ${(() => {
+                // Flood Zone row (FEMA NFHL, Phase 3). Always rendered
+                // per KK 2026-06-06 — parcels outside any mapped FEMA
+                // polygon show "N/A" (matching every other CAD row's
+                // unknown-data convention), parcels inside get the
+                // verbose plain-English wording. FLOODWAY warning stays
+                // loud so Mike can't miss it.
+                const _fz = String(p?.flood_zone || "").trim();
+                const _sub = String(p?.flood_zone_subtype || "").trim().toUpperCase();
+                const _bfe = p?.flood_bfe;
+                let _label;
+                if (!_fz) {
+                  _label = "N/A";
+                } else if (_sub === "FLOODWAY") {
+                  _label = `${_fz} — FLOODWAY (no build)`;
+                } else if (["AE","A","AH","AO","V","VE"].includes(_fz)) {
+                  _label = (_bfe !== null && _bfe !== undefined && Number.isFinite(Number(_bfe)))
+                    ? `${_fz} (BFE ${Number(_bfe).toFixed(1)} ft)`
+                    : _fz;
+                } else if (_fz === "X" && _sub.indexOf("0.2 PCT") !== -1) {
+                  _label = "X — 500-yr floodplain";
+                } else if (_fz === "X" && _sub.indexOf("MINIMAL") !== -1) {
+                  _label = "X — minimal risk";
+                } else {
+                  _label = _fz;
+                }
+                return _buildParcelDetailTableRow("Flood Zone", _propelioEscape(_label));
+              })()}
               ${(() => {
                 // Parcel ID at the bottom of the CAD detail table (KK
                 // request 2026-06-05) — same value as the "Parcel ID"
