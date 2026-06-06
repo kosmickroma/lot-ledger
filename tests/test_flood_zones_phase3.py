@@ -1,15 +1,22 @@
 """tests/test_flood_zones_phase3.py
 Role: Inspection guards for Phase 3 — frontend overlay + popup row + toolbar.
 
+NOTE 2026-06-06: This file was rewritten when Phase 3 pivoted from a live
+GET /api/flood-zones endpoint (with L.geoJSON + bbox-refetch on moveend)
+to PMTiles via protomaps-leaflet. The Phase 3 assertions kept here cover
+the new PMTiles wiring + the unchanged popup row + the unchanged toolbar
+toggle. The deleted L.geoJSON-specific assertions (debounce timer, bbox
+memo, etc.) are gone with the code.
+
 Asserts:
-  - Flood toggle button registered in the map toolbar (programmatic, not
-    static HTML, per Copilot critique)
-  - L.geoJSON layer + style function with severity gradient
-  - 250ms debounced moveend refetch
+  - Flood toggle button registered programmatically in the map toolbar
+    (not static HTML, per Copilot critique)
+  - FLOOD_PMTILES_URL points at the GCS-hosted .pmtiles
+  - protomapsL.leafletLayer used (PMTiles), NOT L.geoJSON (deleted)
+  - Severity-driven paint rules (fill + stroke functions read feature.props.severity)
   - Custom Leaflet pane below parcels, above basemap (z-index 410)
-  - Popup builder includes Flood Zone row with verbose plain-English
-  - Toggle off clears the layer
-  - Unknown-zone fallback style present
+  - Popup builder includes Flood Zone row with verbose plain-English wording
+  - Toggle off removes the layer (no clearLayers needed for protomaps tile layer)
 
 Connects to: frontend/map.js
 """
@@ -26,6 +33,9 @@ def _read() -> str:
     return MAP_JS.read_text()
 
 
+# ---- Toolbar -------------------------------------------------------------
+
+
 def test_toolbar_flood_button_defined_programmatically() -> None:
     """Per Copilot critique fold (spec decision #20): the toggle is
     defined in the map.js control panel, NOT as static HTML in
@@ -39,11 +49,13 @@ def test_toolbar_flood_button_defined_programmatically() -> None:
 def test_toolbar_flood_button_lives_next_to_hoa() -> None:
     """Place FLOOD next to HOA so the related-overlay toggles cluster."""
     src = _read()
-    # hoaBtn lines must appear before floodBtn lines
     hoa_idx = src.find('hoaBtn.id = "btn-hoa-toggle"')
     flood_idx = src.find('floodBtn.id = "btn-flood-toggle"')
     assert hoa_idx > 0 and flood_idx > 0
     assert hoa_idx < flood_idx, "FLOOD button must be defined after HOA button"
+
+
+# ---- Pane ---------------------------------------------------------------
 
 
 def test_flood_zones_pane_below_parcels_above_basemap() -> None:
@@ -68,122 +80,124 @@ def test_flood_zones_pane_is_non_interactive() -> None:
     assert pat.search(src)
 
 
-def test_style_function_floodway_distinct_color() -> None:
-    """FLOODWAY = darkest red with bold outline so Mike can't miss it."""
+# ---- PMTiles wiring -----------------------------------------------------
+
+
+def test_uses_protomaps_leaflet_layer_not_geojson() -> None:
+    """Visual overlay must come from PMTiles (browser pulls ~10KB tiles
+    directly from GCS, zero per-request DB work). L.geoJSON + live API
+    OOM'd Cloud Run at wide zoom."""
+    src = _read()
+    assert "floodZonesLayer = protomapsL.leafletLayer({" in src, (
+        "Visual overlay must use protomapsL.leafletLayer (PMTiles), not L.geoJSON."
+    )
+
+
+def test_flood_pmtiles_url_points_at_gcs() -> None:
+    """Tile URL must point at the GCS-hosted .pmtiles file built by
+    scripts/build_flood_pmtiles.py."""
+    src = _read()
+    assert "FLOOD_PMTILES_URL" in src
+    assert "https://storage.googleapis.com/lot-ledger-tiles/flood_zones.pmtiles" in src
+
+
+def test_paint_rules_use_severity_numeric() -> None:
+    """The build script bakes a numeric `severity` field (1-5) into each
+    tile feature so the symbolizer is a fast switch on a number instead
+    of a string comparison per polygon."""
+    src = _read()
+    assert "feature?.props?.severity" in src
+    # Severity 5 (FLOODWAY) → dark red
+    assert "if (sev === 5)" in src
+    assert 'return "rgba(139,0,0' in src
+    # Severity 4 (AE / A / V) → red
+    assert "if (sev === 4)" in src
+    assert 'return "rgba(220,38,38' in src
+    # Severity 3 (X-shaded / 500-yr) → amber
+    assert "if (sev === 3)" in src
+    assert 'return "rgba(245,158,11' in src
+
+
+def test_paint_rules_use_polygon_symbolizer_per_feature() -> None:
+    """protomapsL.PolygonSymbolizer with perFeature: true so the fill/stroke
+    fns receive each feature individually."""
     src = _read()
     pat = re.compile(
-        r'if \(subty === "FLOODWAY"\).*?fillColor: "#8B0000".*?fillOpacity: 0\.50',
+        r"symbolizer: new protomapsL\.PolygonSymbolizer\(\{.*?"
+        r"fill: _floodZoneFillByFeature.*?"
+        r"stroke: _floodZoneStrokeByFeature.*?"
+        r"perFeature: true",
         re.DOTALL,
     )
     assert pat.search(src)
 
 
-def test_style_function_ae_a_v_red() -> None:
-    """All regulatory 100-yr SFHA zones share the red palette."""
+def test_paint_rules_target_flood_zones_data_layer() -> None:
+    """The tippecanoe build uses `-l flood_zones` so the dataLayer name
+    on the frontend must match."""
+    src = _read()
+    assert 'dataLayer: "flood_zones"' in src
+
+
+def test_pmtiles_layer_uses_custom_pane() -> None:
+    """L.geoJSON used `pane:` directly. protomapsL.leafletLayer must do
+    the same so the z-index is honored."""
     src = _read()
     pat = re.compile(
-        r'zone === "AE" \|\| zone === "A" \|\| zone === "AH" \|\| '
-        r'zone === "AO" \|\| zone === "V" \|\| zone === "VE".*?'
-        r'fillColor: "#DC2626".*?fillOpacity: 0\.35',
+        r'protomapsL\.leafletLayer\(\{[^}]*pane: "floodZonesPane"',
         re.DOTALL,
     )
     assert pat.search(src)
 
 
-def test_style_function_x_shaded_amber() -> None:
-    """X-shaded (500-yr floodplain) = amber, lower opacity than SFHA."""
+def test_pmtiles_layer_disables_pointer_events() -> None:
+    """Match the browse layer pattern: disable pointer events on the
+    canvas so parcel popups still receive clicks."""
     src = _read()
     pat = re.compile(
-        r'zone === "X" && subty\.indexOf\("0\.2 PCT"\) !== -1.*?'
-        r'fillColor: "#F59E0B".*?fillOpacity: 0\.25',
+        r"floodZonesLayer\.getContainer && floodZonesLayer\.getContainer\(\).*?"
+        r'_container\.style\.pointerEvents = "none"',
         re.DOTALL,
     )
     assert pat.search(src)
 
 
-def test_style_function_x_unshaded_minimal() -> None:
-    """X-unshaded (minimal risk) = barely visible so it doesn't clutter."""
+# ---- Toggle behavior ----------------------------------------------------
+
+
+def test_toggle_off_removes_layer() -> None:
+    """Toggle OFF removes the layer from the map. Unlike L.geoJSON we
+    don't need clearLayers — protomaps re-renders on next addTo."""
     src = _read()
     pat = re.compile(
-        r'zone === "X"\) \{.*?fillOpacity: 0\.05',
-        re.DOTALL,
-    )
-    assert pat.search(src)
-
-
-def test_style_function_unknown_zone_fallback() -> None:
-    """Defensive: any FEMA zone code not in the palette (future additions,
-    D zones, B/C legacy codes) gets a gray outline so rendering doesn't
-    silently break."""
-    src = _read()
-    # The fallback return at the end of _floodZoneStyle
-    pat = re.compile(
-        r'function _floodZoneStyle\(feature\).*?'
-        r'return \{ color: "#6b7280".*?fillColor: "#6b7280"',
-        re.DOTALL,
-    )
-    assert pat.search(src)
-
-
-def test_moveend_debounced_250ms() -> None:
-    """Leaflet fires moveend on every pan + zoom step. 250ms debounce
-    catches the 'user paused' moment without firing 10 fetches per drag."""
-    src = _read()
-    pat = re.compile(
-        r"_floodZonesFetchTimer = setTimeout\(_refetchFloodZonesForViewport, 250\)",
-    )
-    assert pat.search(src)
-
-
-def test_moveend_listener_registered() -> None:
-    src = _read()
-    assert 'map.on("moveend", _scheduleFloodZonesRefetch)' in src
-
-
-def test_refetch_skips_when_layer_invisible() -> None:
-    """The handler must self-gate on floodZonesVisible so it's a cheap
-    no-op when the toggle is OFF (default)."""
-    src = _read()
-    pat = re.compile(
-        r"async function _refetchFloodZonesForViewport\(\) \{\s*"
-        r"if \(!floodZonesVisible\) return;",
-        re.DOTALL,
-    )
-    assert pat.search(src)
-
-
-def test_refetch_skips_when_same_bbox() -> None:
-    """Don't refetch if user pans inside the cached extent."""
-    src = _read()
-    assert "_floodZonesLastBboxKey" in src
-    pat = re.compile(
-        r"if \(bboxStr === _floodZonesLastBboxKey\) return",
-    )
-    assert pat.search(src)
-
-
-def test_toggle_off_clears_layer() -> None:
-    """Toggle OFF must removeLayer + clearLayers + reset bbox key so the
-    next toggle-on triggers a fresh fetch."""
-    src = _read()
-    pat = re.compile(
-        r"async function toggleFloodZonesLayer\(\).*?"
-        r"if \(floodZonesVisible\) \{.*?"
-        r"map\.removeLayer\(floodZonesLayer\).*?"
-        r"floodZonesLayer\.clearLayers\(\).*?"
-        r'_floodZonesLastBboxKey = "".*?'
+        r"if \(floodZonesVisible && floodZonesLayer\) \{\s*"
+        r"map\.removeLayer\(floodZonesLayer\);\s*"
         r"floodZonesVisible = false",
         re.DOTALL,
     )
     assert pat.search(src)
 
 
+def test_toggle_on_creates_layer_once_then_reuses() -> None:
+    """First toggle-on creates the protomapsL layer; subsequent toggle-ons
+    just re-add the existing layer."""
+    src = _read()
+    pat = re.compile(
+        r"if \(!floodZonesLayer\) \{\s*"
+        r"floodZonesLayer = protomapsL\.leafletLayer\(",
+        re.DOTALL,
+    )
+    assert pat.search(src)
+    assert "floodZonesLayer.addTo(map)" in src
+
+
+# ---- Popup row ----------------------------------------------------------
+
+
 def test_popup_includes_flood_zone_row() -> None:
     """Popup CAD section must include a Flood Zone row just above the
     Parcel ID row."""
     src = _read()
-    # Flood Zone row IIFE must call _buildParcelDetailTableRow with
-    # "Flood Zone" as the label
     pat = re.compile(
         r'_buildParcelDetailTableRow\("Flood Zone",',
     )
@@ -215,20 +229,20 @@ def test_popup_x_unshaded_minimal_risk_label() -> None:
     assert '"X — minimal risk"' in src
 
 
-def test_layer_uses_custom_pane() -> None:
-    """L.geoJSON must use the floodZonesPane so the z-index is honored."""
-    src = _read()
-    pat = re.compile(
-        r"floodZonesLayer = L\.geoJSON\(null, \{\s*pane: \"floodZonesPane\"",
-    )
-    assert pat.search(src)
+# ---- Old live-API code paths are gone ----------------------------------
 
 
-def test_layer_has_tooltip_with_label() -> None:
-    """Hover tooltip on each flood polygon shows the verbose label."""
+def test_no_live_api_refetch_logic() -> None:
+    """The old debounced moveend bbox-refetch logic must be gone. The
+    PMTiles tile layer handles viewport changes automatically — no manual
+    fetch needed."""
     src = _read()
-    pat = re.compile(
-        r"const lbl = _floodZoneFeatureLabel\(feature\?\.properties\);",
+    assert "_refetchFloodZonesForViewport" not in src, (
+        "Live-API refetch code must be deleted — PMTiles handles viewport."
     )
-    assert pat.search(src)
-    assert "layer.bindTooltip(lbl" in src
+    assert "_floodZonesLastBboxKey" not in src, (
+        "bbox memo is unused now that we don't fetch by bbox."
+    )
+    assert '"/api/flood-zones?bbox=' not in src, (
+        "Frontend must not call the deleted /api/flood-zones endpoint."
+    )

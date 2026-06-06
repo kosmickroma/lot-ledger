@@ -1,13 +1,17 @@
 """tests/test_flood_zones_phase2.py
-Role: Inspection + unit guards for Phase 2 — backend enrichment + endpoint.
+Role: Inspection + unit guards for Phase 2 — backend enrichment + CSV column.
+
+NOTE 2026-06-06: The original Phase 2 also shipped a live GET /api/flood-zones
+endpoint serving GeoJSON. That endpoint was deleted when we pivoted the
+overlay layer to PMTiles (Cloud Run 503 from 5000-polygon responses at wide
+zoom). The per-parcel enrichment + CSV column from Phase 2 stay — they
+power the popup row and the CSV export, both of which are independent of
+how the visual overlay is delivered.
 
 Asserts:
-  - GET /api/flood-zones registered
-  - Bbox parser rejects malformed input with HTTPException(400)
-  - Severity-first ORDER BY in endpoint SQL (spec decision #18)
-  - LIMIT 5000 cap on response
   - Each county adapter has its _fetch_flood_lookup_<county> helper
   - Each adapter wires flood enrichment into row assembly
+  - All 4 adapters use centroid-based ST_Contains (not polygon)
   - CSV header includes "Flood Zone" at right edge
   - _flood_zone_csv_cell formatter handles AE/X/FLOODWAY/BFE/empty cases
 
@@ -18,10 +22,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import pytest
-from fastapi import HTTPException
-
-from api.main import _flood_zone_csv_cell, _parse_flood_bbox
+from api.main import _flood_zone_csv_cell
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -34,94 +35,6 @@ DENTON_PY = ROOT / "api" / "counties" / "denton.py"
 
 def _read(path: Path) -> str:
     return path.read_text()
-
-
-# ---- Bbox parser ----------------------------------------------------------
-
-
-def test_bbox_parser_accepts_valid_input() -> None:
-    """Standard DFW-ish bbox must parse cleanly."""
-    assert _parse_flood_bbox("-97.6,32.4,-96.4,33.4") == (-97.6, 32.4, -96.4, 33.4)
-
-
-def test_bbox_parser_rejects_missing() -> None:
-    with pytest.raises(HTTPException) as exc:
-        _parse_flood_bbox(None)
-    assert exc.value.status_code == 400
-
-
-def test_bbox_parser_rejects_wrong_count() -> None:
-    for bad in ("1,2,3", "1,2,3,4,5", ""):
-        with pytest.raises(HTTPException) as exc:
-            _parse_flood_bbox(bad)
-        assert exc.value.status_code == 400
-
-
-def test_bbox_parser_rejects_non_floats() -> None:
-    with pytest.raises(HTTPException) as exc:
-        _parse_flood_bbox("a,b,c,d")
-    assert exc.value.status_code == 400
-
-
-def test_bbox_parser_rejects_non_finite() -> None:
-    for bad in ("nan,32.4,-96.4,33.4", "-97.6,32.4,inf,33.4"):
-        with pytest.raises(HTTPException) as exc:
-            _parse_flood_bbox(bad)
-        assert exc.value.status_code == 400
-
-
-def test_bbox_parser_rejects_out_of_range_lng() -> None:
-    with pytest.raises(HTTPException) as exc:
-        _parse_flood_bbox("-200,32.4,-96.4,33.4")
-    assert exc.value.status_code == 400
-
-
-def test_bbox_parser_rejects_out_of_range_lat() -> None:
-    with pytest.raises(HTTPException) as exc:
-        _parse_flood_bbox("-97.6,-91,-96.4,33.4")
-    assert exc.value.status_code == 400
-
-
-def test_bbox_parser_rejects_min_greater_or_equal_max() -> None:
-    for bad in ("-96.4,32.4,-97.6,33.4", "-97.6,33.4,-96.4,32.4", "-97.6,32.4,-97.6,33.4"):
-        with pytest.raises(HTTPException) as exc:
-            _parse_flood_bbox(bad)
-        assert exc.value.status_code == 400
-
-
-# ---- Endpoint SQL shape ---------------------------------------------------
-
-
-def test_endpoint_registered() -> None:
-    src = _read(MAIN_PY)
-    assert '@app.get("/api/flood-zones")' in src
-    assert "async def flood_zones(bbox:" in src
-
-
-def test_endpoint_severity_first_ordering() -> None:
-    """Spec decision #18 — narrow floodways must stay visible at low zoom."""
-    src = _read(MAIN_PY)
-    pat = re.compile(
-        r"WHEN zone_subty = 'FLOODWAY' THEN 5.*?"
-        r"WHEN fld_zone IN \('AE','A','AH','AO','V','VE'\) THEN 4.*?"
-        r"WHEN zone_subty = '0\.2 PCT ANNUAL CHANCE FLOOD HAZARD' THEN 3.*?"
-        r"WHEN fld_zone = 'X' THEN 2",
-        re.DOTALL,
-    )
-    assert pat.search(src), "Severity-first ORDER BY missing from /api/flood-zones SQL"
-
-
-def test_endpoint_caps_at_5000() -> None:
-    src = _read(MAIN_PY)
-    pat = re.compile(r"LIMIT 5000", re.IGNORECASE)
-    # Just ensure LIMIT 5000 appears in the flood_zones endpoint area
-    assert pat.search(src), "LIMIT 5000 cap missing from /api/flood-zones SQL"
-
-
-def test_endpoint_uses_gist_bbox_prefilter() -> None:
-    """ST_MakeEnvelope + geom && operator is the GIST-friendly bbox filter."""
-    src = _read(MAIN_PY)
-    assert "geom && ST_MakeEnvelope(%s, %s, %s, %s, 4326)" in src
 
 
 # ---- Per-county adapter wiring -------------------------------------------
@@ -254,3 +167,21 @@ def test_flood_csv_cell_x_unshaded_minimal() -> None:
 def test_flood_csv_cell_x_bare_no_subtype() -> None:
     cell = _flood_zone_csv_cell({"flood_zone": "X", "flood_bfe": None, "flood_zone_subtype": ""})
     assert cell == "X"
+
+
+# ---- Endpoint removal guard ----------------------------------------------
+
+
+def test_live_flood_zones_endpoint_was_removed() -> None:
+    """The original Phase 2 GET /api/flood-zones endpoint was deleted when
+    we pivoted to PMTiles for the visual overlay. Guard against accidental
+    revival — the live SQL endpoint OOM'd Cloud Run on wide-zoom bboxes
+    (5000+ polygon GeoJSON responses)."""
+    src = _read(MAIN_PY)
+    assert '@app.get("/api/flood-zones")' not in src, (
+        "/api/flood-zones endpoint must NOT come back — PMTiles via "
+        "protomaps-leaflet is the new path. See scripts/build_flood_pmtiles.py."
+    )
+    assert "def _parse_flood_bbox" not in src, (
+        "_parse_flood_bbox is unused now that the endpoint is gone; remove it."
+    )

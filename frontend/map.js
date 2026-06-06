@@ -856,15 +856,11 @@ let countyLabelLayer = null;
 let countyVisible = false;
 let hoaLayer = null;
 let hoaVisible = false;
-// Flood zones overlay state (Phase 3). Layer is created on first toggle-on,
-// then refilled per-viewport via _refetchFloodZonesForViewport. Visibility
-// follows the OFF-by-default contract from spec decision; user opts in
-// via the FLOOD toggle in the map toolbar.
+// Flood zones overlay state. PMTiles-backed via protomaps-leaflet — the
+// layer is created lazily on first toggle-on and reused across toggles.
+// OFF by default; user opts in via the FLOOD button in the map toolbar.
 let floodZonesLayer = null;
 let floodZonesVisible = false;
-let _floodZonesFetchInFlight = false;
-let _floodZonesFetchTimer = null;
-let _floodZonesLastBboxKey = "";
 let currentJobId = null;
 let lastPolygon = null;
 let lastDrawnLatLngs = null;
@@ -3194,32 +3190,64 @@ async function toggleHoaLayer() {
   }
 }
 
-// FEMA NFHL flood zone overlay — Phase 3 of the flood zones feature.
-// Severity-gradient style function (locked palette in spec):
-//   FLOODWAY              → dark red #8B0000, 50% opacity, bold outline
-//   AE / A / AH / AO / V  → red #DC2626, 35% opacity
-//   X (500-yr / shaded)   → amber #F59E0B, 25% opacity
-//   X (minimal)           → faint outline only, no fill
-//   anything else (D, B…) → gray outline fallback (defensive against
-//                            FEMA adding new zone codes in future)
-function _floodZoneStyle(feature) {
-  const p = feature?.properties || {};
-  const zone = String(p.fld_zone || "").trim();
-  const subty = String(p.zone_subty || "").trim().toUpperCase();
+// FEMA NFHL flood zone overlay — PMTiles-backed via protomaps-leaflet.
+//
+// Original Phase 3 used a live GET /api/flood-zones?bbox=... endpoint serving
+// GeoJSON. At wide zoom it OOM'd the Cloud Run preview instance (1Gi memory)
+// → 503 errors. PMTiles serves pre-rendered vector tiles directly from GCS:
+// browser pulls ~10KB tiles for the current viewport, zero per-request DB
+// work, GPU-accelerated rendering. Build pipeline:
+//   1. scripts/build_flood_pmtiles.py emits flood_zones.geojsonl from PostGIS
+//   2. tippecanoe converts to flood_zones.pmtiles (Z8-Z16)
+//   3. gsutil uploads to gs://lot-ledger-tiles/flood_zones.pmtiles
+//   4. This layer fetches the .pmtiles file at toggle-on time and
+//      protomaps-leaflet does the rest.
+//
+// Severity-gradient palette (locked spec, unchanged from the live-API
+// implementation):
+//   FLOODWAY              → dark red #8B0000, 45% opacity
+//   AE / A / AH / AO / V  → red #DC2626, 30% opacity
+//   X (500-yr / shaded)   → amber #F59E0B, 22% opacity
+//   X (minimal)           → faint gray, basically invisible
+//   anything else (D, B…) → gray outline fallback (defensive)
+//
+// Severity numeric code (computed at build time via PostGIS) lets the
+// symbolizer fast-switch without parsing strings per feature:
+//   5 = FLOODWAY, 4 = AE/A/AH/AO/V/VE, 3 = X-shaded, 2 = X-unshaded, 1 = other
+const FLOOD_PMTILES_URL = (window.LL_CONFIG && window.LL_CONFIG.floodTilesUrl
+                          && window.LL_CONFIG.floodTilesUrl !== "__FLOOD_TILES_URL__")
+  ? window.LL_CONFIG.floodTilesUrl
+  : "https://storage.googleapis.com/lot-ledger-tiles/flood_zones.pmtiles";
 
-  if (subty === "FLOODWAY") {
-    return { color: "#660000", weight: 1.5, fillColor: "#8B0000", fillOpacity: 0.50 };
-  }
-  if (zone === "AE" || zone === "A" || zone === "AH" || zone === "AO" || zone === "V" || zone === "VE") {
-    return { color: "#991b1b", weight: 1, fillColor: "#DC2626", fillOpacity: 0.35 };
-  }
-  if (zone === "X" && subty.indexOf("0.2 PCT") !== -1) {
-    return { color: "#b45309", weight: 0.8, fillColor: "#F59E0B", fillOpacity: 0.25 };
-  }
-  if (zone === "X") {
-    return { color: "#9ca3af", weight: 0.5, fillColor: "#9ca3af", fillOpacity: 0.05 };
-  }
-  return { color: "#6b7280", weight: 0.5, fillColor: "#6b7280", fillOpacity: 0.08 };
+function _floodZoneFillByFeature(zoom, feature) {
+  const sev = Number(feature?.props?.severity || 0);
+  if (sev === 5) return "rgba(139,0,0,0.45)";       // FLOODWAY
+  if (sev === 4) return "rgba(220,38,38,0.30)";     // AE / A / V
+  if (sev === 3) return "rgba(245,158,11,0.22)";    // X-shaded (500-yr)
+  if (sev === 2) return "rgba(156,163,175,0.05)";   // X-unshaded
+  return "rgba(107,114,128,0.08)";                  // fallback
+}
+
+function _floodZoneStrokeByFeature(zoom, feature) {
+  const sev = Number(feature?.props?.severity || 0);
+  if (sev === 5) return "rgba(102,0,0,0.85)";
+  if (sev === 4) return "rgba(153,27,27,0.7)";
+  if (sev === 3) return "rgba(180,83,9,0.6)";
+  if (sev === 2) return "rgba(156,163,175,0.4)";
+  return "rgba(107,114,128,0.5)";
+}
+
+function _floodZonePaintRules() {
+  return [{
+    dataLayer: "flood_zones",
+    symbolizer: new protomapsL.PolygonSymbolizer({
+      fill: _floodZoneFillByFeature,
+      stroke: _floodZoneStrokeByFeature,
+      width: 1.0,
+      opacity: 1.0,
+      perFeature: true,
+    }),
+  }];
 }
 
 function _floodZoneFeatureLabel(p) {
@@ -3240,70 +3268,30 @@ function _floodZoneFeatureLabel(p) {
   return zone;
 }
 
-async function _refetchFloodZonesForViewport() {
-  if (!floodZonesVisible) return;
-  if (_floodZonesFetchInFlight) return;
-  const b = map.getBounds();
-  const sw = b.getSouthWest();
-  const ne = b.getNorthEast();
-  const bboxStr = `${sw.lng.toFixed(5)},${sw.lat.toFixed(5)},${ne.lng.toFixed(5)},${ne.lat.toFixed(5)}`;
-  // Same bbox as the last fetch → skip (pan inside the cached extent).
-  if (bboxStr === _floodZonesLastBboxKey) return;
-  _floodZonesFetchInFlight = true;
-  try {
-    const res = await fetch(`/api/flood-zones?bbox=${bboxStr}`);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const geojson = await res.json();
-    if (!floodZonesLayer) {
-      floodZonesLayer = L.geoJSON(null, {
-        pane: "floodZonesPane",
-        style: _floodZoneStyle,
-        onEachFeature(feature, layer) {
-          const lbl = _floodZoneFeatureLabel(feature?.properties);
-          if (lbl) {
-            layer.bindTooltip(lbl, { sticky: true, opacity: 0.92, direction: "top" });
-          }
-        },
-      });
-    }
-    floodZonesLayer.clearLayers();
-    floodZonesLayer.addData(geojson);
-    if (!map.hasLayer(floodZonesLayer)) floodZonesLayer.addTo(map);
-    _floodZonesLastBboxKey = bboxStr;
-  } catch (e) {
-    console.warn("[flood-zones] fetch failed", e);
-  } finally {
-    _floodZonesFetchInFlight = false;
-  }
-}
-
-function _scheduleFloodZonesRefetch() {
-  // 250ms debounce so a rapid pan/zoom sequence only triggers one fetch.
-  clearTimeout(_floodZonesFetchTimer);
-  _floodZonesFetchTimer = setTimeout(_refetchFloodZonesForViewport, 250);
-}
-
-async function toggleFloodZonesLayer() {
+function toggleFloodZonesLayer() {
   const btn = document.getElementById("btn-flood-toggle");
-  if (floodZonesVisible) {
-    if (floodZonesLayer) {
-      map.removeLayer(floodZonesLayer);
-      floodZonesLayer.clearLayers();
-    }
-    _floodZonesLastBboxKey = "";
+  if (floodZonesVisible && floodZonesLayer) {
+    map.removeLayer(floodZonesLayer);
     floodZonesVisible = false;
     if (btn) btn.classList.remove("active");
     return;
   }
+  if (!floodZonesLayer) {
+    floodZonesLayer = protomapsL.leafletLayer({
+      url: FLOOD_PMTILES_URL,
+      paintRules: _floodZonePaintRules(),
+      labelRules: [],
+      pane: "floodZonesPane",
+    });
+    // Match the browse layer pattern: disable pointer events so parcel
+    // popups still receive clicks normally.
+    const _container = floodZonesLayer.getContainer && floodZonesLayer.getContainer();
+    if (_container) _container.style.pointerEvents = "none";
+  }
+  floodZonesLayer.addTo(map);
   floodZonesVisible = true;
   if (btn) btn.classList.add("active");
-  await _refetchFloodZonesForViewport();
 }
-
-// Hook viewport changes so flood polygons follow the user's panning + zoom.
-// The handler self-gates on floodZonesVisible so it's a cheap no-op when
-// the toggle is OFF (default).
-map.on("moveend", _scheduleFloodZonesRefetch);
 
 async function toggleCountyLayer() {
   const btn = document.getElementById("btn-county-toggle");

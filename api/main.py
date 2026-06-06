@@ -19,7 +19,6 @@ import csv
 import io
 import json
 import logging
-import math
 import os
 import re
 import secrets
@@ -2924,91 +2923,6 @@ async def hoa_boundaries() -> dict:
                 "name": row.get("asso_name") or "",
                 "url": row.get("asso_web") or "",
                 "status": row.get("status") or "",
-            },
-        })
-    return {"type": "FeatureCollection", "features": features}
-
-
-def _parse_flood_bbox(raw: str | None) -> tuple[float, float, float, float]:
-    """Parse bbox=lng_min,lat_min,lng_max,lat_max.
-
-    Spec decision #16 — strict validation. Any failure raises HTTPException(400)
-    so a malformed query never produces a 500.
-    """
-    if not raw:
-        raise HTTPException(status_code=400, detail="bbox required")
-    parts = [p.strip() for p in raw.split(",")]
-    if len(parts) != 4:
-        raise HTTPException(
-            status_code=400,
-            detail="bbox must be exactly 4 comma-separated floats: lng_min,lat_min,lng_max,lat_max",
-        )
-    try:
-        lng_min, lat_min, lng_max, lat_max = (float(p) for p in parts)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="bbox values must be floats")
-    for v in (lng_min, lat_min, lng_max, lat_max):
-        if not math.isfinite(v):
-            raise HTTPException(status_code=400, detail="bbox values must be finite")
-    if not (-180.0 <= lng_min <= 180.0 and -180.0 <= lng_max <= 180.0):
-        raise HTTPException(status_code=400, detail="bbox longitudes must be in [-180, 180]")
-    if not (-90.0 <= lat_min <= 90.0 and -90.0 <= lat_max <= 90.0):
-        raise HTTPException(status_code=400, detail="bbox latitudes must be in [-90, 90]")
-    if lng_min >= lng_max or lat_min >= lat_max:
-        raise HTTPException(status_code=400, detail="bbox min must be strictly less than max")
-    return lng_min, lat_min, lng_max, lat_max
-
-
-@app.get("/api/flood-zones")
-async def flood_zones(bbox: str | None = None) -> dict:
-    """FEMA NFHL flood zone polygons inside a viewport bbox.
-
-    GET /api/flood-zones?bbox=lng_min,lat_min,lng_max,lat_max
-
-    Returns up to 5000 features per request, severity-ordered so narrow
-    floodway slivers stay visible even when big X swaths flood the bbox
-    at low zoom (spec decision #18). Public FEMA data — no role gate.
-    """
-    lng_min, lat_min, lng_max, lat_max = _parse_flood_bbox(bbox)
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT fld_zone, zone_subty, sfha_tf, static_bfe, source_county,
-                       ST_AsGeoJSON(geom)::json AS geometry
-                FROM flood_zones
-                WHERE geom && ST_MakeEnvelope(%s, %s, %s, %s, 4326)
-                ORDER BY
-                    CASE
-                        WHEN zone_subty = 'FLOODWAY' THEN 5
-                        WHEN fld_zone IN ('AE','A','AH','AO','V','VE') THEN 4
-                        WHEN zone_subty = '0.2 PCT ANNUAL CHANCE FLOOD HAZARD' THEN 3
-                        WHEN fld_zone = 'X' THEN 2
-                        ELSE 1
-                    END DESC,
-                    ST_Area(geom) DESC
-                LIMIT 5000
-                """,
-                (lng_min, lat_min, lng_max, lat_max),
-            )
-            rows = cur.fetchall()
-    finally:
-        release_conn(conn)
-
-    features = []
-    for (fld_zone, zone_subty, sfha_tf, static_bfe, source_county, geometry) in rows:
-        if geometry is None:
-            continue
-        features.append({
-            "type": "Feature",
-            "geometry": geometry,
-            "properties": {
-                "fld_zone": fld_zone or "",
-                "zone_subty": zone_subty or "",
-                "sfha_tf": sfha_tf or "",
-                "static_bfe": float(static_bfe) if static_bfe is not None else None,
-                "source_county": source_county or "",
             },
         })
     return {"type": "FeatureCollection", "features": features}
