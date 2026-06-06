@@ -1494,17 +1494,20 @@ body.is-not-power-user .power-user-only {
   border-color: #134a35;
   box-shadow: 0 0 0 2px rgba(26, 90, 66, 0.22);
 }
-/* KK preview-smoke 2026-06-06: the base ".map-toolbar a.active" rule sets
-   color:#fff (white) on any active anchor inside the toolbar. The popover
-   row IS inside the toolbar, so on click the row's label turned white and
-   disappeared against the white card background. Pin the row's color +
-   background explicitly here so the active state never tinkers with
-   either. The dot is the only active indicator we want. */
-.map-toolbar-popover-row.active {
+/* KK preview-smoke 2026-06-06 (second attempt): the base
+   ".map-toolbar a.active" rule has specificity (0,0,2,1) and sets
+   color:#fff. My first override used ".map-toolbar-popover-row.active"
+   which is only (0,0,2,0) and LOSES on specificity even with !important.
+   Hover worked by accident because ":hover" added a pseudo-class
+   bumping specificity to (0,0,3,0) which won.
+   Fix: prefix with the "a" element selector so my rule becomes
+   (0,0,3,1) — beats both the base active rule and the previous
+   broken override. */
+.map-toolbar a.map-toolbar-popover-row.active {
   color: #1f2937 !important;
   background: transparent !important;
 }
-.map-toolbar-popover-row.active:hover {
+.map-toolbar a.map-toolbar-popover-row.active:hover {
   background: #f8fafc !important;
   color: #0f172a !important;
 }
