@@ -2567,12 +2567,30 @@ function _dismissUndoPill() {
   _activeUndoSnapshot = null;
 }
 
+// One-shot localStorage marker for the duplexes-default-on migration
+// (KK 2026-06-06: Mike asked for Duplexes default ON, but existing users
+// have lotledger.map.filters.v1 with duplexes:false from the old default,
+// which wins via the spread in loadFilters). On first visit after this
+// change, force-apply the new default + set the marker. After the
+// marker exists, normal localStorage precedence resumes — a user who
+// turns Duplexes off later keeps their preference.
+const FILTER_DUPLEXES_DEFAULT_ON_MIGRATION_KEY = "lotledger.map.filters.v1.duplexes_default_on_migration";
+
 function loadFilters() {
   try {
     const raw = localStorage.getItem(FILTER_STORAGE_KEY);
     if (!raw) return;
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object") return;
+    // One-shot duplexes-default-on migration (see marker constant above).
+    // Runs at most once per browser; after the marker is set, future
+    // loads honor whatever the user has explicitly chosen.
+    try {
+      if (!localStorage.getItem(FILTER_DUPLEXES_DEFAULT_ON_MIGRATION_KEY)) {
+        parsed.duplexes = DEFAULT_FILTERS.duplexes;
+        localStorage.setItem(FILTER_DUPLEXES_DEFAULT_ON_MIGRATION_KEY, "1");
+      }
+    } catch (_) { /* fall through — non-blocking */ }
     filterState = { ...DEFAULT_FILTERS, ...parsed };
   } catch (_) {
     filterState = { ...DEFAULT_FILTERS };
