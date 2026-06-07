@@ -75,21 +75,10 @@
         </div>
         <div id="stored-value-body" class="collapsible-body">
 
-          <div class="sv-row" data-field-key="arv">
-            <div class="sv-row-head">
-              <label class="sv-label" for="sv-input-arv">ARV</label>
-              <button type="button" class="sv-tooltip-trigger" aria-describedby="sv-tooltip-arv" aria-label="What is ARV?">?</button>
-              <span id="sv-tooltip-arv" role="tooltip" class="sv-tooltip">After Repair Value</span>
-            </div>
-            <div class="sv-input-wrap">
-              <span class="sv-input-prefix">$</span>
-              <input id="sv-input-arv" class="sv-numeric-input" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="0">
-            </div>
-            <textarea id="sv-comment-arv" class="sv-comment" rows="2" placeholder="Comment (optional)"></textarea>
-          </div>
-
           <!-- K4 (2026-05-27 roadmap): NBV (New Build Value) — user input
-               that drives TDPP via NBV × 0.2. Inserted above TDPP. -->
+               that drives TDPP via NBV × 0.2. Mike 2026-06-06: moved above
+               ARV so the NBV → TDPP pair sits at the top of the panel and
+               ARV drops below them. -->
           <div class="sv-row" data-field-key="nbv">
             <div class="sv-row-head">
               <label class="sv-label" for="sv-input-nbv">NBV</label>
@@ -121,6 +110,19 @@
               <input id="sv-input-tdpp" class="sv-numeric-input" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="0">
             </div>
             <textarea id="sv-comment-tdpp" class="sv-comment" rows="2" placeholder="Comment (optional)"></textarea>
+          </div>
+
+          <div class="sv-row" data-field-key="arv">
+            <div class="sv-row-head">
+              <label class="sv-label" for="sv-input-arv">ARV</label>
+              <button type="button" class="sv-tooltip-trigger" aria-describedby="sv-tooltip-arv" aria-label="What is ARV?">?</button>
+              <span id="sv-tooltip-arv" role="tooltip" class="sv-tooltip">After Repair Value</span>
+            </div>
+            <div class="sv-input-wrap">
+              <span class="sv-input-prefix">$</span>
+              <input id="sv-input-arv" class="sv-numeric-input" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="0">
+            </div>
+            <textarea id="sv-comment-arv" class="sv-comment" rows="2" placeholder="Comment (optional)"></textarea>
           </div>
 
           <div class="sv-row" data-field-key="rehab_needed">
@@ -230,16 +232,16 @@
               <input type="checkbox" id="filter-vacant" checked>
             </label>
             <label class="filter-row">
+              <span class="filter-swatch" style="--sw:#9C7B8C"></span>
+              <span class="filter-name">Duplexes</span>
+              <span class="filter-count" id="filter-count-duplexes">0</span>
+              <input type="checkbox" id="filter-duplexes" checked>
+            </label>
+            <label class="filter-row">
               <span class="filter-swatch swatch-multifamily"></span>
               <span class="filter-name">Multifamily</span>
               <span class="filter-count" id="filter-count-multifamily">0</span>
               <input type="checkbox" id="filter-multifamily">
-            </label>
-            <label class="filter-row">
-              <span class="filter-swatch" style="--sw:#9C7B8C"></span>
-              <span class="filter-name">Duplexes</span>
-              <span class="filter-count" id="filter-count-duplexes">0</span>
-              <input type="checkbox" id="filter-duplexes">
             </label>
             <label class="filter-row">
               <span class="filter-swatch" style="--sw:#8B7355"></span>

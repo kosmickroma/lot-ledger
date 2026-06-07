@@ -406,7 +406,59 @@ def query_collin_parcels(polygon: list[list[float]]) -> ParcelQueryResult:
             exempt_set.add(_clean_text(normalized.get("account_num")))
         rows.append(normalized)
 
+    flood_lookup = _fetch_flood_lookup_collin(
+        [r["parcel_key"] for r in rows if r.get("parcel_key")]
+    )
+    for row in rows:
+        flood = flood_lookup.get(row.get("parcel_key"))
+        if flood:
+            row["flood_zone"] = flood["flood_zone"]
+            row["flood_zone_subtype"] = flood["flood_zone_subtype"]
+            row["flood_bfe"] = flood["flood_bfe"]
+        else:
+            row["flood_zone"] = ""
+            row["flood_zone_subtype"] = ""
+            row["flood_bfe"] = None
+
     return ParcelQueryResult(parcels=rows, exempt_accounts=exempt_set)
+
+
+def _fetch_flood_lookup_collin(parcel_keys: list[str]) -> dict[str, dict[str, Any]]:
+    """Batch spatial join: returns
+    {parcel_key: {flood_zone, flood_zone_subtype, flood_bfe}}
+    for Collin parcels whose centroid falls inside a FEMA flood polygon.
+    Mirrors api/counties/dcad.py:_fetch_flood_lookup_dcad."""
+    if not parcel_keys:
+        return {}
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT ON (p.parcel_key)
+                       p.parcel_key, f.fld_zone, f.zone_subty, f.static_bfe
+                FROM collin_parcels p
+                JOIN flood_zones f
+                     ON f.source_county = 'collin'
+                    AND ST_Contains(f.geom, p.centroid)
+                WHERE p.parcel_key = ANY(%s)
+                ORDER BY p.parcel_key, ST_Area(f.geom) DESC
+                """,
+                (parcel_keys,),
+            )
+            return {
+                row[0]: {
+                    "flood_zone": row[1] or "",
+                    "flood_zone_subtype": row[2] or "",
+                    "flood_bfe": float(row[3]) if row[3] is not None else None,
+                }
+                for row in cur.fetchall()
+            }
+    except Exception as exc:
+        logger.warning("Collin flood zone lookup failed: %s", exc)
+        return {}
+    finally:
+        release_conn(conn)
 
 
 __all__ = ["query_collin_parcels", "_classify_collin", "_normalize_collin_row"]

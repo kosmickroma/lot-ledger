@@ -230,7 +230,7 @@ const DEFAULT_FILTERS = {
   off_market: true,
   vacant: true,
   multifamily: false,
-  duplexes: false,  // new types default OFF per filter-defaults convention (2026-06-01)
+  duplexes: true,  // Mike request 2026-06-06: Duplexes is a primary deal type, default ON
   commercial: false,
   exempt: false,
 };
@@ -556,6 +556,15 @@ map.createPane("selectedOutlinePane");
 map.getPane("selectedOutlinePane").style.zIndex = "625";
 map.getPane("selectedOutlinePane").style.pointerEvents = "none";
 
+// Flood zone overlay pane — sits ABOVE the basemap (default tile pane at
+// 200) but BELOW the parcel polygon panes (620+). Lets parcel polygons
+// stay readable on top while flood fills tint the surrounding map. Spec
+// decision (Phase 3): pane below parcels, above basemap, with debounced
+// viewport-bounded refetch on moveend.
+map.createPane("floodZonesPane");
+map.getPane("floodZonesPane").style.zIndex = "410";
+map.getPane("floodZonesPane").style.pointerEvents = "none";
+
 // Apply saved basemap BEFORE browseLayer is added. If we switch after protomaps
 // is on the map, the tile layer removal fires viewprereset → _invalidateAll on
 // protomaps → _tileZoom = undefined → browse layer goes blank until next pan/zoom.
@@ -847,6 +856,11 @@ let countyLabelLayer = null;
 let countyVisible = false;
 let hoaLayer = null;
 let hoaVisible = false;
+// Flood zones overlay state. PMTiles-backed via protomaps-leaflet — the
+// layer is created lazily on first toggle-on and reused across toggles.
+// OFF by default; user opts in via the FLOOD button in the map toolbar.
+let floodZonesLayer = null;
+let floodZonesVisible = false;
 let currentJobId = null;
 let lastPolygon = null;
 let lastDrawnLatLngs = null;
@@ -938,6 +952,15 @@ let _filterSaveLastSnapshot = null;
 // Per docs/MULTIUSER_COLLAB_SPRINT3_SPEC.md v1 §4.1.
 let _sseEventSource = null;           // current EventSource instance
 let _sseAreaId = null;                 // which area it's subscribed to
+// KK debug 2026-06-06: zombie-connection watchdog. _sseLastMessageAt
+// updated by every SSE event handler (including the synthetic 'connected'
+// fired at stream open). The 60s watchdog (see _sseWatchdogTick) checks
+// the gap and force-reconnects if no events arrived for >90s while the
+// tab is visible and an area is loaded. Covers the Edge tab-throttling
+// case where the EventSource thinks it's open but the backend's keepalive
+// is being silently swallowed.
+let _sseLastMessageAt = 0;
+let _sseWatchdogInterval = null;
 const _sseSessionUuid = (typeof crypto !== "undefined" && crypto.randomUUID)
   ? crypto.randomUUID()
   : `sess-${Math.random().toString(36).slice(2)}-${Date.now()}`;
@@ -2005,30 +2028,80 @@ function _openSseStream(areaId) {
     { withCredentials: true }
   );
   _sseEventSource = es;
+  // KK debug 2026-06-06 watchdog (paired with area_meta_change broadcast):
+  // track the most recent SSE message timestamp so the 60s health probe
+  // (declared below the listeners) can detect a zombie EventSource and
+  // force-reconnect. EventSource.readyState only flips to CLOSED on a
+  // non-200 response; transport blips + Edge tab throttling can leave the
+  // stream "open" but silently dead. Backend sse-starlette pings every
+  // 30s as SSE comments (`: ping\n\n`) which the EventSource API hides
+  // from JavaScript, so we can't use pings — only real events bump this.
+  _sseLastMessageAt = Date.now();
   es.addEventListener("connected", (e) => {
+    _sseLastMessageAt = Date.now();
     try {
       const data = JSON.parse(e.data);
       console.debug("[sse] connected", data);
     } catch (_) {}
   });
   es.addEventListener("message", (e) => {
+    _sseLastMessageAt = Date.now();
     let msg;
     try { msg = JSON.parse(e.data); } catch (_) { return; }
     _handleSseFieldChange(msg);
   });
   es.addEventListener("resync", () => {
+    _sseLastMessageAt = Date.now();
     console.debug("[sse] resync event — refetching area state");
     _sseRefetchArea(areaId);
   });
   es.addEventListener("blob_explode", () => {
+    _sseLastMessageAt = Date.now();
     console.debug("[sse] blob_explode event — refetching area state");
     _sseRefetchArea(areaId);
   });
   // Sprint 3 hotfix (2026-06-02): stored value live sync.
   es.addEventListener("stored_value", (e) => {
+    _sseLastMessageAt = Date.now();
     let msg;
     try { msg = JSON.parse(e.data); } catch (_) { return; }
     _handleSseStoredValue(msg);
+  });
+  // Mike report 2026-06-06: "stars don't show up when my assistants are
+  // adding areas with saved parcels until I view the area with a saved
+  // parcel." The backend now fires this event when create_saved_parcel
+  // bonds a parcel to a shared area (or delete_saved_parcel removes one).
+  // Refetch the saved-resources cache so the gold star renders immediately
+  // for every other connected member of this area.
+  es.addEventListener("saved_parcel_change", () => {
+    _sseLastMessageAt = Date.now();
+    // No self-echo gate. Copilot deep dive 2026-06-06: the gate I added
+    // at commit 99be884 was over-engineered for a speculative race that
+    // doesn't actually exist (`_renderSubjectPropertyOutlineLazy` has
+    // an `_subjectPropertyGeometryInFlight` early-return that prevents
+    // the duplicate fetch). What the gate actually did was kill the
+    // FAST path for the writer's own tab: the SSE self-echo arrives
+    // ~100ms after the backend commits, well before the local awaited
+    // PUT chain returns. Suppressing it meant the writer had to wait
+    // the full HTTP round trip + post-PUT reload before the new gold
+    // star appeared. The OLD pre-99be884 behavior was instant precisely
+    // because the SSE self-echo was the fast path.
+    console.debug("[sse] saved_parcel_change — refreshing saved resources");
+    _reloadSavedResources().catch((err) =>
+      console.warn("[sse] _reloadSavedResources after saved_parcel_change failed:", err)
+    );
+  });
+  // KK debug 2026-06-06: PUT /api/areas/{id} now fires this for name +
+  // originator changes (was previously silent — only blob_explode fired
+  // when filter_state was in the body). User B's subject-property and
+  // area-name display refresh live instead of waiting for tab refocus.
+  es.addEventListener("area_meta_change", () => {
+    _sseLastMessageAt = Date.now();
+    // Same reasoning as saved_parcel_change above — gate removed.
+    console.debug("[sse] area_meta_change — refreshing saved resources");
+    _reloadSavedResources().catch((err) =>
+      console.warn("[sse] _reloadSavedResources after area_meta_change failed:", err)
+    );
   });
   es.addEventListener("error", () => {
     // EventSource enters CLOSED only on non-200 response. Transport
@@ -2048,12 +2121,47 @@ function _closeSseStream() {
   _sseAreaId = null;
 }
 
+// KK debug 2026-06-06 watchdog: detect zombie EventSource that thinks it's
+// open but isn't delivering events (Edge tab throttling, dropped TCP that
+// the browser didn't notice, etc.). Backend sends ping every 30s as an SSE
+// comment which the API hides from JS — so we only see "real" events. A
+// healthy stream WILL see at least one real message per minute under any
+// normal usage. We're generous: only force-reconnect after 90s of silence.
+function _sseWatchdogTick() {
+  if (!_sseEventSource) return;
+  if (!_sseAreaId) return;
+  // Don't fire while tab is hidden — browser may have legitimately frozen
+  // the timer + EventSource together; tab-focus visibilitychange handler
+  // will trigger _reloadSavedResources anyway.
+  if (document.visibilityState !== "visible") return;
+  const silenceMs = Date.now() - _sseLastMessageAt;
+  if (silenceMs <= 90_000) return;
+  // Zombie. Force-reconnect.
+  const areaId = _sseAreaId;
+  console.warn(
+    `[sse] watchdog: no events for ${Math.round(silenceMs / 1000)}s; force-reconnect`
+  );
+  _closeSseStream();
+  _openSseStream(areaId);
+}
+
+// Single global interval — starts when the module loads, ticks every 30s,
+// is a no-op when no stream is open or tab is hidden. Cheap, idempotent.
+if (typeof window !== "undefined" && !_sseWatchdogInterval) {
+  _sseWatchdogInterval = setInterval(_sseWatchdogTick, 30_000);
+}
+
 function _handleSseFieldChange(msg) {
   if (!msg) return;
-  // Type-tagged messages (resync / blob_explode) are handled by
-  // their dedicated addEventListener bindings; this catches only
-  // field-change deltas.
-  if (msg.type === "resync" || msg.type === "blob_explode") return;
+  // Type-tagged messages (resync / blob_explode / saved_parcel_change /
+  // area_meta_change) are handled by their dedicated addEventListener
+  // bindings; this catches only field-change deltas.
+  if (
+    msg.type === "resync"
+    || msg.type === "blob_explode"
+    || msg.type === "saved_parcel_change"
+    || msg.type === "area_meta_change"
+  ) return;
   const { field_key, value, client_seq, by_session_id } = msg;
   if (!field_key) return;
   // Sprint 3 hotfix (2026-06-02 evening): seq-based self-echo + LWW filter.
@@ -2459,12 +2567,30 @@ function _dismissUndoPill() {
   _activeUndoSnapshot = null;
 }
 
+// One-shot localStorage marker for the duplexes-default-on migration
+// (KK 2026-06-06: Mike asked for Duplexes default ON, but existing users
+// have lotledger.map.filters.v1 with duplexes:false from the old default,
+// which wins via the spread in loadFilters). On first visit after this
+// change, force-apply the new default + set the marker. After the
+// marker exists, normal localStorage precedence resumes — a user who
+// turns Duplexes off later keeps their preference.
+const FILTER_DUPLEXES_DEFAULT_ON_MIGRATION_KEY = "lotledger.map.filters.v1.duplexes_default_on_migration";
+
 function loadFilters() {
   try {
     const raw = localStorage.getItem(FILTER_STORAGE_KEY);
     if (!raw) return;
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object") return;
+    // One-shot duplexes-default-on migration (see marker constant above).
+    // Runs at most once per browser; after the marker is set, future
+    // loads honor whatever the user has explicitly chosen.
+    try {
+      if (!localStorage.getItem(FILTER_DUPLEXES_DEFAULT_ON_MIGRATION_KEY)) {
+        parsed.duplexes = DEFAULT_FILTERS.duplexes;
+        localStorage.setItem(FILTER_DUPLEXES_DEFAULT_ON_MIGRATION_KEY, "1");
+      }
+    } catch (_) { /* fall through — non-blocking */ }
     filterState = { ...DEFAULT_FILTERS, ...parsed };
   } catch (_) {
     filterState = { ...DEFAULT_FILTERS };
@@ -3145,8 +3271,11 @@ async function toggleHoaLayer() {
     btn.classList.add("active");
     return;
   }
-  // First load — fetch from API
-  btn.textContent = "Loading...";
+  // First load — fetch from API. NOTE: do NOT touch btn.textContent — the
+  // HOA button is now a row inside the LYRS popover with child spans
+  // (dot + label), and textContent would wipe those. The .active class
+  // is sufficient feedback; fetch is fast enough that a loading state
+  // is barely visible.
   try {
     const res = await fetch("/api/hoa");
     const geojson = await res.json();
@@ -3168,12 +3297,113 @@ async function toggleHoaLayer() {
       },
     }).addTo(map);
     hoaVisible = true;
-    btn.textContent = "HOA";
     btn.classList.add("active");
   } catch (e) {
-    btn.textContent = "HOA";
     console.error("HOA layer load failed", e);
   }
+}
+
+// FEMA NFHL flood zone overlay — PMTiles-backed via protomaps-leaflet.
+//
+// Original Phase 3 used a live GET /api/flood-zones?bbox=... endpoint serving
+// GeoJSON. At wide zoom it OOM'd the Cloud Run preview instance (1Gi memory)
+// → 503 errors. PMTiles serves pre-rendered vector tiles directly from GCS:
+// browser pulls ~10KB tiles for the current viewport, zero per-request DB
+// work, GPU-accelerated rendering. Build pipeline:
+//   1. scripts/build_flood_pmtiles.py emits flood_zones.geojsonl from PostGIS
+//   2. tippecanoe converts to flood_zones.pmtiles (Z8-Z16)
+//   3. gsutil uploads to gs://lot-ledger-tiles/flood_zones.pmtiles
+//   4. This layer fetches the .pmtiles file at toggle-on time and
+//      protomaps-leaflet does the rest.
+//
+// Severity-gradient palette (locked spec, unchanged from the live-API
+// implementation):
+//   FLOODWAY              → dark red #8B0000, 45% opacity
+//   AE / A / AH / AO / V  → red #DC2626, 30% opacity
+//   X (500-yr / shaded)   → amber #F59E0B, 22% opacity
+//   X (minimal)           → faint gray, basically invisible
+//   anything else (D, B…) → gray outline fallback (defensive)
+//
+// Severity numeric code (computed at build time via PostGIS) lets the
+// symbolizer fast-switch without parsing strings per feature:
+//   5 = FLOODWAY, 4 = AE/A/AH/AO/V/VE, 3 = X-shaded, 2 = X-unshaded, 1 = other
+const FLOOD_PMTILES_URL = (window.LL_CONFIG && window.LL_CONFIG.floodTilesUrl
+                          && window.LL_CONFIG.floodTilesUrl !== "__FLOOD_TILES_URL__")
+  ? window.LL_CONFIG.floodTilesUrl
+  : "https://storage.googleapis.com/lot-ledger-tiles/flood_zones.pmtiles";
+
+function _floodZoneFillByFeature(zoom, feature) {
+  const sev = Number(feature?.props?.severity || 0);
+  if (sev === 5) return "rgba(139,0,0,0.45)";       // FLOODWAY
+  if (sev === 4) return "rgba(220,38,38,0.30)";     // AE / A / V
+  if (sev === 3) return "rgba(245,158,11,0.22)";    // X-shaded (500-yr)
+  if (sev === 2) return "rgba(156,163,175,0.05)";   // X-unshaded
+  return "rgba(107,114,128,0.08)";                  // fallback
+}
+
+function _floodZoneStrokeByFeature(zoom, feature) {
+  const sev = Number(feature?.props?.severity || 0);
+  if (sev === 5) return "rgba(102,0,0,0.85)";
+  if (sev === 4) return "rgba(153,27,27,0.7)";
+  if (sev === 3) return "rgba(180,83,9,0.6)";
+  if (sev === 2) return "rgba(156,163,175,0.4)";
+  return "rgba(107,114,128,0.5)";
+}
+
+function _floodZonePaintRules() {
+  return [{
+    dataLayer: "flood_zones",
+    symbolizer: new protomapsL.PolygonSymbolizer({
+      fill: _floodZoneFillByFeature,
+      stroke: _floodZoneStrokeByFeature,
+      width: 1.0,
+      opacity: 1.0,
+      perFeature: true,
+    }),
+  }];
+}
+
+function _floodZoneFeatureLabel(p) {
+  // Mirrors api/main.py:_flood_zone_csv_cell verbose plain-English format.
+  const zone = String(p?.fld_zone || "").trim();
+  if (!zone) return "";
+  const subty = String(p?.zone_subty || "").trim().toUpperCase();
+  const bfe = p?.static_bfe;
+  if (subty === "FLOODWAY") return `${zone} — FLOODWAY (no build)`;
+  if (zone === "AE" || zone === "A" || zone === "AH" || zone === "AO" || zone === "V" || zone === "VE") {
+    if (bfe !== null && bfe !== undefined && Number.isFinite(Number(bfe))) {
+      return `${zone} (BFE ${Number(bfe).toFixed(1)} ft)`;
+    }
+    return zone;
+  }
+  if (zone === "X" && subty.indexOf("0.2 PCT") !== -1) return "X — 500-yr floodplain";
+  if (zone === "X" && subty.indexOf("MINIMAL") !== -1) return "X — minimal risk";
+  return zone;
+}
+
+function toggleFloodZonesLayer() {
+  const btn = document.getElementById("btn-flood-toggle");
+  if (floodZonesVisible && floodZonesLayer) {
+    map.removeLayer(floodZonesLayer);
+    floodZonesVisible = false;
+    if (btn) btn.classList.remove("active");
+    return;
+  }
+  if (!floodZonesLayer) {
+    floodZonesLayer = protomapsL.leafletLayer({
+      url: FLOOD_PMTILES_URL,
+      paintRules: _floodZonePaintRules(),
+      labelRules: [],
+      pane: "floodZonesPane",
+    });
+    // Match the browse layer pattern: disable pointer events so parcel
+    // popups still receive clicks normally.
+    const _container = floodZonesLayer.getContainer && floodZonesLayer.getContainer();
+    if (_container) _container.style.pointerEvents = "none";
+  }
+  floodZonesLayer.addTo(map);
+  floodZonesVisible = true;
+  if (btn) btn.classList.add("active");
 }
 
 async function toggleCountyLayer() {
@@ -3193,7 +3423,10 @@ async function toggleCountyLayer() {
     return;
   }
 
-  if (btn) btn.textContent = "...";
+  // NOTE: do NOT touch btn.textContent — the County button is now a row
+  // inside the LYRS popover with child spans (dot + label), and
+  // textContent would wipe those. The .active class is sufficient
+  // feedback.
   try {
     const res = await fetch("/api/counties/boundaries");
     const geojson = await res.json();
@@ -3228,13 +3461,9 @@ async function toggleCountyLayer() {
       }).addTo(countyLabelLayer);
     });
     countyVisible = true;
-    if (btn) {
-      btn.textContent = "CNTY";
-      btn.classList.add("active");
-    }
+    btn?.classList.add("active");
     _updateCountyLabelVisibility();
   } catch (e) {
-    if (btn) btn.textContent = "CNTY";
     console.error("County layer load failed", e);
   }
 }
@@ -3447,7 +3676,6 @@ async function _reloadSavedResources() {
   _restoreAllSavedParcelOutlines();
   renderSavedAreasList();
   renderSavedSessionsList();
-  _renderSubjectProperties();
 
   // v1.1 §2.3 — when another tab auto-saves a new subject for a loaded
   // area, _savedAreasCache here gets refreshed by the lines above, but
@@ -3457,6 +3685,17 @@ async function _reloadSavedResources() {
   // originator through _setCurrentTargetParcel so the sidebar label
   // catches up. No-op when no area is loaded or loaded area has no
   // subject.
+  //
+  // KK regression 2026-06-06: this block USED to sit AFTER
+  // _renderSubjectProperties() below — which meant the high-zoom "staged
+  // target star" branch (frontend/map.js ~4467) rendered using the STALE
+  // _currentTargetParcel before this code corrected it. Result: on
+  // tab B, the outline migrated to the new subject (driven by
+  // _subjectPropertiesByKey) but the star stayed pinned on the old
+  // subject until the next moveend re-render. Moved the block above
+  // _renderSubjectProperties so the staged identity is current at
+  // render time. _setCurrentTargetParcel has no map-render side effects
+  // (only sidebar label + optional coord resolve), so the move is safe.
   if (_currentLoadedAreaId) {
     const loaded = _savedAreasCache.find(
       (a) => a.id === _currentLoadedAreaId && a.type === "area",
@@ -3472,11 +3711,32 @@ async function _reloadSavedResources() {
         const stagedC = staged ? String(staged.county || "").trim().toLowerCase() : null;
         const stagedA = staged ? String(staged.account || "").trim() : null;
         if (c !== stagedC || a !== stagedA) {
-          _setCurrentTargetParcel({ county: c, account: a });
+          // KK / Copilot debug 2026-06-06: pull lat/lng from the freshly-
+          // populated _subjectPropertiesByKey (built right above from
+          // the /api/areas response) so _setCurrentTargetParcel receives
+          // finite coords on the same tick. Without this, the call below
+          // passes only county/account → _normalizeTargetParcel stores
+          // lat/lng as null → _ensureCurrentTargetParcelCoords starts an
+          // async fetch → _renderSubjectProperties fires RIGHT AFTER
+          // with stale (null) coords → high-zoom staged-star branch
+          // skips (Number.isFinite check fails) → no star until the
+          // next moveend triggers a re-render. Reader-tab specific bug:
+          // outline came from _subjectPropertiesByKey (had coords) but
+          // star came from _currentTargetParcel (didn't).
+          const _subjectKey = _subjectPropertyKey(c, a);
+          const _subjectEntry = _subjectPropertiesByKey.get(_subjectKey);
+          _setCurrentTargetParcel({
+            county: c,
+            account: a,
+            lat: _subjectEntry ? _subjectEntry.lat : undefined,
+            lng: _subjectEntry ? _subjectEntry.lng : undefined,
+          });
         }
       }
     }
   }
+
+  _renderSubjectProperties();
 }
 
 // Sync the browser tab title AND the ?area=<share_id> URL param to the
@@ -6006,24 +6266,104 @@ const MapToolbar = L.Control.extend({
       _setMeasureModeEnabled(!_measureModeEnabled);
     });
 
-    const hoaBtn = L.DomUtil.create("a", "", container);
-    hoaBtn.id = "btn-hoa-toggle";
-    hoaBtn.href = "#";
-    hoaBtn.title = "Toggle HOA zone boundaries";
-    hoaBtn.textContent = "HOA";
+    // LYRS dropdown — collapses HOA / FLOOD / CNTY into a single toolbar
+    // slot with a popover. Was 3 buttons before; the chevron in the
+    // toolbar's vertical track started overlapping the bottom two
+    // after FLOOD was added. Future overlays (PMTiles or otherwise) slot
+    // into the popover instead of growing the toolbar height.
+    const lyrsBtn = L.DomUtil.create("a", "", container);
+    lyrsBtn.id = "btn-layers-toggle";
+    lyrsBtn.href = "#";
+    lyrsBtn.title = "Map overlay layers";
+    lyrsBtn.textContent = "LYRS";
+
+    const lyrsPopover = L.DomUtil.create("div", "map-toolbar-popover hidden", container);
+    lyrsPopover.id = "map-layers-popover";
+    lyrsPopover.innerHTML = `
+      <a href="#" class="map-toolbar-popover-row" id="btn-hoa-toggle"
+         title="Toggle HOA zone boundaries">
+        <span class="map-toolbar-popover-dot" aria-hidden="true"></span>
+        <span class="map-toolbar-popover-label">HOA</span>
+      </a>
+      <a href="#" class="map-toolbar-popover-row" id="btn-flood-toggle"
+         title="Toggle FEMA flood zones overlay">
+        <span class="map-toolbar-popover-dot" aria-hidden="true"></span>
+        <span class="map-toolbar-popover-label">Flood Zones</span>
+      </a>
+      <a href="#" class="map-toolbar-popover-row" id="btn-county-toggle"
+         title="Toggle county boundary lines">
+        <span class="map-toolbar-popover-dot" aria-hidden="true"></span>
+        <span class="map-toolbar-popover-label">County Lines</span>
+      </a>
+    `;
+
+    // Stop popover clicks from propagating to the map (avoid drag/select).
+    L.DomEvent.disableClickPropagation(lyrsPopover);
+    L.DomEvent.disableScrollPropagation(lyrsPopover);
+
+    function _closeLyrsPopover() {
+      lyrsPopover.classList.add("hidden");
+      lyrsBtn.classList.remove("popover-open");
+    }
+    function _toggleLyrsPopover() {
+      const isOpen = !lyrsPopover.classList.contains("hidden");
+      if (isOpen) {
+        _closeLyrsPopover();
+      } else {
+        // Vertically anchor the popover to the LYRS button so it aligns
+        // with the button regardless of where in the toolbar stack the
+        // button sits. Without this the popover renders at top: 0 of the
+        // toolbar container (aligned with the topmost button) which is
+        // way above LYRS.
+        lyrsPopover.style.top = `${lyrsBtn.offsetTop}px`;
+        lyrsPopover.classList.remove("hidden");
+        lyrsBtn.classList.add("popover-open");
+      }
+    }
+    function _refreshLyrsActiveState() {
+      // Tint the LYRS button "active" if ANY overlay is on, so the user
+      // sees something is enabled even with the popover closed.
+      const anyOn = hoaVisible || floodZonesVisible || countyVisible;
+      lyrsBtn.classList.toggle("active", anyOn);
+    }
+    // Expose so the underlying togglers can call it after they flip
+    // their visibility state.
+    window._refreshLyrsActiveState = _refreshLyrsActiveState;
+
+    L.DomEvent.on(lyrsBtn, "click", (e) => {
+      L.DomEvent.preventDefault(e);
+      L.DomEvent.stopPropagation(e);
+      _toggleLyrsPopover();
+    });
+
+    // Click-outside-to-close. Use mousedown so we don't fight inner clicks.
+    document.addEventListener("mousedown", (e) => {
+      if (lyrsPopover.classList.contains("hidden")) return;
+      if (lyrsPopover.contains(e.target) || lyrsBtn.contains(e.target)) return;
+      _closeLyrsPopover();
+    });
+
+    // Wire each popover row to the existing toggle function. Each row keeps
+    // its own id ("btn-hoa-toggle" etc.) so the existing toggleHoaLayer /
+    // toggleCountyLayer / toggleFloodZonesLayer functions can keep flipping
+    // .active on those elements unchanged.
+    const hoaBtn = lyrsPopover.querySelector("#btn-hoa-toggle");
     L.DomEvent.on(hoaBtn, "click", (e) => {
       L.DomEvent.preventDefault(e);
       toggleHoaLayer();
+      _refreshLyrsActiveState();
     });
-
-    const countyBtn = L.DomUtil.create("a", "", container);
-    countyBtn.id = "btn-county-toggle";
-    countyBtn.href = "#";
-    countyBtn.title = "Toggle county boundary lines";
-    countyBtn.textContent = "CNTY";
+    const floodBtn = lyrsPopover.querySelector("#btn-flood-toggle");
+    L.DomEvent.on(floodBtn, "click", (e) => {
+      L.DomEvent.preventDefault(e);
+      toggleFloodZonesLayer();
+      _refreshLyrsActiveState();
+    });
+    const countyBtn = lyrsPopover.querySelector("#btn-county-toggle");
     L.DomEvent.on(countyBtn, "click", (e) => {
       L.DomEvent.preventDefault(e);
       toggleCountyLayer();
+      _refreshLyrsActiveState();
     });
 
     // ZOOM toggle — click-mode (jump = zoom on click, stay = keep current
@@ -8779,6 +9119,14 @@ const AddressSearch = L.Control.extend({
       // clears _searchHighlight on the other side of this asymmetry; this
       // line restores symmetry the other way.
       try { _clearSelectedOutline(); } catch (_) {}
+      // Mike report 2026-06-06: a parcel that was selected by click and
+      // THEN the user does an address search → the previous parcel's
+      // popup state (_activeParcelPopupState) was never reset, so the
+      // user couldn't unselect it (clicking the map elsewhere reopened
+      // the OLD parcel's popup because the state still held it). The
+      // outline got cleared above; the in-memory popup state needs the
+      // same treatment so the map.click reset path works.
+      _activeParcelPopupState = null;
       if (window._searchMoveEndHandler) map.off("moveend", window._searchMoveEndHandler);
 
       window._clearSearchHighlight = () => {
@@ -9869,6 +10217,34 @@ function _buildParcelDetailPanelHtml(p, matchedComp) {
               ${_buildParcelDetailTableRow("Flooring", _panelDisplayValue(p.flooring))}
               ${p.on_redfin && p.redfin_url ? _buildParcelDetailTableRow("Listing", `<a href="${p.redfin_url}" target="_blank" rel="noopener noreferrer">View listing</a>`) : ""}
               ${soldCompRows}
+              ${(() => {
+                // Flood Zone row (FEMA NFHL, Phase 3). Always rendered
+                // per KK 2026-06-06 — parcels outside any mapped FEMA
+                // polygon show "N/A" (matching every other CAD row's
+                // unknown-data convention), parcels inside get the
+                // verbose plain-English wording. FLOODWAY warning stays
+                // loud so Mike can't miss it.
+                const _fz = String(p?.flood_zone || "").trim();
+                const _sub = String(p?.flood_zone_subtype || "").trim().toUpperCase();
+                const _bfe = p?.flood_bfe;
+                let _label;
+                if (!_fz) {
+                  _label = "N/A";
+                } else if (_sub === "FLOODWAY") {
+                  _label = `${_fz} — FLOODWAY (no build)`;
+                } else if (["AE","A","AH","AO","V","VE"].includes(_fz)) {
+                  _label = (_bfe !== null && _bfe !== undefined && Number.isFinite(Number(_bfe)))
+                    ? `${_fz} (BFE ${Number(_bfe).toFixed(1)} ft)`
+                    : _fz;
+                } else if (_fz === "X" && _sub.indexOf("0.2 PCT") !== -1) {
+                  _label = "X — 500-yr floodplain";
+                } else if (_fz === "X" && _sub.indexOf("MINIMAL") !== -1) {
+                  _label = "X — minimal risk";
+                } else {
+                  _label = _fz;
+                }
+                return _buildParcelDetailTableRow("Flood Zone", _propelioEscape(_label));
+              })()}
               ${(() => {
                 // Parcel ID at the bottom of the CAD detail table (KK
                 // request 2026-06-05) — same value as the "Parcel ID"
@@ -13614,10 +13990,28 @@ async function _storedValueSaveField(fieldKey) {
 
   _storedValueSetStatus("saving", "Saving…");
 
+  // Mike report 2026-06-06: "stored values still not saving... fresh
+  // browser fixes." Root cause: this fetch had no timeout, so a hung
+  // network kept the outer await pending indefinitely. _storedValueProcessQueue
+  // has a try/finally that clears _storedValueInflightField — but only
+  // when this function returns. A never-resolving fetch never returns,
+  // so the inflight gate stays locked forever and every subsequent
+  // field save is silently skipped at the `if (_storedValueInflightField)
+  // return;` check. New browser = fresh JS state = no lock.
+  //
+  // 15s timeout via AbortController bounds the wait. On abort, the
+  // fetch rejects with AbortError, the existing catch (below) maps it
+  // to a Retry status, the inflight gate releases, the next field can
+  // save. Bound is generous enough that real Cloud SQL latency
+  // (typical <500ms) never triggers it.
+  const saveAbortController = new AbortController();
+  const saveAbortTimer = setTimeout(() => saveAbortController.abort(), 15_000);
+
   try {
     const resp = await fetch(`/api/areas/${encodeURIComponent(areaIdAtCall)}/stored-value`, {
       method: "PUT",
       credentials: "same-origin",
+      signal: saveAbortController.signal,
       headers: {
         "Content-Type": "application/json",
         "X-Session-Id": _sseSessionUuid,  // Sprint 3 hotfix: echo for self-echo filter
@@ -13678,9 +14072,20 @@ async function _storedValueSaveField(fieldKey) {
     }
     _storedValueSetStatus("flash");
   } catch (err) {
-    if (err.name === "AbortError") return;
+    if (err.name === "AbortError") {
+      // Distinguish timeout (saveAbortController.abort fired) from a
+      // navigation-time cancel (existing _storedValueAbortController.abort
+      // path). Either way the gate releases via the outer finally and the
+      // user can retry; the timeout case warns so we can see the symptom
+      // in production logs.
+      console.warn("[stored-value] save aborted (timeout or navigation) for", fieldKey);
+      _storedValueSetStatus("error", "Retry");
+      return;
+    }
     console.error("[stored-value] save failed:", err);
     _storedValueSetStatus("error", "Retry");
+  } finally {
+    clearTimeout(saveAbortTimer);
   }
 }
 

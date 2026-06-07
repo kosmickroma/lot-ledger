@@ -1434,6 +1434,94 @@ body.is-not-power-user .power-user-only {
   letter-spacing: 0.04em;
 }
 
+/* LYRS popover — opens to the right of the LYRS toolbar button. Holds
+   the HOA / Flood / County overlay toggles that used to be 3 stacked
+   buttons. Vertical anchor (top) is set in JS at toggle time so it
+   aligns with the LYRS button regardless of where in the toolbar
+   stack the button lives. */
+.map-toolbar-popover {
+  position: absolute;
+  top: 0;
+  left: 50px;
+  min-width: 168px;
+  background: #fff;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.22);
+  z-index: 1000;
+  padding: 4px 0;
+  display: flex;
+  flex-direction: column;
+}
+.map-toolbar-popover.hidden {
+  display: none;
+}
+.map-toolbar-popover-row {
+  /* Override the .map-toolbar a base rules — those force 44x34 boxes
+     with center alignment, which is wrong for a multi-row label list. */
+  display: flex !important;
+  align-items: center !important;
+  justify-content: flex-start !important;
+  gap: 10px;
+  padding: 9px 14px !important;
+  font-size: 13px !important;
+  font-weight: 600;
+  color: #1f2937 !important;
+  text-decoration: none !important;
+  background: transparent !important;
+  border: none !important;
+  width: auto !important;
+  height: auto !important;
+  white-space: nowrap;
+}
+.map-toolbar-popover-row + .map-toolbar-popover-row {
+  border-top: 1px solid #f1f5f9;
+}
+.map-toolbar-popover-row:hover {
+  background: #f8fafc !important;
+  color: #0f172a !important;
+}
+.map-toolbar-popover-dot {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: #e5e7eb;
+  border: 1px solid #cbd5e1;
+  flex-shrink: 0;
+}
+.map-toolbar-popover-row.active .map-toolbar-popover-dot {
+  background: #1a5a42;
+  border-color: #134a35;
+  box-shadow: 0 0 0 2px rgba(26, 90, 66, 0.22);
+}
+/* KK preview-smoke 2026-06-06 (second attempt): the base
+   ".map-toolbar a.active" rule has specificity (0,0,2,1) and sets
+   color:#fff. My first override used ".map-toolbar-popover-row.active"
+   which is only (0,0,2,0) and LOSES on specificity even with !important.
+   Hover worked by accident because ":hover" added a pseudo-class
+   bumping specificity to (0,0,3,0) which won.
+   Fix: prefix with the "a" element selector so my rule becomes
+   (0,0,3,1) — beats both the base active rule and the previous
+   broken override. */
+.map-toolbar a.map-toolbar-popover-row.active {
+  color: #1f2937 !important;
+  background: transparent !important;
+}
+.map-toolbar a.map-toolbar-popover-row.active:hover {
+  background: #f8fafc !important;
+  color: #0f172a !important;
+}
+.map-toolbar-popover-label {
+  flex: 1;
+  white-space: nowrap;
+}
+/* The LYRS button itself gets a subtle visual treatment when the popover
+   is open, distinct from the .active state (which means "an overlay is
+   currently rendered"). */
+.map-toolbar a#btn-layers-toggle.popover-open {
+  background: #eef2ff;
+}
+
 /* Empty-state for saved-area / saved-target lists when the search has
    no matches. Keeps the section visible so the user can clear the
    search instead of having to refresh. */
