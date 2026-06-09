@@ -3337,7 +3337,7 @@ function _floodZoneFillByFeature(zoom, feature) {
   if (sev === 5) return "rgba(139,0,0,0.45)";       // FLOODWAY
   if (sev === 4) return "rgba(220,38,38,0.30)";     // AE / A / V
   if (sev === 3) return "rgba(245,158,11,0.22)";    // X-shaded (500-yr)
-  if (sev === 2) return "rgba(156,163,175,0.05)";   // X-unshaded
+  if (sev === 2) return "rgba(156,163,175,0.18)";   // X-unshaded (Mike/KK 2026-06-08: 0.05 → 0.18 so it's actually visible)
   return "rgba(107,114,128,0.08)";                  // fallback
 }
 
