@@ -12,7 +12,7 @@ LotLedger is a Dallas–Fort Worth parcel intelligence tool for real estate acqu
 2. [Running on Windows](#running-on-windows)
 3. [Running on Mac or Linux](#running-on-mac-or-linux)
 4. [Environment Variables](#environment-variables)
-5. [Using the App](#using-the-app)
+5. [Using the App](#using-the-app) — full [User Guide](./docs/USER_GUIDE.md)
 6. [Team Access Setup](#team-access-setup)
 7. [Full Dev Setup with WSL2](#full-dev-setup-with-wsl2-db-rebuilds--pmtiles)
 8. [Annual Data Refresh](#annual-data-refresh)
@@ -175,6 +175,9 @@ Never share your `.env` file or `credentials.json`. Do not commit them to GitHub
 
 ## Using the App
 
+> 📖 **Full walkthrough:** for an end-to-end guide to using the app and querying the database directly,
+> see the [**User Guide**](./docs/USER_GUIDE.md).
+
 **Browse mode** — the map loads with all parcels color-coded:
 
 | Color | Meaning |
@@ -267,7 +270,7 @@ pip install -r requirements.txt
 Create `.env` and copy `credentials.json` into the folder (same as Quick Start).
 
 **Accessing Windows files from WSL2:** your Windows C drive is at `/mnt/c/` inside WSL2.
-Example: `C:\Users\Mike\Downloads\` becomes `/mnt/c/Users/Mike/Downloads/`
+Example: `C:\Users\YourName\Downloads\` becomes `/mnt/c/Users/YourName/Downloads/`
 
 ---
 

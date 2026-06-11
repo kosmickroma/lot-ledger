@@ -23,12 +23,13 @@ ingest/
 *.db
 *.sqlite
 
-# Docs — internal notes, not for repo (CODE_GUIDE.md, propelio/, OPERATIONS_RUNBOOK.md are exceptions)
+# Docs — internal notes, not for repo (CODE_GUIDE.md, propelio/, OPERATIONS_RUNBOOK.md, USER_GUIDE.md are exceptions)
 docs/*
 !docs/CODE_GUIDE.md
 !docs/propelio/
 !docs/propelio/**
 !docs/OPERATIONS_RUNBOOK.md
+!docs/USER_GUIDE.md
 
 # Render / deployment artifacts
 .render/
