@@ -485,16 +485,24 @@ const MAP_CANVAS_RENDERER = L.canvas();
 const MAP_SVG_RENDERER = L.svg();
 L.control.scale({ position: "bottomright", metric: false, imperial: true }).addTo(map);
 
+// crossOrigin (2026-06-16): tiles MUST be fetched as CORS requests. Without it,
+// <img> tiles are cross-origin "no-cors" responses, and the browser's Opaque
+// Response Blocking (Firefox ORB / Chromium ORB) blanks any tile whose response
+// isn't a clean image — which happens when CARTO returns a rate-limit/error body
+// (CARTO also sends `x-content-type-options: nosniff`, so the browser won't sniff).
+// Both CARTO and ArcGIS send `Access-Control-Allow-Origin: *`, so CORS is safe here.
 const streetLayer = L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
   attribution: "&copy; OpenStreetMap contributors &copy; CARTO",
   subdomains: "abcd",
   maxZoom: 20,
+  crossOrigin: true,
 });
 
 const contrastLayer = L.tileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png", {
   attribution: "&copy; OpenStreetMap contributors &copy; CARTO",
   subdomains: "abcd",
   maxZoom: 20,
+  crossOrigin: true,
 });
 
 const satelliteLayer = L.tileLayer(
@@ -502,6 +510,7 @@ const satelliteLayer = L.tileLayer(
   {
     attribution: "Tiles &copy; Esri",
     maxZoom: 20,
+    crossOrigin: true,
   }
 );
 
@@ -517,8 +526,26 @@ map.getPane("labelsPane").style.zIndex = "450";
 map.getPane("labelsPane").style.pointerEvents = "none";
 const labelsLayer = L.tileLayer(
   "https://{s}.basemaps.cartocdn.com/rastertiles/voyager_only_labels/{z}/{x}/{y}{r}.png",
-  { subdomains: "abcd", maxZoom: 20, opacity: 1, pane: "labelsPane" }
+  { subdomains: "abcd", maxZoom: 20, opacity: 1, pane: "labelsPane", crossOrigin: true }
 );
+
+// Tile-error self-heal (2026-06-16): Leaflet does NOT retry a failed tile by
+// default — a transient CARTO rate-limit / ORB block / network blip leaves a
+// permanent grey hole until the user happens to pan across that exact tile.
+// Retry each failed tile up to 2× with backoff (cache-busted only on retry, so
+// normal tiles stay CDN-cacheable). Bounded per-tile, so no retry storm.
+[streetLayer, contrastLayer, satelliteLayer, labelsLayer].forEach((layer) => {
+  layer.on("tileerror", (e) => {
+    const tile = e.tile;
+    if (!tile || !e.coords) return;
+    const attempt = (tile._llRetry || 0) + 1;
+    if (attempt > 2) return;
+    tile._llRetry = attempt;
+    let url = layer.getTileUrl(e.coords);
+    url += (url.includes("?") ? "&" : "?") + "_r=" + attempt;
+    setTimeout(() => { tile.src = url; }, 700 * attempt);
+  });
+});
 
 map.createPane("soldPane");
 map.getPane("soldPane").style.zIndex = "640";
@@ -2043,6 +2070,16 @@ function _openSseStream(areaId) {
       const data = JSON.parse(e.data);
       console.debug("[sse] connected", data);
     } catch (_) {}
+  });
+  // Heartbeat (2026-06-16): the backend now emits a real `heartbeat` event every
+  // ~30s (api/main.py SSE generator). The watchdog only treats *real* events as
+  // liveness (ping comments are hidden from JS), so before this, a healthy-but-
+  // quiet idle stream looked "dead" and the watchdog force-reconnected every
+  // ~120s — triggering a resync + refetch storm. Counting the heartbeat as
+  // liveness stops that misfire while still letting the watchdog catch a stream
+  // that has genuinely gone silent (no heartbeat for >90s).
+  es.addEventListener("heartbeat", () => {
+    _sseLastMessageAt = Date.now();
   });
   es.addEventListener("message", (e) => {
     _sseLastMessageAt = Date.now();

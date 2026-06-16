@@ -7288,6 +7288,10 @@ async def stream_area_events(
                     # fires; this is belt-and-suspenders for disconnect detection.
                     if await request.is_disconnected():
                         break
+                    yield {
+                        "event": "heartbeat",
+                        "data": "{}",
+                    }
                     continue
                 if await request.is_disconnected():
                     break
