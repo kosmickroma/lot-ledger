@@ -192,7 +192,12 @@ def get_session_pool() -> psycopg2.pool.ThreadedConnectionPool:
         try:
             _session_pool = psycopg2.pool.ThreadedConnectionPool(
                 minconn=1,
-                maxconn=5,
+                # 2026-06-16: raised 5 -> 10. The per-request auth middleware plus
+                # the saved-area endpoints each borrow a session connection, so a
+                # few concurrent users could exhaust a pool of 5, triggering
+                # PoolError -> dropped/rebuilt connections. 10 gives headroom
+                # (the data pool is 20).
+                maxconn=10,
                 dsn=dsn,
             )
         except psycopg2.OperationalError as exc:
@@ -201,7 +206,7 @@ def get_session_pool() -> psycopg2.pool.ThreadedConnectionPool:
             _create_session_database_if_missing(s)
             _session_pool = psycopg2.pool.ThreadedConnectionPool(
                 minconn=1,
-                maxconn=5,
+                maxconn=10,  # keep in sync with the primary path above
                 dsn=dsn,
             )
     return _session_pool
