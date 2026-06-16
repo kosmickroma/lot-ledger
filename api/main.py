@@ -2467,7 +2467,12 @@ async def auth_gate(request: Request, call_next):
 
     if is_protected or path.startswith("/api/") or path.startswith("/auth/") or path.startswith("/admin/"):
         try:
-            user = get_current_user(request)
+            # Tier 2 (2026-06-16): offload the per-request auth DB read off the
+            # event loop. get_current_user does a blocking psycopg2 lookup; on a
+            # single-worker async server, calling it inline here serialized EVERY
+            # request behind that query. to_thread runs it in the threadpool so
+            # concurrent users don't block each other. AuthError still propagates.
+            user = await asyncio.to_thread(get_current_user, request)
             request.state.current_user = user
         except AuthError:
             user = None
@@ -6234,36 +6239,42 @@ async def get_session(session_id: str, user: dict[str, Any] = Depends(get_curren
 async def list_sessions(user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
     """List the current user's named (permanent) sessions, ordered newest first."""
     uid = int(user["id"])
-    conn = get_session_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT s.session_id, s.name, s.parcel_count, s.county_coverage, s.filter_state, s.polygon, s.created_at,
-                       sa.originator_parcel_county, sa.originator_parcel_account_num
-                FROM analysis_sessions s
-                LEFT JOIN saved_areas sa ON sa.area_id = s.saved_area_id
-                WHERE s.user_id = %s AND s.name IS NOT NULL
-                ORDER BY s.created_at DESC
-                """,
-                (uid,),
-            )
-            sessions = []
-            for row in cur.fetchall():
-                polygon_latlngs = _to_leaflet_polygon(row[5]) if row[5] else []
-                sessions.append({
-                    "session_id": row[0],
-                    "name": row[1],
-                    "parcel_count": int(row[2] or 0),
-                    "county_coverage": list(row[3] or []),
-                    "filter_state": row[4] if isinstance(row[4], dict) else None,
-                    "latlngs": polygon_latlngs,
-                    "created_at": row[6].isoformat() if row[6] else None,
-                    "originator_parcel_county": str(row[7] or "").strip().lower() or None,
-                    "originator_parcel_account_num": str(row[8] or "").strip() or None,
-                })
-    finally:
-        release_session_conn(conn)
+
+    def _query() -> list[dict[str, Any]]:
+        conn = get_session_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT s.session_id, s.name, s.parcel_count, s.county_coverage, s.filter_state, s.polygon, s.created_at,
+                           sa.originator_parcel_county, sa.originator_parcel_account_num
+                    FROM analysis_sessions s
+                    LEFT JOIN saved_areas sa ON sa.area_id = s.saved_area_id
+                    WHERE s.user_id = %s AND s.name IS NOT NULL
+                    ORDER BY s.created_at DESC
+                    """,
+                    (uid,),
+                )
+                sessions = []
+                for row in cur.fetchall():
+                    polygon_latlngs = _to_leaflet_polygon(row[5]) if row[5] else []
+                    sessions.append({
+                        "session_id": row[0],
+                        "name": row[1],
+                        "parcel_count": int(row[2] or 0),
+                        "county_coverage": list(row[3] or []),
+                        "filter_state": row[4] if isinstance(row[4], dict) else None,
+                        "latlngs": polygon_latlngs,
+                        "created_at": row[6].isoformat() if row[6] else None,
+                        "originator_parcel_county": str(row[7] or "").strip().lower() or None,
+                        "originator_parcel_account_num": str(row[8] or "").strip() or None,
+                    })
+                return sessions
+        finally:
+            release_session_conn(conn)
+
+    # Tier 2: run the blocking session-DB query off the event loop.
+    sessions = await asyncio.to_thread(_query)
     return {"sessions": sessions}
 
 
@@ -6566,26 +6577,32 @@ async def list_saved_areas(user: dict[str, Any] = Depends(get_current_user)) -> 
     # Sprint 1 multi-user collab: return areas the caller is a member of
     # (owner OR editor). The role column travels with each row so the
     # frontend can drive affordance gating (spec §3 row 1, §3.5).
-    conn = get_session_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT sa.area_id, sa.name, sa.polygon, sa.filter_state, sa.type, sa.share_id,
-                       sa.originator_parcel_county, sa.originator_parcel_account_num,
-                       sa.created_at, sa.updated_at,
-                       sam.role
-                FROM saved_areas sa
-                JOIN saved_area_members sam
-                  ON sam.area_id = sa.area_id
-                 AND sam.user_id = %s
-                ORDER BY sa.created_at DESC
-                """,
-                (int(user["id"]),)
-            )
-            rows = cur.fetchall()
-    finally:
-        release_session_conn(conn)
+    uid = int(user["id"])
+
+    def _fetch_rows():
+        conn = get_session_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT sa.area_id, sa.name, sa.polygon, sa.filter_state, sa.type, sa.share_id,
+                           sa.originator_parcel_county, sa.originator_parcel_account_num,
+                           sa.created_at, sa.updated_at,
+                           sam.role
+                    FROM saved_areas sa
+                    JOIN saved_area_members sam
+                      ON sam.area_id = sa.area_id
+                     AND sam.user_id = %s
+                    ORDER BY sa.created_at DESC
+                    """,
+                    (uid,)
+                )
+                return cur.fetchall()
+        finally:
+            release_session_conn(conn)
+
+    # Tier 2: blocking session-DB query off the event loop.
+    rows = await asyncio.to_thread(_fetch_rows)
 
     originators_to_resolve: list[tuple[str, str]] = []
     for row in rows:
@@ -6596,7 +6613,7 @@ async def list_saved_areas(user: dict[str, Any] = Depends(get_current_user)) -> 
     # Centroid lookups hit the DATA DB (parcel tables live there), NOT the
     # session DB that backs saved_areas. The batch helper opens its own
     # get_conn() pool — must be called OUTSIDE the session-cursor scope.
-    resolved_coords = _resolve_originator_coords_batch(originators_to_resolve)
+    resolved_coords = await asyncio.to_thread(_resolve_originator_coords_batch, originators_to_resolve)
 
     areas: list[dict[str, Any]] = []
     subject_props_acc: dict[tuple[str, str], dict[str, Any]] = {}
@@ -7878,29 +7895,35 @@ async def delete_saved_area(area_id: str, user: dict[str, Any] = Depends(get_cur
 
 @app.get("/api/parcels")
 async def list_saved_parcels(user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
-    conn = get_session_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT account_num, county, payload, created_at
-                FROM saved_parcels
-                WHERE user_id = %s AND area_id IS NULL
-                ORDER BY created_at DESC
-                """,
-                (int(user["id"]),),
-            )
-            parcels = [
-                {
-                    "account_num": row[0],
-                    "county": row[1],
-                    "payload": row[2] if isinstance(row[2], dict) else {},
-                    "created_at": row[3].isoformat() if row[3] else None,
-                }
-                for row in cur.fetchall()
-            ]
-    finally:
-        release_session_conn(conn)
+    uid = int(user["id"])
+
+    def _query() -> list[dict[str, Any]]:
+        conn = get_session_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT account_num, county, payload, created_at
+                    FROM saved_parcels
+                    WHERE user_id = %s AND area_id IS NULL
+                    ORDER BY created_at DESC
+                    """,
+                    (uid,),
+                )
+                return [
+                    {
+                        "account_num": row[0],
+                        "county": row[1],
+                        "payload": row[2] if isinstance(row[2], dict) else {},
+                        "created_at": row[3].isoformat() if row[3] else None,
+                    }
+                    for row in cur.fetchall()
+                ]
+        finally:
+            release_session_conn(conn)
+
+    # Tier 2: run the blocking session-DB query off the event loop.
+    parcels = await asyncio.to_thread(_query)
     return {"parcels": parcels}
 
 
