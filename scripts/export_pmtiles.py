@@ -363,6 +363,15 @@ def main() -> None:
         f"-L '{{\"file\":\"{denton_out}\",\"layer\":\"denton\"}}'"
     )
 
+    print("\nThen — upload to GCS (NOT executed by this script).")
+    print("Use a NEW versioned filename; never overwrite the existing file in place.")
+    print("Include the Cache-Control flag to keep caching policy explicit and consistent:")
+    print(
+        'gsutil -h "Cache-Control:public, max-age=3600" '
+        "cp parcels.pmtiles gs://YOUR-BUCKET/parcels-YYYYMMDD.pmtiles"
+    )
+    print("Then update TILES_BASE_URL on the Cloud Run service to the new file URL.")
+
 
 if __name__ == "__main__":
     main()

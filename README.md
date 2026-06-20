@@ -301,6 +301,18 @@ python scripts/build_collin.py --write-db --snapshot-date 2026-01-01
 
 ### 3. Rebuild PMTiles
 
+> ⚠️  **CRITICAL — never overwrite `parcels.pmtiles` in place.**
+>
+> Every time you upload a new tileset, give it a **new versioned filename**
+> (for example `parcels-20260619.pmtiles`), then point the app at it by
+> updating the `TILES_BASE_URL` environment variable on the Cloud Run service.
+>
+> **Why:** browsers and CDN edges cache responses against a URL. If you overwrite
+> the existing file, users can continue receiving the old cached copy — or a mix
+> of stale and fresh bytes — until the cache expires. Either way they see blank
+> maps or "wrong magic number" errors. A new filename is a brand-new cache key
+> with no stale-entry risk.
+
 ```bash
 # Export all counties (~10-15 min)
 PYTHONPATH=. python scripts/export_pmtiles.py
@@ -308,9 +320,22 @@ PYTHONPATH=. python scripts/export_pmtiles.py
 # Copy and run the tippecanoe command it prints (~45-60 min)
 tippecanoe -o parcels.pmtiles ...
 
-# Upload to GCS
-gsutil cp parcels.pmtiles gs://YOUR-BUCKET/parcels.pmtiles
+# Upload to GCS under a NEW versioned filename (never overwrite the old one)
+gsutil -h "Cache-Control:public, max-age=3600" cp parcels.pmtiles gs://YOUR-BUCKET/parcels-YYYYMMDD.pmtiles
 ```
+
+### 4. Point the App at the New Tileset
+
+After the upload finishes, update **`TILES_BASE_URL`** on the Cloud Run service
+to the full URL of the new file, e.g.:
+
+```
+TILES_BASE_URL=https://storage.googleapis.com/YOUR-BUCKET/parcels-YYYYMMDD.pmtiles
+```
+
+Set it in **Cloud Console → Cloud Run → (service) → Edit & Deploy New Revision →
+Variables & Secrets** and deploy the revision. The app reads this at `api/main.py:81`.
+The old file must stay in the bucket until the new revision is fully rolled out.
 
 ---
 

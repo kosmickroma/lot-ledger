@@ -652,6 +652,55 @@ const browseLayer = protomapsL.leafletLayer({
   minZoom: 14,
 });
 browseLayer.addTo(map);
+// PMTiles preflight health check — protomaps-leaflet v3.1.2 swallows all tile
+// fetch errors (tile-done callback always fires as success; tileerror never fires
+// for browseLayer). A missing or corrupt parcels.pmtiles silently blanks the map.
+// Catches WHOLE-FILE failures only (404, missing file, total network failure) —
+// NOT per-tile failures. That narrower scope is intentional.
+// Banner is intentionally persistent until page reload — a 404 on parcels.pmtiles
+// is a real infrastructure failure, not a transient blip worth auto-retrying.
+// Fire-and-forget; never awaited.
+fetch(PMTILES_URL, { headers: { Range: "bytes=0-16383" } })
+  .then((r) => {
+    if (r.status !== 206) {
+      throw new Error(`PMTiles preflight: expected 206, got ${r.status}`);
+    }
+    return r.arrayBuffer();
+  })
+  .then((buf) => {
+    const magic = [0x50, 0x4d, 0x54, 0x69, 0x6c, 0x65, 0x73, 0x03];
+    if (buf.byteLength < magic.length) {
+      throw new Error("PMTiles preflight: short header");
+    }
+    const view = new DataView(buf);
+    const valid = magic.every((b, i) => view.getUint8(i) === b);
+    if (!valid) throw new Error("PMTiles preflight: bad magic number");
+  })
+  .catch((err) => {
+    try {
+      console.error("[pmtiles-preflight]", err);
+      if (!document.getElementById("ll-tiles-banner")) {
+        const banner = document.createElement("div");
+        banner.id = "ll-tiles-banner";
+        banner.setAttribute("role", "alert");
+        banner.textContent = "Parcel data is temporarily unavailable.";
+        banner.style.position = "fixed";
+        banner.style.top = "0";
+        banner.style.left = "0";
+        banner.style.right = "0";
+        banner.style.zIndex = "12001";
+        banner.style.padding = "10px 14px";
+        banner.style.textAlign = "center";
+        banner.style.fontSize = "13px";
+        banner.style.fontWeight = "600";
+        banner.style.background = "#ffe5e5";
+        banner.style.color = "#7a1111";
+        banner.style.borderBottom = "1px solid #ffc9c9";
+        banner.style.boxShadow = "0 2px 8px rgba(0,0,0,0.12)";
+        document.body.appendChild(banner);
+      }
+    } catch (_) {}
+  });
 // Disable pointer events on the canvas so draw result polygons beneath it
 // receive clicks normally. queryTileFeaturesDebug still works via map.on("click").
 const _browseContainer = browseLayer.getContainer && browseLayer.getContainer();
