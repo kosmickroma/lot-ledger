@@ -4951,6 +4951,7 @@ async function saveParcel(account_num, county, addr, lat, lng, geometry) {
             if (reloaded) reloaded.name = newWorkspaceName;
             setActiveItem("Workspace", newWorkspaceName);
             renderSavedAreasList();
+            _syncTabTitle();
           } catch (renameErr) {
             console.warn("[saveParcel] first-flow auto-rename failed", renameErr);
           }
