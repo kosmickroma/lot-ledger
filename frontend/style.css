@@ -470,6 +470,65 @@ body.is-not-power-user .power-user-only {
   margin: 0;
 }
 
+/* Neighborhood comp filter */
+.nbhd-filter-wrap {
+  position: relative;
+  width: 100%;
+}
+.nbhd-search-input {
+  width: 100%;
+  box-sizing: border-box;
+}
+.nbhd-options {
+  position: absolute;
+  top: calc(100% + 2px);
+  left: 0;
+  right: 0;
+  z-index: 200;
+  background: #1e2530;
+  border: 1px solid rgba(201, 162, 79, 0.35);
+  border-radius: 6px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+.nbhd-option {
+  padding: 5px 9px;
+  font-size: 11px;
+  color: #dbe0e7;
+  cursor: pointer;
+}
+.nbhd-option:hover {
+  background: rgba(201, 162, 79, 0.15);
+}
+.nbhd-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: rgba(201, 162, 79, 0.14);
+  border: 1px solid rgba(201, 162, 79, 0.4);
+  border-radius: 12px;
+  padding: 3px 8px;
+  font-size: 11px;
+  color: #e8d9b0;
+  max-width: 100%;
+}
+.nbhd-chip-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.nbhd-chip-x {
+  cursor: pointer;
+  color: rgba(232, 217, 176, 0.55);
+  flex-shrink: 0;
+  font-size: 12px;
+  line-height: 1;
+  user-select: none;
+}
+.nbhd-chip-x:hover {
+  color: #e8d9b0;
+}
+
 .nf-sep {
   color: var(--text-muted);
   font-size: 11px;
