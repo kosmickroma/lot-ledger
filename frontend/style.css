@@ -512,6 +512,11 @@ body.is-not-power-user .power-user-only {
   color: #e8d9b0;
   max-width: 100%;
 }
+.nbhd-chip[hidden] {
+  /* More specific than the .nbhd-chip inline-flex rule above, which otherwise
+     beats the UA hidden-attribute display-none and shows an empty pill. */
+  display: none;
+}
 .nbhd-chip-label {
   overflow: hidden;
   text-overflow: ellipsis;

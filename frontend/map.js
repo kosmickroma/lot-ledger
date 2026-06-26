@@ -8800,6 +8800,11 @@ function _renderNbhdOptions(query) {
   const optionsEl = document.getElementById("prop-neighborhood-options");
   if (!optionsEl) return;
   if (!query) { optionsEl.hidden = true; optionsEl.innerHTML = ""; return; }
+  // Build/refresh the options cache on demand. It's ref-guarded (instant no-op
+  // when comps are unchanged), so the typeahead is self-sufficient even when
+  // comps were loaded via a path that didn't run applyPropelioClientFilters
+  // (e.g. saved-area restore) — otherwise the cache could be empty when typing.
+  _buildNbhdOptionsCache();
   const q = query.toLowerCase();
   const matches = (_nbhdOptionsCache || []).filter((o) => o.display.toLowerCase().includes(q));
   if (!matches.length) { optionsEl.hidden = true; optionsEl.innerHTML = ""; return; }

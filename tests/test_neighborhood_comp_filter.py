@@ -13,10 +13,15 @@ import re
 from pathlib import Path
 
 MAP_JS = Path(__file__).resolve().parent.parent / "frontend" / "map.js"
+STYLE_CSS = Path(__file__).resolve().parent.parent / "frontend" / "style.css"
 
 
 def _src() -> str:
     return MAP_JS.read_text(encoding="utf-8")
+
+
+def _css() -> str:
+    return STYLE_CSS.read_text(encoding="utf-8")
 
 
 def _fn_body(src: str, pattern: str) -> str:
@@ -198,4 +203,31 @@ def test_applyFilterFieldToUI_neighborhood_sets_hidden_input() -> None:
     block = body[nbhd_start : nbhd_start + 400]
     assert '"prop-neighborhood"' in block, (
         "_applyFilterFieldToUI neighborhood case must set #prop-neighborhood value"
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Preview smoke fixes (2026-06-25): empty dropdown + stray empty chip pill
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_renderNbhdOptions_builds_cache_on_demand() -> None:
+    """Regression: typing showed nothing because the options cache was only
+    built by applyPropelioClientFilters. _renderNbhdOptions must build it on
+    demand so the typeahead works after a saved-area restore."""
+    src = _src()
+    body = _fn_body(src, r"function _renderNbhdOptions\(")
+    assert "_buildNbhdOptionsCache()" in body, (
+        "_renderNbhdOptions must call _buildNbhdOptionsCache() so the cache is "
+        "fresh when the user types (not just after a filter-apply)"
+    )
+
+
+def test_nbhd_chip_hidden_rule_present() -> None:
+    """Regression: `.nbhd-chip { display: inline-flex }` overrode the [hidden]
+    attribute, so the empty chip rendered as a stray pill. A more-specific
+    `.nbhd-chip[hidden]` rule must restore the hide."""
+    css = _css()
+    assert re.search(r"\.nbhd-chip\[hidden\]\s*\{[^}]*display:\s*none", css), (
+        ".nbhd-chip[hidden] { display: none } must exist to override the "
+        "inline-flex display when the chip is empty/hidden"
     )
