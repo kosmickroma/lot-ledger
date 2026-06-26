@@ -7846,6 +7846,14 @@ async def update_saved_area(area_id: str, request: SavedAreaUpdateRequest, req: 
                         "by_session_id": req.headers.get("x-session-id", ""),
                     }),),
                 )
+
+            if request.polygon is not None:
+                _bond_standalone_targets_to_area(
+                    cur,
+                    user_id=int(user["id"]),
+                    area_id=area_id,
+                    polygon_geojson=_to_geojson_polygon(request.polygon),
+                )
         conn.commit()
     except Exception:
         conn.rollback()
