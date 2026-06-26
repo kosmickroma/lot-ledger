@@ -480,11 +480,11 @@ body.is-not-power-user .power-user-only {
   box-sizing: border-box;
 }
 .nbhd-options {
-  position: absolute;
-  top: calc(100% + 2px);
-  left: 0;
-  right: 0;
-  z-index: 200;
+  /* In-flow (NOT absolute): an absolutely-positioned dropdown gets clipped by
+     the ancestor `.collapsible-body { overflow: hidden }` / `.sidebar` overflow,
+     so it rendered invisibly. In-flow, it pushes rows below it down and rides
+     the sidebar's own scroll — never clipped. */
+  margin-top: 2px;
   background: #1e2530;
   border: 1px solid rgba(201, 162, 79, 0.35);
   border-radius: 6px;
