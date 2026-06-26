@@ -995,6 +995,7 @@ let _savedTargetsSearchQuery = "";
 let _currentSessionIsNamed = false;
 let _savedSessionsCache = [];
 let _currentLoadedAreaId = null;
+let _reshapeTargetAreaId = null;
 let _currentTargetParcel = null; // { county, account, lat?, lng? } | null
 // v1.1 §2.6 — gates cross-tab refetch to prevent flicker when concurrent
 // subject-saves are in-flight. See TkDodo "Concurrent Optimistic Updates
@@ -12094,19 +12095,23 @@ map.on("draw:created", async (e) => {
   bumpUndoPillVersion();
   closeTransientSoldSidebarPopup();
   map.getContainer().classList.remove("drawing-active");
-  _currentSessionIsNamed = false;
-  // Intentionally NOT clearing _currentTargetParcel or _originatorStarMarker
-  // here — saveCurrentArea (called downstream via _autoCacheOnDraw) needs
-  // to read _currentTargetParcel as the originator for the new workspace.
-  // saveCurrentArea handles the clear-and-re-render with the bonded value
-  // after the area is persisted.
-  _currentLoadedAreaId = null;
-  _syncTabTitle();
-  _storedValueOnAreaChange(null);
-  void _filterSaveOnAreaChange(null);
-  _selectedSavedItemId = null;
-  _setSessionCacheNote("");
-  renderSavedAreasList();
+  const reshapeTarget = _reshapeTargetAreaId;
+  _reshapeTargetAreaId = null;
+  if (!reshapeTarget) {
+    _currentSessionIsNamed = false;
+    // Intentionally NOT clearing _currentTargetParcel or _originatorStarMarker
+    // here — saveCurrentArea (called downstream via _autoCacheOnDraw) needs
+    // to read _currentTargetParcel as the originator for the new workspace.
+    // saveCurrentArea handles the clear-and-re-render with the bonded value
+    // after the area is persisted.
+    _currentLoadedAreaId = null;
+    _syncTabTitle();
+    _storedValueOnAreaChange(null);
+    void _filterSaveOnAreaChange(null);
+    _selectedSavedItemId = null;
+    _setSessionCacheNote("");
+    renderSavedAreasList();
+  }
   drawLayer.clearLayers();
   PARCEL_LAYER_KEYS.forEach((key) => parcelTypeLayers[key]?.clearLayers());
   redfinLayer.clearLayers();
@@ -12148,14 +12153,32 @@ map.on("draw:created", async (e) => {
   propelioCompLayerByKey.clear();
   renderPropelioCompList([]);
   propelioCmaChip.hide();
-  // Await the autosave so _currentLoadedAreaId is set before runAnalysis
-  // fires.  Without this, /api/analyze receives area_id: null and the new
-  // cached_jobs row is born with saved_area_id = NULL → Stored Values columns
-  // come back empty on CSV export.  The cache pre-warm inside
-  // _autoCacheOnDraw is fire-and-forget, so this only adds the ~100ms
-  // POST /api/areas round-trip before analysis starts — invisible against
-  // the several-second analysis itself.
-  await _autoCacheOnDraw();
+  if (reshapeTarget) {
+    // Re-scope already-loaded comps to the new polygon instantly (client-side,
+    // zero DB / zero Propelio). OAC comps inside the new shape appear
+    // automatically because the OAC gate re-tests every comp.
+    _buildNbhdOptionsCache();
+    applyPropelioClientFilters();
+    // Persist the new polygon to the loaded area (owner-only).
+    try {
+      await _apiJson(`/api/areas/${encodeURIComponent(reshapeTarget)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ polygon: lastDrawnLatLngs }),
+      });
+    } catch (err) {
+      console.warn("[reshape] PUT polygon failed:", err);
+    }
+  } else {
+    // Await the autosave so _currentLoadedAreaId is set before runAnalysis
+    // fires.  Without this, /api/analyze receives area_id: null and the new
+    // cached_jobs row is born with saved_area_id = NULL → Stored Values columns
+    // come back empty on CSV export.  The cache pre-warm inside
+    // _autoCacheOnDraw is fire-and-forget, so this only adds the ~100ms
+    // POST /api/areas round-trip before analysis starts — invisible against
+    // the several-second analysis itself.
+    await _autoCacheOnDraw();
+  }
   _showPropelioPolygonButton(e.layer.getLatLngs()[0]);
   const analysisRequest = beginLatestAnalysisRequest();
 
@@ -12397,14 +12420,17 @@ map.on("draw:drawstart", () => {
   // CSS pointer-events:none (drawing-active class) blocks parcel layer clicks
   // so vertices never get swallowed by underlying markers.
   map.getContainer().classList.add("drawing-active");
-  _currentSessionIsNamed = false;
-  _currentLoadedAreaId = null;
-  _syncTabTitle();
-  _storedValueOnAreaChange(null);
-  void _filterSaveOnAreaChange(null);
-  _selectedSavedItemId = null;
-  _setSessionCacheNote("");
-  renderSavedAreasList();
+  _reshapeTargetAreaId = _currentLoadedAreaId;
+  if (!_reshapeTargetAreaId) {
+    _currentSessionIsNamed = false;
+    _currentLoadedAreaId = null;
+    _syncTabTitle();
+    _storedValueOnAreaChange(null);
+    void _filterSaveOnAreaChange(null);
+    _selectedSavedItemId = null;
+    _setSessionCacheNote("");
+    renderSavedAreasList();
+  }
   _updateSaveSessionButtonState();
 });
 
@@ -12413,6 +12439,7 @@ map.on("draw:drawstop", () => {
   document.getElementById("btn-draw")?.classList.remove("active");
   document.getElementById("btn-draw-cancel")?.classList.add("hidden");
   map.getContainer().classList.remove("drawing-active");
+  _reshapeTargetAreaId = null;
 });
 
 map.on("contextmenu", async (ev) => {

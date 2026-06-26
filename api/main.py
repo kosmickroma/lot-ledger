@@ -1684,6 +1684,7 @@ class SavedAreaUpdateRequest(BaseModel):
     lng: float | None = None
     originator_parcel_county: str | None = None
     originator_parcel_account_num: str | None = None
+    polygon: list[list[float]] | None = None
 
 
 class SavedParcelCreateRequest(BaseModel):
@@ -7658,7 +7659,7 @@ async def join_saved_area_via_share_id(
 @app.put("/api/areas/{area_id}")
 async def update_saved_area(area_id: str, request: SavedAreaUpdateRequest, req: Request, user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
     require_csrf(req)
-    if request.name is None and request.filter_state is None and request.type is None and request.lat is None and request.lng is None and request.originator_parcel_county is None and request.originator_parcel_account_num is None:
+    if request.name is None and request.filter_state is None and request.type is None and request.lat is None and request.lng is None and request.originator_parcel_county is None and request.originator_parcel_account_num is None and request.polygon is None:
         raise HTTPException(status_code=400, detail="Nothing to update")
 
     update_cols: list[str] = ["updated_at = now()"]
@@ -7674,6 +7675,12 @@ async def update_saved_area(area_id: str, request: SavedAreaUpdateRequest, req: 
     if request.filter_state is not None:
         update_cols.append("filter_state = %s")
         params.append(Json(request.filter_state) if isinstance(request.filter_state, dict) else None)
+
+    if request.polygon is not None:
+        if not isinstance(request.polygon, list) or len(request.polygon) < 3:
+            raise HTTPException(status_code=400, detail="polygon must have at least 3 coordinate pairs")
+        update_cols.append("polygon = %s")
+        params.append(Json(_to_geojson_polygon(request.polygon)))
 
     if request.type is not None or request.lat is not None or request.lng is not None:
         area_type, polygon_geojson, _, _ = _normalize_saved_area_payload(request)
@@ -7708,6 +7715,7 @@ async def update_saved_area(area_id: str, request: SavedAreaUpdateRequest, req: 
         or request.type is not None
         or request.lat is not None
         or request.lng is not None
+        or request.polygon is not None
         or request.originator_parcel_county is not None
         or request.originator_parcel_account_num is not None
     )
