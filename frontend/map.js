@@ -8824,16 +8824,20 @@ function _renderNbhdOptions(query) {
   // (e.g. saved-area restore) — otherwise the cache could be empty when typing.
   _buildNbhdOptionsCache();
   const q = query.toLowerCase();
-  const matches = (_nbhdOptionsCache || []).filter((o) => o.display.toLowerCase().includes(q));
+  const qNo = q.replace(/\s+/g, "");
+  // Whitespace-insensitive matching: the source has letter-spaced names like
+  // "J V C", so also compare with spaces stripped on both sides — typing "jvc"
+  // matches "J V C" (and "j v c" still works).
+  const dispLc = (o) => o.display.toLowerCase();
+  const hit = (o) => dispLc(o).includes(q) || dispLc(o).replace(/\s+/g, "").includes(qNo);
+  const startsHit = (o) => dispLc(o).startsWith(q) || dispLc(o).replace(/\s+/g, "").startsWith(qNo);
+  const matches = (_nbhdOptionsCache || []).filter(hit);
   if (!matches.length) { optionsEl.hidden = true; optionsEl.innerHTML = ""; return; }
   // Rank prefix matches first, then the remaining substring matches. The cache
   // is already alphabetical and Array.sort is stable, so each group stays
   // alphabetical — typing "s" surfaces the S-neighborhoods on top, with the
   // contains-an-s matches below instead of an unordered pile.
-  matches.sort((a, b) =>
-    (a.display.toLowerCase().startsWith(q) ? 0 : 1) -
-    (b.display.toLowerCase().startsWith(q) ? 0 : 1)
-  );
+  matches.sort((a, b) => (startsHit(a) ? 0 : 1) - (startsHit(b) ? 0 : 1));
   optionsEl.innerHTML = matches
     .map((o) => `<div class="nbhd-option" data-display="${_propelioEscape(o.display)}">${_propelioEscape(o.display)} (${o.count})</div>`)
     .join("");

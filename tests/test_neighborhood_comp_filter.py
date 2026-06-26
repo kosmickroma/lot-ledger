@@ -261,6 +261,17 @@ def test_renderNbhdOptions_ranks_prefix_first() -> None:
     )
 
 
+def test_renderNbhdOptions_matching_is_whitespace_insensitive() -> None:
+    """Source has letter-spaced names like 'J V C'; typing 'jvc' must match.
+    The matcher compares with internal whitespace stripped on both sides."""
+    src = _src()
+    body = _fn_body(src, r"function _renderNbhdOptions\(")
+    assert "qNo" in body and 'replace(/\\s+/g, "")' in body, (
+        "_renderNbhdOptions must compare with whitespace stripped so 'jvc' "
+        "matches the stored 'J V C'"
+    )
+
+
 def test_nbhd_chip_hidden_rule_present() -> None:
     """Regression: `.nbhd-chip { display: inline-flex }` overrode the [hidden]
     attribute, so the empty chip rendered as a stray pill. A more-specific
