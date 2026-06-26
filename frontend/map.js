@@ -7865,6 +7865,7 @@ let propelioFilterState = { ...DEFAULT_PROPELIO_FILTERS };
 // never on keystrokes. Null until the first comp set arrives.
 let _nbhdOptionsCache = null;
 let _nbhdOptionsCacheRef = null;
+let _nbhdOptionsCacheSig = null;
 
 function _propNumIn(id) {
   const el = document.getElementById(id);
@@ -8754,12 +8755,29 @@ function _buildNbhdOptionsCache() {
   if (!Array.isArray(comps) || comps.length === 0) {
     _nbhdOptionsCache = [];
     _nbhdOptionsCacheRef = null;
+    _nbhdOptionsCacheSig = null;
     return;
   }
-  if (comps === _nbhdOptionsCacheRef) return;
+  // Options mirror what's actually VISIBLE: build from comps that pass the
+  // active filters EXCEPT the neighborhood filter itself (so you can still
+  // re-pick). This makes the list + counts react live to OAC and every other
+  // filter — OAC off shows only in-area neighborhoods, OAC on shows all.
+  const filtersNoNbhd = { ...propelioFilterState, neighborhood: null };
+  // Signature so a filter change (e.g. OAC toggle — same comps array) forces a
+  // rebuild, while typing (no filter change) stays a cheap no-op. No geometry
+  // math in the signature itself; the point-in-polygon work happens only on the
+  // rebuild below, which fires on filter/comp change, not per keystroke.
+  const polySig = Array.isArray(lastPolygon) && lastPolygon.length
+    ? lastPolygon.length + ":" + JSON.stringify(lastPolygon[0]) + JSON.stringify(lastPolygon[lastPolygon.length - 1])
+    : "0";
+  const sig = JSON.stringify(filtersNoNbhd) + "|" + polySig;
+  if (comps === _nbhdOptionsCacheRef && sig === _nbhdOptionsCacheSig) return;
   _nbhdOptionsCacheRef = comps;
+  _nbhdOptionsCacheSig = sig;
   const keyMap = new Map();
   for (const c of comps) {
+    // Same visibility gate the map/list use, minus the neighborhood filter.
+    if (!compPassesPropelioFilters(c, filtersNoNbhd)) continue;
     const raw = c?.neighborhood;
     if (!raw || !String(raw).trim()) continue;
     const key = normalizeNbhd(raw);

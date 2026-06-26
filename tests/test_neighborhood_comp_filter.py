@@ -222,6 +222,33 @@ def test_renderNbhdOptions_builds_cache_on_demand() -> None:
     )
 
 
+def test_options_built_from_visible_set_respecting_filters() -> None:
+    """Options must mirror the visible comp set: built through the same
+    compPassesPropelioFilters gate (so OAC + other filters scope them), with
+    the neighborhood filter itself excluded so the user can still re-pick."""
+    src = _src()
+    body = _fn_body(src, r"function _buildNbhdOptionsCache\(")
+    assert "compPassesPropelioFilters(c, filtersNoNbhd)" in body, (
+        "_buildNbhdOptionsCache must filter source comps through "
+        "compPassesPropelioFilters so the options reflect what's visible (OAC etc.)"
+    )
+    assert "neighborhood: null" in body, (
+        "_buildNbhdOptionsCache must null the neighborhood filter when building "
+        "options so a selected neighborhood doesn't collapse the option list"
+    )
+
+
+def test_options_cache_keyed_on_filter_signature() -> None:
+    """The cache must rebuild on filter change (e.g. OAC toggle), not just when
+    the comps array changes — otherwise toggling OAC wouldn't update options."""
+    src = _src()
+    body = _fn_body(src, r"function _buildNbhdOptionsCache\(")
+    assert "_nbhdOptionsCacheSig" in body, (
+        "_buildNbhdOptionsCache must key its cache on a filter signature so OAC/"
+        "filter changes (same comps array) trigger a rebuild"
+    )
+
+
 def test_nbhd_chip_hidden_rule_present() -> None:
     """Regression: `.nbhd-chip { display: inline-flex }` overrode the [hidden]
     attribute, so the empty chip rendered as a stray pill. A more-specific
