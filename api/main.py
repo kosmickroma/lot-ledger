@@ -1842,7 +1842,7 @@ _FILTER_FIELD_KEYS: frozenset[str] = frozenset({
     "comp.appr_val_min", "comp.appr_val_max",
     "comp.yr_built_min", "comp.yr_built_max",
     "comp.sqft_min",     "comp.sqft_max",
-    # propelio (22) — includes the 6 parcelType* mirrors of the parcel-side
+    # propelio (23) — includes the 6 parcelType* mirrors of the parcel-side
     # checkboxes synthesized by readPropelioFiltersFromUI() at capture time
     # (frontend/map.js:7146-7151). They're derived/redundant with
     # checkboxes.* but persist into filter_state because the capture spread
@@ -1856,6 +1856,7 @@ _FILTER_FIELD_KEYS: frozenset[str] = frozenset({
     "propelio.yearMin", "propelio.yearMax",
     "propelio.priceMin", "propelio.priceMax",
     "propelio.sortMode",
+    "propelio.neighborhood",
     "propelio.parcelTypeMultifamily", "propelio.parcelTypeDuplexes",
     "propelio.parcelTypeCommercial",  "propelio.parcelTypeVacant",
     "propelio.parcelTypeExempt",      "propelio.parcelTypeOffMarket",

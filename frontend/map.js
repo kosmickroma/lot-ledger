@@ -1925,6 +1925,10 @@ function applyPropelioFilterStateToUI(persisted) {
     const sortEl = document.getElementById("propelio-comp-sort");
     if (sortEl) sortEl.value = propelioCompSortMode;
   }
+  // Neighborhood hidden input (chip render wired in Chunk 3)
+  const _nbhdEl = document.getElementById("prop-neighborhood");
+  if (_nbhdEl) _nbhdEl.value = merged.neighborhood ?? "";
+  _renderNbhdChip(merged.neighborhood || null);
   propelioFilterState = readPropelioFiltersFromUI();
 }
 
@@ -2072,6 +2076,14 @@ function _writeFilterFieldDirect(fieldKey, value) {
 // if the user has focus on the corresponding input and is actively
 // typing, defer the apply until blur.
 function _applyFilterFieldToUI(fieldKey, value) {
+  if (fieldKey === "propelio.neighborhood") {
+    propelioFilterState.neighborhood = value ?? null;
+    const _nbhdEl = document.getElementById("prop-neighborhood");
+    if (_nbhdEl) _nbhdEl.value = value ?? "";
+    _renderNbhdChip(value || null);
+    try { applyPropelioClientFilters(); } catch (_) {}
+    return;
+  }
   const inputEl = _resolveFieldInput(fieldKey);
   if (inputEl && document.activeElement === inputEl) {
     // Defer apply until blur (Figma's anti-flicker pattern).
@@ -7832,6 +7844,8 @@ function _renderPropelioComps(data) {
 // lot/sqft/year/price min-max) apply instantly to the existing comp pool
 // without re-hitting Propelio.
 
+const normalizeNbhd = (s) => String(s || "").trim().replace(/\s+/g, " ").toLowerCase();
+
 const DEFAULT_PROPELIO_FILTERS = {
   months: 24,
   range: 1.0,
@@ -7844,8 +7858,14 @@ const DEFAULT_PROPELIO_FILTERS = {
   sqftMin: null, sqftMax: null,
   yearMin: null, yearMax: null,
   priceMin: null, priceMax: null,
+  neighborhood: null,
 };
 let propelioFilterState = { ...DEFAULT_PROPELIO_FILTERS };
+// Option-list cache: rebuilt once per comp-load (reference-equality guard),
+// never on keystrokes. Null until the first comp set arrives.
+let _nbhdOptionsCache = null;
+let _nbhdOptionsCacheRef = null;
+let _nbhdOptionsCacheSig = null;
 
 function _propNumIn(id) {
   const el = document.getElementById(id);
@@ -7889,6 +7909,7 @@ function readPropelioFiltersFromUI() {
     yearMax: _propIntIn("prop-year-max"),
     priceMin: _propPriceIn("prop-price-min"),
     priceMax: _propPriceIn("prop-price-max"),
+    neighborhood: (document.getElementById("prop-neighborhood")?.value || "").trim() || null,
     // Property Type Filter toggles — read from the parcel-side filterState
     // so the same toggles gate both parcels and comps.
     parcelTypeMultifamily: filterState.multifamily,
@@ -7962,7 +7983,7 @@ function _compMatchedTotVal(comp) {
   return raw ? Number(raw[0]) : null;
 }
 
-function compPassesPropelioFilters(comp, filters) {
+function compPassesPropelioFilters(comp, filters, _nbhdNorm) {
   const status = String(comp?.status || "").toLowerCase();
   // Status checkbox filters
   if (status === "sold" && !filters.statusSold) return false;
@@ -8065,6 +8086,12 @@ function compPassesPropelioFilters(comp, filters) {
   if (bucket === "single_family" && filters.parcelTypeOffMarket   === false) return false;
   if (bucket === null            && filters.parcelTypeOffMarket   === false) return false;
 
+  // Neighborhood filter — null/blank comp drops out when a filter is active
+  if (filters.neighborhood) {
+    const norm = (_nbhdNorm !== undefined) ? _nbhdNorm : normalizeNbhd(filters.neighborhood);
+    if (normalizeNbhd(comp?.neighborhood) !== norm) return false;
+  }
+
   return true;
 }
 
@@ -8080,11 +8107,13 @@ function applyPropelioClientFilters() {
     _renderGoodCompsSection();  // hides section when no comp cache
     return;
   }
+  _buildNbhdOptionsCache();
   propelioFilterState = readPropelioFiltersFromUI();
   const all = window._propelioLast.comps;
   // Map view: render every passing comp (good/unrated AND bad — bad gets
   // the `.bad-comp` class for visual de-emphasis but stays on the map).
-  const visibleOnMap = all.filter((c) => compPassesPropelioFilters(c, propelioFilterState));
+  const _nbhdNorm = normalizeNbhd(propelioFilterState.neighborhood);
+  const visibleOnMap = all.filter((c) => compPassesPropelioFilters(c, propelioFilterState, _nbhdNorm));
   _updatePropelioStatusCounts();
   // Render-only dedup: collapse multi-status records on the same parcel
   // to only the highest-priority status (good-rated wins tie-break).
@@ -8704,6 +8733,8 @@ function resetPropelioFilters() {
   set("prop-sqft-min", ""); set("prop-sqft-max", "");
   set("prop-year-min", ""); set("prop-year-max", "");
   set("prop-price-min", ""); set("prop-price-max", "");
+  set("prop-neighborhood", "");
+  _renderNbhdChip(null);
   applyPropelioClientFilters();
 }
 
@@ -8715,6 +8746,118 @@ function _setPropStatusFilter(status, checked, options = {}) {
   if (mapBox) mapBox.checked = next;
   if (cfBox) cfBox.checked = next;
   if (apply) applyPropelioClientFilters();
+}
+
+// === Neighborhood filter helpers ============================================
+
+function _buildNbhdOptionsCache() {
+  const comps = window._propelioLast?.comps;
+  if (!Array.isArray(comps) || comps.length === 0) {
+    _nbhdOptionsCache = [];
+    _nbhdOptionsCacheRef = null;
+    _nbhdOptionsCacheSig = null;
+    return;
+  }
+  // Options mirror what's actually VISIBLE: build from comps that pass the
+  // active filters EXCEPT the neighborhood filter itself (so you can still
+  // re-pick). This makes the list + counts react live to OAC and every other
+  // filter — OAC off shows only in-area neighborhoods, OAC on shows all.
+  const filtersNoNbhd = { ...propelioFilterState, neighborhood: null };
+  // Signature so a filter change (e.g. OAC toggle — same comps array) forces a
+  // rebuild, while typing (no filter change) stays a cheap no-op. No geometry
+  // math in the signature itself; the point-in-polygon work happens only on the
+  // rebuild below, which fires on filter/comp change, not per keystroke.
+  const polySig = Array.isArray(lastPolygon) && lastPolygon.length
+    ? lastPolygon.length + ":" + JSON.stringify(lastPolygon[0]) + JSON.stringify(lastPolygon[lastPolygon.length - 1])
+    : "0";
+  const sig = JSON.stringify(filtersNoNbhd) + "|" + polySig;
+  if (comps === _nbhdOptionsCacheRef && sig === _nbhdOptionsCacheSig) return;
+  _nbhdOptionsCacheRef = comps;
+  _nbhdOptionsCacheSig = sig;
+  const keyMap = new Map();
+  for (const c of comps) {
+    // Same visibility gate the map/list use, minus the neighborhood filter.
+    if (!compPassesPropelioFilters(c, filtersNoNbhd)) continue;
+    const raw = c?.neighborhood;
+    if (!raw || !String(raw).trim()) continue;
+    const key = normalizeNbhd(raw);
+    if (!keyMap.has(key)) keyMap.set(key, { counts: new Map(), total: 0 });
+    const entry = keyMap.get(key);
+    entry.total++;
+    entry.counts.set(raw, (entry.counts.get(raw) || 0) + 1);
+  }
+  _nbhdOptionsCache = Array.from(keyMap.values())
+    .map(({ counts, total }) => {
+      let bestDisplay = "", bestCount = 0;
+      for (const [variant, cnt] of counts) {
+        if (cnt > bestCount) { bestCount = cnt; bestDisplay = variant; }
+      }
+      return { display: bestDisplay, count: total };
+    })
+    .sort((a, b) => a.display.localeCompare(b.display));
+}
+
+function _renderNbhdChip(display) {
+  const chipEl = document.getElementById("prop-neighborhood-chip");
+  const searchEl = document.getElementById("prop-neighborhood-search");
+  const optionsEl = document.getElementById("prop-neighborhood-options");
+  if (!chipEl) return;
+  if (!display) {
+    chipEl.hidden = true;
+    chipEl.innerHTML = "";
+    if (searchEl) searchEl.hidden = false;
+    return;
+  }
+  chipEl.innerHTML = `<span class="nbhd-chip-label">${_propelioEscape(display)}</span><span class="nbhd-chip-x" role="button" aria-label="Clear neighborhood filter" tabindex="0">✕</span>`;
+  chipEl.hidden = false;
+  if (searchEl) { searchEl.value = ""; searchEl.hidden = true; }
+  if (optionsEl) { optionsEl.hidden = true; optionsEl.innerHTML = ""; }
+}
+
+function _renderNbhdOptions(query) {
+  const optionsEl = document.getElementById("prop-neighborhood-options");
+  if (!optionsEl) return;
+  if (!query) { optionsEl.hidden = true; optionsEl.innerHTML = ""; return; }
+  // Build/refresh the options cache on demand. It's ref-guarded (instant no-op
+  // when comps are unchanged), so the typeahead is self-sufficient even when
+  // comps were loaded via a path that didn't run applyPropelioClientFilters
+  // (e.g. saved-area restore) — otherwise the cache could be empty when typing.
+  _buildNbhdOptionsCache();
+  const q = query.toLowerCase();
+  const qNo = q.replace(/\s+/g, "");
+  // Whitespace-insensitive matching: the source has letter-spaced names like
+  // "J V C", so also compare with spaces stripped on both sides — typing "jvc"
+  // matches "J V C" (and "j v c" still works).
+  const dispLc = (o) => o.display.toLowerCase();
+  const hit = (o) => dispLc(o).includes(q) || dispLc(o).replace(/\s+/g, "").includes(qNo);
+  const startsHit = (o) => dispLc(o).startsWith(q) || dispLc(o).replace(/\s+/g, "").startsWith(qNo);
+  const matches = (_nbhdOptionsCache || []).filter(hit);
+  if (!matches.length) { optionsEl.hidden = true; optionsEl.innerHTML = ""; return; }
+  // Rank prefix matches first, then the remaining substring matches. The cache
+  // is already alphabetical and Array.sort is stable, so each group stays
+  // alphabetical — typing "s" surfaces the S-neighborhoods on top, with the
+  // contains-an-s matches below instead of an unordered pile.
+  matches.sort((a, b) => (startsHit(a) ? 0 : 1) - (startsHit(b) ? 0 : 1));
+  optionsEl.innerHTML = matches
+    .map((o) => `<div class="nbhd-option" data-display="${_propelioEscape(o.display)}">${_propelioEscape(o.display)} (${o.count})</div>`)
+    .join("");
+  optionsEl.hidden = false;
+}
+
+function _selectNbhdOption(display) {
+  const hiddenEl = document.getElementById("prop-neighborhood");
+  if (hiddenEl) hiddenEl.value = display;
+  _renderNbhdChip(display);
+  applyPropelioClientFiltersDebounced();
+  _filterSaveQueueSave();
+}
+
+function _clearNbhdFilter() {
+  const hiddenEl = document.getElementById("prop-neighborhood");
+  if (hiddenEl) hiddenEl.value = "";
+  _renderNbhdChip(null);
+  applyPropelioClientFiltersDebounced();
+  _filterSaveQueueSave();
 }
 
 // Deep Pull sidebar button state. Declared BEFORE the IIFE below so that
@@ -8789,6 +8932,56 @@ let propelioStickyBtn = null;
       if (k) _setPropelioFootprintHighlight(k, false);
     });
   }
+
+  // Neighborhood filter typeahead
+  const nbhdSearchEl = document.getElementById("prop-neighborhood-search");
+  if (nbhdSearchEl) {
+    nbhdSearchEl.addEventListener("input", () => {
+      _renderNbhdOptions(nbhdSearchEl.value.trim());
+    });
+    nbhdSearchEl.addEventListener("blur", () => {
+      // Delay so an option click fires before the dropdown closes
+      setTimeout(() => {
+        const optEl = document.getElementById("prop-neighborhood-options");
+        if (optEl) { optEl.hidden = true; optEl.innerHTML = ""; }
+      }, 200);
+    });
+  }
+  // Option selection (delegation on the dropdown container)
+  const nbhdOptionsEl = document.getElementById("prop-neighborhood-options");
+  if (nbhdOptionsEl) {
+    nbhdOptionsEl.addEventListener("click", (ev) => {
+      const opt = ev.target.closest(".nbhd-option");
+      if (!opt) return;
+      _selectNbhdOption(opt.dataset.display || "");
+    });
+  }
+  // Chip clear (delegation on chip container)
+  const nbhdChipEl = document.getElementById("prop-neighborhood-chip");
+  if (nbhdChipEl) {
+    nbhdChipEl.addEventListener("click", (ev) => {
+      if (ev.target.closest(".nbhd-chip-x")) _clearNbhdFilter();
+    });
+    nbhdChipEl.addEventListener("keydown", (ev) => {
+      if (ev.target.closest(".nbhd-chip-x") && (ev.key === "Enter" || ev.key === " ")) {
+        ev.preventDefault();
+        _clearNbhdFilter();
+      }
+    });
+  }
+
+  // Close dropdown on outside click. Bubbles from child → document, so
+  // the option-click delegation on #prop-neighborhood-options fires first
+  // and hides the dropdown before this runs — making optEl.hidden true
+  // before the check, safe no-op after a selection.
+  document.addEventListener("click", (ev) => {
+    const optEl = document.getElementById("prop-neighborhood-options");
+    if (!optEl || optEl.hidden) return;
+    if (!ev.target.closest(".nbhd-filter-wrap")) {
+      optEl.hidden = true;
+      optEl.innerHTML = "";
+    }
+  });
 
   // Document-level delegation for popup rating buttons. Popups are recreated
   // on every render so a single delegated listener is simpler than per-popup
