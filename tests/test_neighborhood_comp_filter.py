@@ -249,6 +249,18 @@ def test_options_cache_keyed_on_filter_signature() -> None:
     )
 
 
+def test_renderNbhdOptions_ranks_prefix_first() -> None:
+    """Typeahead keeps substring matching but ranks prefix matches first, so a
+    short query like 's' surfaces names that start with it on top instead of an
+    unordered pile of contains-an-s matches."""
+    src = _src()
+    body = _fn_body(src, r"function _renderNbhdOptions\(")
+    assert ".startsWith(q)" in body and "matches.sort" in body, (
+        "_renderNbhdOptions must sort matches so display.startsWith(query) "
+        "ranks ahead of mid-string substring matches"
+    )
+
+
 def test_nbhd_chip_hidden_rule_present() -> None:
     """Regression: `.nbhd-chip { display: inline-flex }` overrode the [hidden]
     attribute, so the empty chip rendered as a stray pill. A more-specific
