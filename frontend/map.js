@@ -12166,6 +12166,11 @@ map.on("draw:created", async (e) => {
         headers: { "Content-Type": "application/json", ...authHeaders() },
         body: JSON.stringify({ polygon: lastDrawnLatLngs }),
       });
+      // Refresh the saved-areas cache so reopening the area shows the NEW shape.
+      // A polygon-only PUT doesn't auto-update _savedAreasCache, so without this
+      // reopening from the sidebar restores the stale cached polygon (mirrors
+      // what the create path does via _reloadSavedResources).
+      await _reloadSavedResources();
     } catch (err) {
       console.warn("[reshape] PUT polygon failed:", err);
     }
