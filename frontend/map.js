@@ -14484,6 +14484,12 @@ function _storedValueOnCommentInput(fieldKey, raw) {
 
 function _storedValueOnNumericBlur(fieldKey, el) {
   if (!_storedValueState) return;
+  // Re-parse the field's ACTUAL text on commit so the saved value always
+  // reflects what's in the box. Fixes an intermittent race where, under fast
+  // typing/tabbing, a keystroke's input event could lag and an intermediate
+  // value got committed instead of the full shorthand (e.g. "5.8m" saved as 6,
+  // "5m" saved as 5). Re-running the input parse here makes commit deterministic.
+  _storedValueOnNumericInput(fieldKey, el.value);
   el.value = _storedValueFormatDisplay(_storedValueState[fieldKey].numeric_value);
   _storedValuePendingFields.add(fieldKey);
   if (_storedValueDebounceTimer) {
