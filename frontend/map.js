@@ -13858,7 +13858,13 @@ async function _loadAreaFromShareId(shareId) {
         _setCurrentTargetParcel(null);
         _currentLoadedAreaId = joined.area_id;
         // Reload stored values for the shared area (membership-gated GET
-        // succeeds now that the editor row exists).
+        // succeeds now that the editor row exists). Force a clean reload by
+        // resetting the cache guard first — restoreSavedArea already fired a
+        // pre-join load that failed (403, not a member yet), and without this
+        // reset the _storedValueOnAreaChange guard could short-circuit on the
+        // stale/blank cached state and leave the panel empty until refresh.
+        _storedValueAreaId = null;
+        _storedValueState = null;
         _storedValueOnAreaChange(_currentLoadedAreaId);
         _syncTabTitle();
         _selectedSavedItemId = joined.area_id;
@@ -14218,6 +14224,12 @@ async function _storedValueLoadFromServer(areaId, signal) {
     });
     if (!resp.ok) {
       if (resp.status === 404) return _storedValueBlankState();
+      // 403 = not a member YET (e.g. stored values loaded during share-open,
+      // before the auto-join grants editor membership). Return null so it is
+      // NOT cached as a blank state — otherwise the post-join reload would
+      // short-circuit on the _storedValueOnAreaChange guard and the panel would
+      // stay empty until a manual refresh.
+      if (resp.status === 403) return null;
       throw new Error(`stored-value load failed: ${resp.status}`);
     }
     const data = await resp.json();
