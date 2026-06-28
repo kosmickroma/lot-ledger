@@ -58,6 +58,17 @@ const APP_VERSION = (window.LL_CONFIG && window.LL_CONFIG.appVersion && window.L
   ? window.LL_CONFIG.appVersion
   : "dev";
 
+// Instant-reshape flag. Ships OFF via LL_CONFIG (see index.html). For preview
+// testing it can be enabled per-browser WITHOUT committing the flag on:
+//   - URL param  ?instantReshape=1   (one-off, current load)
+//   - localStorage ll_instant_reshape="1"  (sticky for this browser)
+// The committed default stays false so dev/main inherit it OFF.
+const INSTANT_RESHAPE_ENABLED = Boolean(
+  (window.LL_CONFIG && window.LL_CONFIG.instantReshape) ||
+  /[?&]instantReshape=1\b/.test(window.location.search) ||
+  (() => { try { return localStorage.getItem("ll_instant_reshape") === "1"; } catch (_e) { return false; } })()
+);
+
 function _formatAppVersionForDisplay(raw) {
   // Pill is white-space:nowrap and shares the sidebar header row with the
   // user dropdown. Long preview APP_VERSION (e.g. "0.28-feat-foo-bar-pre")
@@ -996,6 +1007,9 @@ let _currentSessionIsNamed = false;
 let _savedSessionsCache = [];
 let _currentLoadedAreaId = null;
 let _reshapeTargetAreaId = null;
+let _preReshapeFeatures = null;        // full pre-clip set, for restore-on-error / reconcile (Chunk C)
+let _reshapeClippedSubset = null;      // the optimistic clip result (Chunk C compares against analyze)
+let _reshapeOptimisticApplied = false; // did we optimistic-render this reshape? (Chunk C)
 let _currentTargetParcel = null; // { county, account, lat?, lng? } | null
 // v1.1 §2.6 — gates cross-tab refetch to prevent flicker when concurrent
 // subject-saves are in-flight. See TkDodo "Concurrent Optimistic Updates
@@ -11689,6 +11703,35 @@ function featureCentroidLngLat(feature) {
   return null;
 }
 
+// Test point for client-side polygon clipping. Prefer the STORED parcel
+// centroid (properties.lng/lat) because the server filters parcels by
+// stored centroid-in-polygon; fall back to the geometry centroid. Keeping
+// parity with the server minimizes reshape reconcile diffs.
+function testPointLngLat(feature) {
+  const p = feature?.properties || {};
+  if (p.lng != null && p.lat != null) return [Number(p.lng), Number(p.lat)];
+  return featureCentroidLngLat(feature);
+}
+
+function reshapeFeatureKey(f) {
+  const p = f?.properties || {};
+  const county = String(p.source_county || "").trim().toLowerCase();
+  const id = county === "dcad"
+    ? String(p.account_num || "").trim()
+    : String(p.parcel_key || p.account_num || "").trim();
+  return `${county}::${id}`;
+}
+
+// True if two feature arrays contain the same parcel identities (order-independent).
+function reshapeSetsEqual(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b)) return false;
+  if (a.length !== b.length) return false;
+  const sa = new Set(a.map(reshapeFeatureKey));
+  if (sa.size !== a.length) { /* dupes — fall through to size-safe compare */ }
+  for (const f of b) { if (!sa.has(reshapeFeatureKey(f))) return false; }
+  return sa.size === new Set(b.map(reshapeFeatureKey)).size;
+}
+
 function _sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -12176,6 +12219,43 @@ map.on("draw:created", async (e) => {
     // automatically because the OAC gate re-tests every comp.
     _buildNbhdOptionsCache();
     applyPropelioClientFilters();
+    // Instant parcels: clip the already-loaded parcels to the new polygon and
+    // render them now (display-only; runAnalysis below reconciles + is authoritative).
+    // Flag-gated; reshape-only; skipped for large/browse sets (those keep today's path).
+    _reshapeOptimisticApplied = false;
+    _preReshapeFeatures = null;
+    _reshapeClippedSubset = null;
+    if (
+      INSTANT_RESHAPE_ENABLED &&
+      Array.isArray(allAnalysisFeatures) &&
+      allAnalysisFeatures.length &&
+      allAnalysisFeatures.length <= BROWSE_ONLY_THRESHOLD &&
+      Array.isArray(lastPolygon) && lastPolygon.length >= 3
+    ) {
+      _preReshapeFeatures = allAnalysisFeatures;
+      const clipped = allAnalysisFeatures.filter((f) => {
+        const pt = testPointLngLat(f);
+        return pt && pointInPolygonLngLat(pt, lastPolygon);
+      });
+      // Render instantly at the matching scale, mirroring the reconcile branch
+      // (~12294-12303): viewport render above the large-draw threshold, normal
+      // polygon render below it. clipped can't exceed BROWSE_ONLY_THRESHOLD
+      // because the outer guard caps allAnalysisFeatures at it.
+      _reshapeClippedSubset = clipped;
+      _reshapeOptimisticApplied = true;
+      allAnalysisFeatures = clipped;
+      if (map.hasLayer(browseLayer)) browseLayer.remove();
+      let markers;
+      if (clipped.length > LARGE_DRAW_THRESHOLD) {
+        viewportRenderMode = true;
+        renderViewportFeatures();
+        markers = {};
+      } else {
+        viewportRenderMode = false;
+        markers = renderFeatures({ type: "FeatureCollection", features: clipped });
+      }
+      renderSidebar(getVisibleFeatureCounts(clipped, { ignoreBucketToggles: true }), markers);
+    }
     // Persist the new polygon to the loaded area (owner-only).
     try {
       await _apiJson(`/api/areas/${encodeURIComponent(reshapeTarget)}`, {
