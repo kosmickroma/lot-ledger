@@ -58,6 +58,8 @@ const APP_VERSION = (window.LL_CONFIG && window.LL_CONFIG.appVersion && window.L
   ? window.LL_CONFIG.appVersion
   : "dev";
 
+const INSTANT_RESHAPE_ENABLED = Boolean(window.LL_CONFIG && window.LL_CONFIG.instantReshape);
+
 function _formatAppVersionForDisplay(raw) {
   // Pill is white-space:nowrap and shares the sidebar header row with the
   // user dropdown. Long preview APP_VERSION (e.g. "0.28-feat-foo-bar-pre")
@@ -11687,6 +11689,35 @@ function featureCentroidLngLat(feature) {
   }
   if (p.lng != null && p.lat != null) return [p.lng, p.lat];
   return null;
+}
+
+// Test point for client-side polygon clipping. Prefer the STORED parcel
+// centroid (properties.lng/lat) because the server filters parcels by
+// stored centroid-in-polygon; fall back to the geometry centroid. Keeping
+// parity with the server minimizes reshape reconcile diffs.
+function testPointLngLat(feature) {
+  const p = feature?.properties || {};
+  if (p.lng != null && p.lat != null) return [Number(p.lng), Number(p.lat)];
+  return featureCentroidLngLat(feature);
+}
+
+function reshapeFeatureKey(f) {
+  const p = f?.properties || {};
+  const county = String(p.source_county || "").trim().toLowerCase();
+  const id = county === "dcad"
+    ? String(p.account_num || "").trim()
+    : String(p.parcel_key || p.account_num || "").trim();
+  return `${county}::${id}`;
+}
+
+// True if two feature arrays contain the same parcel identities (order-independent).
+function reshapeSetsEqual(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b)) return false;
+  if (a.length !== b.length) return false;
+  const sa = new Set(a.map(reshapeFeatureKey));
+  if (sa.size !== a.length) { /* dupes — fall through to size-safe compare */ }
+  for (const f of b) { if (!sa.has(reshapeFeatureKey(f))) return false; }
+  return sa.size === new Set(b.map(reshapeFeatureKey)).size;
 }
 
 function _sleep(ms) {
