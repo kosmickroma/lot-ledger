@@ -58,7 +58,16 @@ const APP_VERSION = (window.LL_CONFIG && window.LL_CONFIG.appVersion && window.L
   ? window.LL_CONFIG.appVersion
   : "dev";
 
-const INSTANT_RESHAPE_ENABLED = Boolean(window.LL_CONFIG && window.LL_CONFIG.instantReshape);
+// Instant-reshape flag. Ships OFF via LL_CONFIG (see index.html). For preview
+// testing it can be enabled per-browser WITHOUT committing the flag on:
+//   - URL param  ?instantReshape=1   (one-off, current load)
+//   - localStorage ll_instant_reshape="1"  (sticky for this browser)
+// The committed default stays false so dev/main inherit it OFF.
+const INSTANT_RESHAPE_ENABLED = Boolean(
+  (window.LL_CONFIG && window.LL_CONFIG.instantReshape) ||
+  /[?&]instantReshape=1\b/.test(window.location.search) ||
+  (() => { try { return localStorage.getItem("ll_instant_reshape") === "1"; } catch (_e) { return false; } })()
+);
 
 function _formatAppVersionForDisplay(raw) {
   // Pill is white-space:nowrap and shares the sidebar header row with the
