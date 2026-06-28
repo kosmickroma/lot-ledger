@@ -998,6 +998,9 @@ let _currentSessionIsNamed = false;
 let _savedSessionsCache = [];
 let _currentLoadedAreaId = null;
 let _reshapeTargetAreaId = null;
+let _preReshapeFeatures = null;        // full pre-clip set, for restore-on-error / reconcile (Chunk C)
+let _reshapeClippedSubset = null;      // the optimistic clip result (Chunk C compares against analyze)
+let _reshapeOptimisticApplied = false; // did we optimistic-render this reshape? (Chunk C)
 let _currentTargetParcel = null; // { county, account, lat?, lng? } | null
 // v1.1 §2.6 — gates cross-tab refetch to prevent flicker when concurrent
 // subject-saves are in-flight. See TkDodo "Concurrent Optimistic Updates
@@ -12207,6 +12210,34 @@ map.on("draw:created", async (e) => {
     // automatically because the OAC gate re-tests every comp.
     _buildNbhdOptionsCache();
     applyPropelioClientFilters();
+    // Instant parcels: clip the already-loaded parcels to the new polygon and
+    // render them now (display-only; runAnalysis below reconciles + is authoritative).
+    // Flag-gated; reshape-only; skipped for large/browse sets (those keep today's path).
+    _reshapeOptimisticApplied = false;
+    _preReshapeFeatures = null;
+    _reshapeClippedSubset = null;
+    if (
+      INSTANT_RESHAPE_ENABLED &&
+      Array.isArray(allAnalysisFeatures) &&
+      allAnalysisFeatures.length &&
+      allAnalysisFeatures.length <= BROWSE_ONLY_THRESHOLD &&
+      Array.isArray(lastPolygon) && lastPolygon.length >= 3
+    ) {
+      _preReshapeFeatures = allAnalysisFeatures;
+      const clipped = allAnalysisFeatures.filter((f) => {
+        const pt = testPointLngLat(f);
+        return pt && pointInPolygonLngLat(pt, lastPolygon);
+      });
+      // Only optimistic-render at the normal polygon scale; large sets use the
+      // viewport/browse path on reconcile, so skip the instant render for them.
+      if (clipped.length <= LARGE_DRAW_THRESHOLD) {
+        _reshapeClippedSubset = clipped;
+        _reshapeOptimisticApplied = true;
+        allAnalysisFeatures = clipped;
+        const markers = renderFeatures({ type: "FeatureCollection", features: clipped });
+        renderSidebar(getVisibleFeatureCounts(clipped, { ignoreBucketToggles: true }), markers);
+      }
+    }
     // Persist the new polygon to the loaded area (owner-only).
     try {
       await _apiJson(`/api/areas/${encodeURIComponent(reshapeTarget)}`, {
