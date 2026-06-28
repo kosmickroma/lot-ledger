@@ -6622,12 +6622,15 @@ function _buildRatingButtonsHtml(comp, parcel) {
   const hasComp = Boolean(compKey);
   const hasParcel = Boolean(parcelCounty && parcelAccount);
   if (!hasComp && !hasParcel) return "";
-  // Active rating reflected from whichever source we have. When both are
-  // present, parcel rating takes priority for display (since the button
-  // primarily reflects the parcel-level user judgment).
-  const sourceRating = hasParcel
-    ? parcel?.user_rating
-    : comp?.user_rating;
+  // Active rating reflected from whichever source we have. Prefer the
+  // parcel-level judgment when present, but FALL BACK to the comp rating
+  // when the parcel has none. This matters for spillover (outside-area)
+  // comps: they get a throwaway dummy parcel with no user_rating that is
+  // never cached, so a strict parcel-priority read would lose the comp's
+  // own good/bad highlight on popup reopen (regression from the
+  // 2026-05-24 single-button consolidation). comp.user_rating persists in
+  // window._propelioLast.comps, so the fallback restores the highlight.
+  const sourceRating = parcel?.user_rating ?? comp?.user_rating;
   const currentRating = sourceRating === "good" || sourceRating === "bad" ? sourceRating : null;
   const ratingsEnabled = Boolean(_currentLoadedAreaId && (hasComp || hasParcel));
   const goodActive = ratingsEnabled && currentRating === "good" ? " is-active" : "";
@@ -8108,8 +8111,13 @@ function applyPropelioClientFilters() {
     _renderGoodCompsSection();  // hides section when no comp cache
     return;
   }
-  _buildNbhdOptionsCache();
+  // Read the current UI filter state FIRST, then build the neighborhood
+  // options cache from it. _buildNbhdOptionsCache() derives its options
+  // from the active propelioFilterState (minus the neighborhood gate), so
+  // building it before refreshing that state used STALE filters — the
+  // options lagged one apply cycle behind toggles like OAC.
   propelioFilterState = readPropelioFiltersFromUI();
+  _buildNbhdOptionsCache();
   const all = window._propelioLast.comps;
   // Map view: render every passing comp (good/unrated AND bad — bad gets
   // the `.bad-comp` class for visual de-emphasis but stays on the map).
@@ -8869,7 +8877,6 @@ let propelioStickyBtn = null;
 
 (function _initPropelioFilterListeners() {
   const liveIds = [
-    "prop-outside-area",
     "prop-sold-within",
     "prop-lot-min", "prop-lot-max",
     "prop-sqft-min", "prop-sqft-max",
@@ -8882,6 +8889,16 @@ let propelioStickyBtn = null;
     el.addEventListener("input", applyPropelioClientFiltersDebounced);
     el.addEventListener("change", applyPropelioClientFiltersDebounced);
   });
+  // OAC (Outside-Area Comps) is a TOGGLE, not a typed range — apply
+  // DIRECTLY on change like the status toggles (_setPropStatusFilter),
+  // not through the 150ms debounce the numeric ranges use. The debounce
+  // made the first click feel dead and invited the double/triple-click.
+  // The toolbar OAC button dispatches a "change" on this checkbox, so a
+  // single button click now applies immediately.
+  const oacBox = document.getElementById("prop-outside-area");
+  if (oacBox) {
+    oacBox.addEventListener("change", applyPropelioClientFilters);
+  }
   ["sold", "active", "pending"].forEach((status) => {
     const mapBox = document.getElementById(`prop-status-${status}`);
     const cfBox = document.getElementById(`cf-status-${status}`);
