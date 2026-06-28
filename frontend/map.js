@@ -12237,15 +12237,24 @@ map.on("draw:created", async (e) => {
         const pt = testPointLngLat(f);
         return pt && pointInPolygonLngLat(pt, lastPolygon);
       });
-      // Only optimistic-render at the normal polygon scale; large sets use the
-      // viewport/browse path on reconcile, so skip the instant render for them.
-      if (clipped.length <= LARGE_DRAW_THRESHOLD) {
-        _reshapeClippedSubset = clipped;
-        _reshapeOptimisticApplied = true;
-        allAnalysisFeatures = clipped;
-        const markers = renderFeatures({ type: "FeatureCollection", features: clipped });
-        renderSidebar(getVisibleFeatureCounts(clipped, { ignoreBucketToggles: true }), markers);
+      // Render instantly at the matching scale, mirroring the reconcile branch
+      // (~12294-12303): viewport render above the large-draw threshold, normal
+      // polygon render below it. clipped can't exceed BROWSE_ONLY_THRESHOLD
+      // because the outer guard caps allAnalysisFeatures at it.
+      _reshapeClippedSubset = clipped;
+      _reshapeOptimisticApplied = true;
+      allAnalysisFeatures = clipped;
+      if (map.hasLayer(browseLayer)) browseLayer.remove();
+      let markers;
+      if (clipped.length > LARGE_DRAW_THRESHOLD) {
+        viewportRenderMode = true;
+        renderViewportFeatures();
+        markers = {};
+      } else {
+        viewportRenderMode = false;
+        markers = renderFeatures({ type: "FeatureCollection", features: clipped });
       }
+      renderSidebar(getVisibleFeatureCounts(clipped, { ignoreBucketToggles: true }), markers);
     }
     // Persist the new polygon to the loaded area (owner-only).
     try {
