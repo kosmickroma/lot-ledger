@@ -199,12 +199,16 @@ Never share your `.env` file or `credentials.json`. Do not commit them to GitHub
 
 **Saved areas** — click Save Area to name and save your polygon. Click it again later to fly back and restore the draw. The parcel you had selected when you clicked Save Area becomes the workspace's "intended target" — marked on the map with a gold star at every zoom level so you can always tell which parcel the workspace was built around.
 
+**Reshaping a saved area** — with an area loaded, just draw a new polygon to *reshape it in place* (grow, shrink, trim) instead of creating a new one. Everything attached stays put — name, filters, stored values, comp ratings, and intended target — only the geometry changes, which changes which parcels fall inside. Parcels re-render instantly while the full analysis catches up. Drawing with no area loaded still creates a fresh area; use Save Area to keep multiple separate shapes.
+
 **Propelio comps (power-user+ only)** — when a workspace is loaded, two pulls are available:
 
 - **Get Comps** (gold sticky button on the map) — fires a 3-pass Quick Sweep across the last 1–3 months at 0.25–1.0 mile radius, constrained to the drawn polygon. Catches recent listings, pendings, and sold comps. ~3 minutes per polygon.
 - **Custom Search** (sidebar) — manual scrape using the months + range you set. Results merge into the global comp cache automatically.
 
 Comps render as colored footprints on the map: red = sold, green = active listing, blue dot = pending. Click any comp to see the full MLS data + price, agent info, photos, and a Good/Bad rating you can attach (ratings ship with the workspace through share links).
+
+**Neighborhood filter** — type a neighborhood name to narrow the comps to that neighborhood, in both the list and on the map. The autocomplete options mirror the comps currently visible under your other filters, so what you can pick always matches what's on screen. The selection saves with the workspace.
 
 **Sharing a workspace** — every saved area has a Share link button. Send the URL to a teammate; when they open it, it auto-clones into their saved areas (with their own copy if their account has a same-named workspace already). The clone carries the polygon, filter state, comp ratings, and intended-target marker.
 
