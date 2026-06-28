@@ -8111,8 +8111,13 @@ function applyPropelioClientFilters() {
     _renderGoodCompsSection();  // hides section when no comp cache
     return;
   }
-  _buildNbhdOptionsCache();
+  // Read the current UI filter state FIRST, then build the neighborhood
+  // options cache from it. _buildNbhdOptionsCache() derives its options
+  // from the active propelioFilterState (minus the neighborhood gate), so
+  // building it before refreshing that state used STALE filters — the
+  // options lagged one apply cycle behind toggles like OAC.
   propelioFilterState = readPropelioFiltersFromUI();
+  _buildNbhdOptionsCache();
   const all = window._propelioLast.comps;
   // Map view: render every passing comp (good/unrated AND bad — bad gets
   // the `.bad-comp` class for visual de-emphasis but stays on the map).
@@ -8872,7 +8877,6 @@ let propelioStickyBtn = null;
 
 (function _initPropelioFilterListeners() {
   const liveIds = [
-    "prop-outside-area",
     "prop-sold-within",
     "prop-lot-min", "prop-lot-max",
     "prop-sqft-min", "prop-sqft-max",
@@ -8885,6 +8889,16 @@ let propelioStickyBtn = null;
     el.addEventListener("input", applyPropelioClientFiltersDebounced);
     el.addEventListener("change", applyPropelioClientFiltersDebounced);
   });
+  // OAC (Outside-Area Comps) is a TOGGLE, not a typed range — apply
+  // DIRECTLY on change like the status toggles (_setPropStatusFilter),
+  // not through the 150ms debounce the numeric ranges use. The debounce
+  // made the first click feel dead and invited the double/triple-click.
+  // The toolbar OAC button dispatches a "change" on this checkbox, so a
+  // single button click now applies immediately.
+  const oacBox = document.getElementById("prop-outside-area");
+  if (oacBox) {
+    oacBox.addEventListener("change", applyPropelioClientFilters);
+  }
   ["sold", "active", "pending"].forEach((status) => {
     const mapBox = document.getElementById(`prop-status-${status}`);
     const cfBox = document.getElementById(`cf-status-${status}`);
