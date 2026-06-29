@@ -1030,18 +1030,24 @@ body.is-not-power-user .power-user-only {
    Same size/spacing/inline display; only the glyph differs. Native
    title attribute (browser tooltip), matching the pencil — no custom
    tooltip element/CSS. */
+/* Keep the pencil + share as a tight pair on one row; the pair wraps together
+   to a second row only if the name is long (KK 2026-06-29). */
+.active-item-name-actions {
+  white-space: nowrap;
+}
+
 .active-item-share-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   width: 22px;
   height: 22px;
-  margin-left: 6px;
+  margin-left: 2px;        /* tight to the pencil */
   padding: 0;
   border: 0;
   background: transparent;
   color: var(--gold);
-  font-size: 12px;
+  font-size: 10px;         /* the 🔗 emoji renders chunkier than ✎ — shrink to match */
   border-radius: 4px;
   cursor: pointer;
   vertical-align: middle;

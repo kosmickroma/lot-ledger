@@ -11696,6 +11696,7 @@ function renderSidebar(counts, markers) {
   document.getElementById("sidebar-results").classList.remove("hidden");
   document.getElementById("active-item-actions")?.classList.remove("hidden");
   _renderViewToggle();  // reveal ARV/NBV/Export toggle alongside the workspace actions (flag-gated; self-hides if no area loaded)
+  _updateActiveItemRenameVisibility();  // reveal rename pencil + share button now the area + cache are ready (idempotent)
   const visibleCounts = Array.isArray(allAnalysisFeatures) && allAnalysisFeatures.length
     ? getVisibleFeatureCounts(allAnalysisFeatures, { ignoreBucketToggles: true })
     : {
