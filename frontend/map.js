@@ -2500,6 +2500,14 @@ function _updateActiveItemRenameVisibility() {
   const isOwnerOfLoaded = loadedArea ? (loadedArea.role || "owner") === "owner" : true;
   const shouldShow = (Boolean(_currentLoadedAreaId) || hasRealName) && isOwnerOfLoaded;
   btn.classList.toggle("hidden", !shouldShow);
+  // Share button: shown whenever the loaded area is shareable (has a share_id).
+  // NOT owner-only — anyone can copy a share link (mirrors the saved-areas-list
+  // 🔗 button). Rides the same visibility triggers as the rename pencil.
+  const shareBtn = document.getElementById("active-item-share");
+  if (shareBtn) {
+    const shareId = loadedArea ? String(loadedArea.share_id || "").trim() : "";
+    shareBtn.classList.toggle("hidden", !(Boolean(_currentLoadedAreaId) && shareId));
+  }
 }
 
 (function _initActiveItemRenamePencil() {
@@ -2508,6 +2516,32 @@ function _updateActiveItemRenameVisibility() {
   btn.addEventListener("click", (e) => {
     e.preventDefault();
     void _handleActiveItemRenameClick();
+  });
+})();
+
+// Share button next to the rename pencil — copies the loaded area's share link,
+// reusing the exact copy logic from the saved-areas-list 🔗 handler (no new
+// backend, no new share logic). Isolated handler: reads _savedAreasCache, writes
+// to clipboard, toasts — no autosave/restore side effects.
+(function _initActiveItemShareButton() {
+  const btn = document.getElementById("active-item-share");
+  if (!btn) return;
+  btn.addEventListener("click", async (e) => {
+    e.preventDefault();
+    if (!_currentLoadedAreaId) return;
+    const loadedArea = _savedAreasCache.find((a) => String(a.id) === String(_currentLoadedAreaId));
+    const shareId = loadedArea ? String(loadedArea.share_id || "").trim() : "";
+    if (!shareId) return;
+    const url = `${window.location.origin}/?area=${shareId}`;
+    try {
+      if (!navigator.clipboard || typeof navigator.clipboard.writeText !== "function") {
+        throw new Error("Clipboard API unavailable");
+      }
+      await navigator.clipboard.writeText(url);
+      _showToast("Link copied");
+    } catch {
+      _showToast("Copy failed - try again", "error");
+    }
   });
 })();
 
@@ -4277,6 +4311,7 @@ async function saveCurrentArea(name) {
   _setCurrentTargetParcel(null);
   _currentLoadedAreaId = normalized.id;
   _renderViewToggle();  // area id set → reveal the ARV/NBV/Export toggle
+    _updateActiveItemRenameVisibility();  // area id set → reveal rename pencil + share button (idempotent)
   _syncTabTitle();
   _storedValueOnAreaChange(_currentLoadedAreaId);
   void _filterSaveOnAreaChange(_currentLoadedAreaId);
@@ -4317,6 +4352,10 @@ async function saveCurrentArea(name) {
   await _reloadSavedResources().catch((err) =>
     console.warn("[saveCurrentArea] post-save resource reload failed:", err)
   );
+  // The reload populates share_id from the server (the POST create response may
+  // omit it), so re-check visibility now to reveal the share button on a freshly
+  // drawn/saved area.
+  _updateActiveItemRenameVisibility();
 }
 
 // On saved-area load: pull the archived comps for that workspace from
@@ -5545,6 +5584,7 @@ async function restoreSavedArea(area, options = {}) {
     _setCurrentTargetParcel(null);
     _currentLoadedAreaId = area.id;
     _renderViewToggle();  // area id set → reveal the ARV/NBV/Export toggle
+    _updateActiveItemRenameVisibility();  // area id set → reveal rename pencil + share button (idempotent)
     _syncTabTitle();
     _storedValueOnAreaChange(_currentLoadedAreaId);
     void _filterSaveOnAreaChange(_currentLoadedAreaId);
@@ -5943,6 +5983,7 @@ function _renderList(sectionId, listId, items, options = {}) {
           _setCurrentTargetParcel(null);
           _currentLoadedAreaId = cloned.area_id;
           _renderViewToggle();  // area id set → reveal the ARV/NBV/Export toggle
+    _updateActiveItemRenameVisibility();  // area id set → reveal rename pencil + share button (idempotent)
           _syncTabTitle();
           _storedValueOnAreaChange(_currentLoadedAreaId);
           void _filterSaveOnAreaChange(_currentLoadedAreaId);
@@ -11662,6 +11703,7 @@ function renderSidebar(counts, markers) {
   document.getElementById("sidebar-results").classList.remove("hidden");
   document.getElementById("active-item-actions")?.classList.remove("hidden");
   _renderViewToggle();  // reveal ARV/NBV/Export toggle alongside the workspace actions (flag-gated; self-hides if no area loaded)
+  _updateActiveItemRenameVisibility();  // reveal rename pencil + share button now the area + cache are ready (idempotent)
   const visibleCounts = Array.isArray(allAnalysisFeatures) && allAnalysisFeatures.length
     ? getVisibleFeatureCounts(allAnalysisFeatures, { ignoreBucketToggles: true })
     : {
@@ -14105,6 +14147,7 @@ async function _loadAreaFromShareId(shareId) {
         _setCurrentTargetParcel(null);
         _currentLoadedAreaId = joined.area_id;
         _renderViewToggle();  // area id set → reveal the ARV/NBV/Export toggle
+    _updateActiveItemRenameVisibility();  // area id set → reveal rename pencil + share button (idempotent)
         // Reload stored values for the shared area (membership-gated GET
         // succeeds now that the editor row exists). Force a clean reload by
         // resetting the cache guard first — restoreSavedArea already fired a
