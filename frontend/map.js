@@ -11612,6 +11612,7 @@ function renderSidebar(counts, markers) {
   document.getElementById("sidebar-loading").classList.add("hidden");
   document.getElementById("sidebar-results").classList.remove("hidden");
   document.getElementById("active-item-actions")?.classList.remove("hidden");
+  _renderViewToggle();  // reveal ARV/NBV/Export toggle alongside the workspace actions (flag-gated; self-hides if no area loaded)
   const visibleCounts = Array.isArray(allAnalysisFeatures) && allAnalysisFeatures.length
     ? getVisibleFeatureCounts(allAnalysisFeatures, { ignoreBucketToggles: true })
     : {
