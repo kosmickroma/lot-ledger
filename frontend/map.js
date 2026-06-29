@@ -69,6 +69,16 @@ const INSTANT_RESHAPE_ENABLED = Boolean(
   (() => { try { return localStorage.getItem("ll_instant_reshape") === "1"; } catch (_e) { return false; } })()
 );
 
+// ARV · NBV · Export filter-view toggle. Ships OFF via LL_CONFIG. Per-browser
+// override for preview soak without committing the flag on:
+//   - URL param  ?arvNbvExport=1   (one-off, current load)
+//   - localStorage ll_arv_nbv_export="1"  (sticky for this browser)
+const ARV_NBV_EXPORT_ENABLED = Boolean(
+  (window.LL_CONFIG && window.LL_CONFIG.arvNbvExport) ||
+  /[?&]arvNbvExport=1\b/.test(window.location.search) ||
+  (() => { try { return localStorage.getItem("ll_arv_nbv_export") === "1"; } catch (_e) { return false; } })()
+);
+
 function _formatAppVersionForDisplay(raw) {
   // Pill is white-space:nowrap and shares the sidebar header row with the
   // user dropdown. Long preview APP_VERSION (e.g. "0.28-feat-foo-bar-pre")
@@ -1010,6 +1020,11 @@ let _reshapeTargetAreaId = null;
 let _preReshapeFeatures = null;        // full pre-clip set, for restore-on-error / reconcile (Chunk C)
 let _reshapeClippedSubset = null;      // the optimistic clip result (Chunk C compares against analyze)
 let _reshapeOptimisticApplied = false; // did we optimistic-render this reshape? (Chunk C)
+// ARV · NBV · Export filter-view toggle state (Feature #3). Both are purely
+// in-memory and per-tab — not persisted. _viewFilterCache is null per view
+// until hydrated from the loaded area's filter_state on area load.
+let _activeView = "arv";   // 'arv' | 'nbv' | 'export'
+let _viewFilterCache = { arv: null, nbv: null, export: null };
 let _currentTargetParcel = null; // { county, account, lat?, lng? } | null
 // v1.1 §2.6 — gates cross-tab refetch to prevent flicker when concurrent
 // subject-saves are in-flight. See TkDodo "Concurrent Optimistic Updates
@@ -1038,6 +1053,12 @@ let _filterSaveClientSeq = 0;
 // captureFilterState() output and decide which fields actually changed.
 // null = no area loaded; reset on clearDrawResults, set on restoreSavedArea.
 let _filterSaveLastSnapshot = null;
+// When true, _filterSaveQueueSave() is a no-op. Set during restoreFilterState
+// so LOADING a view/area (incl. the comp re-filter it triggers) never generates
+// save traffic — a view switch must not "save," only display (KK 2026-06-29).
+// Genuine user edits (input handlers) and the explicit seed persist run with
+// this false, so they still save normally.
+let _suppressFilterAutosave = false;
 
 // Sprint 3 multi-user collab: SSE subscriber state.
 // Per docs/MULTIUSER_COLLAB_SPRINT3_SPEC.md v1 §4.1.
@@ -1866,6 +1887,11 @@ function getAnalysisErrorMessage(err, fallback = "Analysis failed. Please try ag
 }
 
 function captureFilterState() {
+  // Always serializes the live UI as an ARV-flat blob regardless of _activeView.
+  // Correct for diff baselines on any view. Whole-blob POST paths
+  // (saveCurrentArea, saveCurrentSession) only run while _activeView === 'arv'
+  // (draw severs the bond on drawstart; session-save has no view context).
+  // Do NOT use for non-ARV whole-blob writes — see spec §5.7.
   return {
     v: 1,
     checkboxes: { ...filterState },
@@ -1882,6 +1908,9 @@ function captureFilterState() {
   };
 }
 
+// Normalizes a flat ARV-form capture for equality comparison. Operates on
+// the same shape as captureFilterState() output (always flat). _views keys
+// in a raw server blob are ignored — comparisons never cross view boundaries.
 function _normalizeFilterStateForCompare(state) {
   if (!state || typeof state !== "object") {
     return { v: 1, checkboxes: {}, numeric: {}, sold: {}, comp: {} };
@@ -1978,14 +2007,20 @@ function _diffFilterState(current, lastSnapshot) {
   const out = [];
   const sections = ["checkboxes", "numeric", "sold", "comp", "propelio"];
   const snap = lastSnapshot && typeof lastSnapshot === "object" ? lastSnapshot : {};
+  // 🔴 CRITICAL #1: emit view-prefixed field keys on non-ARV views so the
+  // per-field PATCH writes to _views.<view>.* rows, never the flat ARV rows.
+  // Flag-gated: when off, _viewPrefix is "" and behavior is byte-for-byte today's.
+  const _viewPrefix = (ARV_NBV_EXPORT_ENABLED && _activeView !== "arv")
+    ? `_views.${_activeView}.`
+    : "";
   for (const section of sections) {
     const currSection = (current[section] && typeof current[section] === "object") ? current[section] : {};
     const snapSection = (snap[section] && typeof snap[section] === "object") ? snap[section] : {};
     for (const key of Object.keys(currSection)) {
-      const fieldKey = `${section}.${key}`;
-      // §5.2 special case: skip checkboxes.active (force-cleared on restore
-      // — would create a save-restore churn loop)
-      if (fieldKey === "checkboxes.active") continue;
+      const fieldKey = `${_viewPrefix}${section}.${key}`;
+      // §5.2 special case: skip checkboxes.active and its view-prefixed variant
+      // (force-cleared on restore — would create a save-restore churn loop).
+      if (fieldKey === "checkboxes.active" || fieldKey.endsWith(".checkboxes.active")) continue;
       const a = _coerceForDiff(currSection[key]);
       const b = _coerceForDiff(snapSection[key]);
       if (a === b) continue;
@@ -2000,7 +2035,11 @@ function _diffFilterState(current, lastSnapshot) {
 // hook. Only sustained-focus inputs (numeric/text) return an element;
 // checkboxes return null (click is momentary, no flicker hazard).
 function _resolveFieldInput(fieldKey) {
-  const [section, key] = fieldKey.split(".");
+  // Strip _views.<view>. prefix so section routing works for all views.
+  const _fk = (ARV_NBV_EXPORT_ENABLED && fieldKey.startsWith("_views."))
+    ? fieldKey.split(".").slice(2).join(".")
+    : fieldKey;
+  const [section, key] = _fk.split(".");
   if (section === "numeric") {
     const map = {
       lot_sqft_min: "nf-lot-min", lot_sqft_max: "nf-lot-max",
@@ -2046,7 +2085,15 @@ function _resolveFieldInput(fieldKey) {
 // after a PATCH loses to a concurrent write). Writes the value into the
 // in-memory state object AND syncs the DOM input element.
 function _writeFilterFieldDirect(fieldKey, value) {
-  const [section, key] = fieldKey.split(".");
+  // When the flag is on, _views.<view>.<section>.<key> keys are routed to a
+  // specific view. Only apply to the live UI if it matches the active view.
+  let _effectiveKey = fieldKey;
+  if (ARV_NBV_EXPORT_ENABLED && fieldKey.startsWith("_views.")) {
+    const _parts = fieldKey.split(".");
+    if (_parts[1] !== _activeView) return; // Not the active view — skip UI write.
+    _effectiveKey = _parts.slice(2).join(".");
+  }
+  const [section, key] = _effectiveKey.split(".");
   if (section === "checkboxes") {
     filterState[key] = Boolean(value);
     syncFilterInputs();
@@ -2091,7 +2138,14 @@ function _writeFilterFieldDirect(fieldKey, value) {
 // if the user has focus on the corresponding input and is actively
 // typing, defer the apply until blur.
 function _applyFilterFieldToUI(fieldKey, value) {
-  if (fieldKey === "propelio.neighborhood") {
+  // Strip _views.<view>. prefix; only apply to the visible UI when it's the active view.
+  let _effectiveKey = fieldKey;
+  if (ARV_NBV_EXPORT_ENABLED && fieldKey.startsWith("_views.")) {
+    const _parts = fieldKey.split(".");
+    if (_parts[1] !== _activeView) return; // Not the active view — skip.
+    _effectiveKey = _parts.slice(2).join(".");
+  }
+  if (_effectiveKey === "propelio.neighborhood") {
     propelioFilterState.neighborhood = value ?? null;
     const _nbhdEl = document.getElementById("prop-neighborhood");
     if (_nbhdEl) _nbhdEl.value = value ?? "";
@@ -2099,7 +2153,7 @@ function _applyFilterFieldToUI(fieldKey, value) {
     try { applyPropelioClientFilters(); } catch (_) {}
     return;
   }
-  const inputEl = _resolveFieldInput(fieldKey);
+  const inputEl = _resolveFieldInput(_effectiveKey);
   if (inputEl && document.activeElement === inputEl) {
     // Defer apply until blur (Figma's anti-flicker pattern).
     inputEl.dataset.pendingReconcile = JSON.stringify(value);
@@ -2109,6 +2163,7 @@ function _applyFilterFieldToUI(fieldKey, value) {
         delete inputEl.dataset.pendingReconcile;
         inputEl.removeEventListener("blur", inputEl._reconcileBlurHook);
         inputEl._reconcileBlurHook = null;
+        // Pass original fieldKey so _writeFilterFieldDirect can strip prefix if needed.
         if (stashed != null) _writeFilterFieldDirect(fieldKey, JSON.parse(stashed));
       };
       inputEl.addEventListener("blur", inputEl._reconcileBlurHook, { once: true });
@@ -2300,6 +2355,28 @@ function _handleSseFieldChange(msg) {
     action: shouldApply ? "APPLY" : "IGNORED (stale or self)",
   });
   if (!shouldApply) return;
+  // ─── Chunk D: active-view gate (Feature #3) ───
+  // Any filter change for a view that ISN'T the active one must update that
+  // view's in-memory cache + seq bookkeeping ONLY — never the live UI / re-render.
+  // FLAT (unprefixed) keys belong to the ARV view; _views.<view>.* keys belong to
+  // that view. Without gating the FLAT case too, an ARV echo bleeds into the
+  // visible NBV/Export view while hammering switches (KK 2026-06-29).
+  if (ARV_NBV_EXPORT_ENABLED) {
+    const _isViewKey = field_key.startsWith("_views.");
+    const _parts = field_key.split(".");
+    const _eventView = _isViewKey ? _parts[1] : "arv";
+    if (_eventView !== _activeView) {
+      // Update the background view's cache (best-effort) without touching UI.
+      const _vc = _viewFilterCache[_eventView];
+      const _section = _isViewKey ? _parts[2] : _parts[0];
+      const _key = _isViewKey ? _parts[3] : _parts[1];
+      if (_vc && _vc.v && _vc[_section] && typeof _vc[_section] === "object") {
+        _vc[_section][_key] = value;
+      }
+      _dispatchedSeqByField.set(field_key, incomingSeq);  // LWW bookkeeping
+      return;  // no UI write, no re-render
+    }
+  }
   // Apply via Sprint 2 anti-flicker hook (defers to blur if user is
   // focused on the input).
   _applyFilterFieldToUI(field_key, value);
@@ -2506,6 +2583,7 @@ async function _handleActiveItemRenameClick() {
 function _refreshLoadedAreaUi() {
   if (!_currentLoadedAreaId) return;
   renderSavedAreasList();
+  _renderViewToggle();  // show + sync the ARV/NBV/Export toggle (flag-gated)
 }
 
 function _setSessionCacheNote(message) {
@@ -2598,13 +2676,40 @@ function _hydrateCompNumericInputsFromState() {
   });
 }
 
-function restoreFilterState(state) {
+function restoreFilterState(state, { _isAreaLoad = false } = {}) {
+  // Restoring = LOAD, not EDIT: suppress autosave for the whole restore so a
+  // view switch / area load never generates save traffic (incl. the comp
+  // re-filter below, which otherwise auto-saves). try/finally guarantees the
+  // flag is cleared even on the early-return guards. (KK 2026-06-29)
+  _suppressFilterAutosave = true;
+  try {
   if (!state || typeof state !== "object") return;
   if (Number(state.v || 0) > 1) {
     console.info("[saved-area] skipping newer filter_state version", state.v);
     return;
   }
   if (Number(state.v || 0) !== 1) return;
+  // On area load, hydrate the per-view cache from the raw blob (which carries
+  // _views from the server) and reset to ARV. On view-switch restores, the
+  // caller already set _activeView and cached the departing view, so skip.
+  if (ARV_NBV_EXPORT_ENABLED && _isAreaLoad) {
+    _activeView = "arv";
+    _viewFilterCache = {
+      arv: {
+        v: 1,
+        checkboxes: (state.checkboxes && typeof state.checkboxes === "object") ? { ...state.checkboxes } : {},
+        numeric:    (state.numeric    && typeof state.numeric    === "object") ? { ...state.numeric    } : {},
+        sold:       (state.sold       && typeof state.sold       === "object") ? { ...state.sold       } : {},
+        comp:       (state.comp       && typeof state.comp       === "object") ? { ...state.comp       } : {},
+        propelio:   (state.propelio   && typeof state.propelio   === "object") ? { ...state.propelio   } : {},
+      },
+      nbv: null,
+      export: null,
+    };
+    const _vv = (state._views && typeof state._views === "object") ? state._views : {};
+    if (_vv.nbv    && typeof _vv.nbv    === "object") _viewFilterCache.nbv    = { v: 1, ..._vv.nbv    };
+    if (_vv.export && typeof _vv.export === "object") _viewFilterCache.export = { v: 1, ..._vv.export };
+  }
   // Rebase to defaults first so keys MISSING from the saved blob (e.g.,
   // older saved_areas with no `duplexes` checkbox key) resolve to the
   // current default rather than inheriting whatever the user's in-memory
@@ -2664,7 +2769,18 @@ function restoreFilterState(state) {
     const counts = getVisibleFeatureCounts(lastAnalysisGeojson.features || []);
     if (lastAnalysisCounts) renderSidebar(counts, markers || {});
   }
+  // Re-filter the Propelio comps to the restored filter state. Without this a
+  // view switch (ARV/NBV/Export) re-rendered parcels but left comps FROZEN at
+  // the previous view's filter pass — so comps lagged/mismatched the active
+  // view (root cause confirmed by two independent investigations 2026-06-29).
+  // Self-guards on window._propelioLast, so it's a no-op when no comps are
+  // loaded (e.g. during initial area load before comps arrive). Suppressed
+  // autosave (see top) means this re-filter does NOT generate a save.
+  applyPropelioClientFilters();
   _refreshLoadedAreaUi();
+  } finally {
+    _suppressFilterAutosave = false;
+  }
 }
 
 function bumpUndoPillVersion() {
@@ -3959,6 +4075,7 @@ function _filterSaveSetStatus(state, label) {
 // (defers to blur via _applyFilterFieldToUI if user is still typing).
 
 function _filterSaveQueueSave() {
+  if (_suppressFilterAutosave) return;  // restore/switch is load-only, never save
   if (!_currentLoadedAreaId) return;
   // Diff captureFilterState() against last-saved snapshot, enqueue changed fields.
   const current = captureFilterState();
@@ -4159,6 +4276,7 @@ async function saveCurrentArea(name) {
   _clearOriginatorStar();
   _setCurrentTargetParcel(null);
   _currentLoadedAreaId = normalized.id;
+  _renderViewToggle();  // area id set → reveal the ARV/NBV/Export toggle
   _syncTabTitle();
   _storedValueOnAreaChange(_currentLoadedAreaId);
   void _filterSaveOnAreaChange(_currentLoadedAreaId);
@@ -5098,12 +5216,25 @@ function _createUndoSnapshot() {
     jobId: currentJobId,
     abortCtrl: null,
     pillVersion: ++undoPillVersion,
+    // Per-view state so undo correctly restores the active view + its cache.
+    _snapshotActiveView: ARV_NBV_EXPORT_ENABLED ? _activeView : "arv",
+    _snapshotViewCache: ARV_NBV_EXPORT_ENABLED
+      ? { arv:    _viewFilterCache.arv    ? { ..._viewFilterCache.arv    } : null,
+          nbv:    _viewFilterCache.nbv    ? { ..._viewFilterCache.nbv    } : null,
+          export: _viewFilterCache.export ? { ..._viewFilterCache.export } : null }
+      : null,
   };
 }
 
 function _restoreUndoSnapshot(snapshot) {
   if (!snapshot) return;
   snapshot.abortCtrl?.abort();
+  // Restore view state before filter mutations so any re-render below sees
+  // the correct _activeView.
+  if (ARV_NBV_EXPORT_ENABLED && snapshot._snapshotActiveView) {
+    _activeView = snapshot._snapshotActiveView;
+    if (snapshot._snapshotViewCache) _viewFilterCache = { ...snapshot._snapshotViewCache };
+  }
   filterState = { ...DEFAULT_FILTERS, ...(snapshot.filterState || {}) };
   Object.assign(numericFilters, snapshot.numericFilters || {});
   soldCompsFilter = { ...DEFAULT_SOLD_COMPS_FILTER, ...(snapshot.soldCompsFilter || {}) };
@@ -5153,6 +5284,13 @@ function _countRestoredFilterKeys(state) {
   count += Object.values(state.checkboxes || {}).filter((v) => v === false).length;
   count += Object.values(state.numeric || {}).filter((v) => v != null && v !== "").length;
   count += Object.values(state.sold || {}).filter((v) => v != null && v !== "").length;
+  // Cosmetic: count non-empty _views sections so the "Restored N filters" pill
+  // reflects that NBV / Export filter data is also present in the area.
+  if (ARV_NBV_EXPORT_ENABLED && state._views && typeof state._views === "object") {
+    const _vv = state._views;
+    if (_vv.nbv    && typeof _vv.nbv    === "object" && Object.keys(_vv.nbv).length    > 0) count += 1;
+    if (_vv.export && typeof _vv.export === "object" && Object.keys(_vv.export).length > 0) count += 1;
+  }
   return count;
 }
 
@@ -5290,7 +5428,7 @@ async function restoreSavedArea(area, options = {}) {
   clearDrawResults();
   setActiveItem("Workspace", area.name);
   if (savedFilterState) {
-    restoreFilterState(savedFilterState);
+    restoreFilterState(savedFilterState, { _isAreaLoad: true });
   }
   // Sprint 2 §5.3: capture the restored state as the diff baseline so
   // the first user edit after load only PATCHes the fields they touch.
@@ -5406,6 +5544,7 @@ async function restoreSavedArea(area, options = {}) {
     _clearOriginatorStar();
     _setCurrentTargetParcel(null);
     _currentLoadedAreaId = area.id;
+    _renderViewToggle();  // area id set → reveal the ARV/NBV/Export toggle
     _syncTabTitle();
     _storedValueOnAreaChange(_currentLoadedAreaId);
     void _filterSaveOnAreaChange(_currentLoadedAreaId);
@@ -5464,6 +5603,7 @@ async function restoreNamedSession(session, options = {}) {
   _clearOriginatorStar();
   _setCurrentTargetParcel(null);
   _currentLoadedAreaId = null;
+  _renderViewToggle();  // no area loaded → hide the ARV/NBV/Export toggle
   // Sprint 2 §5.3: no area loaded -> no snapshot baseline + clear queue.
   _filterSaveLastSnapshot = null;
   _filterSavePendingFields.clear();
@@ -5478,7 +5618,7 @@ async function restoreNamedSession(session, options = {}) {
     : null;
   clearDrawResults();
   if (savedFilterState) {
-    restoreFilterState(savedFilterState);
+    restoreFilterState(savedFilterState, { _isAreaLoad: true });
   }
   // Sprint 2 §5.3: refresh diff baseline after snapshot restore so any
   // subsequent edit only PATCHes the fields actually changed.
@@ -5802,6 +5942,7 @@ function _renderList(sectionId, listId, items, options = {}) {
           _clearOriginatorStar();
           _setCurrentTargetParcel(null);
           _currentLoadedAreaId = cloned.area_id;
+          _renderViewToggle();  // area id set → reveal the ARV/NBV/Export toggle
           _syncTabTitle();
           _storedValueOnAreaChange(_currentLoadedAreaId);
           void _filterSaveOnAreaChange(_currentLoadedAreaId);
@@ -11520,6 +11661,7 @@ function renderSidebar(counts, markers) {
   document.getElementById("sidebar-loading").classList.add("hidden");
   document.getElementById("sidebar-results").classList.remove("hidden");
   document.getElementById("active-item-actions")?.classList.remove("hidden");
+  _renderViewToggle();  // reveal ARV/NBV/Export toggle alongside the workspace actions (flag-gated; self-hides if no area loaded)
   const visibleCounts = Array.isArray(allAnalysisFeatures) && allAnalysisFeatures.length
     ? getVisibleFeatureCounts(allAnalysisFeatures, { ignoreBucketToggles: true })
     : {
@@ -12414,6 +12556,7 @@ function clearDrawResults() {
   _clearOriginatorStar();
   _setCurrentTargetParcel(null);
   _currentLoadedAreaId = null;
+  _renderViewToggle();  // no area loaded → hide the ARV/NBV/Export toggle
   // Sprint 2 §5.3: no area loaded -> no snapshot baseline + clear queue.
   _filterSaveLastSnapshot = null;
   _filterSavePendingFields.clear();
@@ -12446,6 +12589,13 @@ function clearDrawResults() {
   // _filterSaveOnAreaChange(null) was called at line ~10671, so
   // _filterSaveQueueSave() will early-return during these mutations —
   // no spurious PUT/autosave fires here.
+
+  // Per-view state: return to ARV and clear the cache so a subsequent area
+  // load starts fresh.
+  if (ARV_NBV_EXPORT_ENABLED) {
+    _activeView = "arv";
+    _viewFilterCache = { arv: null, nbv: null, export: null };
+  }
 
   // Property type filter checkboxes (filterState)
   filterState = { ...DEFAULT_FILTERS };
@@ -13954,6 +14104,7 @@ async function _loadAreaFromShareId(shareId) {
         _clearOriginatorStar();
         _setCurrentTargetParcel(null);
         _currentLoadedAreaId = joined.area_id;
+        _renderViewToggle();  // area id set → reveal the ARV/NBV/Export toggle
         // Reload stored values for the shared area (membership-gated GET
         // succeeds now that the editor row exists). Force a clean reload by
         // resetting the cache guard first — restoreSavedArea already fired a
@@ -14643,6 +14794,85 @@ if (document.readyState === "loading") {
   document.addEventListener("DOMContentLoaded", _storedValueWireListeners, { once: true });
 } else {
   _storedValueWireListeners();
+}
+
+// ─── ARV · NBV · Export filter-view toggle (Feature #3, Chunk C) ───
+// _setActiveView is the real switch, used by BOTH the toggle buttons and the
+// window._llSetActiveView console hook. _renderViewToggle shows/hides the
+// in-slot toggle box (under the Clear button) + syncs the active segment.
+// All flag-gated: flag OFF ⇒ the box stays hidden and none of this runs against
+// a visible element, so today's layout/behavior is byte-for-byte unchanged.
+function _renderViewToggle() {
+  const block = document.getElementById("view-toggle-block");
+  if (!block) return;
+  const show = ARV_NBV_EXPORT_ENABLED && Boolean(_currentLoadedAreaId);
+  block.classList.toggle("hidden", !show);
+  if (!show) return;
+  block.querySelectorAll(".view-toggle-seg").forEach((seg) => {
+    const isActive = seg.getAttribute("data-view") === _activeView;
+    seg.classList.toggle("active", isActive);
+    seg.setAttribute("aria-selected", isActive ? "true" : "false");
+  });
+}
+
+function _setActiveView(view) {
+  if (!ARV_NBV_EXPORT_ENABLED) return;
+  if (view !== "arv" && view !== "nbv" && view !== "export") {
+    console.warn("[views] unknown view:", view, "— must be 'arv', 'nbv', or 'export'");
+    return;
+  }
+  if (view === _activeView) return; // already active — no-op
+  // Save the departing view's live UI back to its cache.
+  _viewFilterCache[_activeView] = captureFilterState();
+  _activeView = view;
+  // Seed-from-ARV on first visit to NBV/Export (spec §5.4): copy the current
+  // ARV filters so the view starts from a baseline, not blank, and persist each
+  // seeded field via the per-field PATCH (as _views.<view>.*) so it survives a
+  // reload.
+  let _cached = _viewFilterCache[view];
+  let _seeded = false;
+  if ((view === "nbv" || view === "export") && !(_cached && _cached.v)) {
+    const _arv = _viewFilterCache.arv;
+    _cached = (_arv && _arv.v)
+      ? JSON.parse(JSON.stringify(_arv))
+      : { v: 1, checkboxes: { ...DEFAULT_FILTERS }, numeric: {}, sold: {}, comp: {}, propelio: {} };
+    _viewFilterCache[view] = _cached;
+    _seeded = true;
+  }
+  const _toRestore = (_cached && _cached.v)
+    ? _cached
+    : { v: 1, checkboxes: { ...DEFAULT_FILTERS }, numeric: {}, sold: {}, comp: {}, propelio: {} };
+  restoreFilterState(_toRestore);
+  if (_seeded) {
+    // Persist the seed via the per-field PATCH path, but diff against the app
+    // DEFAULTS (not empty) so we only PATCH fields that actually DIFFER from
+    // defaults. Missing fields fall back to defaults on restore, so a near-
+    // default ARV seeds with ~zero PATCHes — which keeps the SSE echo burst
+    // tiny and makes rapid view-switching ("wild ape" hammering) smooth.
+    // _diffFilterState uses _activeView to build the _views.<view>.* keys.
+    _filterSaveLastSnapshot = {
+      v: 1,
+      checkboxes: { ...DEFAULT_FILTERS },
+      numeric: {},
+      sold: {},
+      comp: {},
+      propelio: { ...DEFAULT_PROPELIO_FILTERS },
+    };
+    _filterSaveQueueSave();
+  }
+  // Baseline for subsequent user edits on this view.
+  _filterSaveLastSnapshot = captureFilterState();
+  _renderViewToggle();
+  console.info("[views] active view →", _activeView, _seeded ? "(seeded from ARV)" : "");
+}
+
+// Wire the visible toggle buttons + keep the console hook pointed at the real fn.
+//   window._llSetActiveView('nbv' | 'arv' | 'export')  — dev/power-user tool.
+if (ARV_NBV_EXPORT_ENABLED) {
+  document.querySelectorAll("#view-toggle-block .view-toggle-seg").forEach((seg) => {
+    seg.addEventListener("click", () => _setActiveView(seg.getAttribute("data-view")));
+  });
+  window._llSetActiveView = _setActiveView;
 }
 
 // v1 §2.1 — flush pending filter save on tab close. Mirror of

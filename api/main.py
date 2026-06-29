@@ -1824,7 +1824,7 @@ _STORED_VALUE_CALC_FIELD_KEYS: tuple[str, ...] = ("mao_arv", "tdpp_minus_mao_arv
 # docs/MULTIUSER_COLLAB_SPRINT2_SPEC.md §2.1.A.
 # Test: tests/test_multiuser_collab_sprint2_allowlist_drift.py guards
 # against frontend additions that miss this allowlist.
-_FILTER_FIELD_KEYS: frozenset[str] = frozenset({
+_FILTER_FIELD_BASE_KEYS: frozenset[str] = frozenset({
     # checkboxes (9)
     "checkboxes.active", "checkboxes.sold", "checkboxes.off_market",
     "checkboxes.vacant", "checkboxes.multifamily", "checkboxes.duplexes",
@@ -1862,6 +1862,14 @@ _FILTER_FIELD_KEYS: frozenset[str] = frozenset({
     "propelio.parcelTypeCommercial",  "propelio.parcelTypeVacant",
     "propelio.parcelTypeExempt",      "propelio.parcelTypeOffMarket",
 })
+
+# Derive view-prefixed keys for the ARV · NBV · Export toggle (Feature #3).
+# Each base key K also gets _views.nbv.K and _views.export.K, built
+# programmatically so the two sets can never drift.
+_FILTER_FIELD_KEYS: frozenset[str] = frozenset(
+    _FILTER_FIELD_BASE_KEYS
+    | {f"_views.{v}.{k}" for v in ("nbv", "export") for k in _FILTER_FIELD_BASE_KEYS}
+)
 
 
 def compute_calc_fields(manual_map: dict[str, int | None]) -> dict[str, int | None]:
@@ -7160,30 +7168,62 @@ async def patch_area_filter_field(
             # with create_missing=true silently NO-OPs when the section
             # parent is null/missing/non-object. Two-step CASE-WHEN guard
             # coerces parent to {} first, then sets the leaf.
-            section, _, key = field_key.partition('.')
-            cur.execute(
-                """
-                UPDATE saved_areas
-                SET filter_state = jsonb_set(
-                    CASE
-                        WHEN jsonb_typeof(COALESCE(filter_state, '{}'::jsonb) -> %s) = 'object'
-                        THEN COALESCE(filter_state, '{}'::jsonb)
-                        ELSE jsonb_set(
-                            COALESCE(filter_state, '{}'::jsonb),
-                            ARRAY[%s],
-                            '{}'::jsonb,
-                            true
-                        )
-                    END,
-                    %s::text[],
-                    %s::jsonb,
-                    true
-                ),
-                updated_at = now()
-                WHERE area_id = %s
-                """,
-                (section, section, [section, key], Json(row[0]), area_id),
-            )
+            #
+            # _views branch: a 4-level path needs EVERY intermediate parent
+            # built explicitly (PG 14.23 silently no-ops otherwise — same
+            # hazard, deeper). Nested jsonb_set ensures _views → _views.<v>
+            # → _views.<v>.<section> all exist before writing the leaf.
+            # The flat (ARV) path is byte-for-byte unchanged.
+            if field_key.startswith("_views."):
+                _, view, section, key = field_key.split(".")
+                cur.execute(
+                    """
+                    UPDATE saved_areas
+                    SET filter_state = jsonb_set(
+                        jsonb_set(
+                            jsonb_set(
+                                jsonb_set(COALESCE(filter_state,'{}'::jsonb),
+                                          ARRAY['_views'],
+                                          COALESCE(filter_state->'_views','{}'::jsonb),
+                                          true),
+                                ARRAY['_views',%s],
+                                COALESCE(filter_state->'_views'->%s,'{}'::jsonb),
+                                true),
+                            ARRAY['_views',%s,%s],
+                            COALESCE(filter_state->'_views'->%s->%s,'{}'::jsonb),
+                            true),
+                        ARRAY['_views',%s,%s,%s], %s::jsonb, true
+                    ),
+                    updated_at = now()
+                    WHERE area_id = %s
+                    """,
+                    (view, view, view, section, view, section, view, section, key, Json(row[0]), area_id),
+                )
+            else:
+                section, _, key = field_key.partition('.')
+                cur.execute(
+                    """
+                    UPDATE saved_areas
+                    SET filter_state = jsonb_set(
+                        CASE
+                            WHEN jsonb_typeof(COALESCE(filter_state, '{}'::jsonb) -> %s) = 'object'
+                            THEN COALESCE(filter_state, '{}'::jsonb)
+                            ELSE jsonb_set(
+                                COALESCE(filter_state, '{}'::jsonb),
+                                ARRAY[%s],
+                                '{}'::jsonb,
+                                true
+                            )
+                        END,
+                        %s::text[],
+                        %s::jsonb,
+                        true
+                    ),
+                    updated_at = now()
+                    WHERE area_id = %s
+                    """,
+                    (section, section, [section, key], Json(row[0]), area_id),
+                )
 
             # Sprint 3 §3.2: broadcast on winning writes only. NOTIFY is
             # delivered atomically with the transaction commit per Postgres
@@ -7673,8 +7713,10 @@ async def update_saved_area(area_id: str, request: SavedAreaUpdateRequest, req: 
         params.append(name)
 
     if request.filter_state is not None:
-        update_cols.append("filter_state = %s")
-        params.append(Json(request.filter_state) if isinstance(request.filter_state, dict) else None)
+        # Merge instead of overwrite so a whole-blob PUT never silently wipes
+        # _views data written by PATCH (ARV·NBV·Export feature flag).
+        update_cols.append("filter_state = COALESCE(filter_state,'{}') || %s::jsonb")
+        params.append(Json(request.filter_state) if isinstance(request.filter_state, dict) else Json({}))
 
     if request.polygon is not None:
         if not isinstance(request.polygon, list) or len(request.polygon) < 3:
