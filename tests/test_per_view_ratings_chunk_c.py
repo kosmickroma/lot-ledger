@@ -326,20 +326,9 @@ def test_no_alter_or_drop():
         )
 
 
-def test_chunk_c_does_not_touch_fork():
-    """Chunk C = CSV only. The fork block must NOT reference comp_ratings_views
-    yet (fork is Chunk D)."""
-    src = inspect.getsource(api_main)
-    # The fork comp_ratings copy block.
-    fork_idx = src.find("INSERT INTO comp_ratings (workspace_id, comp_id, rating, rated_by_user_id, rated_at)")
-    if fork_idx != -1:
-        fork_region = src[fork_idx:fork_idx + 1500]
-        assert "comp_ratings_views" not in fork_region, (
-            "Fork must not copy comp_ratings_views yet (Chunk D, not C)."
-        )
-        assert "parcel_ratings_views" not in fork_region, (
-            "Fork must not copy parcel_ratings_views yet (Chunk D, not C)."
-        )
+# NOTE: the former Chunk-C 'fork untouched' tripwire was removed once Chunk D
+# legitimately landed the fork _views copies. Chunk C's CSV work is independent
+# of fork; fork correctness is owned by test_per_view_ratings_chunk_d.py.
 
 
 def test_get_download_path_unchanged():

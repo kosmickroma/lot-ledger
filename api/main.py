@@ -7707,6 +7707,36 @@ async def fork_saved_area(
                 (row[0], source_area_id),
             )
 
+            # comp_ratings_views — per-view (nbv/export) comp ratings. Per
+            # per-view ratings spec §3.3 / FMEA C5: fork copies the _views
+            # tables parallel to the ARV comp_ratings copy above so the
+            # forked workspace inherits the source's per-view judgments.
+            # rating_id excluded (BIGSERIAL auto-generates); view copied
+            # verbatim. Same cursor + transaction as the copies above.
+            cur.execute(
+                """
+                INSERT INTO comp_ratings_views (workspace_id, comp_id, view, rating, rated_by_user_id, rated_at)
+                SELECT %s, comp_id, view, rating, rated_by_user_id, rated_at
+                FROM comp_ratings_views
+                WHERE workspace_id = %s
+                """,
+                (row[0], source_area_id),
+            )
+
+            # parcel_ratings_views — per-view (nbv/export) direct parcel
+            # ratings, parallel to the parcel_ratings copy above. Same
+            # discipline: rating_id excluded, view copied verbatim, same
+            # cursor + transaction. FMEA C5.
+            cur.execute(
+                """
+                INSERT INTO parcel_ratings_views (workspace_id, county, account_num, view, rating, rated_by_user_id, rated_at)
+                SELECT %s, county, account_num, view, rating, rated_by_user_id, rated_at
+                FROM parcel_ratings_views
+                WHERE workspace_id = %s
+                """,
+                (row[0], source_area_id),
+            )
+
             # stored_value_entries — copy the source area's stored values
             # (ARV / TDPP / rehab + comments) into the fork, parallel to the
             # rating copies above, so a shared-then-opened (forked) area keeps

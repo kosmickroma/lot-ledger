@@ -472,19 +472,6 @@ def test_no_alter_or_drop_anywhere():
             )
 
 
-def test_no_csv_or_fork_changes_in_chunk_b():
-    """Chunk B = READ paths only. The CSV export block (main.py ~5100+) and
-    the fork block (main.py ~7600+) must NOT reference comp_ratings_views yet
-    — those are Chunks C and D respectively."""
-    src = inspect.getsource(api_main)
-    # Fork: the comp_ratings copy block must not yet copy _views.
-    fork_idx = src.find("INSERT INTO comp_ratings (workspace_id, comp_id, rating, rated_by_user_id, rated_at)")
-    if fork_idx != -1:
-        # Look at the fork region (next ~1500 chars) — no _views INSERT there yet.
-        fork_region = src[fork_idx:fork_idx + 1500]
-        assert "comp_ratings_views" not in fork_region, (
-            "Fork must not copy comp_ratings_views yet (Chunk D, not B)."
-        )
-        assert "parcel_ratings_views" not in fork_region, (
-            "Fork must not copy parcel_ratings_views yet (Chunk D, not B)."
-        )
+# NOTE: the former Chunk-B 'fork untouched yet' tripwire was removed once
+# Chunk D legitimately landed the fork _views copies. Fork correctness is now
+# owned in full by test_per_view_ratings_chunk_d.py (14 structural tests).

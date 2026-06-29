@@ -402,11 +402,15 @@ def test_no_alter_or_drop_on_existing_tables():
 def test_no_second_arv_backfill():
     """M8/G1: no backfill writes into the _views tables. A backfill is an
     INSERT ... SELECT (copying rows in); the legitimate Chunk A WRITE path is
-    INSERT ... VALUES ... ON CONFLICT and is allowed. (Fork's INSERT...SELECT
-    into _views is Chunk D, not present yet.) Matching any 'INSERT INTO
-    *_views' was too broad — it flagged the normal write UPSERT."""
+    INSERT ... VALUES ... ON CONFLICT and is allowed. The ONE sanctioned
+    INSERT...SELECT into _views is the Chunk D fork copy (inside
+    fork_saved_area) — exclude that function, then assert no OTHER
+    INSERT...SELECT into _views exists (a second one = stale-shadow source)."""
     import re
     src = inspect.getsource(api_main)
+    # Strip fork_saved_area (the sole legitimate _views INSERT...SELECT).
+    fork_fn = _extract_fn_source(src, "fork_saved_area")
+    scanned = src.replace(fork_fn, "") if fork_fn else src
     # Catch only the backfill shape: INSERT INTO <_views> (cols) SELECT …
     # The legitimate write is INSERT INTO <_views> (cols) VALUES … ON CONFLICT,
     # so keying on "(cols) SELECT" (vs "(cols) VALUES") distinguishes them.
@@ -414,9 +418,10 @@ def test_no_second_arv_backfill():
         r"INSERT\s+INTO\s+(?:comp|parcel)_ratings_views\s*\([^)]*\)\s*SELECT\b",
         re.IGNORECASE,
     )
-    m = backfill_re.search(src)
+    m = backfill_re.search(scanned)
     assert m is None, (
-        "Backfill (INSERT...SELECT) into a _views table found in main.py — "
-        "Chunk A must add NO _views backfill (fork is Chunk D; spec M8/G1 forbid "
-        f"a second ARV/backfill source). Match: {m.group(0)[:120] if m else ''!r}"
+        "Backfill (INSERT...SELECT) into a _views table found OUTSIDE "
+        "fork_saved_area — the only sanctioned _views INSERT...SELECT is the "
+        "Chunk D fork copy. A second one is a backfill/second-source (M8/G1). "
+        f"Match: {m.group(0)[:120] if m else ''!r}"
     )
