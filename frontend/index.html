@@ -57,6 +57,20 @@
           <button id="btn-download" class="btn-secondary">Download CSV</button>
           <button id="btn-clear" class="btn-tertiary">Clear</button>
         </div>
+        <!-- ARV · NBV · Export filter-view toggle (Feature #3, Chunk C).
+             Lives INSIDE the Workspace block (#active-item-slot), under the
+             Clear button, so it moves/sticks WITH the workspace block — no
+             separate sticky element (KK 2026-06-29: standalone sticky didn't
+             pin to the workspace bottom). Hidden unless flag on + area loaded
+             (map.js _renderViewToggle). Flag OFF ⇒ never un-hidden ⇒ today's
+             layout byte-for-byte unchanged. -->
+        <div id="view-toggle-block" class="view-toggle-block hidden" role="group" aria-label="Filter view toggle">
+          <div class="view-toggle-segments" role="tablist" aria-label="Active filter view">
+            <button type="button" class="view-toggle-seg" data-view="arv" role="tab" aria-selected="true">ARV</button>
+            <button type="button" class="view-toggle-seg" data-view="nbv" role="tab" aria-selected="false">NBV</button>
+            <button type="button" class="view-toggle-seg" data-view="export" role="tab" aria-selected="false">Export</button>
+          </div>
+        </div>
       </div>
       <div id="sidebar-results" class="sidebar-section hidden">
         <p id="session-cache-note" class="sidebar-note hidden"></p>

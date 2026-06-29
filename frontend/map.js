@@ -2555,6 +2555,7 @@ async function _handleActiveItemRenameClick() {
 function _refreshLoadedAreaUi() {
   if (!_currentLoadedAreaId) return;
   renderSavedAreasList();
+  _renderViewToggle();  // show + sync the ARV/NBV/Export toggle (flag-gated)
 }
 
 function _setSessionCacheNote(message) {
@@ -5554,6 +5555,7 @@ async function restoreNamedSession(session, options = {}) {
   _clearOriginatorStar();
   _setCurrentTargetParcel(null);
   _currentLoadedAreaId = null;
+  _renderViewToggle();  // no area loaded → hide the ARV/NBV/Export toggle
   // Sprint 2 §5.3: no area loaded -> no snapshot baseline + clear queue.
   _filterSaveLastSnapshot = null;
   _filterSavePendingFields.clear();
@@ -12504,6 +12506,7 @@ function clearDrawResults() {
   _clearOriginatorStar();
   _setCurrentTargetParcel(null);
   _currentLoadedAreaId = null;
+  _renderViewToggle();  // no area loaded → hide the ARV/NBV/Export toggle
   // Sprint 2 §5.3: no area loaded -> no snapshot baseline + clear queue.
   _filterSaveLastSnapshot = null;
   _filterSavePendingFields.clear();
@@ -14742,34 +14745,73 @@ if (document.readyState === "loading") {
   _storedValueWireListeners();
 }
 
-// ─── ARV · NBV · Export — console-driven view switch (Chunk B, Feature #3) ───
-// Drive the view toggle from the browser console during preview testing.
-// Chunk C adds the visible toggle UI; this hook stays as a dev/power-user tool.
-//   window._llSetActiveView('nbv')    → switch to NBV view
-//   window._llSetActiveView('arv')    → return to ARV view
-if (ARV_NBV_EXPORT_ENABLED) {
-  window._llSetActiveView = function _llSetActiveView(view) {
-    if (view !== "arv" && view !== "nbv" && view !== "export") {
-      console.warn("[views] unknown view:", view, "— must be 'arv', 'nbv', or 'export'");
-      return;
-    }
-    // Save current live UI state back to the departing view's cache so it can
-    // be restored when the user returns to it.
-    _viewFilterCache[_activeView] = captureFilterState();
-    _activeView = view;
-    // Restore the target view's cached state into the live UI.
-    // If null (first visit), fall back to flat defaults — Chunk C adds seed-from-ARV.
-    const _cached = _viewFilterCache[view];
-    const _toRestore = (_cached && _cached.v)
-      ? _cached
+// ─── ARV · NBV · Export filter-view toggle (Feature #3, Chunk C) ───
+// _setActiveView is the real switch, used by BOTH the toggle buttons and the
+// window._llSetActiveView console hook. _renderViewToggle shows/hides the
+// in-slot toggle box (under the Clear button) + syncs the active segment.
+// All flag-gated: flag OFF ⇒ the box stays hidden and none of this runs against
+// a visible element, so today's layout/behavior is byte-for-byte unchanged.
+function _renderViewToggle() {
+  const block = document.getElementById("view-toggle-block");
+  if (!block) return;
+  const show = ARV_NBV_EXPORT_ENABLED && Boolean(_currentLoadedAreaId);
+  block.classList.toggle("hidden", !show);
+  if (!show) return;
+  block.querySelectorAll(".view-toggle-seg").forEach((seg) => {
+    const isActive = seg.getAttribute("data-view") === _activeView;
+    seg.classList.toggle("active", isActive);
+    seg.setAttribute("aria-selected", isActive ? "true" : "false");
+  });
+}
+
+function _setActiveView(view) {
+  if (!ARV_NBV_EXPORT_ENABLED) return;
+  if (view !== "arv" && view !== "nbv" && view !== "export") {
+    console.warn("[views] unknown view:", view, "— must be 'arv', 'nbv', or 'export'");
+    return;
+  }
+  if (view === _activeView) return; // already active — no-op
+  // Save the departing view's live UI back to its cache.
+  _viewFilterCache[_activeView] = captureFilterState();
+  _activeView = view;
+  // Seed-from-ARV on first visit to NBV/Export (spec §5.4): copy the current
+  // ARV filters so the view starts from a baseline, not blank, and persist each
+  // seeded field via the per-field PATCH (as _views.<view>.*) so it survives a
+  // reload.
+  let _cached = _viewFilterCache[view];
+  let _seeded = false;
+  if ((view === "nbv" || view === "export") && !(_cached && _cached.v)) {
+    const _arv = _viewFilterCache.arv;
+    _cached = (_arv && _arv.v)
+      ? JSON.parse(JSON.stringify(_arv))
       : { v: 1, checkboxes: { ...DEFAULT_FILTERS }, numeric: {}, sold: {}, comp: {}, propelio: {} };
-    // No _isAreaLoad — the view cache was already hydrated; we're just switching.
-    restoreFilterState(_toRestore);
-    // Refresh the autosave diff baseline so the next user edit on this view is
-    // diffed against this view's values, not the previous view's.
-    _filterSaveLastSnapshot = captureFilterState();
-    console.info("[views] active view →", _activeView);
-  };
+    _viewFilterCache[view] = _cached;
+    _seeded = true;
+  }
+  const _toRestore = (_cached && _cached.v)
+    ? _cached
+    : { v: 1, checkboxes: { ...DEFAULT_FILTERS }, numeric: {}, sold: {}, comp: {}, propelio: {} };
+  restoreFilterState(_toRestore);
+  if (_seeded) {
+    // Diff the seeded values against an EMPTY baseline so every seeded field is
+    // queued as a _views.<view>.* PATCH (_diffFilterState uses _activeView to
+    // build the prefixed keys). Persists the seed server-side.
+    _filterSaveLastSnapshot = { v: 1, checkboxes: {}, numeric: {}, sold: {}, comp: {}, propelio: {} };
+    _filterSaveQueueSave();
+  }
+  // Baseline for subsequent user edits on this view.
+  _filterSaveLastSnapshot = captureFilterState();
+  _renderViewToggle();
+  console.info("[views] active view →", _activeView, _seeded ? "(seeded from ARV)" : "");
+}
+
+// Wire the visible toggle buttons + keep the console hook pointed at the real fn.
+//   window._llSetActiveView('nbv' | 'arv' | 'export')  — dev/power-user tool.
+if (ARV_NBV_EXPORT_ENABLED) {
+  document.querySelectorAll("#view-toggle-block .view-toggle-seg").forEach((seg) => {
+    seg.addEventListener("click", () => _setActiveView(seg.getAttribute("data-view")));
+  });
+  window._llSetActiveView = _setActiveView;
 }
 
 // v1 §2.1 — flush pending filter save on tab close. Mirror of

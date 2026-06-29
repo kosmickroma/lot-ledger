@@ -782,6 +782,60 @@ body.is-not-power-user .power-user-only {
   margin-bottom: 0;
 }
 
+/* ─── ARV · NBV · Export filter-view toggle (Feature #3, Chunk C) ───
+   Lives INSIDE the Workspace block (#active-item-slot), as a thin row under
+   the Clear button (KK 2026-06-29: a standalone sticky box didn't pin to the
+   workspace bottom). NO position:sticky here — it rides with the workspace
+   block, which gives the desired "attached to the bottom of workspace" feel
+   without a separate sticky element to coordinate. No max-height/transition/
+   collapse hacks (feedback_slot_no_animation rule); the segment buttons use
+   only a color shift for active state. Flag OFF ⇒ the block is never
+   un-hidden (map.js) ⇒ today's layout is byte-for-byte intact. */
+.view-toggle-block {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.view-toggle-segments {
+  display: flex;
+  gap: 4px;
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  padding: 3px;
+}
+
+.view-toggle-seg {
+  flex: 1 1 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #c5ccd6;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  padding: 7px 0;
+  cursor: pointer;
+  transition: background 120ms linear, color 120ms linear;
+}
+
+.view-toggle-seg:hover:not(.active) {
+  background: rgba(255, 255, 255, 0.06);
+  color: #eef2f6;
+}
+
+.view-toggle-seg.active {
+  background: linear-gradient(135deg, #e2c075 0%, #c9a24f 58%, #9c7a2b 100%);
+  color: #1a1410;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.18) inset;
+}
+
+.view-toggle-seg:focus-visible {
+  outline: 2px solid var(--gold);
+  outline-offset: 1px;
+}
+
 .active-item-target-row {
   display: block;
   margin-bottom: 8px;
