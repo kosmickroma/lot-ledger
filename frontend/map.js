@@ -4311,6 +4311,7 @@ async function saveCurrentArea(name) {
   _setCurrentTargetParcel(null);
   _currentLoadedAreaId = normalized.id;
   _renderViewToggle();  // area id set → reveal the ARV/NBV/Export toggle
+    _updateActiveItemRenameVisibility();  // area id set → reveal rename pencil + share button (idempotent)
   _syncTabTitle();
   _storedValueOnAreaChange(_currentLoadedAreaId);
   void _filterSaveOnAreaChange(_currentLoadedAreaId);
@@ -4351,6 +4352,10 @@ async function saveCurrentArea(name) {
   await _reloadSavedResources().catch((err) =>
     console.warn("[saveCurrentArea] post-save resource reload failed:", err)
   );
+  // The reload populates share_id from the server (the POST create response may
+  // omit it), so re-check visibility now to reveal the share button on a freshly
+  // drawn/saved area.
+  _updateActiveItemRenameVisibility();
 }
 
 // On saved-area load: pull the archived comps for that workspace from
@@ -5579,6 +5584,7 @@ async function restoreSavedArea(area, options = {}) {
     _setCurrentTargetParcel(null);
     _currentLoadedAreaId = area.id;
     _renderViewToggle();  // area id set → reveal the ARV/NBV/Export toggle
+    _updateActiveItemRenameVisibility();  // area id set → reveal rename pencil + share button (idempotent)
     _syncTabTitle();
     _storedValueOnAreaChange(_currentLoadedAreaId);
     void _filterSaveOnAreaChange(_currentLoadedAreaId);
@@ -5977,6 +5983,7 @@ function _renderList(sectionId, listId, items, options = {}) {
           _setCurrentTargetParcel(null);
           _currentLoadedAreaId = cloned.area_id;
           _renderViewToggle();  // area id set → reveal the ARV/NBV/Export toggle
+    _updateActiveItemRenameVisibility();  // area id set → reveal rename pencil + share button (idempotent)
           _syncTabTitle();
           _storedValueOnAreaChange(_currentLoadedAreaId);
           void _filterSaveOnAreaChange(_currentLoadedAreaId);
@@ -14140,6 +14147,7 @@ async function _loadAreaFromShareId(shareId) {
         _setCurrentTargetParcel(null);
         _currentLoadedAreaId = joined.area_id;
         _renderViewToggle();  // area id set → reveal the ARV/NBV/Export toggle
+    _updateActiveItemRenameVisibility();  // area id set → reveal rename pencil + share button (idempotent)
         // Reload stored values for the shared area (membership-gated GET
         // succeeds now that the editor row exists). Force a clean reload by
         // resetting the cache guard first — restoreSavedArea already fired a
