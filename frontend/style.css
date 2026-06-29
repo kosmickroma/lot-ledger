@@ -803,7 +803,7 @@ body.is-not-power-user .power-user-only {
   background: rgba(0, 0, 0, 0.28);
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 8px;
-  padding: 3px;
+  padding: 2px;
 }
 
 .view-toggle-seg {
@@ -815,7 +815,9 @@ body.is-not-power-user .power-user-only {
   font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.02em;
-  padding: 7px 0;
+  /* Match the action buttons' height (.btn-primary = 6px) so the row doesn't
+     crowd the space (KK 2026-06-29). */
+  padding: 4px 0;
   cursor: pointer;
   transition: background 120ms linear, color 120ms linear;
 }
