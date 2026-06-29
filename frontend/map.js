@@ -2349,6 +2349,24 @@ function _handleSseFieldChange(msg) {
     action: shouldApply ? "APPLY" : "IGNORED (stale or self)",
   });
   if (!shouldApply) return;
+  // ─── Chunk D: active-view gate (Feature #3) ───
+  // A _views.<view>.* change for a view that ISN'T the active one must update
+  // that view's in-memory cache + seq bookkeeping ONLY — never the live UI and
+  // never a re-render. Without this, remote/self echoes for a background view
+  // (e.g. the seed-from-ARV PATCH burst) bleed into the visible view and thrash
+  // the comp render when rapidly switching views.
+  if (ARV_NBV_EXPORT_ENABLED && field_key.startsWith("_views.")) {
+    const _parts = field_key.split(".");
+    const _eventView = _parts[1];
+    if (_eventView !== _activeView) {
+      const _vc = _viewFilterCache[_eventView];
+      if (_vc && _vc.v && _vc[_parts[2]] && typeof _vc[_parts[2]] === "object") {
+        _vc[_parts[2]][_parts[3]] = value;  // keep the background view's cache fresh
+      }
+      _dispatchedSeqByField.set(field_key, incomingSeq);  // LWW bookkeeping
+      return;  // no UI write, no re-render
+    }
+  }
   // Apply via Sprint 2 anti-flicker hook (defers to blur if user is
   // focused on the input).
   _applyFilterFieldToUI(field_key, value);
@@ -14798,10 +14816,20 @@ function _setActiveView(view) {
     : { v: 1, checkboxes: { ...DEFAULT_FILTERS }, numeric: {}, sold: {}, comp: {}, propelio: {} };
   restoreFilterState(_toRestore);
   if (_seeded) {
-    // Diff the seeded values against an EMPTY baseline so every seeded field is
-    // queued as a _views.<view>.* PATCH (_diffFilterState uses _activeView to
-    // build the prefixed keys). Persists the seed server-side.
-    _filterSaveLastSnapshot = { v: 1, checkboxes: {}, numeric: {}, sold: {}, comp: {}, propelio: {} };
+    // Persist the seed via the per-field PATCH path, but diff against the app
+    // DEFAULTS (not empty) so we only PATCH fields that actually DIFFER from
+    // defaults. Missing fields fall back to defaults on restore, so a near-
+    // default ARV seeds with ~zero PATCHes — which keeps the SSE echo burst
+    // tiny and makes rapid view-switching ("wild ape" hammering) smooth.
+    // _diffFilterState uses _activeView to build the _views.<view>.* keys.
+    _filterSaveLastSnapshot = {
+      v: 1,
+      checkboxes: { ...DEFAULT_FILTERS },
+      numeric: {},
+      sold: {},
+      comp: {},
+      propelio: { ...DEFAULT_PROPELIO_FILTERS },
+    };
     _filterSaveQueueSave();
   }
   // Baseline for subsequent user edits on this view.
