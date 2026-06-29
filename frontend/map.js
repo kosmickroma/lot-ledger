@@ -2753,6 +2753,13 @@ function restoreFilterState(state, { _isAreaLoad = false } = {}) {
     const counts = getVisibleFeatureCounts(lastAnalysisGeojson.features || []);
     if (lastAnalysisCounts) renderSidebar(counts, markers || {});
   }
+  // Re-filter the Propelio comps to the restored filter state. Without this a
+  // view switch (ARV/NBV/Export) re-rendered parcels but left comps FROZEN at
+  // the previous view's filter pass — so comps lagged/mismatched the active
+  // view (root cause confirmed by two independent investigations 2026-06-29).
+  // Self-guards on window._propelioLast, so it's a no-op when no comps are
+  // loaded (e.g. during initial area load before comps arrive).
+  applyPropelioClientFilters();
   _refreshLoadedAreaUi();
 }
 
