@@ -69,6 +69,16 @@ const INSTANT_RESHAPE_ENABLED = Boolean(
   (() => { try { return localStorage.getItem("ll_instant_reshape") === "1"; } catch (_e) { return false; } })()
 );
 
+// ARV · NBV · Export filter-view toggle. Ships OFF via LL_CONFIG. Per-browser
+// override for preview soak without committing the flag on:
+//   - URL param  ?arvNbvExport=1   (one-off, current load)
+//   - localStorage ll_arv_nbv_export="1"  (sticky for this browser)
+const ARV_NBV_EXPORT_ENABLED = Boolean(
+  (window.LL_CONFIG && window.LL_CONFIG.arvNbvExport) ||
+  /[?&]arvNbvExport=1\b/.test(window.location.search) ||
+  (() => { try { return localStorage.getItem("ll_arv_nbv_export") === "1"; } catch (_e) { return false; } })()
+);
+
 function _formatAppVersionForDisplay(raw) {
   // Pill is white-space:nowrap and shares the sidebar header row with the
   // user dropdown. Long preview APP_VERSION (e.g. "0.28-feat-foo-bar-pre")
