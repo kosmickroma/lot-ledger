@@ -30,7 +30,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Optional
 from urllib.parse import parse_qs, quote_plus
 
 from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Path as FastAPIPath, Query, Request, Response, UploadFile
@@ -500,6 +500,57 @@ def _ensure_session_schema() -> None:
                 """
                 CREATE INDEX IF NOT EXISTS idx_parcel_ratings_workspace
                     ON parcel_ratings (workspace_id)
+                """
+            )
+            # comp_ratings_views — per-view (NBV/Export) Good/Bad comp ratings,
+            # additive companion to comp_ratings (which stays the ARV store,
+            # untouched). view CHECK excludes 'arv' so ARV is structurally
+            # single-sourced in the old table (impossible to shadow ARV here).
+            # Created UNCONDITIONALLY at startup (never flag-gated) so fork +
+            # reads work under any config — per docs/superpowers/specs/
+            # 2026-06-29-per-view-ratings-spec.md §2 + FMEA C1.
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS comp_ratings_views (
+                    rating_id BIGSERIAL PRIMARY KEY,
+                    workspace_id TEXT NOT NULL REFERENCES saved_areas(area_id) ON DELETE CASCADE,
+                    comp_id BIGINT NOT NULL REFERENCES propelio_comps(comp_id) ON DELETE CASCADE,
+                    view TEXT NOT NULL CHECK (view IN ('nbv','export')),
+                    rating TEXT NOT NULL CHECK (rating IN ('good','bad')),
+                    rated_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    rated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    UNIQUE (workspace_id, comp_id, view)
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_comp_ratings_views_ws
+                    ON comp_ratings_views (workspace_id, comp_id)
+                """
+            )
+            # parcel_ratings_views — per-view (NBV/Export) Good/Bad CAD parcel
+            # ratings, additive companion to parcel_ratings (ARV store). Same
+            # view exclusion + unconditional-create discipline as above.
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS parcel_ratings_views (
+                    rating_id BIGSERIAL PRIMARY KEY,
+                    workspace_id TEXT NOT NULL REFERENCES saved_areas(area_id) ON DELETE CASCADE,
+                    county TEXT NOT NULL,
+                    account_num TEXT NOT NULL,
+                    view TEXT NOT NULL CHECK (view IN ('nbv','export')),
+                    rating TEXT NOT NULL CHECK (rating IN ('good','bad')),
+                    rated_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    rated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    UNIQUE (workspace_id, county, account_num, view)
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_parcel_ratings_views_ws
+                    ON parcel_ratings_views (workspace_id, county, account_num)
                 """
             )
             # One-shot migration: copy legacy propelio_comp_archive.user_rating into
@@ -1127,6 +1178,9 @@ class ParcelRateRequest(BaseModel):
     county: str
     account_num: str
     rating: str | None = None  # 'good', 'bad', or None to clear
+    # Per-view ratings spec §3.1 (FMEA C2): absent/None → 'arv' (coexistence
+    # with old flag-off clients). Present-but-invalid → 400 (never silent ARV).
+    view: Optional[Literal["arv", "nbv", "export"]] = None  # 'arv' | 'nbv' | 'export' | None
 
 
 def _job_share_id(job_id: str, fallback_saved_area_id: str | None = None) -> str:
@@ -8141,7 +8195,14 @@ async def delete_saved_parcel(county: str, account_num: str, req: Request, user:
 async def rate_parcel(request: ParcelRateRequest, req: Request, user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
     """Workspace-scoped Good/Bad/Clear rating for a CAD parcel. Parallel
     to /api/propelio/comp/rate but keyed by (county, account_num) since
-    parcels exist independently of comps. Per PARCEL_RATINGS_SPEC.md v2."""
+    parcels exist independently of comps. Per PARCEL_RATINGS_SPEC.md v2.
+
+    view routing (per-view ratings spec §3.1, FMEA C2): view='arv' (the
+    default for absent/None — coexistence with old clients) → the EXISTING
+    parcel_ratings table, byte-for-byte unchanged; view in ('nbv','export')
+    → the additive parcel_ratings_views table, UPSERT keyed with view;
+    clear = DELETE that view's row only. view='arv' is never written to
+    the _views table (CHECK excludes it)."""
     require_csrf(req)
     area_id = str(request.saved_area_id or "").strip()
     county = str(request.county or "").strip().lower()
@@ -8151,29 +8212,65 @@ async def rate_parcel(request: ParcelRateRequest, req: Request, user: dict[str, 
         raise HTTPException(status_code=400, detail="saved_area_id, county, account_num all required")
     if rating not in (None, "good", "bad"):
         raise HTTPException(status_code=400, detail="rating must be 'good', 'bad', or null")
+    # View normalization (FMEA C2): absent/None → 'arv' (old clients coexist;
+    # flag-ON frontend always sends an explicit view, so missing = old client).
+    # Present-but-invalid → 400 (NEVER silently default an invalid present
+    # view to ARV).
+    if request.view is None:
+        norm_view = "arv"
+    else:
+        norm_view = str(request.view).strip().lower()
+        if norm_view not in ("arv", "nbv", "export"):
+            raise HTTPException(status_code=400, detail="view must be 'arv', 'nbv', 'export', or null")
     # Sprint 1: editors can rate parcels on shared areas (spec §3.2).
     _assert_user_is_area_member(area_id, int(user["id"]))
 
     conn = get_session_conn()
     try:
         with conn.cursor() as cur:
-            if rating is None:
-                cur.execute(
-                    "DELETE FROM parcel_ratings WHERE workspace_id = %s AND county = %s AND account_num = %s",
-                    (area_id, county, account_num),
-                )
+            if norm_view == "arv":
+                # ARV path — EXISTING parcel_ratings table, byte-for-byte
+                # unchanged. This is the load-bearing coexistence invariant.
+                if rating is None:
+                    cur.execute(
+                        "DELETE FROM parcel_ratings WHERE workspace_id = %s AND county = %s AND account_num = %s",
+                        (area_id, county, account_num),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        INSERT INTO parcel_ratings (workspace_id, county, account_num, rating, rated_by_user_id)
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (workspace_id, county, account_num) DO UPDATE
+                        SET rating = EXCLUDED.rating,
+                            rated_by_user_id = EXCLUDED.rated_by_user_id,
+                            rated_at = NOW()
+                        """,
+                        (area_id, county, account_num, rating, int(user["id"])),
+                    )
             else:
-                cur.execute(
-                    """
-                    INSERT INTO parcel_ratings (workspace_id, county, account_num, rating, rated_by_user_id)
-                    VALUES (%s, %s, %s, %s, %s)
-                    ON CONFLICT (workspace_id, county, account_num) DO UPDATE
-                    SET rating = EXCLUDED.rating,
-                        rated_by_user_id = EXCLUDED.rated_by_user_id,
-                        rated_at = NOW()
-                    """,
-                    (area_id, county, account_num, rating, int(user["id"])),
-                )
+                # NBV/Export path — additive parcel_ratings_views table. view
+                # CHECK excludes 'arv' (structurally impossible to shadow ARV).
+                if rating is None:
+                    cur.execute(
+                        """
+                        DELETE FROM parcel_ratings_views
+                        WHERE workspace_id = %s AND county = %s AND account_num = %s AND view = %s
+                        """,
+                        (area_id, county, account_num, norm_view),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        INSERT INTO parcel_ratings_views (workspace_id, county, account_num, view, rating, rated_by_user_id)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (workspace_id, county, account_num, view) DO UPDATE
+                        SET rating = EXCLUDED.rating,
+                            rated_by_user_id = EXCLUDED.rated_by_user_id,
+                            rated_at = NOW()
+                        """,
+                        (area_id, county, account_num, norm_view, rating, int(user["id"])),
+                    )
         conn.commit()
     except HTTPException:
         conn.rollback()
@@ -8183,7 +8280,7 @@ async def rate_parcel(request: ParcelRateRequest, req: Request, user: dict[str, 
         raise
     finally:
         release_session_conn(conn)
-    return {"ok": True, "rating": rating}
+    return {"ok": True, "rating": rating, "view": norm_view}
 
 
 # =============================================================================

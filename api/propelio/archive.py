@@ -10,7 +10,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from psycopg2.extras import Json
 
@@ -191,6 +191,7 @@ def set_comp_rating(
     comp_address_key: str,
     rating: str | None,
     rated_by_user_id: int | None = None,
+    view: Literal["arv", "nbv", "export"] | None = None,
 ) -> int:
     """Set or clear a workspace-scoped rating for a comp.
 
@@ -198,6 +199,14 @@ def set_comp_rating(
     (workspace_id, comp_id). Looks up comp_id via comp_address_key on
     propelio_comps. Returns rows-affected count for endpoint 404 logic
     (0 = comp not found in global cache).
+
+    view routing (per-view ratings spec §3.1, FMEA C2):
+    - view='arv' (default for absent/None — coexistence with old clients)
+      → the EXISTING comp_ratings table, byte-for-byte unchanged.
+    - view in ('nbv','export') → the additive comp_ratings_views table,
+      UPSERT ON CONFLICT (workspace_id, comp_id, view); clear = DELETE
+      that view's row only.
+    view='arv' is NEVER written to the _views table (CHECK excludes it).
     """
     # Intentionally no longer writes propelio_comp_archive.user_rating;
     # readers should query comp_ratings for canonical rating state.
@@ -207,6 +216,19 @@ def set_comp_rating(
     addr_key = str(comp_address_key or "").strip()
     if not addr_key:
         raise ValueError("comp_address_key is required")
+
+    # View normalization: absent/None → 'arv' (old clients coexist; the
+    # flag-ON frontend always sends an explicit view, so a missing view is
+    # always a flag-off old client). Present-but-invalid → ValueError → 400
+    # (NEVER silently default an invalid present view to ARV). FMEA C2.
+    norm_view: Literal["arv", "nbv", "export"]
+    if view is None:
+        norm_view = "arv"
+    else:
+        candidate_view = str(view).strip().lower()
+        if candidate_view not in ("arv", "nbv", "export"):
+            raise ValueError(f"view must be 'arv', 'nbv', 'export', or null; got {view!r}")
+        norm_view = candidate_view  # type: ignore[assignment]
 
     norm_rating: str | None
     if rating is None:
@@ -234,28 +256,56 @@ def set_comp_rating(
                 return 0
             comp_id = int(row[0])
 
-            if norm_rating is None:
-                cur.execute(
-                    """
-                    DELETE FROM comp_ratings
-                    WHERE workspace_id = %s AND comp_id = %s
-                    """,
-                    (area_id, comp_id),
-                )
-                affected = cur.rowcount
+            if norm_view == "arv":
+                # ARV path — EXISTING comp_ratings table, byte-for-byte
+                # unchanged. This is the load-bearing coexistence invariant.
+                if norm_rating is None:
+                    cur.execute(
+                        """
+                        DELETE FROM comp_ratings
+                        WHERE workspace_id = %s AND comp_id = %s
+                        """,
+                        (area_id, comp_id),
+                    )
+                    affected = cur.rowcount
+                else:
+                    cur.execute(
+                        """
+                        INSERT INTO comp_ratings (workspace_id, comp_id, rating, rated_by_user_id, rated_at)
+                        VALUES (%s, %s, %s, %s, NOW())
+                        ON CONFLICT (workspace_id, comp_id) DO UPDATE
+                            SET rating = EXCLUDED.rating,
+                                rated_by_user_id = EXCLUDED.rated_by_user_id,
+                                rated_at = NOW()
+                        """,
+                        (area_id, comp_id, norm_rating, rated_by_user_id),
+                    )
+                    affected = cur.rowcount
             else:
-                cur.execute(
-                    """
-                    INSERT INTO comp_ratings (workspace_id, comp_id, rating, rated_by_user_id, rated_at)
-                    VALUES (%s, %s, %s, %s, NOW())
-                    ON CONFLICT (workspace_id, comp_id) DO UPDATE
-                        SET rating = EXCLUDED.rating,
-                            rated_by_user_id = EXCLUDED.rated_by_user_id,
-                            rated_at = NOW()
-                    """,
-                    (area_id, comp_id, norm_rating, rated_by_user_id),
-                )
-                affected = cur.rowcount
+                # NBV/Export path — additive comp_ratings_views table. view
+                # CHECK excludes 'arv' (structurally impossible to shadow ARV).
+                if norm_rating is None:
+                    cur.execute(
+                        """
+                        DELETE FROM comp_ratings_views
+                        WHERE workspace_id = %s AND comp_id = %s AND view = %s
+                        """,
+                        (area_id, comp_id, norm_view),
+                    )
+                    affected = cur.rowcount
+                else:
+                    cur.execute(
+                        """
+                        INSERT INTO comp_ratings_views (workspace_id, comp_id, view, rating, rated_by_user_id, rated_at)
+                        VALUES (%s, %s, %s, %s, %s, NOW())
+                        ON CONFLICT (workspace_id, comp_id, view) DO UPDATE
+                            SET rating = EXCLUDED.rating,
+                                rated_by_user_id = EXCLUDED.rated_by_user_id,
+                                rated_at = NOW()
+                        """,
+                        (area_id, comp_id, norm_view, norm_rating, rated_by_user_id),
+                    )
+                    affected = cur.rowcount
         conn.commit()
         if norm_rating is None and affected == 0:
             return 1

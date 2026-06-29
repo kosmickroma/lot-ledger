@@ -17,7 +17,7 @@ import os
 import secrets
 from dataclasses import asdict
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal, Optional
 
 import requests
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -1096,6 +1096,10 @@ class CompRateRequest(BaseModel):
     saved_area_id: str
     comp_address_key: str
     rating: str | None = None
+    # Per-view ratings spec §3.1 (FMEA C2): absent/None → 'arv' (coexistence
+    # with old flag-off clients, which never send this field). Present-but-
+    # invalid → 400 (never silent ARV). Flag-ON clients send an explicit view.
+    view: Optional[Literal["arv", "nbv", "export"]] = None
 
 
 @router.post("/comp/rate")
@@ -1105,9 +1109,11 @@ async def rate_comp(
 ) -> dict[str, Any]:
     """Set or clear a workspace-scoped rating for a comp.
 
-    Writes to comp_ratings (Phase 2 canonical store) keyed on
-    (workspace_id, comp_id). Comp must exist in the global propelio_comps
-    cache (comp_address_key UNIQUE index) — returns 404 otherwise.
+    Writes to comp_ratings (ARV, Phase 2 canonical store) keyed on
+    (workspace_id, comp_id), or comp_ratings_views (NBV/Export) keyed on
+    (workspace_id, comp_id, view). Comp must exist in the global
+    propelio_comps cache (comp_address_key UNIQUE index) — returns 404
+    otherwise.
 
     Per PARCEL_RATINGS_SPEC.md v2: verifies the calling user owns the
     saved area before mutating. Closes the pre-existing weakness where
@@ -1125,6 +1131,7 @@ async def rate_comp(
             comp_address_key=request.comp_address_key,
             rating=request.rating,
             rated_by_user_id=int(user.get("id")) if user.get("id") is not None else None,
+            view=request.view,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1133,4 +1140,7 @@ async def rate_comp(
             status_code=404,
             detail="Comp not found in global cache for that comp_address_key",
         )
-    return {"ok": True, "rating": request.rating, "updated": updated}
+    # Normalize view for the response so the client can confirm routing
+    # (absent/None → 'arv'; matches set_comp_rating's internal normalization).
+    norm_view = "arv" if request.view is None else str(request.view).strip().lower()
+    return {"ok": True, "rating": request.rating, "updated": updated, "view": norm_view}
