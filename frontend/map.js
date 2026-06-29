@@ -4230,6 +4230,7 @@ async function saveCurrentArea(name) {
   _clearOriginatorStar();
   _setCurrentTargetParcel(null);
   _currentLoadedAreaId = normalized.id;
+  _renderViewToggle();  // area id set → reveal the ARV/NBV/Export toggle
   _syncTabTitle();
   _storedValueOnAreaChange(_currentLoadedAreaId);
   void _filterSaveOnAreaChange(_currentLoadedAreaId);
@@ -5497,6 +5498,7 @@ async function restoreSavedArea(area, options = {}) {
     _clearOriginatorStar();
     _setCurrentTargetParcel(null);
     _currentLoadedAreaId = area.id;
+    _renderViewToggle();  // area id set → reveal the ARV/NBV/Export toggle
     _syncTabTitle();
     _storedValueOnAreaChange(_currentLoadedAreaId);
     void _filterSaveOnAreaChange(_currentLoadedAreaId);
@@ -5894,6 +5896,7 @@ function _renderList(sectionId, listId, items, options = {}) {
           _clearOriginatorStar();
           _setCurrentTargetParcel(null);
           _currentLoadedAreaId = cloned.area_id;
+          _renderViewToggle();  // area id set → reveal the ARV/NBV/Export toggle
           _syncTabTitle();
           _storedValueOnAreaChange(_currentLoadedAreaId);
           void _filterSaveOnAreaChange(_currentLoadedAreaId);
@@ -14055,6 +14058,7 @@ async function _loadAreaFromShareId(shareId) {
         _clearOriginatorStar();
         _setCurrentTargetParcel(null);
         _currentLoadedAreaId = joined.area_id;
+        _renderViewToggle();  // area id set → reveal the ARV/NBV/Export toggle
         // Reload stored values for the shared area (membership-gated GET
         // succeeds now that the editor row exists). Force a clean reload by
         // resetting the cache guard first — restoreSavedArea already fired a
