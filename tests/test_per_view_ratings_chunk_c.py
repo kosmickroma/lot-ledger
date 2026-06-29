@@ -211,8 +211,13 @@ def test_g3_compatibility_lock_comments_preserved():
 
 def test_g3_no_new_rating_columns_added():
     """G3: Chunk C adds NO new CSV columns. There must be no 'NBV Good Comp',
-    'Export Good Comp', or 'ratings_by_view' column in the CSV header."""
+    'Export Good Comp', or 'ratings_by_view' column in the CSV header. Scoped
+    to the CSV builder (_run_download_csv) — a whole-file scan false-positives
+    on legit feature-property keys like feature["properties"]["ratings_by_view"]
+    (the Chunk E parcel hydrate, a JSON response field, NOT a CSV column)."""
     src = inspect.getsource(api_main)
+    fn = _extract_fn_source(src, "_run_download_csv")
+    assert fn, "_run_download_csv not found"
     forbidden_headers = [
         '"NBV Good Comp"',
         '"Export Good Comp"',
@@ -221,10 +226,10 @@ def test_g3_no_new_rating_columns_added():
         '"Ratings By View"',
     ]
     for h in forbidden_headers:
-        assert h not in src, (
-            f"Forbidden new CSV column {h!r} found — G3 locks column positions "
-            f"(spec §3.4: NO new columns, only the source of the existing "
-            f"'Good Comp' column changes per active view)."
+        assert h not in fn, (
+            f"Forbidden new CSV column {h!r} found in _run_download_csv — G3 "
+            f"locks column positions (spec §3.4: NO new columns, only the source "
+            f"of the existing 'Good Comp' column changes per active view)."
         )
 
 

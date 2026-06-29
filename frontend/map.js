@@ -4405,7 +4405,16 @@ async function _reattachPropelioToSavedArea(savedAreaId) {
       headers: { "Content-Type": "application/json", ...authHeaders() },
       body: JSON.stringify({
         saved_area_id: savedAreaId,
-        comps: window._propelioLast.comps,
+        // Strip the client-internal projection transient `_ratingArv` before it
+        // goes over the wire — it must never be persisted in the archive blob
+        // (per-view ratings Chunk E; would poison the lazy-capture on reload).
+        comps: window._propelioLast.comps.map((c) => {
+          if (c && c._ratingArv !== undefined) {
+            const { _ratingArv, ...rest } = c;
+            return rest;
+          }
+          return c;
+        }),
       }),
     });
     if (!resp.ok) {
@@ -5990,6 +5999,10 @@ function _renderList(sectionId, listId, items, options = {}) {
           // Refresh Good Comps section visibility — fork bypasses the
           // normal restoreSavedArea path, so applyPropelioClientFilters
           // isn't called automatically. Per spec v2 §Risk #1.
+          // Per-view ratings (Chunk E): project to the active view first, since
+          // _renderGoodCompsSection reads user_rating and nothing else projected
+          // it on this path.
+          _projectCompRatingsForActiveView();
           if (typeof _renderGoodCompsSection === "function") _renderGoodCompsSection();
           _selectedSavedItemId = cloned.area_id;
           // Carry the originator TARGET star through the fork.
@@ -7596,6 +7609,74 @@ function _isLatestMutation(kind, id, capturedSeq) {
   return _ratingMutationSeq.get(`${kind}:${id}`) === capturedSeq;
 }
 
+// ─── Per-view rating projection (Chunk E, per-view ratings spec §4) ───────
+// ARV ratings live in the canonical `_ratingArv`; NBV/Export live in
+// `ratings_by_view` (both stamped by the backend on hydrate — comps via
+// load_comps_by_polygon, parcels via _load_parcel_ratings_by_view_for_workspace).
+// Every renderer reads `user_rating`, so we keep `user_rating` as the
+// PROJECTION of the ACTIVE view — recomputed on each render + view switch.
+// Writes update the canonical store for the view captured AT CLICK TIME, never
+// `user_rating` directly (avoids the view-switch-mid-flight race, C2/H4).
+// Flag-OFF (main) skips all of this: `user_rating` stays exactly as the
+// backend sent it (ARV) so the wire + behavior are byte-identical to today.
+// The helpers operate on comp objects AND parcel `properties` objects — both
+// carry `user_rating` + `ratings_by_view` at the same shape.
+
+function _ratingForView(arvRating, ratingsByView, view) {
+  if (view === "arv") {
+    return (arvRating === "good" || arvRating === "bad") ? arvRating : null;
+  }
+  const r = ratingsByView && ratingsByView[view];
+  return (r === "good" || r === "bad") ? r : null;
+}
+
+function _ensureRatingCanonical(obj) {
+  // Lazy-capture the ARV canonical the first time we see this object — i.e.
+  // while `user_rating` still equals the backend-sent ARV value, before any
+  // projection has overwritten it. Then normalize the per-view map. Idempotent.
+  if (!obj) return;
+  if (obj._ratingArv === undefined) {
+    obj._ratingArv = (obj.user_rating === "good" || obj.user_rating === "bad") ? obj.user_rating : null;
+  }
+  if (!obj.ratings_by_view || typeof obj.ratings_by_view !== "object") {
+    obj.ratings_by_view = {};
+  }
+}
+
+function _setRatingCanonical(obj, rating, view) {
+  // Write `rating` into the object's canonical store for `view`.
+  _ensureRatingCanonical(obj);
+  const r = (rating === "good" || rating === "bad") ? rating : null;
+  if (view === "arv") {
+    obj._ratingArv = r;
+  } else if (r) {
+    obj.ratings_by_view[view] = r;
+  } else {
+    delete obj.ratings_by_view[view];
+  }
+}
+
+function _projectRatingActive(obj) {
+  // Recompute user_rating as the active view's projection from the canonical.
+  _ensureRatingCanonical(obj);
+  obj.user_rating = _ratingForView(obj._ratingArv, obj.ratings_by_view, _activeView);
+}
+
+function _projectCompRatingsForActiveView() {
+  if (!ARV_NBV_EXPORT_ENABLED) return;
+  const comps = window._propelioLast && window._propelioLast.comps;
+  if (!Array.isArray(comps)) return;
+  for (const c of comps) if (c) _projectRatingActive(c);
+}
+
+function _projectParcelRatingsForActiveView() {
+  if (!ARV_NBV_EXPORT_ENABLED) return;
+  if (!Array.isArray(allAnalysisFeatures)) return;
+  for (const f of allAnalysisFeatures) {
+    if (f && f.properties) _projectRatingActive(f.properties);
+  }
+}
+
 function _resolveParcelAnchor(county, accountNum) {
   // Find a centroid lat/lng for the parcel via the analysis features cache.
   // Chain: rendered polygon bounds (if we have a registered layer) →
@@ -7646,6 +7727,24 @@ function _updateParcelUserRatingInCache(county, accountNum, rating) {
     const fp = f?.properties || {};
     if (String(fp.source_county || "").toLowerCase() === c && String(fp.account_num || "").trim() === a) {
       fp.user_rating = rating;
+      return;
+    }
+  }
+}
+
+// Per-view variant (Chunk E): write into the feature's canonical store for
+// `view`, then re-project user_rating for the active view. Used by the
+// flag-ON parcel write path so a rating in NBV/Export doesn't bleed into ARV.
+function _updateParcelRatingCanonicalInCache(county, accountNum, rating, view) {
+  if (!Array.isArray(allAnalysisFeatures)) return;
+  const c = String(county || "").toLowerCase();
+  const a = String(accountNum || "").trim();
+  for (const f of allAnalysisFeatures) {
+    const fp = f?.properties;
+    if (!fp) continue;
+    if (String(fp.source_county || "").toLowerCase() === c && String(fp.account_num || "").trim() === a) {
+      _setRatingCanonical(fp, rating, view);
+      _projectRatingActive(fp);
       return;
     }
   }
@@ -7804,15 +7903,21 @@ function _rebuildOutreachOverlays() {
 // emits a SINGLE button row with both data-comp-key + data-county +
 // data-account-num and writes to both rating tables on click.)
 
-async function rateParcel(county, accountNum, rating) {
+async function rateParcel(county, accountNum, rating, view) {
   const areaId = (typeof _currentLoadedAreaId === "string" ? _currentLoadedAreaId : "") || "";
   if (!areaId || !county || !accountNum) return false;
+  // View captured at click time (per-view ratings §4). Invalid/absent → the
+  // current active view. Flag-OFF: _activeView is always "arv".
+  const _view = (view === "arv" || view === "nbv" || view === "export") ? view : _activeView;
   const body = {
     saved_area_id: areaId,
     county,
     account_num: accountNum,
     rating: rating === "good" || rating === "bad" ? rating : null,
   };
+  // Only send `view` when the feature is enabled — keeps the flag-OFF wire
+  // byte-identical to today (backend treats absent view as 'arv', C2).
+  if (ARV_NBV_EXPORT_ENABLED) body.view = _view;
   try {
     const resp = await fetch("/api/parcels/rate", {
       method: "POST",
@@ -7823,7 +7928,11 @@ async function rateParcel(county, accountNum, rating) {
       console.warn("[cad] rate parcel failed:", resp.status);
       return false;
     }
-    _updateParcelUserRatingInCache(county, accountNum, body.rating);
+    if (ARV_NBV_EXPORT_ENABLED) {
+      _updateParcelRatingCanonicalInCache(county, accountNum, body.rating, _view);
+    } else {
+      _updateParcelUserRatingInCache(county, accountNum, body.rating);
+    }
     return true;
   } catch (err) {
     console.error("[cad] rate parcel error:", err);
@@ -8307,6 +8416,11 @@ function applyPropelioClientFilters() {
     _renderGoodCompsSection();  // hides section when no comp cache
     return;
   }
+  // Chunk E (per-view ratings §4): project each comp's user_rating to the
+  // ACTIVE view before any filter/dedup/render reads it. No-op when the flag
+  // is off (user_rating stays the backend ARV value). This is also the
+  // view-switch re-render path (_setActiveView → restoreFilterState → here).
+  _projectCompRatingsForActiveView();
   // Read the current UI filter state FIRST, then build the neighborhood
   // options cache from it. _buildNbhdOptionsCache() derives its options
   // from the active propelioFilterState (minus the neighborhood gate), so
@@ -8546,12 +8660,34 @@ function _renderGoodCompsSection() {
 async function _setGoodCompRatingOptimistic(compKey, newRating) {
   const comp = _findPropelioCompByKey(compKey);
   if (!comp) return;
-  const oldRating = comp.user_rating;
-  comp.user_rating = newRating;
+  // Capture the active view synchronously (per-view ratings §4 / H4).
+  const _view = _activeView;
+  if (!ARV_NBV_EXPORT_ENABLED) {
+    // Flag-OFF: today's behavior, byte-identical.
+    const oldRating = comp.user_rating;
+    comp.user_rating = newRating;
+    _renderGoodCompsSection();
+    const ok = await ratePropelioComp(compKey, newRating, _view);
+    if (!ok) {
+      comp.user_rating = oldRating;
+      _renderGoodCompsSection();
+      _showToast("Rating update failed — reverted", "error");
+    }
+    return;
+  }
+  // Flag-ON: optimistic via the canonical store + active-view projection, so a
+  // revert restores the exact per-view state (not just user_rating).
+  _ensureRatingCanonical(comp);
+  const oldArv = comp._ratingArv;
+  const oldByView = { ...comp.ratings_by_view };
+  _setRatingCanonical(comp, newRating, _view);
+  _projectRatingActive(comp);
   _renderGoodCompsSection();
-  const ok = await ratePropelioComp(compKey, newRating);
+  const ok = await ratePropelioComp(compKey, newRating, _view);
   if (!ok) {
-    comp.user_rating = oldRating;
+    comp._ratingArv = oldArv;
+    comp.ratings_by_view = oldByView;
+    _projectRatingActive(comp);
     _renderGoodCompsSection();
     _showToast("Rating update failed — reverted", "error");
   }
@@ -8796,14 +8932,20 @@ function _setPropelioFootprintHighlight(compKey, on) {
   else apply(layer);
 }
 
-async function ratePropelioComp(compKey, rating) {
+async function ratePropelioComp(compKey, rating, view) {
   const areaId = (typeof _currentLoadedAreaId === "string" ? _currentLoadedAreaId : "") || "";
   if (!areaId || !compKey) return false;
+  // View captured at click time (per-view ratings §4). Invalid/absent → the
+  // current active view. Flag-OFF: _activeView is always "arv".
+  const _view = (view === "arv" || view === "nbv" || view === "export") ? view : _activeView;
   const body = {
     saved_area_id: areaId,
     comp_address_key: compKey,
     rating: rating === "good" || rating === "bad" ? rating : null,
   };
+  // Only send `view` when the feature is enabled — keeps the flag-OFF wire
+  // byte-identical to today (backend treats absent view as 'arv', C2).
+  if (ARV_NBV_EXPORT_ENABLED) body.view = _view;
   try {
     const resp = await fetch("/api/propelio/comp/rate", {
       method: "POST",
@@ -8814,10 +8956,15 @@ async function ratePropelioComp(compKey, rating) {
       console.warn("[propelio] rate failed:", resp.status);
       return false;
     }
-    // Update the in-memory comp so re-render reflects the new rating
-    // without a round-trip to the archive.
+    // Update the in-memory comp so re-render reflects the new rating without a
+    // round-trip to the archive. Flag-ON writes the canonical store for the
+    // captured view; applyPropelioClientFilters re-projects user_rating for the
+    // active view. Flag-OFF keeps today's direct user_rating write.
     const comp = _findPropelioCompByKey(compKey);
-    if (comp) comp.user_rating = body.rating;
+    if (comp) {
+      if (ARV_NBV_EXPORT_ENABLED) _setRatingCanonical(comp, body.rating, _view);
+      else comp.user_rating = body.rating;
+    }
     applyPropelioClientFilters();
     return true;
   } catch (err) {
@@ -9220,6 +9367,10 @@ let propelioStickyBtn = null;
     const hasParcel = Boolean(parcelCounty && parcelAccount);
     if (!hasComp && !hasParcel) return;
     const newRating = rating === "clear" ? null : rating;
+    // Per-view ratings §4 / H4: capture the active view AT CLICK TIME (a
+    // synchronous read), then thread it through the async writes + view-key the
+    // mutation seqs so a view switch mid-flight can't cross-contaminate.
+    const _view = _activeView;
 
     // Optimistic popup button highlighting — instant feedback
     const container = btn.parentElement;
@@ -9241,24 +9392,31 @@ let propelioStickyBtn = null;
     // doesn't roll back a parcel-only mark and vice versa.
 
     if (hasComp) {
-      _bumpMutationSeq("comp", compKey);
+      _bumpMutationSeq("comp", `${compKey}:${_view}`);
       // Suppress comp optimistic mark when a parcel rating is ALSO being
       // written this click — the parcel mark covers the same spot and
       // two stacked ✓s is the bug KK reported 2026-05-24.
       if (!hasParcel) {
         _setCompRatingMarkOptimistic(compKey, newRating);
       }
-      void ratePropelioComp(compKey, newRating);
+      void ratePropelioComp(compKey, newRating, _view);
     }
 
     if (hasParcel) {
-      const mutId = `${parcelCounty}:${parcelAccount}`;
+      const mutId = `${parcelCounty}:${parcelAccount}:${_view}`;
       const seq = _bumpMutationSeq("parcel", mutId);
       const previousRating = _getCachedParcelRating(parcelCounty, parcelAccount);
       _setParcelRatingMarkOptimistic(parcelCounty, parcelAccount, newRating);
-      void rateParcel(parcelCounty, parcelAccount, newRating).then((ok) => {
+      void rateParcel(parcelCounty, parcelAccount, newRating, _view).then((ok) => {
         if (!ok && _isLatestMutation("parcel", mutId, seq)) {
-          _setParcelRatingMarkOptimistic(parcelCounty, parcelAccount, previousRating);
+          // Only repaint the optimistic mark if we're STILL on the view the
+          // click happened in (H4). If the user switched views mid-flight, the
+          // switch already re-rendered marks from the canonical store (which the
+          // failed write never touched), so repainting previousRating here would
+          // paint a wrong-view mark. The toast still fires either way.
+          if (_view === _activeView) {
+            _setParcelRatingMarkOptimistic(parcelCounty, parcelAccount, previousRating);
+          }
           _showToast("Rating update failed — reverted", "error");
         }
       });
@@ -11363,6 +11521,11 @@ async function _openParcelDetailFromFeature(p, ev, feature) {
 }
 
 function renderFeatures(geojson) {
+  // Chunk E (per-view ratings §4): project every parcel's user_rating to the
+  // ACTIVE view before the mark loop reads it (_maybeAddParcelRatingMark).
+  // No-op when the flag is off. renderViewportFeatures delegates here, so this
+  // single point covers both render modes + the view-switch re-render.
+  _projectParcelRatingsForActiveView();
   const shouldRestorePopup = Boolean(_activeParcelPopupState?.accountNum);
   _isRefreshingParcelLayers = shouldRestorePopup;
   _renderedParcelPopupLayers.clear();
@@ -14157,6 +14320,14 @@ async function _loadAreaFromShareId(shareId) {
         _storedValueAreaId = null;
         _storedValueState = null;
         _storedValueOnAreaChange(_currentLoadedAreaId);
+        // G7 fence (per-view ratings spec §9): unlike stored values, comp +
+        // parcel RATINGS are NOT membership-gated — comps load via the
+        // un-authed /api/propelio/by-saved-area endpoint, and parcel ratings
+        // via /api/analyze which scopes by workspace_id (not membership; only
+        // _saved_area_exists). So the pre-join restoreSavedArea() hydrate above
+        // already returned the correct ratings (incl. ratings_by_view) and there
+        // is NO 403-before-join race to repair here. Intentionally no rating
+        // re-fetch. (Verified 2026-06-29; see spec §9 G7.)
         _syncTabTitle();
         _selectedSavedItemId = joined.area_id;
         // Carry the originator TARGET star through to the editor's view.
@@ -14868,6 +15039,14 @@ function _setActiveView(view) {
   // Save the departing view's live UI back to its cache.
   _viewFilterCache[_activeView] = captureFilterState();
   _activeView = view;
+  // Per-view ratings (Chunk E): re-project ratings to the new active view up
+  // front, independent of whether the filter restore below actually re-renders
+  // (the parcel render is gated on lastAnalysisGeojson). This keeps the comp +
+  // parcel `user_rating` projections correct for any subsequent read even on
+  // the edge where a render is skipped. The renders below then repaint from
+  // this already-projected state.
+  _projectCompRatingsForActiveView();
+  _projectParcelRatingsForActiveView();
   // Seed-from-ARV on first visit to NBV/Export (spec §5.4): copy the current
   // ARV filters so the view starts from a baseline, not blank, and persist each
   // seeded field via the per-field PATCH (as _views.<view>.*) so it survives a

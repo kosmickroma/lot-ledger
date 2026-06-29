@@ -123,6 +123,15 @@ def merge_comps_into_archive(saved_area_id: str, comps: list[dict[str, Any]]) ->
                 # the frontend round-trip the same key when POSTing ratings.
                 comp["comp_address_key"] = comp_key
 
+                # Per-view ratings (Chunk E): NEVER persist the frontend's
+                # client-internal projection transient `_ratingArv`. The client
+                # captures it only while `user_rating` still equals the backend
+                # ARV value; baking a (possibly stale) copy into the blob would
+                # survive reload and poison the client's lazy-capture guard →
+                # silent ARV-rating desync. The canonical ARV rating lives in
+                # comp_ratings and is re-attached on read (load_archived_comps).
+                comp.pop("_ratingArv", None)
+
                 cur.execute(
                     """
                     INSERT INTO propelio_comp_archive (
@@ -385,6 +394,11 @@ def load_archived_comps(saved_area_id: str) -> list[dict[str, Any]]:
         hydrated: list[dict[str, Any]] = []
         for comp_data, parcel_geom, parcel_account_num, status, comp_address_key, user_rating, ratings_by_view in rows:
             comp = dict(comp_data) if isinstance(comp_data, dict) else {}
+            # Defensive (Chunk E): drop any client-internal projection transient
+            # that an older blob may have captured before merge_comps_into_archive
+            # started stripping it. user_rating + ratings_by_view below are the
+            # authoritative values from the rating tables.
+            comp.pop("_ratingArv", None)
             comp["parcel_geom"] = parcel_geom if isinstance(parcel_geom, (dict, list)) else None
             comp["parcel_account_num"] = str(parcel_account_num or "").strip() or None
             # comp_address_key is now explicitly set (parity with

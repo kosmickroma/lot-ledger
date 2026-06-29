@@ -1198,6 +1198,42 @@ def _load_parcel_ratings_for_workspace(
         release_session_conn(conn)
 
 
+def _load_parcel_ratings_by_view_for_workspace(
+    workspace_id: str | None,
+) -> dict[tuple[str, str], dict[str, str]]:
+    """Return {(county_lower, account_num): {view: rating}} for the workspace's
+    NON-ARV (nbv/export) parcel ratings, or {} if no workspace. One SQL query
+    over the additive parcel_ratings_views table — the parcel analogue of the
+    comp ratings_by_view Alt-D hydrate (load_comps_by_polygon, Chunk B).
+
+    Per-view ratings spec §4 (Chunk E parcel display): ARV stays in
+    `user_rating` via _load_parcel_ratings_for_workspace(view='arv'); this
+    layers the per-view ratings so the frontend can project the active view's
+    parcel marks without a cross-view bleed. Additive + backward-compatible:
+    flag-off clients ignore the extra `ratings_by_view` property. Parcels with
+    no per-view rating simply have no key here → the caller defaults to {}.
+    """
+    if not workspace_id:
+        return {}
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT county, account_num, view, rating
+                FROM parcel_ratings_views
+                WHERE workspace_id = %s AND view IN ('nbv', 'export')
+                """,
+                (workspace_id,),
+            )
+            out: dict[tuple[str, str], dict[str, str]] = {}
+            for c, a, v, r in cur.fetchall():
+                out.setdefault((str(c).lower(), str(a)), {})[str(v)] = str(r)
+            return out
+    finally:
+        release_session_conn(conn)
+
+
 class ParcelRateRequest(BaseModel):
     saved_area_id: str
     county: str
@@ -1439,9 +1475,12 @@ def _build_features_from_rows(
 
     exempt_set: set[str] = set()
     features: list[dict[str, Any]] = []
-    # Chunk B: view="arv" explicit (today's behavior). Analyze's active-view
-    # wiring is Chunk E. Per-view ratings spec §3.3 / FMEA H2.
+    # ARV ratings stay in user_rating (today's behavior, unchanged query).
     parcel_ratings_map: dict[tuple[str, str], str] = _load_parcel_ratings_for_workspace(area_id, view="arv")
+    # Chunk E (per-view ratings spec §4): additionally layer the per-view
+    # (nbv/export) parcel ratings so the frontend projects the active view's
+    # marks without ARV bleeding across views. Additive + backward-compatible.
+    parcel_ratings_by_view: dict[tuple[str, str], dict[str, str]] = _load_parcel_ratings_by_view_for_workspace(area_id)
     counts: dict[str, int] = {
         "active": 0, "off_market": 0, "multifamily": 0, "duplexes": 0,
         "vacant": 0, "commercial": 0, "exempt": 0, "total": len(rows),
@@ -1481,6 +1520,9 @@ def _build_features_from_rows(
                 str(feature["properties"].get("account_num", "") or "").strip(),
             )
             feature["properties"]["user_rating"] = parcel_ratings_map.get(_rating_key)
+            # Per-view ratings (nbv/export); {} when none → frontend projects
+            # null for non-ARV views (Chunk E). ARV is user_rating above.
+            feature["properties"]["ratings_by_view"] = parcel_ratings_by_view.get(_rating_key, {})
             features.append(feature)
         except Exception:
             continue
@@ -4532,9 +4574,12 @@ async def analyze(request: AnalyzeRequest, req: Request, user: dict[str, Any] = 
     # SQL query, applied in-memory below to avoid per-row joins across
     # county-specific parcel tables. Public/unauth endpoints intentionally
     # skip this hydrate (security boundary per KK product call).
-    # Chunk B: view="arv" explicit (today's behavior). Analyze's active-view
-    # wiring is Chunk E. Per-view ratings spec §3.3 / FMEA H2.
+    # ARV ratings stay in user_rating (today's behavior, unchanged query).
     parcel_ratings_map: dict[tuple[str, str], str] = _load_parcel_ratings_for_workspace(area_id, view="arv")
+    # Chunk E (per-view ratings spec §4): additionally layer the per-view
+    # (nbv/export) parcel ratings so the frontend projects the active view's
+    # marks without ARV bleeding across views. Additive + backward-compatible.
+    parcel_ratings_by_view: dict[tuple[str, str], dict[str, str]] = _load_parcel_ratings_by_view_for_workspace(area_id)
     counts = {
         "active": 0,
         "off_market": 0,
@@ -4598,6 +4643,9 @@ async def analyze(request: AnalyzeRequest, req: Request, user: dict[str, Any] = 
                 str(feature["properties"].get("account_num", "") or "").strip(),
             )
             feature["properties"]["user_rating"] = parcel_ratings_map.get(_rating_key)
+            # Per-view ratings (nbv/export); {} when none → frontend projects
+            # null for non-ARV views (Chunk E). ARV is user_rating above.
+            feature["properties"]["ratings_by_view"] = parcel_ratings_by_view.get(_rating_key, {})
             features.append(feature)
         except ValueError:
             continue
