@@ -1154,20 +1154,45 @@ def _user_area_role(area_id: str, user_id: int) -> str | None:
         release_session_conn(conn)
 
 
-def _load_parcel_ratings_for_workspace(workspace_id: str | None) -> dict[tuple[str, str], str]:
+def _load_parcel_ratings_for_workspace(
+    workspace_id: str | None,
+    view: str = "arv",
+) -> dict[tuple[str, str], str]:
     """Return {(county_lower, account_num): rating} for the workspace, or
     {} if no workspace. Single SQL query — apply to features in-memory to
     avoid per-row joins across county-specific parcel tables.
-    Per PARCEL_RATINGS_SPEC.md v2 §2D."""
+    Per PARCEL_RATINGS_SPEC.md v2 §2D.
+
+    Per-view ratings spec §3.3 / FMEA H2: view='arv' (default) reads the
+    EXISTING parcel_ratings table (unchanged query, today's behavior). view
+    in ('nbv','export') reads the additive parcel_ratings_views table
+    WHERE view=%s, same workspace scoping. Chunk B only makes the function
+    CAPABLE of per-view; all callers default to 'arv' (CSV's true per-view
+    wiring is Chunk C; analyze's active-view wiring is Chunk E), so this
+    is byte-for-byte today's behavior unless a caller passes a non-arv view.
+    """
     if not workspace_id:
         return {}
+    # Normalize + validate view (defensive; invalid → arv fallback rather than
+    # 500, since this is a read helper, not a request handler).
+    norm_view = str(view or "").strip().lower() or "arv"
+    if norm_view not in ("arv", "nbv", "export"):
+        norm_view = "arv"
     conn = get_session_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                "SELECT county, account_num, rating FROM parcel_ratings WHERE workspace_id = %s",
-                (workspace_id,),
-            )
+            if norm_view == "arv":
+                # ARV path — EXISTING parcel_ratings table, unchanged query.
+                cur.execute(
+                    "SELECT county, account_num, rating FROM parcel_ratings WHERE workspace_id = %s",
+                    (workspace_id,),
+                )
+            else:
+                # NBV/Export path — additive parcel_ratings_views table.
+                cur.execute(
+                    "SELECT county, account_num, rating FROM parcel_ratings_views WHERE workspace_id = %s AND view = %s",
+                    (workspace_id, norm_view),
+                )
             return {(str(c).lower(), str(a)): str(r) for c, a, r in cur.fetchall()}
     finally:
         release_session_conn(conn)
@@ -1414,7 +1439,9 @@ def _build_features_from_rows(
 
     exempt_set: set[str] = set()
     features: list[dict[str, Any]] = []
-    parcel_ratings_map: dict[tuple[str, str], str] = _load_parcel_ratings_for_workspace(area_id)
+    # Chunk B: view="arv" explicit (today's behavior). Analyze's active-view
+    # wiring is Chunk E. Per-view ratings spec §3.3 / FMEA H2.
+    parcel_ratings_map: dict[tuple[str, str], str] = _load_parcel_ratings_for_workspace(area_id, view="arv")
     counts: dict[str, int] = {
         "active": 0, "off_market": 0, "multifamily": 0, "duplexes": 0,
         "vacant": 0, "commercial": 0, "exempt": 0, "total": len(rows),
@@ -4505,7 +4532,9 @@ async def analyze(request: AnalyzeRequest, req: Request, user: dict[str, Any] = 
     # SQL query, applied in-memory below to avoid per-row joins across
     # county-specific parcel tables. Public/unauth endpoints intentionally
     # skip this hydrate (security boundary per KK product call).
-    parcel_ratings_map: dict[tuple[str, str], str] = _load_parcel_ratings_for_workspace(area_id)
+    # Chunk B: view="arv" explicit (today's behavior). Analyze's active-view
+    # wiring is Chunk E. Per-view ratings spec §3.3 / FMEA H2.
+    parcel_ratings_map: dict[tuple[str, str], str] = _load_parcel_ratings_for_workspace(area_id, view="arv")
     counts = {
         "active": 0,
         "off_market": 0,
@@ -5095,7 +5124,9 @@ async def _run_download_csv(
     # PARCEL_RATINGS_SPEC.md v2). Distinct from parcel_rating_by_key above
     # which is comp-derived. Used in COMP-WINS-ABSOLUTE exclusion: direct
     # rating only applies when there's no comp rating for that parcel.
-    parcel_rating_direct_by_key: dict[tuple[str, str], str] = _load_parcel_ratings_for_workspace(job_saved_area_id)
+    # Chunk B: view="arv" explicit (today's behavior). CSV's true per-view
+    # wiring is Chunk C. Per-view ratings spec §3.3 / FMEA H2.
+    parcel_rating_direct_by_key: dict[tuple[str, str], str] = _load_parcel_ratings_for_workspace(job_saved_area_id, view="arv")
     if job_saved_area_id:
         _conn = get_session_conn()
         try:
