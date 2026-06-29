@@ -1053,6 +1053,12 @@ let _filterSaveClientSeq = 0;
 // captureFilterState() output and decide which fields actually changed.
 // null = no area loaded; reset on clearDrawResults, set on restoreSavedArea.
 let _filterSaveLastSnapshot = null;
+// When true, _filterSaveQueueSave() is a no-op. Set during restoreFilterState
+// so LOADING a view/area (incl. the comp re-filter it triggers) never generates
+// save traffic — a view switch must not "save," only display (KK 2026-06-29).
+// Genuine user edits (input handlers) and the explicit seed persist run with
+// this false, so they still save normally.
+let _suppressFilterAutosave = false;
 
 // Sprint 3 multi-user collab: SSE subscriber state.
 // Per docs/MULTIUSER_COLLAB_SPRINT3_SPEC.md v1 §4.1.
@@ -2350,18 +2356,22 @@ function _handleSseFieldChange(msg) {
   });
   if (!shouldApply) return;
   // ─── Chunk D: active-view gate (Feature #3) ───
-  // A _views.<view>.* change for a view that ISN'T the active one must update
-  // that view's in-memory cache + seq bookkeeping ONLY — never the live UI and
-  // never a re-render. Without this, remote/self echoes for a background view
-  // (e.g. the seed-from-ARV PATCH burst) bleed into the visible view and thrash
-  // the comp render when rapidly switching views.
-  if (ARV_NBV_EXPORT_ENABLED && field_key.startsWith("_views.")) {
+  // Any filter change for a view that ISN'T the active one must update that
+  // view's in-memory cache + seq bookkeeping ONLY — never the live UI / re-render.
+  // FLAT (unprefixed) keys belong to the ARV view; _views.<view>.* keys belong to
+  // that view. Without gating the FLAT case too, an ARV echo bleeds into the
+  // visible NBV/Export view while hammering switches (KK 2026-06-29).
+  if (ARV_NBV_EXPORT_ENABLED) {
+    const _isViewKey = field_key.startsWith("_views.");
     const _parts = field_key.split(".");
-    const _eventView = _parts[1];
+    const _eventView = _isViewKey ? _parts[1] : "arv";
     if (_eventView !== _activeView) {
+      // Update the background view's cache (best-effort) without touching UI.
       const _vc = _viewFilterCache[_eventView];
-      if (_vc && _vc.v && _vc[_parts[2]] && typeof _vc[_parts[2]] === "object") {
-        _vc[_parts[2]][_parts[3]] = value;  // keep the background view's cache fresh
+      const _section = _isViewKey ? _parts[2] : _parts[0];
+      const _key = _isViewKey ? _parts[3] : _parts[1];
+      if (_vc && _vc.v && _vc[_section] && typeof _vc[_section] === "object") {
+        _vc[_section][_key] = value;
       }
       _dispatchedSeqByField.set(field_key, incomingSeq);  // LWW bookkeeping
       return;  // no UI write, no re-render
@@ -2667,6 +2677,12 @@ function _hydrateCompNumericInputsFromState() {
 }
 
 function restoreFilterState(state, { _isAreaLoad = false } = {}) {
+  // Restoring = LOAD, not EDIT: suppress autosave for the whole restore so a
+  // view switch / area load never generates save traffic (incl. the comp
+  // re-filter below, which otherwise auto-saves). try/finally guarantees the
+  // flag is cleared even on the early-return guards. (KK 2026-06-29)
+  _suppressFilterAutosave = true;
+  try {
   if (!state || typeof state !== "object") return;
   if (Number(state.v || 0) > 1) {
     console.info("[saved-area] skipping newer filter_state version", state.v);
@@ -2758,9 +2774,13 @@ function restoreFilterState(state, { _isAreaLoad = false } = {}) {
   // the previous view's filter pass — so comps lagged/mismatched the active
   // view (root cause confirmed by two independent investigations 2026-06-29).
   // Self-guards on window._propelioLast, so it's a no-op when no comps are
-  // loaded (e.g. during initial area load before comps arrive).
+  // loaded (e.g. during initial area load before comps arrive). Suppressed
+  // autosave (see top) means this re-filter does NOT generate a save.
   applyPropelioClientFilters();
   _refreshLoadedAreaUi();
+  } finally {
+    _suppressFilterAutosave = false;
+  }
 }
 
 function bumpUndoPillVersion() {
@@ -4055,6 +4075,7 @@ function _filterSaveSetStatus(state, label) {
 // (defers to blur via _applyFilterFieldToUI if user is still typing).
 
 function _filterSaveQueueSave() {
+  if (_suppressFilterAutosave) return;  // restore/switch is load-only, never save
   if (!_currentLoadedAreaId) return;
   // Diff captureFilterState() against last-saved snapshot, enqueue changed fields.
   const current = captureFilterState();
