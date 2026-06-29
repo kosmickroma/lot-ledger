@@ -792,10 +792,10 @@ body.is-not-power-user .power-user-only {
    only a color shift for active state. Flag OFF ⇒ the block is never
    un-hidden (map.js) ⇒ today's layout is byte-for-byte intact. */
 .view-toggle-block {
-  /* Sit close to the Clear button, matching the action-button group's ~8px
-     gaps (KK 2026-06-29). .sidebar-actions above carries margin-bottom:16px,
-     so pull up 8px to net ~8px. No divider — match the clean button spacing. */
-  margin-top: -8px;
+  /* Clean gap below Clear, matching the action buttons' spacing (KK 2026-06-29:
+     -8px tucked it in and blended with Clear). Positive margin so it never
+     overlaps; no divider. */
+  margin-top: 8px;
   padding-top: 0;
 }
 
