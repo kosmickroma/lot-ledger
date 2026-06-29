@@ -30,7 +30,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Optional
 from urllib.parse import parse_qs, quote_plus
 
 from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Path as FastAPIPath, Query, Request, Response, UploadFile
@@ -500,6 +500,57 @@ def _ensure_session_schema() -> None:
                 """
                 CREATE INDEX IF NOT EXISTS idx_parcel_ratings_workspace
                     ON parcel_ratings (workspace_id)
+                """
+            )
+            # comp_ratings_views — per-view (NBV/Export) Good/Bad comp ratings,
+            # additive companion to comp_ratings (which stays the ARV store,
+            # untouched). view CHECK excludes 'arv' so ARV is structurally
+            # single-sourced in the old table (impossible to shadow ARV here).
+            # Created UNCONDITIONALLY at startup (never flag-gated) so fork +
+            # reads work under any config — per docs/superpowers/specs/
+            # 2026-06-29-per-view-ratings-spec.md §2 + FMEA C1.
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS comp_ratings_views (
+                    rating_id BIGSERIAL PRIMARY KEY,
+                    workspace_id TEXT NOT NULL REFERENCES saved_areas(area_id) ON DELETE CASCADE,
+                    comp_id BIGINT NOT NULL REFERENCES propelio_comps(comp_id) ON DELETE CASCADE,
+                    view TEXT NOT NULL CHECK (view IN ('nbv','export')),
+                    rating TEXT NOT NULL CHECK (rating IN ('good','bad')),
+                    rated_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    rated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    UNIQUE (workspace_id, comp_id, view)
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_comp_ratings_views_ws
+                    ON comp_ratings_views (workspace_id, comp_id)
+                """
+            )
+            # parcel_ratings_views — per-view (NBV/Export) Good/Bad CAD parcel
+            # ratings, additive companion to parcel_ratings (ARV store). Same
+            # view exclusion + unconditional-create discipline as above.
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS parcel_ratings_views (
+                    rating_id BIGSERIAL PRIMARY KEY,
+                    workspace_id TEXT NOT NULL REFERENCES saved_areas(area_id) ON DELETE CASCADE,
+                    county TEXT NOT NULL,
+                    account_num TEXT NOT NULL,
+                    view TEXT NOT NULL CHECK (view IN ('nbv','export')),
+                    rating TEXT NOT NULL CHECK (rating IN ('good','bad')),
+                    rated_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    rated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    UNIQUE (workspace_id, county, account_num, view)
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_parcel_ratings_views_ws
+                    ON parcel_ratings_views (workspace_id, county, account_num)
                 """
             )
             # One-shot migration: copy legacy propelio_comp_archive.user_rating into
@@ -1103,21 +1154,82 @@ def _user_area_role(area_id: str, user_id: int) -> str | None:
         release_session_conn(conn)
 
 
-def _load_parcel_ratings_for_workspace(workspace_id: str | None) -> dict[tuple[str, str], str]:
+def _load_parcel_ratings_for_workspace(
+    workspace_id: str | None,
+    view: str = "arv",
+) -> dict[tuple[str, str], str]:
     """Return {(county_lower, account_num): rating} for the workspace, or
     {} if no workspace. Single SQL query — apply to features in-memory to
     avoid per-row joins across county-specific parcel tables.
-    Per PARCEL_RATINGS_SPEC.md v2 §2D."""
+    Per PARCEL_RATINGS_SPEC.md v2 §2D.
+
+    Per-view ratings spec §3.3 / FMEA H2: view='arv' (default) reads the
+    EXISTING parcel_ratings table (unchanged query, today's behavior). view
+    in ('nbv','export') reads the additive parcel_ratings_views table
+    WHERE view=%s, same workspace scoping. Chunk B only makes the function
+    CAPABLE of per-view; all callers default to 'arv' (CSV's true per-view
+    wiring is Chunk C; analyze's active-view wiring is Chunk E), so this
+    is byte-for-byte today's behavior unless a caller passes a non-arv view.
+    """
+    if not workspace_id:
+        return {}
+    # Normalize + validate view (defensive; invalid → arv fallback rather than
+    # 500, since this is a read helper, not a request handler).
+    norm_view = str(view or "").strip().lower() or "arv"
+    if norm_view not in ("arv", "nbv", "export"):
+        norm_view = "arv"
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            if norm_view == "arv":
+                # ARV path — EXISTING parcel_ratings table, unchanged query.
+                cur.execute(
+                    "SELECT county, account_num, rating FROM parcel_ratings WHERE workspace_id = %s",
+                    (workspace_id,),
+                )
+            else:
+                # NBV/Export path — additive parcel_ratings_views table.
+                cur.execute(
+                    "SELECT county, account_num, rating FROM parcel_ratings_views WHERE workspace_id = %s AND view = %s",
+                    (workspace_id, norm_view),
+                )
+            return {(str(c).lower(), str(a)): str(r) for c, a, r in cur.fetchall()}
+    finally:
+        release_session_conn(conn)
+
+
+def _load_parcel_ratings_by_view_for_workspace(
+    workspace_id: str | None,
+) -> dict[tuple[str, str], dict[str, str]]:
+    """Return {(county_lower, account_num): {view: rating}} for the workspace's
+    NON-ARV (nbv/export) parcel ratings, or {} if no workspace. One SQL query
+    over the additive parcel_ratings_views table — the parcel analogue of the
+    comp ratings_by_view Alt-D hydrate (load_comps_by_polygon, Chunk B).
+
+    Per-view ratings spec §4 (Chunk E parcel display): ARV stays in
+    `user_rating` via _load_parcel_ratings_for_workspace(view='arv'); this
+    layers the per-view ratings so the frontend can project the active view's
+    parcel marks without a cross-view bleed. Additive + backward-compatible:
+    flag-off clients ignore the extra `ratings_by_view` property. Parcels with
+    no per-view rating simply have no key here → the caller defaults to {}.
+    """
     if not workspace_id:
         return {}
     conn = get_session_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT county, account_num, rating FROM parcel_ratings WHERE workspace_id = %s",
+                """
+                SELECT county, account_num, view, rating
+                FROM parcel_ratings_views
+                WHERE workspace_id = %s AND view IN ('nbv', 'export')
+                """,
                 (workspace_id,),
             )
-            return {(str(c).lower(), str(a)): str(r) for c, a, r in cur.fetchall()}
+            out: dict[tuple[str, str], dict[str, str]] = {}
+            for c, a, v, r in cur.fetchall():
+                out.setdefault((str(c).lower(), str(a)), {})[str(v)] = str(r)
+            return out
     finally:
         release_session_conn(conn)
 
@@ -1127,6 +1239,9 @@ class ParcelRateRequest(BaseModel):
     county: str
     account_num: str
     rating: str | None = None  # 'good', 'bad', or None to clear
+    # Per-view ratings spec §3.1 (FMEA C2): absent/None → 'arv' (coexistence
+    # with old flag-off clients). Present-but-invalid → 400 (never silent ARV).
+    view: Optional[Literal["arv", "nbv", "export"]] = None  # 'arv' | 'nbv' | 'export' | None
 
 
 def _job_share_id(job_id: str, fallback_saved_area_id: str | None = None) -> str:
@@ -1360,7 +1475,12 @@ def _build_features_from_rows(
 
     exempt_set: set[str] = set()
     features: list[dict[str, Any]] = []
-    parcel_ratings_map: dict[tuple[str, str], str] = _load_parcel_ratings_for_workspace(area_id)
+    # ARV ratings stay in user_rating (today's behavior, unchanged query).
+    parcel_ratings_map: dict[tuple[str, str], str] = _load_parcel_ratings_for_workspace(area_id, view="arv")
+    # Chunk E (per-view ratings spec §4): additionally layer the per-view
+    # (nbv/export) parcel ratings so the frontend projects the active view's
+    # marks without ARV bleeding across views. Additive + backward-compatible.
+    parcel_ratings_by_view: dict[tuple[str, str], dict[str, str]] = _load_parcel_ratings_by_view_for_workspace(area_id)
     counts: dict[str, int] = {
         "active": 0, "off_market": 0, "multifamily": 0, "duplexes": 0,
         "vacant": 0, "commercial": 0, "exempt": 0, "total": len(rows),
@@ -1400,6 +1520,9 @@ def _build_features_from_rows(
                 str(feature["properties"].get("account_num", "") or "").strip(),
             )
             feature["properties"]["user_rating"] = parcel_ratings_map.get(_rating_key)
+            # Per-view ratings (nbv/export); {} when none → frontend projects
+            # null for non-ARV views (Chunk E). ARV is user_rating above.
+            feature["properties"]["ratings_by_view"] = parcel_ratings_by_view.get(_rating_key, {})
             features.append(feature)
         except Exception:
             continue
@@ -4451,7 +4574,12 @@ async def analyze(request: AnalyzeRequest, req: Request, user: dict[str, Any] = 
     # SQL query, applied in-memory below to avoid per-row joins across
     # county-specific parcel tables. Public/unauth endpoints intentionally
     # skip this hydrate (security boundary per KK product call).
-    parcel_ratings_map: dict[tuple[str, str], str] = _load_parcel_ratings_for_workspace(area_id)
+    # ARV ratings stay in user_rating (today's behavior, unchanged query).
+    parcel_ratings_map: dict[tuple[str, str], str] = _load_parcel_ratings_for_workspace(area_id, view="arv")
+    # Chunk E (per-view ratings spec §4): additionally layer the per-view
+    # (nbv/export) parcel ratings so the frontend projects the active view's
+    # marks without ARV bleeding across views. Additive + backward-compatible.
+    parcel_ratings_by_view: dict[tuple[str, str], dict[str, str]] = _load_parcel_ratings_by_view_for_workspace(area_id)
     counts = {
         "active": 0,
         "off_market": 0,
@@ -4515,6 +4643,9 @@ async def analyze(request: AnalyzeRequest, req: Request, user: dict[str, Any] = 
                 str(feature["properties"].get("account_num", "") or "").strip(),
             )
             feature["properties"]["user_rating"] = parcel_ratings_map.get(_rating_key)
+            # Per-view ratings (nbv/export); {} when none → frontend projects
+            # null for non-ARV views (Chunk E). ARV is user_rating above.
+            feature["properties"]["ratings_by_view"] = parcel_ratings_by_view.get(_rating_key, {})
             features.append(feature)
         except ValueError:
             continue
@@ -4882,6 +5013,13 @@ class DownloadFilterRequest(BaseModel):
     # share_id column would point back at the source area, not the active
     # copy. When this field is set, it wins over the cached_jobs fallback.
     loaded_area_id: str | None = None
+    # Per-view ratings spec §3.4 (FMEA H1): the active filter view the CSV
+    # is exported from. view='arv' (default for absent — coexistence with
+    # old clients) → today's ARV Good Comp column byte-for-byte. view in
+    # ('nbv','export') → Good Comp column sourced from that view's comp +
+    # parcel ratings. Frontend sends this in Chunk E; Chunk C defaults to
+    # 'arv' = today's behavior.
+    view: str = "arv"
 
 
 @app.get("/api/download/{job_id}")
@@ -4928,6 +5066,9 @@ async def download_filtered(
         # filter_state and bad_comp_ids params reserved for Phase C2.
         filter_state=body.filter_state,
         loaded_area_id=body.loaded_area_id,
+        # Per-view ratings §3.4 (FMEA H1): thread the active view so the
+        # Good Comp column reflects it. Defaults to 'arv' (coexistence).
+        view=body.view,
     )
 
 
@@ -4940,9 +5081,20 @@ async def _run_download_csv(
     filter_state: dict[str, Any] | None = None,
     bad_comp_ids: set[int] | None = None,
     loaded_area_id: str | None = None,
+    view: str = "arv",
 ) -> StreamingResponse:
+    # H9 (FMEA): role gate runs FIRST, before any view handling. The CSV
+    # export role check is never weakened by per-view wiring.
     if str(user.get("role") or "").strip().lower() == "user":
         raise HTTPException(status_code=403, detail="CSV export not available for this role")
+
+    # Per-view ratings §3.4 (FMEA H1): normalize the active view. absent/None
+    # → 'arv' (coexistence with old clients that don't send the field).
+    # Present-but-invalid → 400 (NEVER silently default an invalid present
+    # view to ARV — same discipline as the write side, FMEA C2).
+    norm_view = str(view or "").strip().lower() or "arv"
+    if norm_view not in ("arv", "nbv", "export"):
+        raise HTTPException(status_code=400, detail="view must be 'arv', 'nbv', 'export', or null")
 
     job = _get_job(job_id, int(user["id"]))
     if job is None:
@@ -5041,24 +5193,49 @@ async def _run_download_csv(
     # PARCEL_RATINGS_SPEC.md v2). Distinct from parcel_rating_by_key above
     # which is comp-derived. Used in COMP-WINS-ABSOLUTE exclusion: direct
     # rating only applies when there's no comp rating for that parcel.
-    parcel_rating_direct_by_key: dict[tuple[str, str], str] = _load_parcel_ratings_for_workspace(job_saved_area_id)
+    # Per-view ratings spec §3.4 (FMEA H1): source the ACTIVE view's parcel
+    # ratings. view='arv' → parcel_ratings (today's behavior); view in
+    # ('nbv','export') → parcel_ratings_views (Chunk B made the loader
+    # view-aware). _load_parcel_ratings_for_workspace handles the routing.
+    parcel_rating_direct_by_key: dict[tuple[str, str], str] = _load_parcel_ratings_for_workspace(job_saved_area_id, view=norm_view)
     if job_saved_area_id:
         _conn = get_session_conn()
         try:
             with _conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT
-                        cr.comp_id,
-                        cr.rating,
-                        pc.parcel_county,
-                        pc.parcel_account_num
-                    FROM comp_ratings cr
-                    JOIN propelio_comps pc ON cr.comp_id = pc.comp_id
-                    WHERE cr.workspace_id = %s
-                    """,
-                    (job_saved_area_id,),
-                )
+                # Per-view ratings spec §3.4 (FMEA H1): source the ACTIVE
+                # view's comp ratings. view='arv' → comp_ratings (unchanged
+                # query, today's ARV behavior byte-for-byte). view in
+                # ('nbv','export') → comp_ratings_views WHERE view=%s
+                # (workspace-scoped — C4 cross-tenant guard). The bad-wins
+                # conflict resolution below runs ONCE on this view's data.
+                if norm_view == "arv":
+                    cur.execute(
+                        """
+                        SELECT
+                            cr.comp_id,
+                            cr.rating,
+                            pc.parcel_county,
+                            pc.parcel_account_num
+                        FROM comp_ratings cr
+                        JOIN propelio_comps pc ON cr.comp_id = pc.comp_id
+                        WHERE cr.workspace_id = %s
+                        """,
+                        (job_saved_area_id,),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT
+                            cr.comp_id,
+                            cr.rating,
+                            pc.parcel_county,
+                            pc.parcel_account_num
+                        FROM comp_ratings_views cr
+                        JOIN propelio_comps pc ON cr.comp_id = pc.comp_id
+                        WHERE cr.workspace_id = %s AND cr.view = %s
+                        """,
+                        (job_saved_area_id, norm_view),
+                    )
                 for comp_id, rating, parcel_county, parcel_account_num in cur.fetchall():
                     rating_by_comp_id[int(comp_id)] = rating
                     if not parcel_county or not parcel_account_num:
@@ -5072,7 +5249,7 @@ async def _run_download_csv(
                     # Bad-wins conflict resolution: once a parcel has any bad
                     # rating, no other rating displaces it. Otherwise good
                     # upgrades from no-rating, but cannot overwrite an
-                    # earlier bad.
+                    # earlier bad. Runs ONCE on the active view's data (H1).
                     existing = parcel_rating_by_key.get(pkey)
                     if existing == "bad":
                         continue
@@ -7578,6 +7755,36 @@ async def fork_saved_area(
                 (row[0], source_area_id),
             )
 
+            # comp_ratings_views — per-view (nbv/export) comp ratings. Per
+            # per-view ratings spec §3.3 / FMEA C5: fork copies the _views
+            # tables parallel to the ARV comp_ratings copy above so the
+            # forked workspace inherits the source's per-view judgments.
+            # rating_id excluded (BIGSERIAL auto-generates); view copied
+            # verbatim. Same cursor + transaction as the copies above.
+            cur.execute(
+                """
+                INSERT INTO comp_ratings_views (workspace_id, comp_id, view, rating, rated_by_user_id, rated_at)
+                SELECT %s, comp_id, view, rating, rated_by_user_id, rated_at
+                FROM comp_ratings_views
+                WHERE workspace_id = %s
+                """,
+                (row[0], source_area_id),
+            )
+
+            # parcel_ratings_views — per-view (nbv/export) direct parcel
+            # ratings, parallel to the parcel_ratings copy above. Same
+            # discipline: rating_id excluded, view copied verbatim, same
+            # cursor + transaction. FMEA C5.
+            cur.execute(
+                """
+                INSERT INTO parcel_ratings_views (workspace_id, county, account_num, view, rating, rated_by_user_id, rated_at)
+                SELECT %s, county, account_num, view, rating, rated_by_user_id, rated_at
+                FROM parcel_ratings_views
+                WHERE workspace_id = %s
+                """,
+                (row[0], source_area_id),
+            )
+
             # stored_value_entries — copy the source area's stored values
             # (ARV / TDPP / rehab + comments) into the fork, parallel to the
             # rating copies above, so a shared-then-opened (forked) area keeps
@@ -8141,7 +8348,14 @@ async def delete_saved_parcel(county: str, account_num: str, req: Request, user:
 async def rate_parcel(request: ParcelRateRequest, req: Request, user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
     """Workspace-scoped Good/Bad/Clear rating for a CAD parcel. Parallel
     to /api/propelio/comp/rate but keyed by (county, account_num) since
-    parcels exist independently of comps. Per PARCEL_RATINGS_SPEC.md v2."""
+    parcels exist independently of comps. Per PARCEL_RATINGS_SPEC.md v2.
+
+    view routing (per-view ratings spec §3.1, FMEA C2): view='arv' (the
+    default for absent/None — coexistence with old clients) → the EXISTING
+    parcel_ratings table, byte-for-byte unchanged; view in ('nbv','export')
+    → the additive parcel_ratings_views table, UPSERT keyed with view;
+    clear = DELETE that view's row only. view='arv' is never written to
+    the _views table (CHECK excludes it)."""
     require_csrf(req)
     area_id = str(request.saved_area_id or "").strip()
     county = str(request.county or "").strip().lower()
@@ -8151,29 +8365,65 @@ async def rate_parcel(request: ParcelRateRequest, req: Request, user: dict[str, 
         raise HTTPException(status_code=400, detail="saved_area_id, county, account_num all required")
     if rating not in (None, "good", "bad"):
         raise HTTPException(status_code=400, detail="rating must be 'good', 'bad', or null")
+    # View normalization (FMEA C2): absent/None → 'arv' (old clients coexist;
+    # flag-ON frontend always sends an explicit view, so missing = old client).
+    # Present-but-invalid → 400 (NEVER silently default an invalid present
+    # view to ARV).
+    if request.view is None:
+        norm_view = "arv"
+    else:
+        norm_view = str(request.view).strip().lower()
+        if norm_view not in ("arv", "nbv", "export"):
+            raise HTTPException(status_code=400, detail="view must be 'arv', 'nbv', 'export', or null")
     # Sprint 1: editors can rate parcels on shared areas (spec §3.2).
     _assert_user_is_area_member(area_id, int(user["id"]))
 
     conn = get_session_conn()
     try:
         with conn.cursor() as cur:
-            if rating is None:
-                cur.execute(
-                    "DELETE FROM parcel_ratings WHERE workspace_id = %s AND county = %s AND account_num = %s",
-                    (area_id, county, account_num),
-                )
+            if norm_view == "arv":
+                # ARV path — EXISTING parcel_ratings table, byte-for-byte
+                # unchanged. This is the load-bearing coexistence invariant.
+                if rating is None:
+                    cur.execute(
+                        "DELETE FROM parcel_ratings WHERE workspace_id = %s AND county = %s AND account_num = %s",
+                        (area_id, county, account_num),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        INSERT INTO parcel_ratings (workspace_id, county, account_num, rating, rated_by_user_id)
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (workspace_id, county, account_num) DO UPDATE
+                        SET rating = EXCLUDED.rating,
+                            rated_by_user_id = EXCLUDED.rated_by_user_id,
+                            rated_at = NOW()
+                        """,
+                        (area_id, county, account_num, rating, int(user["id"])),
+                    )
             else:
-                cur.execute(
-                    """
-                    INSERT INTO parcel_ratings (workspace_id, county, account_num, rating, rated_by_user_id)
-                    VALUES (%s, %s, %s, %s, %s)
-                    ON CONFLICT (workspace_id, county, account_num) DO UPDATE
-                    SET rating = EXCLUDED.rating,
-                        rated_by_user_id = EXCLUDED.rated_by_user_id,
-                        rated_at = NOW()
-                    """,
-                    (area_id, county, account_num, rating, int(user["id"])),
-                )
+                # NBV/Export path — additive parcel_ratings_views table. view
+                # CHECK excludes 'arv' (structurally impossible to shadow ARV).
+                if rating is None:
+                    cur.execute(
+                        """
+                        DELETE FROM parcel_ratings_views
+                        WHERE workspace_id = %s AND county = %s AND account_num = %s AND view = %s
+                        """,
+                        (area_id, county, account_num, norm_view),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        INSERT INTO parcel_ratings_views (workspace_id, county, account_num, view, rating, rated_by_user_id)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (workspace_id, county, account_num, view) DO UPDATE
+                        SET rating = EXCLUDED.rating,
+                            rated_by_user_id = EXCLUDED.rated_by_user_id,
+                            rated_at = NOW()
+                        """,
+                        (area_id, county, account_num, norm_view, rating, int(user["id"])),
+                    )
         conn.commit()
     except HTTPException:
         conn.rollback()
@@ -8183,7 +8433,7 @@ async def rate_parcel(request: ParcelRateRequest, req: Request, user: dict[str, 
         raise
     finally:
         release_session_conn(conn)
-    return {"ok": True, "rating": rating}
+    return {"ok": True, "rating": rating, "view": norm_view}
 
 
 # =============================================================================
