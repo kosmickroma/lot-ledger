@@ -4965,6 +4965,13 @@ class DownloadFilterRequest(BaseModel):
     # share_id column would point back at the source area, not the active
     # copy. When this field is set, it wins over the cached_jobs fallback.
     loaded_area_id: str | None = None
+    # Per-view ratings spec §3.4 (FMEA H1): the active filter view the CSV
+    # is exported from. view='arv' (default for absent — coexistence with
+    # old clients) → today's ARV Good Comp column byte-for-byte. view in
+    # ('nbv','export') → Good Comp column sourced from that view's comp +
+    # parcel ratings. Frontend sends this in Chunk E; Chunk C defaults to
+    # 'arv' = today's behavior.
+    view: str = "arv"
 
 
 @app.get("/api/download/{job_id}")
@@ -5011,6 +5018,9 @@ async def download_filtered(
         # filter_state and bad_comp_ids params reserved for Phase C2.
         filter_state=body.filter_state,
         loaded_area_id=body.loaded_area_id,
+        # Per-view ratings §3.4 (FMEA H1): thread the active view so the
+        # Good Comp column reflects it. Defaults to 'arv' (coexistence).
+        view=body.view,
     )
 
 
@@ -5023,9 +5033,20 @@ async def _run_download_csv(
     filter_state: dict[str, Any] | None = None,
     bad_comp_ids: set[int] | None = None,
     loaded_area_id: str | None = None,
+    view: str = "arv",
 ) -> StreamingResponse:
+    # H9 (FMEA): role gate runs FIRST, before any view handling. The CSV
+    # export role check is never weakened by per-view wiring.
     if str(user.get("role") or "").strip().lower() == "user":
         raise HTTPException(status_code=403, detail="CSV export not available for this role")
+
+    # Per-view ratings §3.4 (FMEA H1): normalize the active view. absent/None
+    # → 'arv' (coexistence with old clients that don't send the field).
+    # Present-but-invalid → 400 (NEVER silently default an invalid present
+    # view to ARV — same discipline as the write side, FMEA C2).
+    norm_view = str(view or "").strip().lower() or "arv"
+    if norm_view not in ("arv", "nbv", "export"):
+        raise HTTPException(status_code=400, detail="view must be 'arv', 'nbv', 'export', or null")
 
     job = _get_job(job_id, int(user["id"]))
     if job is None:
@@ -5124,26 +5145,49 @@ async def _run_download_csv(
     # PARCEL_RATINGS_SPEC.md v2). Distinct from parcel_rating_by_key above
     # which is comp-derived. Used in COMP-WINS-ABSOLUTE exclusion: direct
     # rating only applies when there's no comp rating for that parcel.
-    # Chunk B: view="arv" explicit (today's behavior). CSV's true per-view
-    # wiring is Chunk C. Per-view ratings spec §3.3 / FMEA H2.
-    parcel_rating_direct_by_key: dict[tuple[str, str], str] = _load_parcel_ratings_for_workspace(job_saved_area_id, view="arv")
+    # Per-view ratings spec §3.4 (FMEA H1): source the ACTIVE view's parcel
+    # ratings. view='arv' → parcel_ratings (today's behavior); view in
+    # ('nbv','export') → parcel_ratings_views (Chunk B made the loader
+    # view-aware). _load_parcel_ratings_for_workspace handles the routing.
+    parcel_rating_direct_by_key: dict[tuple[str, str], str] = _load_parcel_ratings_for_workspace(job_saved_area_id, view=norm_view)
     if job_saved_area_id:
         _conn = get_session_conn()
         try:
             with _conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT
-                        cr.comp_id,
-                        cr.rating,
-                        pc.parcel_county,
-                        pc.parcel_account_num
-                    FROM comp_ratings cr
-                    JOIN propelio_comps pc ON cr.comp_id = pc.comp_id
-                    WHERE cr.workspace_id = %s
-                    """,
-                    (job_saved_area_id,),
-                )
+                # Per-view ratings spec §3.4 (FMEA H1): source the ACTIVE
+                # view's comp ratings. view='arv' → comp_ratings (unchanged
+                # query, today's ARV behavior byte-for-byte). view in
+                # ('nbv','export') → comp_ratings_views WHERE view=%s
+                # (workspace-scoped — C4 cross-tenant guard). The bad-wins
+                # conflict resolution below runs ONCE on this view's data.
+                if norm_view == "arv":
+                    cur.execute(
+                        """
+                        SELECT
+                            cr.comp_id,
+                            cr.rating,
+                            pc.parcel_county,
+                            pc.parcel_account_num
+                        FROM comp_ratings cr
+                        JOIN propelio_comps pc ON cr.comp_id = pc.comp_id
+                        WHERE cr.workspace_id = %s
+                        """,
+                        (job_saved_area_id,),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT
+                            cr.comp_id,
+                            cr.rating,
+                            pc.parcel_county,
+                            pc.parcel_account_num
+                        FROM comp_ratings_views cr
+                        JOIN propelio_comps pc ON cr.comp_id = pc.comp_id
+                        WHERE cr.workspace_id = %s AND cr.view = %s
+                        """,
+                        (job_saved_area_id, norm_view),
+                    )
                 for comp_id, rating, parcel_county, parcel_account_num in cur.fetchall():
                     rating_by_comp_id[int(comp_id)] = rating
                     if not parcel_county or not parcel_account_num:
@@ -5157,7 +5201,7 @@ async def _run_download_csv(
                     # Bad-wins conflict resolution: once a parcel has any bad
                     # rating, no other rating displaces it. Otherwise good
                     # upgrades from no-rating, but cannot overwrite an
-                    # earlier bad.
+                    # earlier bad. Runs ONCE on the active view's data (H1).
                     existing = parcel_rating_by_key.get(pkey)
                     if existing == "bad":
                         continue

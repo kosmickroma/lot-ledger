@@ -388,9 +388,13 @@ def test_h2_parcel_loader_validates_view():
     )
 
 
-def test_h2_callers_default_to_arv():
-    """H2: all 3 callers pass view='arv' in Chunk B (CSV per-view is Chunk C,
-    analyze active-view is Chunk E). Today's behavior preserved."""
+def test_h2_callers_pass_explicit_view():
+    """H2 (post-Chunk-C): every caller passes an EXPLICIT view — none is left
+    unscoped. The analyze hydrate paths still pass view='arv' (active-view
+    analyze is Chunk E); the CSV caller now passes the active view
+    (view=norm_view) — that is Chunk C's per-view export. The invariant under
+    test is 'no caller silently relies on the default', which keeps every read
+    intentionally scoped on the shared prod DB."""
     src = inspect.getsource(api_main)
     # Find all call sites.
     call_sites = []
@@ -408,11 +412,27 @@ def test_h2_callers_default_to_arv():
     assert len(call_sites) >= 3, (
         f"Expected >=3 _load_parcel_ratings_for_workspace call sites, found {len(call_sites)}."
     )
+    arv_sites = 0
+    view_var_sites = 0
     for site in call_sites:
-        assert 'view="arv"' in site or "view='arv'" in site, (
-            f"Every Chunk B caller must pass view='arv' (today's behavior). "
-            f"Site: {site}"
+        is_arv = 'view="arv"' in site or "view='arv'" in site
+        # Chunk C's CSV caller passes the normalized active view.
+        is_view_var = "view=norm_view" in site
+        assert is_arv or is_view_var, (
+            f"Every caller must pass an explicit view — either view='arv' "
+            f"(analyze) or view=norm_view (CSV per-view, Chunk C). Site: {site}"
         )
+        arv_sites += 1 if is_arv else 0
+        view_var_sites += 1 if is_view_var else 0
+    # Analyze hydrate (×2) still defaults to arv; CSV (×1) is now view-aware.
+    assert arv_sites >= 2, (
+        f"Expected the 2 analyze hydrate callers to still pass view='arv' "
+        f"(active-view analyze is Chunk E); found {arv_sites}."
+    )
+    assert view_var_sites >= 1, (
+        f"Expected the CSV caller to pass view=norm_view (Chunk C per-view "
+        f"export); found {view_var_sites}."
+    )
 
 
 # ═════════════════════════════════════════════════════════════════════════
