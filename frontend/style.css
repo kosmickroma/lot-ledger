@@ -1025,6 +1025,35 @@ body.is-not-power-user .power-user-only {
   background: rgba(201, 162, 79, 0.18);
 }
 
+/* Share button — mirrors .active-item-rename-btn so the 🔗 sits inline-
+   adjacent to the ✎ pencil and wraps with it on long workspace names.
+   Same size/spacing/inline display; only the glyph differs. Native
+   title attribute (browser tooltip), matching the pencil — no custom
+   tooltip element/CSS. */
+.active-item-share-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  margin-left: 6px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--gold);
+  font-size: 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  vertical-align: middle;
+  opacity: 0.65;
+  transition: opacity 0.14s ease, background 0.14s ease;
+}
+
+.active-item-share-btn:hover {
+  opacity: 1;
+  background: rgba(201, 162, 79, 0.18);
+}
+
 .active-item-name.is-editing {
   display: inline-block;
 }

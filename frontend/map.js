@@ -2500,6 +2500,14 @@ function _updateActiveItemRenameVisibility() {
   const isOwnerOfLoaded = loadedArea ? (loadedArea.role || "owner") === "owner" : true;
   const shouldShow = (Boolean(_currentLoadedAreaId) || hasRealName) && isOwnerOfLoaded;
   btn.classList.toggle("hidden", !shouldShow);
+  // Share button: shown whenever the loaded area is shareable (has a share_id).
+  // NOT owner-only — anyone can copy a share link (mirrors the saved-areas-list
+  // 🔗 button). Rides the same visibility triggers as the rename pencil.
+  const shareBtn = document.getElementById("active-item-share");
+  if (shareBtn) {
+    const shareId = loadedArea ? String(loadedArea.share_id || "").trim() : "";
+    shareBtn.classList.toggle("hidden", !(Boolean(_currentLoadedAreaId) && shareId));
+  }
 }
 
 (function _initActiveItemRenamePencil() {
@@ -2508,6 +2516,32 @@ function _updateActiveItemRenameVisibility() {
   btn.addEventListener("click", (e) => {
     e.preventDefault();
     void _handleActiveItemRenameClick();
+  });
+})();
+
+// Share button next to the rename pencil — copies the loaded area's share link,
+// reusing the exact copy logic from the saved-areas-list 🔗 handler (no new
+// backend, no new share logic). Isolated handler: reads _savedAreasCache, writes
+// to clipboard, toasts — no autosave/restore side effects.
+(function _initActiveItemShareButton() {
+  const btn = document.getElementById("active-item-share");
+  if (!btn) return;
+  btn.addEventListener("click", async (e) => {
+    e.preventDefault();
+    if (!_currentLoadedAreaId) return;
+    const loadedArea = _savedAreasCache.find((a) => String(a.id) === String(_currentLoadedAreaId));
+    const shareId = loadedArea ? String(loadedArea.share_id || "").trim() : "";
+    if (!shareId) return;
+    const url = `${window.location.origin}/?area=${shareId}`;
+    try {
+      if (!navigator.clipboard || typeof navigator.clipboard.writeText !== "function") {
+        throw new Error("Clipboard API unavailable");
+      }
+      await navigator.clipboard.writeText(url);
+      _showToast("Link copied");
+    } catch {
+      _showToast("Copy failed - try again", "error");
+    }
   });
 })();
 
