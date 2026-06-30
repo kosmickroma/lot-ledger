@@ -38,6 +38,11 @@ WITH source_rows AS (
     COALESCE(a.tot_val, 0) AS tot_val,
     COALESCE(l.area_size, 0) AS area_size,
     COALESCE(l.area_estimated, false) AS area_estimated,
+    -- ⚠️ PHASE 2 PENDING (2026-06-30): the live classifier (api/counties/dcad.py) now
+    -- treats B12 as 'duplexes' (label-first, audit confirmed). This SQL still says
+    -- 'multifamily' for B12. Re-baking from this file WILL regress browse (all DCAD
+    -- duplexes → dark multifamily). Do NOT re-bake until the Phase-2 single-source
+    -- fix lands and this CASE is updated to match dcad.py classify_parcel().
     CASE
       WHEN e.account_num IS NOT NULL
            OR COALESCE(a.sptd_code, p.sptd_code) IN ('X11', 'D10')            THEN 'exempt'
@@ -87,6 +92,8 @@ SELECT json_build_object(
   'geometry', ST_AsGeoJSON(p.centroid)::json,
   'properties', json_build_object(
     'account_num',           p.account_num,
+    -- ⚠️ PHASE 2 PENDING (2026-06-30): see polygon block comment above. Same B12/duplexes
+    -- divergence applies to this centroid fallback. Do not re-bake until Phase 2 lands.
     'prop_type',             CASE
       WHEN e.account_num IS NOT NULL
            OR COALESCE(a.sptd_code, p.sptd_code) IN ('X11', 'D10')            THEN 'exempt'
@@ -130,6 +137,9 @@ WITH source_rows AS (
     t.owner_name,
     COALESCE(t.total_value, 0) AS total_value,
     COALESCE(t.land_sqft, t.land_acres * 43560, 0) AS area_size,
+    -- ⚠️ PHASE 2 PENDING (2026-06-30): tad.py classify_parcel() already emits
+    -- 'duplexes' for B2/B3/B4 (duplex codes). This SQL still maps them to
+    -- 'multifamily'. Do NOT re-bake TAD tiles until Phase 2 updates this CASE.
     CASE
       WHEN t.property_class IN (
              'D1','D2','G1','G2','G3','G4',
@@ -187,6 +197,9 @@ WITH source_rows AS (
     c.owner_name,
     COALESCE(c.total_value, 0) AS total_value,
     COALESCE(c.land_sqft, c.land_acres * 43560, 0) AS area_size,
+    -- ⚠️ PHASE 2 PENDING (2026-06-30): collin.py classify_parcel() already emits
+    -- 'duplexes' for B2/B3/B4 (duplex codes). This SQL still maps them to
+    -- 'multifamily'. Do NOT re-bake Collin tiles until Phase 2 updates this CASE.
     CASE
       WHEN c.state_cd LIKE 'EX%%'
            OR c.state_cd IN ('D1', 'D2', 'D6', 'J1A', 'J2A', 'J3A', 'J4A', 'J5', 'J6A')
@@ -255,6 +268,9 @@ SELECT json_build_object(
           )
           AND code NOT IN ('A1', 'A2', 'A3', 'A4', 'A5', 'A6', 'A9')
         ) THEN 'exempt'
+      -- ⚠️ PHASE 2 PENDING (2026-06-30): denton.py classify_parcel() emits 'duplexes'
+      -- for OB2 and B2 (duplex codes). This SQL maps them to 'multifamily'. Do NOT
+      -- re-bake Denton tiles until Phase 2 updates this CASE.
       WHEN code IN ('B1', 'B2') THEN 'multifamily'
       WHEN code IN ('C1', 'C2', 'C3', 'C5') THEN 'vacant'
       WHEN code IN ('F1', 'F2', 'F3', 'J3', 'J5', 'OC1') THEN 'commercial'
