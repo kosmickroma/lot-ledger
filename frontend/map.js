@@ -58,6 +58,27 @@ const APP_VERSION = (window.LL_CONFIG && window.LL_CONFIG.appVersion && window.L
   ? window.LL_CONFIG.appVersion
   : "dev";
 
+// Instant-reshape flag. Ships OFF via LL_CONFIG (see index.html). For preview
+// testing it can be enabled per-browser WITHOUT committing the flag on:
+//   - URL param  ?instantReshape=1   (one-off, current load)
+//   - localStorage ll_instant_reshape="1"  (sticky for this browser)
+// The committed default stays false so dev/main inherit it OFF.
+const INSTANT_RESHAPE_ENABLED = Boolean(
+  (window.LL_CONFIG && window.LL_CONFIG.instantReshape) ||
+  /[?&]instantReshape=1\b/.test(window.location.search) ||
+  (() => { try { return localStorage.getItem("ll_instant_reshape") === "1"; } catch (_e) { return false; } })()
+);
+
+// ARV · NBV · Export filter-view toggle. Ships OFF via LL_CONFIG. Per-browser
+// override for preview soak without committing the flag on:
+//   - URL param  ?arvNbvExport=1   (one-off, current load)
+//   - localStorage ll_arv_nbv_export="1"  (sticky for this browser)
+const ARV_NBV_EXPORT_ENABLED = Boolean(
+  (window.LL_CONFIG && window.LL_CONFIG.arvNbvExport) ||
+  /[?&]arvNbvExport=1\b/.test(window.location.search) ||
+  (() => { try { return localStorage.getItem("ll_arv_nbv_export") === "1"; } catch (_e) { return false; } })()
+);
+
 function _formatAppVersionForDisplay(raw) {
   // Pill is white-space:nowrap and shares the sidebar header row with the
   // user dropdown. Long preview APP_VERSION (e.g. "0.28-feat-foo-bar-pre")
@@ -995,6 +1016,15 @@ let _savedTargetsSearchQuery = "";
 let _currentSessionIsNamed = false;
 let _savedSessionsCache = [];
 let _currentLoadedAreaId = null;
+let _reshapeTargetAreaId = null;
+let _preReshapeFeatures = null;        // full pre-clip set, for restore-on-error / reconcile (Chunk C)
+let _reshapeClippedSubset = null;      // the optimistic clip result (Chunk C compares against analyze)
+let _reshapeOptimisticApplied = false; // did we optimistic-render this reshape? (Chunk C)
+// ARV · NBV · Export filter-view toggle state (Feature #3). Both are purely
+// in-memory and per-tab — not persisted. _viewFilterCache is null per view
+// until hydrated from the loaded area's filter_state on area load.
+let _activeView = "arv";   // 'arv' | 'nbv' | 'export'
+let _viewFilterCache = { arv: null, nbv: null, export: null };
 let _currentTargetParcel = null; // { county, account, lat?, lng? } | null
 // v1.1 §2.6 — gates cross-tab refetch to prevent flicker when concurrent
 // subject-saves are in-flight. See TkDodo "Concurrent Optimistic Updates
@@ -1023,6 +1053,12 @@ let _filterSaveClientSeq = 0;
 // captureFilterState() output and decide which fields actually changed.
 // null = no area loaded; reset on clearDrawResults, set on restoreSavedArea.
 let _filterSaveLastSnapshot = null;
+// When true, _filterSaveQueueSave() is a no-op. Set during restoreFilterState
+// so LOADING a view/area (incl. the comp re-filter it triggers) never generates
+// save traffic — a view switch must not "save," only display (KK 2026-06-29).
+// Genuine user edits (input handlers) and the explicit seed persist run with
+// this false, so they still save normally.
+let _suppressFilterAutosave = false;
 
 // Sprint 3 multi-user collab: SSE subscriber state.
 // Per docs/MULTIUSER_COLLAB_SPRINT3_SPEC.md v1 §4.1.
@@ -1851,6 +1887,11 @@ function getAnalysisErrorMessage(err, fallback = "Analysis failed. Please try ag
 }
 
 function captureFilterState() {
+  // Always serializes the live UI as an ARV-flat blob regardless of _activeView.
+  // Correct for diff baselines on any view. Whole-blob POST paths
+  // (saveCurrentArea, saveCurrentSession) only run while _activeView === 'arv'
+  // (draw severs the bond on drawstart; session-save has no view context).
+  // Do NOT use for non-ARV whole-blob writes — see spec §5.7.
   return {
     v: 1,
     checkboxes: { ...filterState },
@@ -1867,6 +1908,9 @@ function captureFilterState() {
   };
 }
 
+// Normalizes a flat ARV-form capture for equality comparison. Operates on
+// the same shape as captureFilterState() output (always flat). _views keys
+// in a raw server blob are ignored — comparisons never cross view boundaries.
 function _normalizeFilterStateForCompare(state) {
   if (!state || typeof state !== "object") {
     return { v: 1, checkboxes: {}, numeric: {}, sold: {}, comp: {} };
@@ -1925,6 +1969,10 @@ function applyPropelioFilterStateToUI(persisted) {
     const sortEl = document.getElementById("propelio-comp-sort");
     if (sortEl) sortEl.value = propelioCompSortMode;
   }
+  // Neighborhood hidden input (chip render wired in Chunk 3)
+  const _nbhdEl = document.getElementById("prop-neighborhood");
+  if (_nbhdEl) _nbhdEl.value = merged.neighborhood ?? "";
+  _renderNbhdChip(merged.neighborhood || null);
   propelioFilterState = readPropelioFiltersFromUI();
 }
 
@@ -1959,14 +2007,20 @@ function _diffFilterState(current, lastSnapshot) {
   const out = [];
   const sections = ["checkboxes", "numeric", "sold", "comp", "propelio"];
   const snap = lastSnapshot && typeof lastSnapshot === "object" ? lastSnapshot : {};
+  // 🔴 CRITICAL #1: emit view-prefixed field keys on non-ARV views so the
+  // per-field PATCH writes to _views.<view>.* rows, never the flat ARV rows.
+  // Flag-gated: when off, _viewPrefix is "" and behavior is byte-for-byte today's.
+  const _viewPrefix = (ARV_NBV_EXPORT_ENABLED && _activeView !== "arv")
+    ? `_views.${_activeView}.`
+    : "";
   for (const section of sections) {
     const currSection = (current[section] && typeof current[section] === "object") ? current[section] : {};
     const snapSection = (snap[section] && typeof snap[section] === "object") ? snap[section] : {};
     for (const key of Object.keys(currSection)) {
-      const fieldKey = `${section}.${key}`;
-      // §5.2 special case: skip checkboxes.active (force-cleared on restore
-      // — would create a save-restore churn loop)
-      if (fieldKey === "checkboxes.active") continue;
+      const fieldKey = `${_viewPrefix}${section}.${key}`;
+      // §5.2 special case: skip checkboxes.active and its view-prefixed variant
+      // (force-cleared on restore — would create a save-restore churn loop).
+      if (fieldKey === "checkboxes.active" || fieldKey.endsWith(".checkboxes.active")) continue;
       const a = _coerceForDiff(currSection[key]);
       const b = _coerceForDiff(snapSection[key]);
       if (a === b) continue;
@@ -1981,7 +2035,11 @@ function _diffFilterState(current, lastSnapshot) {
 // hook. Only sustained-focus inputs (numeric/text) return an element;
 // checkboxes return null (click is momentary, no flicker hazard).
 function _resolveFieldInput(fieldKey) {
-  const [section, key] = fieldKey.split(".");
+  // Strip _views.<view>. prefix so section routing works for all views.
+  const _fk = (ARV_NBV_EXPORT_ENABLED && fieldKey.startsWith("_views."))
+    ? fieldKey.split(".").slice(2).join(".")
+    : fieldKey;
+  const [section, key] = _fk.split(".");
   if (section === "numeric") {
     const map = {
       lot_sqft_min: "nf-lot-min", lot_sqft_max: "nf-lot-max",
@@ -2027,7 +2085,15 @@ function _resolveFieldInput(fieldKey) {
 // after a PATCH loses to a concurrent write). Writes the value into the
 // in-memory state object AND syncs the DOM input element.
 function _writeFilterFieldDirect(fieldKey, value) {
-  const [section, key] = fieldKey.split(".");
+  // When the flag is on, _views.<view>.<section>.<key> keys are routed to a
+  // specific view. Only apply to the live UI if it matches the active view.
+  let _effectiveKey = fieldKey;
+  if (ARV_NBV_EXPORT_ENABLED && fieldKey.startsWith("_views.")) {
+    const _parts = fieldKey.split(".");
+    if (_parts[1] !== _activeView) return; // Not the active view — skip UI write.
+    _effectiveKey = _parts.slice(2).join(".");
+  }
+  const [section, key] = _effectiveKey.split(".");
   if (section === "checkboxes") {
     filterState[key] = Boolean(value);
     syncFilterInputs();
@@ -2072,7 +2138,22 @@ function _writeFilterFieldDirect(fieldKey, value) {
 // if the user has focus on the corresponding input and is actively
 // typing, defer the apply until blur.
 function _applyFilterFieldToUI(fieldKey, value) {
-  const inputEl = _resolveFieldInput(fieldKey);
+  // Strip _views.<view>. prefix; only apply to the visible UI when it's the active view.
+  let _effectiveKey = fieldKey;
+  if (ARV_NBV_EXPORT_ENABLED && fieldKey.startsWith("_views.")) {
+    const _parts = fieldKey.split(".");
+    if (_parts[1] !== _activeView) return; // Not the active view — skip.
+    _effectiveKey = _parts.slice(2).join(".");
+  }
+  if (_effectiveKey === "propelio.neighborhood") {
+    propelioFilterState.neighborhood = value ?? null;
+    const _nbhdEl = document.getElementById("prop-neighborhood");
+    if (_nbhdEl) _nbhdEl.value = value ?? "";
+    _renderNbhdChip(value || null);
+    try { applyPropelioClientFilters(); } catch (_) {}
+    return;
+  }
+  const inputEl = _resolveFieldInput(_effectiveKey);
   if (inputEl && document.activeElement === inputEl) {
     // Defer apply until blur (Figma's anti-flicker pattern).
     inputEl.dataset.pendingReconcile = JSON.stringify(value);
@@ -2082,6 +2163,7 @@ function _applyFilterFieldToUI(fieldKey, value) {
         delete inputEl.dataset.pendingReconcile;
         inputEl.removeEventListener("blur", inputEl._reconcileBlurHook);
         inputEl._reconcileBlurHook = null;
+        // Pass original fieldKey so _writeFilterFieldDirect can strip prefix if needed.
         if (stashed != null) _writeFilterFieldDirect(fieldKey, JSON.parse(stashed));
       };
       inputEl.addEventListener("blur", inputEl._reconcileBlurHook, { once: true });
@@ -2273,6 +2355,28 @@ function _handleSseFieldChange(msg) {
     action: shouldApply ? "APPLY" : "IGNORED (stale or self)",
   });
   if (!shouldApply) return;
+  // ─── Chunk D: active-view gate (Feature #3) ───
+  // Any filter change for a view that ISN'T the active one must update that
+  // view's in-memory cache + seq bookkeeping ONLY — never the live UI / re-render.
+  // FLAT (unprefixed) keys belong to the ARV view; _views.<view>.* keys belong to
+  // that view. Without gating the FLAT case too, an ARV echo bleeds into the
+  // visible NBV/Export view while hammering switches (KK 2026-06-29).
+  if (ARV_NBV_EXPORT_ENABLED) {
+    const _isViewKey = field_key.startsWith("_views.");
+    const _parts = field_key.split(".");
+    const _eventView = _isViewKey ? _parts[1] : "arv";
+    if (_eventView !== _activeView) {
+      // Update the background view's cache (best-effort) without touching UI.
+      const _vc = _viewFilterCache[_eventView];
+      const _section = _isViewKey ? _parts[2] : _parts[0];
+      const _key = _isViewKey ? _parts[3] : _parts[1];
+      if (_vc && _vc.v && _vc[_section] && typeof _vc[_section] === "object") {
+        _vc[_section][_key] = value;
+      }
+      _dispatchedSeqByField.set(field_key, incomingSeq);  // LWW bookkeeping
+      return;  // no UI write, no re-render
+    }
+  }
   // Apply via Sprint 2 anti-flicker hook (defers to blur if user is
   // focused on the input).
   _applyFilterFieldToUI(field_key, value);
@@ -2396,6 +2500,14 @@ function _updateActiveItemRenameVisibility() {
   const isOwnerOfLoaded = loadedArea ? (loadedArea.role || "owner") === "owner" : true;
   const shouldShow = (Boolean(_currentLoadedAreaId) || hasRealName) && isOwnerOfLoaded;
   btn.classList.toggle("hidden", !shouldShow);
+  // Share button: shown whenever the loaded area is shareable (has a share_id).
+  // NOT owner-only — anyone can copy a share link (mirrors the saved-areas-list
+  // 🔗 button). Rides the same visibility triggers as the rename pencil.
+  const shareBtn = document.getElementById("active-item-share");
+  if (shareBtn) {
+    const shareId = loadedArea ? String(loadedArea.share_id || "").trim() : "";
+    shareBtn.classList.toggle("hidden", !(Boolean(_currentLoadedAreaId) && shareId));
+  }
 }
 
 (function _initActiveItemRenamePencil() {
@@ -2404,6 +2516,32 @@ function _updateActiveItemRenameVisibility() {
   btn.addEventListener("click", (e) => {
     e.preventDefault();
     void _handleActiveItemRenameClick();
+  });
+})();
+
+// Share button next to the rename pencil — copies the loaded area's share link,
+// reusing the exact copy logic from the saved-areas-list 🔗 handler (no new
+// backend, no new share logic). Isolated handler: reads _savedAreasCache, writes
+// to clipboard, toasts — no autosave/restore side effects.
+(function _initActiveItemShareButton() {
+  const btn = document.getElementById("active-item-share");
+  if (!btn) return;
+  btn.addEventListener("click", async (e) => {
+    e.preventDefault();
+    if (!_currentLoadedAreaId) return;
+    const loadedArea = _savedAreasCache.find((a) => String(a.id) === String(_currentLoadedAreaId));
+    const shareId = loadedArea ? String(loadedArea.share_id || "").trim() : "";
+    if (!shareId) return;
+    const url = `${window.location.origin}/?area=${shareId}`;
+    try {
+      if (!navigator.clipboard || typeof navigator.clipboard.writeText !== "function") {
+        throw new Error("Clipboard API unavailable");
+      }
+      await navigator.clipboard.writeText(url);
+      _showToast("Link copied");
+    } catch {
+      _showToast("Copy failed - try again", "error");
+    }
   });
 })();
 
@@ -2479,6 +2617,7 @@ async function _handleActiveItemRenameClick() {
 function _refreshLoadedAreaUi() {
   if (!_currentLoadedAreaId) return;
   renderSavedAreasList();
+  _renderViewToggle();  // show + sync the ARV/NBV/Export toggle (flag-gated)
 }
 
 function _setSessionCacheNote(message) {
@@ -2571,13 +2710,40 @@ function _hydrateCompNumericInputsFromState() {
   });
 }
 
-function restoreFilterState(state) {
+function restoreFilterState(state, { _isAreaLoad = false } = {}) {
+  // Restoring = LOAD, not EDIT: suppress autosave for the whole restore so a
+  // view switch / area load never generates save traffic (incl. the comp
+  // re-filter below, which otherwise auto-saves). try/finally guarantees the
+  // flag is cleared even on the early-return guards. (KK 2026-06-29)
+  _suppressFilterAutosave = true;
+  try {
   if (!state || typeof state !== "object") return;
   if (Number(state.v || 0) > 1) {
     console.info("[saved-area] skipping newer filter_state version", state.v);
     return;
   }
   if (Number(state.v || 0) !== 1) return;
+  // On area load, hydrate the per-view cache from the raw blob (which carries
+  // _views from the server) and reset to ARV. On view-switch restores, the
+  // caller already set _activeView and cached the departing view, so skip.
+  if (ARV_NBV_EXPORT_ENABLED && _isAreaLoad) {
+    _activeView = "arv";
+    _viewFilterCache = {
+      arv: {
+        v: 1,
+        checkboxes: (state.checkboxes && typeof state.checkboxes === "object") ? { ...state.checkboxes } : {},
+        numeric:    (state.numeric    && typeof state.numeric    === "object") ? { ...state.numeric    } : {},
+        sold:       (state.sold       && typeof state.sold       === "object") ? { ...state.sold       } : {},
+        comp:       (state.comp       && typeof state.comp       === "object") ? { ...state.comp       } : {},
+        propelio:   (state.propelio   && typeof state.propelio   === "object") ? { ...state.propelio   } : {},
+      },
+      nbv: null,
+      export: null,
+    };
+    const _vv = (state._views && typeof state._views === "object") ? state._views : {};
+    if (_vv.nbv    && typeof _vv.nbv    === "object") _viewFilterCache.nbv    = { v: 1, ..._vv.nbv    };
+    if (_vv.export && typeof _vv.export === "object") _viewFilterCache.export = { v: 1, ..._vv.export };
+  }
   // Rebase to defaults first so keys MISSING from the saved blob (e.g.,
   // older saved_areas with no `duplexes` checkbox key) resolve to the
   // current default rather than inheriting whatever the user's in-memory
@@ -2637,7 +2803,18 @@ function restoreFilterState(state) {
     const counts = getVisibleFeatureCounts(lastAnalysisGeojson.features || []);
     if (lastAnalysisCounts) renderSidebar(counts, markers || {});
   }
+  // Re-filter the Propelio comps to the restored filter state. Without this a
+  // view switch (ARV/NBV/Export) re-rendered parcels but left comps FROZEN at
+  // the previous view's filter pass — so comps lagged/mismatched the active
+  // view (root cause confirmed by two independent investigations 2026-06-29).
+  // Self-guards on window._propelioLast, so it's a no-op when no comps are
+  // loaded (e.g. during initial area load before comps arrive). Suppressed
+  // autosave (see top) means this re-filter does NOT generate a save.
+  applyPropelioClientFilters();
   _refreshLoadedAreaUi();
+  } finally {
+    _suppressFilterAutosave = false;
+  }
 }
 
 function bumpUndoPillVersion() {
@@ -3932,6 +4109,7 @@ function _filterSaveSetStatus(state, label) {
 // (defers to blur via _applyFilterFieldToUI if user is still typing).
 
 function _filterSaveQueueSave() {
+  if (_suppressFilterAutosave) return;  // restore/switch is load-only, never save
   if (!_currentLoadedAreaId) return;
   // Diff captureFilterState() against last-saved snapshot, enqueue changed fields.
   const current = captureFilterState();
@@ -4132,6 +4310,8 @@ async function saveCurrentArea(name) {
   _clearOriginatorStar();
   _setCurrentTargetParcel(null);
   _currentLoadedAreaId = normalized.id;
+  _renderViewToggle();  // area id set → reveal the ARV/NBV/Export toggle
+    _updateActiveItemRenameVisibility();  // area id set → reveal rename pencil + share button (idempotent)
   _syncTabTitle();
   _storedValueOnAreaChange(_currentLoadedAreaId);
   void _filterSaveOnAreaChange(_currentLoadedAreaId);
@@ -4172,6 +4352,10 @@ async function saveCurrentArea(name) {
   await _reloadSavedResources().catch((err) =>
     console.warn("[saveCurrentArea] post-save resource reload failed:", err)
   );
+  // The reload populates share_id from the server (the POST create response may
+  // omit it), so re-check visibility now to reveal the share button on a freshly
+  // drawn/saved area.
+  _updateActiveItemRenameVisibility();
 }
 
 // On saved-area load: pull the archived comps for that workspace from
@@ -4221,7 +4405,16 @@ async function _reattachPropelioToSavedArea(savedAreaId) {
       headers: { "Content-Type": "application/json", ...authHeaders() },
       body: JSON.stringify({
         saved_area_id: savedAreaId,
-        comps: window._propelioLast.comps,
+        // Strip the client-internal projection transient `_ratingArv` before it
+        // goes over the wire — it must never be persisted in the archive blob
+        // (per-view ratings Chunk E; would poison the lazy-capture on reload).
+        comps: window._propelioLast.comps.map((c) => {
+          if (c && c._ratingArv !== undefined) {
+            const { _ratingArv, ...rest } = c;
+            return rest;
+          }
+          return c;
+        }),
       }),
     });
     if (!resp.ok) {
@@ -5071,12 +5264,25 @@ function _createUndoSnapshot() {
     jobId: currentJobId,
     abortCtrl: null,
     pillVersion: ++undoPillVersion,
+    // Per-view state so undo correctly restores the active view + its cache.
+    _snapshotActiveView: ARV_NBV_EXPORT_ENABLED ? _activeView : "arv",
+    _snapshotViewCache: ARV_NBV_EXPORT_ENABLED
+      ? { arv:    _viewFilterCache.arv    ? { ..._viewFilterCache.arv    } : null,
+          nbv:    _viewFilterCache.nbv    ? { ..._viewFilterCache.nbv    } : null,
+          export: _viewFilterCache.export ? { ..._viewFilterCache.export } : null }
+      : null,
   };
 }
 
 function _restoreUndoSnapshot(snapshot) {
   if (!snapshot) return;
   snapshot.abortCtrl?.abort();
+  // Restore view state before filter mutations so any re-render below sees
+  // the correct _activeView.
+  if (ARV_NBV_EXPORT_ENABLED && snapshot._snapshotActiveView) {
+    _activeView = snapshot._snapshotActiveView;
+    if (snapshot._snapshotViewCache) _viewFilterCache = { ...snapshot._snapshotViewCache };
+  }
   filterState = { ...DEFAULT_FILTERS, ...(snapshot.filterState || {}) };
   Object.assign(numericFilters, snapshot.numericFilters || {});
   soldCompsFilter = { ...DEFAULT_SOLD_COMPS_FILTER, ...(snapshot.soldCompsFilter || {}) };
@@ -5126,6 +5332,13 @@ function _countRestoredFilterKeys(state) {
   count += Object.values(state.checkboxes || {}).filter((v) => v === false).length;
   count += Object.values(state.numeric || {}).filter((v) => v != null && v !== "").length;
   count += Object.values(state.sold || {}).filter((v) => v != null && v !== "").length;
+  // Cosmetic: count non-empty _views sections so the "Restored N filters" pill
+  // reflects that NBV / Export filter data is also present in the area.
+  if (ARV_NBV_EXPORT_ENABLED && state._views && typeof state._views === "object") {
+    const _vv = state._views;
+    if (_vv.nbv    && typeof _vv.nbv    === "object" && Object.keys(_vv.nbv).length    > 0) count += 1;
+    if (_vv.export && typeof _vv.export === "object" && Object.keys(_vv.export).length > 0) count += 1;
+  }
   return count;
 }
 
@@ -5263,7 +5476,7 @@ async function restoreSavedArea(area, options = {}) {
   clearDrawResults();
   setActiveItem("Workspace", area.name);
   if (savedFilterState) {
-    restoreFilterState(savedFilterState);
+    restoreFilterState(savedFilterState, { _isAreaLoad: true });
   }
   // Sprint 2 §5.3: capture the restored state as the diff baseline so
   // the first user edit after load only PATCHes the fields they touch.
@@ -5379,6 +5592,8 @@ async function restoreSavedArea(area, options = {}) {
     _clearOriginatorStar();
     _setCurrentTargetParcel(null);
     _currentLoadedAreaId = area.id;
+    _renderViewToggle();  // area id set → reveal the ARV/NBV/Export toggle
+    _updateActiveItemRenameVisibility();  // area id set → reveal rename pencil + share button (idempotent)
     _syncTabTitle();
     _storedValueOnAreaChange(_currentLoadedAreaId);
     void _filterSaveOnAreaChange(_currentLoadedAreaId);
@@ -5437,6 +5652,7 @@ async function restoreNamedSession(session, options = {}) {
   _clearOriginatorStar();
   _setCurrentTargetParcel(null);
   _currentLoadedAreaId = null;
+  _renderViewToggle();  // no area loaded → hide the ARV/NBV/Export toggle
   // Sprint 2 §5.3: no area loaded -> no snapshot baseline + clear queue.
   _filterSaveLastSnapshot = null;
   _filterSavePendingFields.clear();
@@ -5451,7 +5667,7 @@ async function restoreNamedSession(session, options = {}) {
     : null;
   clearDrawResults();
   if (savedFilterState) {
-    restoreFilterState(savedFilterState);
+    restoreFilterState(savedFilterState, { _isAreaLoad: true });
   }
   // Sprint 2 §5.3: refresh diff baseline after snapshot restore so any
   // subsequent edit only PATCHes the fields actually changed.
@@ -5775,12 +5991,18 @@ function _renderList(sectionId, listId, items, options = {}) {
           _clearOriginatorStar();
           _setCurrentTargetParcel(null);
           _currentLoadedAreaId = cloned.area_id;
+          _renderViewToggle();  // area id set → reveal the ARV/NBV/Export toggle
+    _updateActiveItemRenameVisibility();  // area id set → reveal rename pencil + share button (idempotent)
           _syncTabTitle();
           _storedValueOnAreaChange(_currentLoadedAreaId);
           void _filterSaveOnAreaChange(_currentLoadedAreaId);
           // Refresh Good Comps section visibility — fork bypasses the
           // normal restoreSavedArea path, so applyPropelioClientFilters
           // isn't called automatically. Per spec v2 §Risk #1.
+          // Per-view ratings (Chunk E): project to the active view first, since
+          // _renderGoodCompsSection reads user_rating and nothing else projected
+          // it on this path.
+          _projectCompRatingsForActiveView();
           if (typeof _renderGoodCompsSection === "function") _renderGoodCompsSection();
           _selectedSavedItemId = cloned.area_id;
           // Carry the originator TARGET star through the fork.
@@ -6609,12 +6831,15 @@ function _buildRatingButtonsHtml(comp, parcel) {
   const hasComp = Boolean(compKey);
   const hasParcel = Boolean(parcelCounty && parcelAccount);
   if (!hasComp && !hasParcel) return "";
-  // Active rating reflected from whichever source we have. When both are
-  // present, parcel rating takes priority for display (since the button
-  // primarily reflects the parcel-level user judgment).
-  const sourceRating = hasParcel
-    ? parcel?.user_rating
-    : comp?.user_rating;
+  // Active rating reflected from whichever source we have. Prefer the
+  // parcel-level judgment when present, but FALL BACK to the comp rating
+  // when the parcel has none. This matters for spillover (outside-area)
+  // comps: they get a throwaway dummy parcel with no user_rating that is
+  // never cached, so a strict parcel-priority read would lose the comp's
+  // own good/bad highlight on popup reopen (regression from the
+  // 2026-05-24 single-button consolidation). comp.user_rating persists in
+  // window._propelioLast.comps, so the fallback restores the highlight.
+  const sourceRating = parcel?.user_rating ?? comp?.user_rating;
   const currentRating = sourceRating === "good" || sourceRating === "bad" ? sourceRating : null;
   const ratingsEnabled = Boolean(_currentLoadedAreaId && (hasComp || hasParcel));
   const goodActive = ratingsEnabled && currentRating === "good" ? " is-active" : "";
@@ -7384,6 +7609,74 @@ function _isLatestMutation(kind, id, capturedSeq) {
   return _ratingMutationSeq.get(`${kind}:${id}`) === capturedSeq;
 }
 
+// ─── Per-view rating projection (Chunk E, per-view ratings spec §4) ───────
+// ARV ratings live in the canonical `_ratingArv`; NBV/Export live in
+// `ratings_by_view` (both stamped by the backend on hydrate — comps via
+// load_comps_by_polygon, parcels via _load_parcel_ratings_by_view_for_workspace).
+// Every renderer reads `user_rating`, so we keep `user_rating` as the
+// PROJECTION of the ACTIVE view — recomputed on each render + view switch.
+// Writes update the canonical store for the view captured AT CLICK TIME, never
+// `user_rating` directly (avoids the view-switch-mid-flight race, C2/H4).
+// Flag-OFF (main) skips all of this: `user_rating` stays exactly as the
+// backend sent it (ARV) so the wire + behavior are byte-identical to today.
+// The helpers operate on comp objects AND parcel `properties` objects — both
+// carry `user_rating` + `ratings_by_view` at the same shape.
+
+function _ratingForView(arvRating, ratingsByView, view) {
+  if (view === "arv") {
+    return (arvRating === "good" || arvRating === "bad") ? arvRating : null;
+  }
+  const r = ratingsByView && ratingsByView[view];
+  return (r === "good" || r === "bad") ? r : null;
+}
+
+function _ensureRatingCanonical(obj) {
+  // Lazy-capture the ARV canonical the first time we see this object — i.e.
+  // while `user_rating` still equals the backend-sent ARV value, before any
+  // projection has overwritten it. Then normalize the per-view map. Idempotent.
+  if (!obj) return;
+  if (obj._ratingArv === undefined) {
+    obj._ratingArv = (obj.user_rating === "good" || obj.user_rating === "bad") ? obj.user_rating : null;
+  }
+  if (!obj.ratings_by_view || typeof obj.ratings_by_view !== "object") {
+    obj.ratings_by_view = {};
+  }
+}
+
+function _setRatingCanonical(obj, rating, view) {
+  // Write `rating` into the object's canonical store for `view`.
+  _ensureRatingCanonical(obj);
+  const r = (rating === "good" || rating === "bad") ? rating : null;
+  if (view === "arv") {
+    obj._ratingArv = r;
+  } else if (r) {
+    obj.ratings_by_view[view] = r;
+  } else {
+    delete obj.ratings_by_view[view];
+  }
+}
+
+function _projectRatingActive(obj) {
+  // Recompute user_rating as the active view's projection from the canonical.
+  _ensureRatingCanonical(obj);
+  obj.user_rating = _ratingForView(obj._ratingArv, obj.ratings_by_view, _activeView);
+}
+
+function _projectCompRatingsForActiveView() {
+  if (!ARV_NBV_EXPORT_ENABLED) return;
+  const comps = window._propelioLast && window._propelioLast.comps;
+  if (!Array.isArray(comps)) return;
+  for (const c of comps) if (c) _projectRatingActive(c);
+}
+
+function _projectParcelRatingsForActiveView() {
+  if (!ARV_NBV_EXPORT_ENABLED) return;
+  if (!Array.isArray(allAnalysisFeatures)) return;
+  for (const f of allAnalysisFeatures) {
+    if (f && f.properties) _projectRatingActive(f.properties);
+  }
+}
+
 function _resolveParcelAnchor(county, accountNum) {
   // Find a centroid lat/lng for the parcel via the analysis features cache.
   // Chain: rendered polygon bounds (if we have a registered layer) →
@@ -7434,6 +7727,24 @@ function _updateParcelUserRatingInCache(county, accountNum, rating) {
     const fp = f?.properties || {};
     if (String(fp.source_county || "").toLowerCase() === c && String(fp.account_num || "").trim() === a) {
       fp.user_rating = rating;
+      return;
+    }
+  }
+}
+
+// Per-view variant (Chunk E): write into the feature's canonical store for
+// `view`, then re-project user_rating for the active view. Used by the
+// flag-ON parcel write path so a rating in NBV/Export doesn't bleed into ARV.
+function _updateParcelRatingCanonicalInCache(county, accountNum, rating, view) {
+  if (!Array.isArray(allAnalysisFeatures)) return;
+  const c = String(county || "").toLowerCase();
+  const a = String(accountNum || "").trim();
+  for (const f of allAnalysisFeatures) {
+    const fp = f?.properties;
+    if (!fp) continue;
+    if (String(fp.source_county || "").toLowerCase() === c && String(fp.account_num || "").trim() === a) {
+      _setRatingCanonical(fp, rating, view);
+      _projectRatingActive(fp);
       return;
     }
   }
@@ -7592,15 +7903,21 @@ function _rebuildOutreachOverlays() {
 // emits a SINGLE button row with both data-comp-key + data-county +
 // data-account-num and writes to both rating tables on click.)
 
-async function rateParcel(county, accountNum, rating) {
+async function rateParcel(county, accountNum, rating, view) {
   const areaId = (typeof _currentLoadedAreaId === "string" ? _currentLoadedAreaId : "") || "";
   if (!areaId || !county || !accountNum) return false;
+  // View captured at click time (per-view ratings §4). Invalid/absent → the
+  // current active view. Flag-OFF: _activeView is always "arv".
+  const _view = (view === "arv" || view === "nbv" || view === "export") ? view : _activeView;
   const body = {
     saved_area_id: areaId,
     county,
     account_num: accountNum,
     rating: rating === "good" || rating === "bad" ? rating : null,
   };
+  // Only send `view` when the feature is enabled — keeps the flag-OFF wire
+  // byte-identical to today (backend treats absent view as 'arv', C2).
+  if (ARV_NBV_EXPORT_ENABLED) body.view = _view;
   try {
     const resp = await fetch("/api/parcels/rate", {
       method: "POST",
@@ -7611,7 +7928,11 @@ async function rateParcel(county, accountNum, rating) {
       console.warn("[cad] rate parcel failed:", resp.status);
       return false;
     }
-    _updateParcelUserRatingInCache(county, accountNum, body.rating);
+    if (ARV_NBV_EXPORT_ENABLED) {
+      _updateParcelRatingCanonicalInCache(county, accountNum, body.rating, _view);
+    } else {
+      _updateParcelUserRatingInCache(county, accountNum, body.rating);
+    }
     return true;
   } catch (err) {
     console.error("[cad] rate parcel error:", err);
@@ -7832,6 +8153,8 @@ function _renderPropelioComps(data) {
 // lot/sqft/year/price min-max) apply instantly to the existing comp pool
 // without re-hitting Propelio.
 
+const normalizeNbhd = (s) => String(s || "").trim().replace(/\s+/g, " ").toLowerCase();
+
 const DEFAULT_PROPELIO_FILTERS = {
   months: 24,
   range: 1.0,
@@ -7844,8 +8167,14 @@ const DEFAULT_PROPELIO_FILTERS = {
   sqftMin: null, sqftMax: null,
   yearMin: null, yearMax: null,
   priceMin: null, priceMax: null,
+  neighborhood: null,
 };
 let propelioFilterState = { ...DEFAULT_PROPELIO_FILTERS };
+// Option-list cache: rebuilt once per comp-load (reference-equality guard),
+// never on keystrokes. Null until the first comp set arrives.
+let _nbhdOptionsCache = null;
+let _nbhdOptionsCacheRef = null;
+let _nbhdOptionsCacheSig = null;
 
 function _propNumIn(id) {
   const el = document.getElementById(id);
@@ -7889,6 +8218,7 @@ function readPropelioFiltersFromUI() {
     yearMax: _propIntIn("prop-year-max"),
     priceMin: _propPriceIn("prop-price-min"),
     priceMax: _propPriceIn("prop-price-max"),
+    neighborhood: (document.getElementById("prop-neighborhood")?.value || "").trim() || null,
     // Property Type Filter toggles — read from the parcel-side filterState
     // so the same toggles gate both parcels and comps.
     parcelTypeMultifamily: filterState.multifamily,
@@ -7962,7 +8292,7 @@ function _compMatchedTotVal(comp) {
   return raw ? Number(raw[0]) : null;
 }
 
-function compPassesPropelioFilters(comp, filters) {
+function compPassesPropelioFilters(comp, filters, _nbhdNorm) {
   const status = String(comp?.status || "").toLowerCase();
   // Status checkbox filters
   if (status === "sold" && !filters.statusSold) return false;
@@ -8065,6 +8395,12 @@ function compPassesPropelioFilters(comp, filters) {
   if (bucket === "single_family" && filters.parcelTypeOffMarket   === false) return false;
   if (bucket === null            && filters.parcelTypeOffMarket   === false) return false;
 
+  // Neighborhood filter — null/blank comp drops out when a filter is active
+  if (filters.neighborhood) {
+    const norm = (_nbhdNorm !== undefined) ? _nbhdNorm : normalizeNbhd(filters.neighborhood);
+    if (normalizeNbhd(comp?.neighborhood) !== norm) return false;
+  }
+
   return true;
 }
 
@@ -8080,11 +8416,23 @@ function applyPropelioClientFilters() {
     _renderGoodCompsSection();  // hides section when no comp cache
     return;
   }
+  // Chunk E (per-view ratings §4): project each comp's user_rating to the
+  // ACTIVE view before any filter/dedup/render reads it. No-op when the flag
+  // is off (user_rating stays the backend ARV value). This is also the
+  // view-switch re-render path (_setActiveView → restoreFilterState → here).
+  _projectCompRatingsForActiveView();
+  // Read the current UI filter state FIRST, then build the neighborhood
+  // options cache from it. _buildNbhdOptionsCache() derives its options
+  // from the active propelioFilterState (minus the neighborhood gate), so
+  // building it before refreshing that state used STALE filters — the
+  // options lagged one apply cycle behind toggles like OAC.
   propelioFilterState = readPropelioFiltersFromUI();
+  _buildNbhdOptionsCache();
   const all = window._propelioLast.comps;
   // Map view: render every passing comp (good/unrated AND bad — bad gets
   // the `.bad-comp` class for visual de-emphasis but stays on the map).
-  const visibleOnMap = all.filter((c) => compPassesPropelioFilters(c, propelioFilterState));
+  const _nbhdNorm = normalizeNbhd(propelioFilterState.neighborhood);
+  const visibleOnMap = all.filter((c) => compPassesPropelioFilters(c, propelioFilterState, _nbhdNorm));
   _updatePropelioStatusCounts();
   // Render-only dedup: collapse multi-status records on the same parcel
   // to only the highest-priority status (good-rated wins tie-break).
@@ -8312,12 +8660,34 @@ function _renderGoodCompsSection() {
 async function _setGoodCompRatingOptimistic(compKey, newRating) {
   const comp = _findPropelioCompByKey(compKey);
   if (!comp) return;
-  const oldRating = comp.user_rating;
-  comp.user_rating = newRating;
+  // Capture the active view synchronously (per-view ratings §4 / H4).
+  const _view = _activeView;
+  if (!ARV_NBV_EXPORT_ENABLED) {
+    // Flag-OFF: today's behavior, byte-identical.
+    const oldRating = comp.user_rating;
+    comp.user_rating = newRating;
+    _renderGoodCompsSection();
+    const ok = await ratePropelioComp(compKey, newRating, _view);
+    if (!ok) {
+      comp.user_rating = oldRating;
+      _renderGoodCompsSection();
+      _showToast("Rating update failed — reverted", "error");
+    }
+    return;
+  }
+  // Flag-ON: optimistic via the canonical store + active-view projection, so a
+  // revert restores the exact per-view state (not just user_rating).
+  _ensureRatingCanonical(comp);
+  const oldArv = comp._ratingArv;
+  const oldByView = { ...comp.ratings_by_view };
+  _setRatingCanonical(comp, newRating, _view);
+  _projectRatingActive(comp);
   _renderGoodCompsSection();
-  const ok = await ratePropelioComp(compKey, newRating);
+  const ok = await ratePropelioComp(compKey, newRating, _view);
   if (!ok) {
-    comp.user_rating = oldRating;
+    comp._ratingArv = oldArv;
+    comp.ratings_by_view = oldByView;
+    _projectRatingActive(comp);
     _renderGoodCompsSection();
     _showToast("Rating update failed — reverted", "error");
   }
@@ -8562,14 +8932,20 @@ function _setPropelioFootprintHighlight(compKey, on) {
   else apply(layer);
 }
 
-async function ratePropelioComp(compKey, rating) {
+async function ratePropelioComp(compKey, rating, view) {
   const areaId = (typeof _currentLoadedAreaId === "string" ? _currentLoadedAreaId : "") || "";
   if (!areaId || !compKey) return false;
+  // View captured at click time (per-view ratings §4). Invalid/absent → the
+  // current active view. Flag-OFF: _activeView is always "arv".
+  const _view = (view === "arv" || view === "nbv" || view === "export") ? view : _activeView;
   const body = {
     saved_area_id: areaId,
     comp_address_key: compKey,
     rating: rating === "good" || rating === "bad" ? rating : null,
   };
+  // Only send `view` when the feature is enabled — keeps the flag-OFF wire
+  // byte-identical to today (backend treats absent view as 'arv', C2).
+  if (ARV_NBV_EXPORT_ENABLED) body.view = _view;
   try {
     const resp = await fetch("/api/propelio/comp/rate", {
       method: "POST",
@@ -8580,10 +8956,15 @@ async function ratePropelioComp(compKey, rating) {
       console.warn("[propelio] rate failed:", resp.status);
       return false;
     }
-    // Update the in-memory comp so re-render reflects the new rating
-    // without a round-trip to the archive.
+    // Update the in-memory comp so re-render reflects the new rating without a
+    // round-trip to the archive. Flag-ON writes the canonical store for the
+    // captured view; applyPropelioClientFilters re-projects user_rating for the
+    // active view. Flag-OFF keeps today's direct user_rating write.
     const comp = _findPropelioCompByKey(compKey);
-    if (comp) comp.user_rating = body.rating;
+    if (comp) {
+      if (ARV_NBV_EXPORT_ENABLED) _setRatingCanonical(comp, body.rating, _view);
+      else comp.user_rating = body.rating;
+    }
     applyPropelioClientFilters();
     return true;
   } catch (err) {
@@ -8704,6 +9085,8 @@ function resetPropelioFilters() {
   set("prop-sqft-min", ""); set("prop-sqft-max", "");
   set("prop-year-min", ""); set("prop-year-max", "");
   set("prop-price-min", ""); set("prop-price-max", "");
+  set("prop-neighborhood", "");
+  _renderNbhdChip(null);
   applyPropelioClientFilters();
 }
 
@@ -8717,6 +9100,118 @@ function _setPropStatusFilter(status, checked, options = {}) {
   if (apply) applyPropelioClientFilters();
 }
 
+// === Neighborhood filter helpers ============================================
+
+function _buildNbhdOptionsCache() {
+  const comps = window._propelioLast?.comps;
+  if (!Array.isArray(comps) || comps.length === 0) {
+    _nbhdOptionsCache = [];
+    _nbhdOptionsCacheRef = null;
+    _nbhdOptionsCacheSig = null;
+    return;
+  }
+  // Options mirror what's actually VISIBLE: build from comps that pass the
+  // active filters EXCEPT the neighborhood filter itself (so you can still
+  // re-pick). This makes the list + counts react live to OAC and every other
+  // filter — OAC off shows only in-area neighborhoods, OAC on shows all.
+  const filtersNoNbhd = { ...propelioFilterState, neighborhood: null };
+  // Signature so a filter change (e.g. OAC toggle — same comps array) forces a
+  // rebuild, while typing (no filter change) stays a cheap no-op. No geometry
+  // math in the signature itself; the point-in-polygon work happens only on the
+  // rebuild below, which fires on filter/comp change, not per keystroke.
+  const polySig = Array.isArray(lastPolygon) && lastPolygon.length
+    ? lastPolygon.length + ":" + JSON.stringify(lastPolygon[0]) + JSON.stringify(lastPolygon[lastPolygon.length - 1])
+    : "0";
+  const sig = JSON.stringify(filtersNoNbhd) + "|" + polySig;
+  if (comps === _nbhdOptionsCacheRef && sig === _nbhdOptionsCacheSig) return;
+  _nbhdOptionsCacheRef = comps;
+  _nbhdOptionsCacheSig = sig;
+  const keyMap = new Map();
+  for (const c of comps) {
+    // Same visibility gate the map/list use, minus the neighborhood filter.
+    if (!compPassesPropelioFilters(c, filtersNoNbhd)) continue;
+    const raw = c?.neighborhood;
+    if (!raw || !String(raw).trim()) continue;
+    const key = normalizeNbhd(raw);
+    if (!keyMap.has(key)) keyMap.set(key, { counts: new Map(), total: 0 });
+    const entry = keyMap.get(key);
+    entry.total++;
+    entry.counts.set(raw, (entry.counts.get(raw) || 0) + 1);
+  }
+  _nbhdOptionsCache = Array.from(keyMap.values())
+    .map(({ counts, total }) => {
+      let bestDisplay = "", bestCount = 0;
+      for (const [variant, cnt] of counts) {
+        if (cnt > bestCount) { bestCount = cnt; bestDisplay = variant; }
+      }
+      return { display: bestDisplay, count: total };
+    })
+    .sort((a, b) => a.display.localeCompare(b.display));
+}
+
+function _renderNbhdChip(display) {
+  const chipEl = document.getElementById("prop-neighborhood-chip");
+  const searchEl = document.getElementById("prop-neighborhood-search");
+  const optionsEl = document.getElementById("prop-neighborhood-options");
+  if (!chipEl) return;
+  if (!display) {
+    chipEl.hidden = true;
+    chipEl.innerHTML = "";
+    if (searchEl) searchEl.hidden = false;
+    return;
+  }
+  chipEl.innerHTML = `<span class="nbhd-chip-label">${_propelioEscape(display)}</span><span class="nbhd-chip-x" role="button" aria-label="Clear neighborhood filter" tabindex="0">✕</span>`;
+  chipEl.hidden = false;
+  if (searchEl) { searchEl.value = ""; searchEl.hidden = true; }
+  if (optionsEl) { optionsEl.hidden = true; optionsEl.innerHTML = ""; }
+}
+
+function _renderNbhdOptions(query) {
+  const optionsEl = document.getElementById("prop-neighborhood-options");
+  if (!optionsEl) return;
+  if (!query) { optionsEl.hidden = true; optionsEl.innerHTML = ""; return; }
+  // Build/refresh the options cache on demand. It's ref-guarded (instant no-op
+  // when comps are unchanged), so the typeahead is self-sufficient even when
+  // comps were loaded via a path that didn't run applyPropelioClientFilters
+  // (e.g. saved-area restore) — otherwise the cache could be empty when typing.
+  _buildNbhdOptionsCache();
+  const q = query.toLowerCase();
+  const qNo = q.replace(/\s+/g, "");
+  // Whitespace-insensitive matching: the source has letter-spaced names like
+  // "J V C", so also compare with spaces stripped on both sides — typing "jvc"
+  // matches "J V C" (and "j v c" still works).
+  const dispLc = (o) => o.display.toLowerCase();
+  const hit = (o) => dispLc(o).includes(q) || dispLc(o).replace(/\s+/g, "").includes(qNo);
+  const startsHit = (o) => dispLc(o).startsWith(q) || dispLc(o).replace(/\s+/g, "").startsWith(qNo);
+  const matches = (_nbhdOptionsCache || []).filter(hit);
+  if (!matches.length) { optionsEl.hidden = true; optionsEl.innerHTML = ""; return; }
+  // Rank prefix matches first, then the remaining substring matches. The cache
+  // is already alphabetical and Array.sort is stable, so each group stays
+  // alphabetical — typing "s" surfaces the S-neighborhoods on top, with the
+  // contains-an-s matches below instead of an unordered pile.
+  matches.sort((a, b) => (startsHit(a) ? 0 : 1) - (startsHit(b) ? 0 : 1));
+  optionsEl.innerHTML = matches
+    .map((o) => `<div class="nbhd-option" data-display="${_propelioEscape(o.display)}">${_propelioEscape(o.display)} (${o.count})</div>`)
+    .join("");
+  optionsEl.hidden = false;
+}
+
+function _selectNbhdOption(display) {
+  const hiddenEl = document.getElementById("prop-neighborhood");
+  if (hiddenEl) hiddenEl.value = display;
+  _renderNbhdChip(display);
+  applyPropelioClientFiltersDebounced();
+  _filterSaveQueueSave();
+}
+
+function _clearNbhdFilter() {
+  const hiddenEl = document.getElementById("prop-neighborhood");
+  if (hiddenEl) hiddenEl.value = "";
+  _renderNbhdChip(null);
+  applyPropelioClientFiltersDebounced();
+  _filterSaveQueueSave();
+}
+
 // Deep Pull sidebar button state. Declared BEFORE the IIFE below so that
 // _ensureStickyPropelioButton() can be safely called from inside the IIFE
 // (without hitting a TDZ ReferenceError as the original J3 init did).
@@ -8725,7 +9220,6 @@ let propelioStickyBtn = null;
 
 (function _initPropelioFilterListeners() {
   const liveIds = [
-    "prop-outside-area",
     "prop-sold-within",
     "prop-lot-min", "prop-lot-max",
     "prop-sqft-min", "prop-sqft-max",
@@ -8738,6 +9232,16 @@ let propelioStickyBtn = null;
     el.addEventListener("input", applyPropelioClientFiltersDebounced);
     el.addEventListener("change", applyPropelioClientFiltersDebounced);
   });
+  // OAC (Outside-Area Comps) is a TOGGLE, not a typed range — apply
+  // DIRECTLY on change like the status toggles (_setPropStatusFilter),
+  // not through the 150ms debounce the numeric ranges use. The debounce
+  // made the first click feel dead and invited the double/triple-click.
+  // The toolbar OAC button dispatches a "change" on this checkbox, so a
+  // single button click now applies immediately.
+  const oacBox = document.getElementById("prop-outside-area");
+  if (oacBox) {
+    oacBox.addEventListener("change", applyPropelioClientFilters);
+  }
   ["sold", "active", "pending"].forEach((status) => {
     const mapBox = document.getElementById(`prop-status-${status}`);
     const cfBox = document.getElementById(`cf-status-${status}`);
@@ -8790,6 +9294,56 @@ let propelioStickyBtn = null;
     });
   }
 
+  // Neighborhood filter typeahead
+  const nbhdSearchEl = document.getElementById("prop-neighborhood-search");
+  if (nbhdSearchEl) {
+    nbhdSearchEl.addEventListener("input", () => {
+      _renderNbhdOptions(nbhdSearchEl.value.trim());
+    });
+    nbhdSearchEl.addEventListener("blur", () => {
+      // Delay so an option click fires before the dropdown closes
+      setTimeout(() => {
+        const optEl = document.getElementById("prop-neighborhood-options");
+        if (optEl) { optEl.hidden = true; optEl.innerHTML = ""; }
+      }, 200);
+    });
+  }
+  // Option selection (delegation on the dropdown container)
+  const nbhdOptionsEl = document.getElementById("prop-neighborhood-options");
+  if (nbhdOptionsEl) {
+    nbhdOptionsEl.addEventListener("click", (ev) => {
+      const opt = ev.target.closest(".nbhd-option");
+      if (!opt) return;
+      _selectNbhdOption(opt.dataset.display || "");
+    });
+  }
+  // Chip clear (delegation on chip container)
+  const nbhdChipEl = document.getElementById("prop-neighborhood-chip");
+  if (nbhdChipEl) {
+    nbhdChipEl.addEventListener("click", (ev) => {
+      if (ev.target.closest(".nbhd-chip-x")) _clearNbhdFilter();
+    });
+    nbhdChipEl.addEventListener("keydown", (ev) => {
+      if (ev.target.closest(".nbhd-chip-x") && (ev.key === "Enter" || ev.key === " ")) {
+        ev.preventDefault();
+        _clearNbhdFilter();
+      }
+    });
+  }
+
+  // Close dropdown on outside click. Bubbles from child → document, so
+  // the option-click delegation on #prop-neighborhood-options fires first
+  // and hides the dropdown before this runs — making optEl.hidden true
+  // before the check, safe no-op after a selection.
+  document.addEventListener("click", (ev) => {
+    const optEl = document.getElementById("prop-neighborhood-options");
+    if (!optEl || optEl.hidden) return;
+    if (!ev.target.closest(".nbhd-filter-wrap")) {
+      optEl.hidden = true;
+      optEl.innerHTML = "";
+    }
+  });
+
   // Document-level delegation for popup rating buttons. Popups are recreated
   // on every render so a single delegated listener is simpler than per-popup
   // wiring.
@@ -8813,6 +9367,10 @@ let propelioStickyBtn = null;
     const hasParcel = Boolean(parcelCounty && parcelAccount);
     if (!hasComp && !hasParcel) return;
     const newRating = rating === "clear" ? null : rating;
+    // Per-view ratings §4 / H4: capture the active view AT CLICK TIME (a
+    // synchronous read), then thread it through the async writes + view-key the
+    // mutation seqs so a view switch mid-flight can't cross-contaminate.
+    const _view = _activeView;
 
     // Optimistic popup button highlighting — instant feedback
     const container = btn.parentElement;
@@ -8834,24 +9392,31 @@ let propelioStickyBtn = null;
     // doesn't roll back a parcel-only mark and vice versa.
 
     if (hasComp) {
-      _bumpMutationSeq("comp", compKey);
+      _bumpMutationSeq("comp", `${compKey}:${_view}`);
       // Suppress comp optimistic mark when a parcel rating is ALSO being
       // written this click — the parcel mark covers the same spot and
       // two stacked ✓s is the bug KK reported 2026-05-24.
       if (!hasParcel) {
         _setCompRatingMarkOptimistic(compKey, newRating);
       }
-      void ratePropelioComp(compKey, newRating);
+      void ratePropelioComp(compKey, newRating, _view);
     }
 
     if (hasParcel) {
-      const mutId = `${parcelCounty}:${parcelAccount}`;
+      const mutId = `${parcelCounty}:${parcelAccount}:${_view}`;
       const seq = _bumpMutationSeq("parcel", mutId);
       const previousRating = _getCachedParcelRating(parcelCounty, parcelAccount);
       _setParcelRatingMarkOptimistic(parcelCounty, parcelAccount, newRating);
-      void rateParcel(parcelCounty, parcelAccount, newRating).then((ok) => {
+      void rateParcel(parcelCounty, parcelAccount, newRating, _view).then((ok) => {
         if (!ok && _isLatestMutation("parcel", mutId, seq)) {
-          _setParcelRatingMarkOptimistic(parcelCounty, parcelAccount, previousRating);
+          // Only repaint the optimistic mark if we're STILL on the view the
+          // click happened in (H4). If the user switched views mid-flight, the
+          // switch already re-rendered marks from the canonical store (which the
+          // failed write never touched), so repainting previousRating here would
+          // paint a wrong-view mark. The toast still fires either way.
+          if (_view === _activeView) {
+            _setParcelRatingMarkOptimistic(parcelCounty, parcelAccount, previousRating);
+          }
           _showToast("Rating update failed — reverted", "error");
         }
       });
@@ -10956,6 +11521,11 @@ async function _openParcelDetailFromFeature(p, ev, feature) {
 }
 
 function renderFeatures(geojson) {
+  // Chunk E (per-view ratings §4): project every parcel's user_rating to the
+  // ACTIVE view before the mark loop reads it (_maybeAddParcelRatingMark).
+  // No-op when the flag is off. renderViewportFeatures delegates here, so this
+  // single point covers both render modes + the view-switch re-render.
+  _projectParcelRatingsForActiveView();
   const shouldRestorePopup = Boolean(_activeParcelPopupState?.accountNum);
   _isRefreshingParcelLayers = shouldRestorePopup;
   _renderedParcelPopupLayers.clear();
@@ -11295,6 +11865,8 @@ function renderSidebar(counts, markers) {
   document.getElementById("sidebar-loading").classList.add("hidden");
   document.getElementById("sidebar-results").classList.remove("hidden");
   document.getElementById("active-item-actions")?.classList.remove("hidden");
+  _renderViewToggle();  // reveal ARV/NBV/Export toggle alongside the workspace actions (flag-gated; self-hides if no area loaded)
+  _updateActiveItemRenameVisibility();  // reveal rename pencil + share button now the area + cache are ready (idempotent)
   const visibleCounts = Array.isArray(allAnalysisFeatures) && allAnalysisFeatures.length
     ? getVisibleFeatureCounts(allAnalysisFeatures, { ignoreBucketToggles: true })
     : {
@@ -11476,6 +12048,35 @@ function featureCentroidLngLat(feature) {
   }
   if (p.lng != null && p.lat != null) return [p.lng, p.lat];
   return null;
+}
+
+// Test point for client-side polygon clipping. Prefer the STORED parcel
+// centroid (properties.lng/lat) because the server filters parcels by
+// stored centroid-in-polygon; fall back to the geometry centroid. Keeping
+// parity with the server minimizes reshape reconcile diffs.
+function testPointLngLat(feature) {
+  const p = feature?.properties || {};
+  if (p.lng != null && p.lat != null) return [Number(p.lng), Number(p.lat)];
+  return featureCentroidLngLat(feature);
+}
+
+function reshapeFeatureKey(f) {
+  const p = f?.properties || {};
+  const county = String(p.source_county || "").trim().toLowerCase();
+  const id = county === "dcad"
+    ? String(p.account_num || "").trim()
+    : String(p.parcel_key || p.account_num || "").trim();
+  return `${county}::${id}`;
+}
+
+// True if two feature arrays contain the same parcel identities (order-independent).
+function reshapeSetsEqual(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b)) return false;
+  if (a.length !== b.length) return false;
+  const sa = new Set(a.map(reshapeFeatureKey));
+  if (sa.size !== a.length) { /* dupes — fall through to size-safe compare */ }
+  for (const f of b) { if (!sa.has(reshapeFeatureKey(f))) return false; }
+  return sa.size === new Set(b.map(reshapeFeatureKey)).size;
 }
 
 function _sleep(ms) {
@@ -11901,19 +12502,23 @@ map.on("draw:created", async (e) => {
   bumpUndoPillVersion();
   closeTransientSoldSidebarPopup();
   map.getContainer().classList.remove("drawing-active");
-  _currentSessionIsNamed = false;
-  // Intentionally NOT clearing _currentTargetParcel or _originatorStarMarker
-  // here — saveCurrentArea (called downstream via _autoCacheOnDraw) needs
-  // to read _currentTargetParcel as the originator for the new workspace.
-  // saveCurrentArea handles the clear-and-re-render with the bonded value
-  // after the area is persisted.
-  _currentLoadedAreaId = null;
-  _syncTabTitle();
-  _storedValueOnAreaChange(null);
-  void _filterSaveOnAreaChange(null);
-  _selectedSavedItemId = null;
-  _setSessionCacheNote("");
-  renderSavedAreasList();
+  const reshapeTarget = _reshapeTargetAreaId;
+  _reshapeTargetAreaId = null;
+  if (!reshapeTarget) {
+    _currentSessionIsNamed = false;
+    // Intentionally NOT clearing _currentTargetParcel or _originatorStarMarker
+    // here — saveCurrentArea (called downstream via _autoCacheOnDraw) needs
+    // to read _currentTargetParcel as the originator for the new workspace.
+    // saveCurrentArea handles the clear-and-re-render with the bonded value
+    // after the area is persisted.
+    _currentLoadedAreaId = null;
+    _syncTabTitle();
+    _storedValueOnAreaChange(null);
+    void _filterSaveOnAreaChange(null);
+    _selectedSavedItemId = null;
+    _setSessionCacheNote("");
+    renderSavedAreasList();
+  }
   drawLayer.clearLayers();
   PARCEL_LAYER_KEYS.forEach((key) => parcelTypeLayers[key]?.clearLayers());
   redfinLayer.clearLayers();
@@ -11955,14 +12560,74 @@ map.on("draw:created", async (e) => {
   propelioCompLayerByKey.clear();
   renderPropelioCompList([]);
   propelioCmaChip.hide();
-  // Await the autosave so _currentLoadedAreaId is set before runAnalysis
-  // fires.  Without this, /api/analyze receives area_id: null and the new
-  // cached_jobs row is born with saved_area_id = NULL → Stored Values columns
-  // come back empty on CSV export.  The cache pre-warm inside
-  // _autoCacheOnDraw is fire-and-forget, so this only adds the ~100ms
-  // POST /api/areas round-trip before analysis starts — invisible against
-  // the several-second analysis itself.
-  await _autoCacheOnDraw();
+  if (reshapeTarget) {
+    // Re-scope already-loaded comps to the new polygon instantly (client-side,
+    // zero DB / zero Propelio). OAC comps inside the new shape appear
+    // automatically because the OAC gate re-tests every comp.
+    _buildNbhdOptionsCache();
+    applyPropelioClientFilters();
+    // Instant parcels: clip the already-loaded parcels to the new polygon and
+    // render them now (display-only; runAnalysis below reconciles + is authoritative).
+    // Flag-gated; reshape-only; skipped for large/browse sets (those keep today's path).
+    _reshapeOptimisticApplied = false;
+    _preReshapeFeatures = null;
+    _reshapeClippedSubset = null;
+    if (
+      INSTANT_RESHAPE_ENABLED &&
+      Array.isArray(allAnalysisFeatures) &&
+      allAnalysisFeatures.length &&
+      allAnalysisFeatures.length <= BROWSE_ONLY_THRESHOLD &&
+      Array.isArray(lastPolygon) && lastPolygon.length >= 3
+    ) {
+      _preReshapeFeatures = allAnalysisFeatures;
+      const clipped = allAnalysisFeatures.filter((f) => {
+        const pt = testPointLngLat(f);
+        return pt && pointInPolygonLngLat(pt, lastPolygon);
+      });
+      // Render instantly at the matching scale, mirroring the reconcile branch
+      // (~12294-12303): viewport render above the large-draw threshold, normal
+      // polygon render below it. clipped can't exceed BROWSE_ONLY_THRESHOLD
+      // because the outer guard caps allAnalysisFeatures at it.
+      _reshapeClippedSubset = clipped;
+      _reshapeOptimisticApplied = true;
+      allAnalysisFeatures = clipped;
+      if (map.hasLayer(browseLayer)) browseLayer.remove();
+      let markers;
+      if (clipped.length > LARGE_DRAW_THRESHOLD) {
+        viewportRenderMode = true;
+        renderViewportFeatures();
+        markers = {};
+      } else {
+        viewportRenderMode = false;
+        markers = renderFeatures({ type: "FeatureCollection", features: clipped });
+      }
+      renderSidebar(getVisibleFeatureCounts(clipped, { ignoreBucketToggles: true }), markers);
+    }
+    // Persist the new polygon to the loaded area (owner-only).
+    try {
+      await _apiJson(`/api/areas/${encodeURIComponent(reshapeTarget)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ polygon: lastDrawnLatLngs }),
+      });
+      // Refresh the saved-areas cache so reopening the area shows the NEW shape.
+      // A polygon-only PUT doesn't auto-update _savedAreasCache, so without this
+      // reopening from the sidebar restores the stale cached polygon (mirrors
+      // what the create path does via _reloadSavedResources).
+      await _reloadSavedResources();
+    } catch (err) {
+      console.warn("[reshape] PUT polygon failed:", err);
+    }
+  } else {
+    // Await the autosave so _currentLoadedAreaId is set before runAnalysis
+    // fires.  Without this, /api/analyze receives area_id: null and the new
+    // cached_jobs row is born with saved_area_id = NULL → Stored Values columns
+    // come back empty on CSV export.  The cache pre-warm inside
+    // _autoCacheOnDraw is fire-and-forget, so this only adds the ~100ms
+    // POST /api/areas round-trip before analysis starts — invisible against
+    // the several-second analysis itself.
+    await _autoCacheOnDraw();
+  }
   _showPropelioPolygonButton(e.layer.getLatLngs()[0]);
   const analysisRequest = beginLatestAnalysisRequest();
 
@@ -12096,6 +12761,7 @@ function clearDrawResults() {
   _clearOriginatorStar();
   _setCurrentTargetParcel(null);
   _currentLoadedAreaId = null;
+  _renderViewToggle();  // no area loaded → hide the ARV/NBV/Export toggle
   // Sprint 2 §5.3: no area loaded -> no snapshot baseline + clear queue.
   _filterSaveLastSnapshot = null;
   _filterSavePendingFields.clear();
@@ -12128,6 +12794,13 @@ function clearDrawResults() {
   // _filterSaveOnAreaChange(null) was called at line ~10671, so
   // _filterSaveQueueSave() will early-return during these mutations —
   // no spurious PUT/autosave fires here.
+
+  // Per-view state: return to ARV and clear the cache so a subsequent area
+  // load starts fresh.
+  if (ARV_NBV_EXPORT_ENABLED) {
+    _activeView = "arv";
+    _viewFilterCache = { arv: null, nbv: null, export: null };
+  }
 
   // Property type filter checkboxes (filterState)
   filterState = { ...DEFAULT_FILTERS };
@@ -12204,14 +12877,17 @@ map.on("draw:drawstart", () => {
   // CSS pointer-events:none (drawing-active class) blocks parcel layer clicks
   // so vertices never get swallowed by underlying markers.
   map.getContainer().classList.add("drawing-active");
-  _currentSessionIsNamed = false;
-  _currentLoadedAreaId = null;
-  _syncTabTitle();
-  _storedValueOnAreaChange(null);
-  void _filterSaveOnAreaChange(null);
-  _selectedSavedItemId = null;
-  _setSessionCacheNote("");
-  renderSavedAreasList();
+  _reshapeTargetAreaId = _currentLoadedAreaId;
+  if (!_reshapeTargetAreaId) {
+    _currentSessionIsNamed = false;
+    _currentLoadedAreaId = null;
+    _syncTabTitle();
+    _storedValueOnAreaChange(null);
+    void _filterSaveOnAreaChange(null);
+    _selectedSavedItemId = null;
+    _setSessionCacheNote("");
+    renderSavedAreasList();
+  }
   _updateSaveSessionButtonState();
 });
 
@@ -12220,6 +12896,7 @@ map.on("draw:drawstop", () => {
   document.getElementById("btn-draw")?.classList.remove("active");
   document.getElementById("btn-draw-cancel")?.classList.add("hidden");
   map.getContainer().classList.remove("drawing-active");
+  _reshapeTargetAreaId = null;
 });
 
 map.on("contextmenu", async (ev) => {
@@ -13632,9 +14309,25 @@ async function _loadAreaFromShareId(shareId) {
         _clearOriginatorStar();
         _setCurrentTargetParcel(null);
         _currentLoadedAreaId = joined.area_id;
+        _renderViewToggle();  // area id set → reveal the ARV/NBV/Export toggle
+    _updateActiveItemRenameVisibility();  // area id set → reveal rename pencil + share button (idempotent)
         // Reload stored values for the shared area (membership-gated GET
-        // succeeds now that the editor row exists).
+        // succeeds now that the editor row exists). Force a clean reload by
+        // resetting the cache guard first — restoreSavedArea already fired a
+        // pre-join load that failed (403, not a member yet), and without this
+        // reset the _storedValueOnAreaChange guard could short-circuit on the
+        // stale/blank cached state and leave the panel empty until refresh.
+        _storedValueAreaId = null;
+        _storedValueState = null;
         _storedValueOnAreaChange(_currentLoadedAreaId);
+        // G7 fence (per-view ratings spec §9): unlike stored values, comp +
+        // parcel RATINGS are NOT membership-gated — comps load via the
+        // un-authed /api/propelio/by-saved-area endpoint, and parcel ratings
+        // via /api/analyze which scopes by workspace_id (not membership; only
+        // _saved_area_exists). So the pre-join restoreSavedArea() hydrate above
+        // already returned the correct ratings (incl. ratings_by_view) and there
+        // is NO 403-before-join race to repair here. Intentionally no rating
+        // re-fetch. (Verified 2026-06-29; see spec §9 G7.)
         _syncTabTitle();
         _selectedSavedItemId = joined.area_id;
         // Carry the originator TARGET star through to the editor's view.
@@ -13993,6 +14686,12 @@ async function _storedValueLoadFromServer(areaId, signal) {
     });
     if (!resp.ok) {
       if (resp.status === 404) return _storedValueBlankState();
+      // 403 = not a member YET (e.g. stored values loaded during share-open,
+      // before the auto-join grants editor membership). Return null so it is
+      // NOT cached as a blank state — otherwise the post-join reload would
+      // short-circuit on the _storedValueOnAreaChange guard and the panel would
+      // stay empty until a manual refresh.
+      if (resp.status === 403) return null;
       throw new Error(`stored-value load failed: ${resp.status}`);
     }
     const data = await resp.json();
@@ -14309,6 +15008,93 @@ if (document.readyState === "loading") {
   document.addEventListener("DOMContentLoaded", _storedValueWireListeners, { once: true });
 } else {
   _storedValueWireListeners();
+}
+
+// ─── ARV · NBV · Export filter-view toggle (Feature #3, Chunk C) ───
+// _setActiveView is the real switch, used by BOTH the toggle buttons and the
+// window._llSetActiveView console hook. _renderViewToggle shows/hides the
+// in-slot toggle box (under the Clear button) + syncs the active segment.
+// All flag-gated: flag OFF ⇒ the box stays hidden and none of this runs against
+// a visible element, so today's layout/behavior is byte-for-byte unchanged.
+function _renderViewToggle() {
+  const block = document.getElementById("view-toggle-block");
+  if (!block) return;
+  const show = ARV_NBV_EXPORT_ENABLED && Boolean(_currentLoadedAreaId);
+  block.classList.toggle("hidden", !show);
+  if (!show) return;
+  block.querySelectorAll(".view-toggle-seg").forEach((seg) => {
+    const isActive = seg.getAttribute("data-view") === _activeView;
+    seg.classList.toggle("active", isActive);
+    seg.setAttribute("aria-selected", isActive ? "true" : "false");
+  });
+}
+
+function _setActiveView(view) {
+  if (!ARV_NBV_EXPORT_ENABLED) return;
+  if (view !== "arv" && view !== "nbv" && view !== "export") {
+    console.warn("[views] unknown view:", view, "— must be 'arv', 'nbv', or 'export'");
+    return;
+  }
+  if (view === _activeView) return; // already active — no-op
+  // Save the departing view's live UI back to its cache.
+  _viewFilterCache[_activeView] = captureFilterState();
+  _activeView = view;
+  // Per-view ratings (Chunk E): re-project ratings to the new active view up
+  // front, independent of whether the filter restore below actually re-renders
+  // (the parcel render is gated on lastAnalysisGeojson). This keeps the comp +
+  // parcel `user_rating` projections correct for any subsequent read even on
+  // the edge where a render is skipped. The renders below then repaint from
+  // this already-projected state.
+  _projectCompRatingsForActiveView();
+  _projectParcelRatingsForActiveView();
+  // Seed-from-ARV on first visit to NBV/Export (spec §5.4): copy the current
+  // ARV filters so the view starts from a baseline, not blank, and persist each
+  // seeded field via the per-field PATCH (as _views.<view>.*) so it survives a
+  // reload.
+  let _cached = _viewFilterCache[view];
+  let _seeded = false;
+  if ((view === "nbv" || view === "export") && !(_cached && _cached.v)) {
+    const _arv = _viewFilterCache.arv;
+    _cached = (_arv && _arv.v)
+      ? JSON.parse(JSON.stringify(_arv))
+      : { v: 1, checkboxes: { ...DEFAULT_FILTERS }, numeric: {}, sold: {}, comp: {}, propelio: {} };
+    _viewFilterCache[view] = _cached;
+    _seeded = true;
+  }
+  const _toRestore = (_cached && _cached.v)
+    ? _cached
+    : { v: 1, checkboxes: { ...DEFAULT_FILTERS }, numeric: {}, sold: {}, comp: {}, propelio: {} };
+  restoreFilterState(_toRestore);
+  if (_seeded) {
+    // Persist the seed via the per-field PATCH path, but diff against the app
+    // DEFAULTS (not empty) so we only PATCH fields that actually DIFFER from
+    // defaults. Missing fields fall back to defaults on restore, so a near-
+    // default ARV seeds with ~zero PATCHes — which keeps the SSE echo burst
+    // tiny and makes rapid view-switching ("wild ape" hammering) smooth.
+    // _diffFilterState uses _activeView to build the _views.<view>.* keys.
+    _filterSaveLastSnapshot = {
+      v: 1,
+      checkboxes: { ...DEFAULT_FILTERS },
+      numeric: {},
+      sold: {},
+      comp: {},
+      propelio: { ...DEFAULT_PROPELIO_FILTERS },
+    };
+    _filterSaveQueueSave();
+  }
+  // Baseline for subsequent user edits on this view.
+  _filterSaveLastSnapshot = captureFilterState();
+  _renderViewToggle();
+  console.info("[views] active view →", _activeView, _seeded ? "(seeded from ARV)" : "");
+}
+
+// Wire the visible toggle buttons + keep the console hook pointed at the real fn.
+//   window._llSetActiveView('nbv' | 'arv' | 'export')  — dev/power-user tool.
+if (ARV_NBV_EXPORT_ENABLED) {
+  document.querySelectorAll("#view-toggle-block .view-toggle-seg").forEach((seg) => {
+    seg.addEventListener("click", () => _setActiveView(seg.getAttribute("data-view")));
+  });
+  window._llSetActiveView = _setActiveView;
 }
 
 // v1 §2.1 — flush pending filter save on tab close. Mirror of

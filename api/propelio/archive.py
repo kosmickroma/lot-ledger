@@ -10,7 +10,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from psycopg2.extras import Json
 
@@ -123,6 +123,15 @@ def merge_comps_into_archive(saved_area_id: str, comps: list[dict[str, Any]]) ->
                 # the frontend round-trip the same key when POSTing ratings.
                 comp["comp_address_key"] = comp_key
 
+                # Per-view ratings (Chunk E): NEVER persist the frontend's
+                # client-internal projection transient `_ratingArv`. The client
+                # captures it only while `user_rating` still equals the backend
+                # ARV value; baking a (possibly stale) copy into the blob would
+                # survive reload and poison the client's lazy-capture guard →
+                # silent ARV-rating desync. The canonical ARV rating lives in
+                # comp_ratings and is re-attached on read (load_archived_comps).
+                comp.pop("_ratingArv", None)
+
                 cur.execute(
                     """
                     INSERT INTO propelio_comp_archive (
@@ -191,6 +200,7 @@ def set_comp_rating(
     comp_address_key: str,
     rating: str | None,
     rated_by_user_id: int | None = None,
+    view: Literal["arv", "nbv", "export"] | None = None,
 ) -> int:
     """Set or clear a workspace-scoped rating for a comp.
 
@@ -198,6 +208,14 @@ def set_comp_rating(
     (workspace_id, comp_id). Looks up comp_id via comp_address_key on
     propelio_comps. Returns rows-affected count for endpoint 404 logic
     (0 = comp not found in global cache).
+
+    view routing (per-view ratings spec §3.1, FMEA C2):
+    - view='arv' (default for absent/None — coexistence with old clients)
+      → the EXISTING comp_ratings table, byte-for-byte unchanged.
+    - view in ('nbv','export') → the additive comp_ratings_views table,
+      UPSERT ON CONFLICT (workspace_id, comp_id, view); clear = DELETE
+      that view's row only.
+    view='arv' is NEVER written to the _views table (CHECK excludes it).
     """
     # Intentionally no longer writes propelio_comp_archive.user_rating;
     # readers should query comp_ratings for canonical rating state.
@@ -207,6 +225,19 @@ def set_comp_rating(
     addr_key = str(comp_address_key or "").strip()
     if not addr_key:
         raise ValueError("comp_address_key is required")
+
+    # View normalization: absent/None → 'arv' (old clients coexist; the
+    # flag-ON frontend always sends an explicit view, so a missing view is
+    # always a flag-off old client). Present-but-invalid → ValueError → 400
+    # (NEVER silently default an invalid present view to ARV). FMEA C2.
+    norm_view: Literal["arv", "nbv", "export"]
+    if view is None:
+        norm_view = "arv"
+    else:
+        candidate_view = str(view).strip().lower()
+        if candidate_view not in ("arv", "nbv", "export"):
+            raise ValueError(f"view must be 'arv', 'nbv', 'export', or null; got {view!r}")
+        norm_view = candidate_view  # type: ignore[assignment]
 
     norm_rating: str | None
     if rating is None:
@@ -234,28 +265,56 @@ def set_comp_rating(
                 return 0
             comp_id = int(row[0])
 
-            if norm_rating is None:
-                cur.execute(
-                    """
-                    DELETE FROM comp_ratings
-                    WHERE workspace_id = %s AND comp_id = %s
-                    """,
-                    (area_id, comp_id),
-                )
-                affected = cur.rowcount
+            if norm_view == "arv":
+                # ARV path — EXISTING comp_ratings table, byte-for-byte
+                # unchanged. This is the load-bearing coexistence invariant.
+                if norm_rating is None:
+                    cur.execute(
+                        """
+                        DELETE FROM comp_ratings
+                        WHERE workspace_id = %s AND comp_id = %s
+                        """,
+                        (area_id, comp_id),
+                    )
+                    affected = cur.rowcount
+                else:
+                    cur.execute(
+                        """
+                        INSERT INTO comp_ratings (workspace_id, comp_id, rating, rated_by_user_id, rated_at)
+                        VALUES (%s, %s, %s, %s, NOW())
+                        ON CONFLICT (workspace_id, comp_id) DO UPDATE
+                            SET rating = EXCLUDED.rating,
+                                rated_by_user_id = EXCLUDED.rated_by_user_id,
+                                rated_at = NOW()
+                        """,
+                        (area_id, comp_id, norm_rating, rated_by_user_id),
+                    )
+                    affected = cur.rowcount
             else:
-                cur.execute(
-                    """
-                    INSERT INTO comp_ratings (workspace_id, comp_id, rating, rated_by_user_id, rated_at)
-                    VALUES (%s, %s, %s, %s, NOW())
-                    ON CONFLICT (workspace_id, comp_id) DO UPDATE
-                        SET rating = EXCLUDED.rating,
-                            rated_by_user_id = EXCLUDED.rated_by_user_id,
-                            rated_at = NOW()
-                    """,
-                    (area_id, comp_id, norm_rating, rated_by_user_id),
-                )
-                affected = cur.rowcount
+                # NBV/Export path — additive comp_ratings_views table. view
+                # CHECK excludes 'arv' (structurally impossible to shadow ARV).
+                if norm_rating is None:
+                    cur.execute(
+                        """
+                        DELETE FROM comp_ratings_views
+                        WHERE workspace_id = %s AND comp_id = %s AND view = %s
+                        """,
+                        (area_id, comp_id, norm_view),
+                    )
+                    affected = cur.rowcount
+                else:
+                    cur.execute(
+                        """
+                        INSERT INTO comp_ratings_views (workspace_id, comp_id, view, rating, rated_by_user_id, rated_at)
+                        VALUES (%s, %s, %s, %s, %s, NOW())
+                        ON CONFLICT (workspace_id, comp_id, view) DO UPDATE
+                            SET rating = EXCLUDED.rating,
+                                rated_by_user_id = EXCLUDED.rated_by_user_id,
+                                rated_at = NOW()
+                        """,
+                        (area_id, comp_id, norm_view, norm_rating, rated_by_user_id),
+                    )
+                    affected = cur.rowcount
         conn.commit()
         if norm_rating is None and affected == 0:
             return 1
@@ -268,6 +327,26 @@ def set_comp_rating(
 
 
 def load_archived_comps(saved_area_id: str) -> list[dict[str, Any]]:
+    """Load archived comps for a saved area, hydrating ratings from the
+    AUTHORITATIVE store (comp_ratings for ARV + comp_ratings_views for
+    nbv/export) — NOT the legacy propelio_comp_archive.user_rating column.
+
+    Per-view ratings spec §3.3 (gap-hunt critical catch): this function feeds
+    5 endpoints (by-polygon cache-hit fallback, refresh, deep-pull,
+    attach-to-area, archived-comps). Previously it sourced user_rating from
+    propelio_comp_archive.user_rating, which the rate endpoint stopped writing
+    (set_comp_rating writes only comp_ratings) → latent ARV desync where a
+    rating saved via /comp/rate was invisible on this fallback path. This
+    reconciliation reads comp_ratings (ARV) + comp_ratings_views (nbv/export)
+    in the same Alt-D shape as load_comps_by_polygon (§3.2): user_rating from
+    the ARV table (unchanged semantics), ratings_by_view aggregated with
+    COALESCE('{}') + workspace_id-scoped JOIN (C4) + GROUP BY (H5).
+
+    The comp DATA still comes from propelio_comp_archive (it is the comp-data
+    store); only the rating source changes. comp_address_key is needed to
+    bridge archive → propelio_comps → comp_ratings (archive has comp_address_key,
+    comp_ratings needs comp_id).
+    """
     normalized_area_id = str(saved_area_id or "").strip()
     if not normalized_area_id:
         return []
@@ -278,27 +357,70 @@ def load_archived_comps(saved_area_id: str) -> list[dict[str, Any]]:
             cur.execute(
                 """
                 SELECT
-                    comp_data,
-                    parcel_geom,
-                    parcel_account_num,
-                    status,
-                    user_rating
-                FROM propelio_comp_archive
-                WHERE saved_area_id = %s
-                ORDER BY last_seen_at DESC, id DESC
+                    pa.comp_data,
+                    pa.parcel_geom,
+                    pa.parcel_account_num,
+                    pa.status,
+                    pa.comp_address_key,
+                    cr.rating AS user_rating,
+                    COALESCE(
+                        json_object_agg(crv.view, crv.rating)
+                            FILTER (WHERE crv.view IN ('nbv','export')),
+                        '{}'
+                    ) AS ratings_by_view
+                FROM propelio_comp_archive pa
+                LEFT JOIN propelio_comps pc
+                    ON pc.comp_address_key = pa.comp_address_key
+                LEFT JOIN comp_ratings cr
+                    ON cr.comp_id = pc.comp_id
+                    AND cr.workspace_id = pa.saved_area_id
+                LEFT JOIN comp_ratings_views crv
+                    ON crv.comp_id = pc.comp_id
+                    AND crv.workspace_id = pa.saved_area_id
+                WHERE pa.saved_area_id = %s
+                GROUP BY
+                    pa.comp_data,
+                    pa.parcel_geom,
+                    pa.parcel_account_num,
+                    pa.status,
+                    pa.comp_address_key,
+                    cr.rating
+                ORDER BY pa.last_seen_at DESC, pa.id DESC
                 """,
                 (normalized_area_id,),
             )
             rows = cur.fetchall() or []
 
         hydrated: list[dict[str, Any]] = []
-        for comp_data, parcel_geom, parcel_account_num, status, user_rating in rows:
+        for comp_data, parcel_geom, parcel_account_num, status, comp_address_key, user_rating, ratings_by_view in rows:
             comp = dict(comp_data) if isinstance(comp_data, dict) else {}
+            # Defensive (Chunk E): drop any client-internal projection transient
+            # that an older blob may have captured before merge_comps_into_archive
+            # started stripping it. user_rating + ratings_by_view below are the
+            # authoritative values from the rating tables.
+            comp.pop("_ratingArv", None)
             comp["parcel_geom"] = parcel_geom if isinstance(parcel_geom, (dict, list)) else None
             comp["parcel_account_num"] = str(parcel_account_num or "").strip() or None
+            # comp_address_key is now explicitly set (parity with
+            # load_comps_by_polygon) so the popup rating buttons work on this
+            # fallback path too. The archive row always has it (NOT NULL).
+            if comp_address_key:
+                comp["comp_address_key"] = str(comp_address_key)
             if status and not comp.get("status"):
                 comp["status"] = status
             comp["user_rating"] = str(user_rating).strip().lower() if user_rating is not None else None
+            # ratings_by_view: {nbv?, export?} — COALESCE guarantees '{}' (H5).
+            if isinstance(ratings_by_view, dict):
+                comp["ratings_by_view"] = ratings_by_view
+            elif isinstance(ratings_by_view, str):
+                try:
+                    import json as _json3
+                    parsed = _json3.loads(ratings_by_view)
+                    comp["ratings_by_view"] = parsed if isinstance(parsed, dict) else {}
+                except Exception:
+                    comp["ratings_by_view"] = {}
+            else:
+                comp["ratings_by_view"] = {}
             hydrated.append(comp)
 
         return hydrated
@@ -541,8 +663,16 @@ def load_comps_by_polygon(
 
     polygon_latlngs: raw [[lng, lat], ...] ring from the frontend (NOT closed).
     Returns a list of dicts ready for direct inclusion in the API response —
-    each dict is {**parsed_payload, comp_address_key, user_rating, parcel_geom,
-    parcel_account_num, parcel_county}.  Comps with NULL geom are excluded.
+    each dict is {**parsed_payload, comp_address_key, user_rating, ratings_by_view,
+    parcel_geom, parcel_account_num, parcel_county}.  Comps with NULL geom are excluded.
+
+    Per-view ratings spec §3.2 (Alt-D, FMEA C3/C4/H5): user_rating stays the ARV
+    value from the existing comp_ratings JOIN (unchanged). ratings_by_view is the
+    additive per-view (nbv/export) blob from comp_ratings_views, aggregated via
+    json_object_agg + COALESCE('{}') so unrated comps → {} (never SQL NULL). The
+    _views JOIN is workspace_id-scoped (C4 cross-tenant leak guard) and GROUP BY
+    every non-aggregated SELECT column (H5 — json_object_agg requires it or comp
+    rows duplicate).
     """
     if not polygon_latlngs or len(polygon_latlngs) < 3:
         return []
@@ -584,31 +714,47 @@ def load_comps_by_polygon(
                     pc.parcel_geom,
                     pc.parcel_account_num,
                     pc.parcel_county,
-                                        cr.rating AS user_rating,
-                                        NOT ST_Within(
-                                                pc.geom,
-                                                ST_GeomFromGeoJSON(%(polygon)s)::geometry
-                                        ) AS is_outside_polygon
+                    cr.rating AS user_rating,
+                    COALESCE(
+                        json_object_agg(crv.view, crv.rating)
+                            FILTER (WHERE crv.view IN ('nbv','export')),
+                        '{}'
+                    ) AS ratings_by_view,
+                    NOT ST_Within(
+                        pc.geom,
+                        ST_GeomFromGeoJSON(%(polygon)s)::geometry
+                    ) AS is_outside_polygon
                 FROM propelio_comps pc
                 LEFT JOIN comp_ratings cr
                     ON cr.comp_id = pc.comp_id
                     AND cr.workspace_id = %(workspace_id)s
+                LEFT JOIN comp_ratings_views crv
+                    ON crv.comp_id = pc.comp_id
+                    AND crv.workspace_id = %(workspace_id)s
                 WHERE pc.geom IS NOT NULL
-                                    AND (
-                                        ST_Within(pc.geom, ST_GeomFromGeoJSON(%(polygon)s)::geometry)
-                                        OR ST_DWithin(
-                                                pc.geom::geography,
-                                                ST_SetSRID(ST_MakePoint(%(centroid_lng)s, %(centroid_lat)s), 4326)::geography,
-                                                %(circumradius_meters)s
-                                        )
-                                    )
+                    AND (
+                        ST_Within(pc.geom, ST_GeomFromGeoJSON(%(polygon)s)::geometry)
+                        OR ST_DWithin(
+                            pc.geom::geography,
+                            ST_SetSRID(ST_MakePoint(%(centroid_lng)s, %(centroid_lat)s), 4326)::geography,
+                            %(circumradius_meters)s
+                        )
+                    )
+                GROUP BY
+                    pc.parsed_payload,
+                    pc.comp_address_key,
+                    pc.parcel_geom,
+                    pc.parcel_account_num,
+                    pc.parcel_county,
+                    cr.rating,
+                    is_outside_polygon
                 """,
                 {
                     "workspace_id": workspace_id,
                     "polygon": geojson_str,
-                                        "centroid_lat": centroid_lat,
-                                        "centroid_lng": centroid_lng,
-                                        "circumradius_meters": circumradius_meters,
+                    "centroid_lat": centroid_lat,
+                    "centroid_lng": centroid_lng,
+                    "circumradius_meters": circumradius_meters,
                 },
             )
             rows = cur.fetchall() or []
@@ -624,6 +770,7 @@ def load_comps_by_polygon(
             parcel_account_num,
             parcel_county,
             user_rating,
+            ratings_by_view,
             is_outside_polygon,
         ) = row
         comp = dict(parsed_payload) if isinstance(parsed_payload, dict) else {}
@@ -632,6 +779,21 @@ def load_comps_by_polygon(
         comp["parcel_account_num"] = str(parcel_account_num or "").strip() or None
         comp["parcel_county"] = str(parcel_county or "").strip() or None
         comp["user_rating"] = str(user_rating).strip().lower() if user_rating is not None else None
+        # ratings_by_view: {nbv?, export?} — COALESCE guarantees '{}' (never
+        # NULL) so frontend Object.keys()/spread never crashes (H5). psycopg2
+        # returns JSON as a Python dict already; normalize defensively.
+        if isinstance(ratings_by_view, dict):
+            comp["ratings_by_view"] = ratings_by_view
+        elif isinstance(ratings_by_view, str):
+            # Some driver configs return json as text; parse defensively.
+            try:
+                import json as _json2
+                parsed = _json2.loads(ratings_by_view)
+                comp["ratings_by_view"] = parsed if isinstance(parsed, dict) else {}
+            except Exception:
+                comp["ratings_by_view"] = {}
+        else:
+            comp["ratings_by_view"] = {}
         if is_outside_polygon:
             extra = comp.setdefault("extra", {})
             if isinstance(extra, dict):

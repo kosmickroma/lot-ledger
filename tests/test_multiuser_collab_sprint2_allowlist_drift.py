@@ -32,7 +32,7 @@ _EXPECTED_KEYS = frozenset({
     "comp.appr_val_min", "comp.appr_val_max",
     "comp.yr_built_min", "comp.yr_built_max",
     "comp.sqft_min",     "comp.sqft_max",
-    # propelio (22) — includes the 6 parcelType* mirrors (Sprint 2 smoke catch).
+    # propelio (23) — includes the 6 parcelType* mirrors (Sprint 2 smoke catch).
     "propelio.months",  "propelio.range",
     "propelio.statusSold", "propelio.statusActive", "propelio.statusPending",
     "propelio.showOutsideArea", "propelio.soldWithinDays",
@@ -41,6 +41,7 @@ _EXPECTED_KEYS = frozenset({
     "propelio.yearMin", "propelio.yearMax",
     "propelio.priceMin", "propelio.priceMax",
     "propelio.sortMode",
+    "propelio.neighborhood",
     "propelio.parcelTypeMultifamily", "propelio.parcelTypeDuplexes",
     "propelio.parcelTypeCommercial",  "propelio.parcelTypeVacant",
     "propelio.parcelTypeExempt",      "propelio.parcelTypeOffMarket",
@@ -61,22 +62,24 @@ def test_filter_field_keys_has_all_43_expected():
 
 def test_filter_field_keys_no_unknown():
     actual = getattr(api_main, "_FILTER_FIELD_KEYS")
-    extras = set(actual) - _EXPECTED_KEYS
+    # _views.nbv.* and _views.export.* are programmatically derived from
+    # _FILTER_FIELD_BASE_KEYS and are intentionally NOT in _EXPECTED_KEYS
+    # (which covers only the base ARV keys). Strip them before checking extras.
+    flat_actual = {k for k in actual if not k.startswith("_views.")}
+    extras = flat_actual - _EXPECTED_KEYS
     assert not extras, (
-        f"_FILTER_FIELD_KEYS contains unexpected keys: {sorted(extras)}. "
+        f"_FILTER_FIELD_KEYS contains unexpected flat keys: {sorted(extras)}. "
         f"If you added a new filter, also update _EXPECTED_KEYS in this test."
     )
 
 
 def test_filter_field_keys_count_matches_spec():
     actual = getattr(api_main, "_FILTER_FIELD_KEYS")
-    # 9 checkboxes + 8 numeric + 5 sold + 8 comp + 22 propelio = 52.
-    # Sprint 2 smoke catch 2026-06-02: readPropelioFiltersFromUI() spreads
-    # 6 additional parcelType* keys into the propelio object at capture
-    # time (mirrors of the parcel-side checkboxes). They must be in the
-    # allowlist or PATCH 400s on every checkbox toggle.
-    assert len(actual) == 52, (
-        f"Sprint 2 captures 52 distinct filter fields; constant has {len(actual)}."
+    # 53 base keys × 3 (ARV flat + _views.nbv.* + _views.export.*) = 159.
+    # The 53 base keys are: 9 checkboxes + 8 numeric + 5 sold + 8 comp +
+    # 23 propelio (including 6 parcelType* mirrors added Sprint 2).
+    assert len(actual) == 159, (
+        f"Expected 159 keys (53 base × 3 views); constant has {len(actual)}."
     )
 
 

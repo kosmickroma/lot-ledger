@@ -24,11 +24,16 @@ def _extract_fn_source(module_src: str, fn_name: str) -> str:
 
 
 def test_update_saved_area_still_accepts_filter_state_blob():
-    """Regression: existing blob cache write must keep working."""
+    """Regression: existing blob cache write must keep working.
+
+    ARV·NBV·Export feature (2026-06-29): the whole-blob PUT now MERGES
+    (`COALESCE(filter_state,'{}') || %s::jsonb`) instead of overwriting, so a
+    flat-section PUT can never silently wipe the additive `_views` data written
+    by per-field PATCH. Still writes filter_state to the blob — just via merge."""
     src = inspect.getsource(api_main)
     fn_src = _extract_fn_source(src, "update_saved_area")
     assert "filter_state" in fn_src
-    assert 'update_cols.append("filter_state = %s")' in fn_src
+    assert 'update_cols.append("filter_state = COALESCE(filter_state,\'{}\') || %s::jsonb")' in fn_src
 
 
 def test_update_saved_area_explodes_blob_into_per_field():

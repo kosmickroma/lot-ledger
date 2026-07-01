@@ -1,11 +1,12 @@
-"""Tests for the duplexes bucket in `classify_parcel` (DCAD v1, 2026-06-01).
+"""Tests for the duplexes bucket in `classify_parcel` (DCAD, updated 2026-06-30).
 
-Locked rule: `units` (joined from `res_detail.num_units`) drives the new
-duplex bucket; SPTD is used only to gate eligibility. Condos (A13/A14)
-and apartments (B11) stay multifamily by DCAD's classification regardless
-of unit count. F10 commercial stays commercial. See
-docs/DUPLEXES_PROPERTY_TYPE_SPEC.md for the audit data that drove the
-shift from "trust SPTD" to "trust units, gate by SPTD."
+Rule (v2, 2026-06-30 label-first): B12 ("Duplexes") is trusted directly —
+units=1 B12 parcels are duplex halves (87.6% have an adjacent B12 sibling
+per imagery audit 2026-06-30). No scalar CAD field separates a duplex half
+from an SFR, so the B12 label is the only reliable signal. A11/A12/A20
+still gate on units 2-4 (converted SFR). Condos (A13/A14) and apartments
+(B11) stay multifamily regardless of unit count. Exempt/gov/HOA short-circuit
+first. See docs/DUPLEXES_PROPERTY_TYPE_SPEC.md for the original v1 audit.
 """
 from api.counties.dcad import classify_parcel
 
@@ -22,7 +23,7 @@ def _row(*, sptd, units=None, owner_name="", tot_val=100_000):
 
 
 # ---------------------------------------------------------------------------
-# Happy path — actual duplexes (B12 with 2-4 units)
+# Happy path — actual duplexes (B12 with 2-4 units — unchanged behaviour)
 # ---------------------------------------------------------------------------
 
 def test_b12_with_two_units_is_duplexes():
@@ -38,32 +39,44 @@ def test_b12_with_four_units_is_duplexes():
 
 
 # ---------------------------------------------------------------------------
-# B12 fall-through — single-unit / no-unit B12 is single_family
+# B12 label-first — ALL B12 parcels are duplexes (units field irrelevant)
 # ---------------------------------------------------------------------------
 
-def test_b12_with_one_unit_is_single_family():
-    """60% of DCAD's B12 parcels are actually 1-unit per the 2026-06-01
-    audit. DCAD's "Duplexes" SPTD label is unreliable for these; we trust
-    units instead and let them fall through to single_family."""
-    assert classify_parcel(_row(sptd="B12", units=1), set()) == "single_family"
+def test_b12_with_one_unit_is_duplexes():
+    """Imagery audit 2026-06-30: ~10/10 spot-checked units=1 B12 parcels
+    are duplex halves — each half platted as its own account, unit count
+    legitimately 1. 87.6% of DCAD B12 parcels have an adjacent B12 sibling.
+    The B12 label is the only reliable signal; trust it directly."""
+    assert classify_parcel(_row(sptd="B12", units=1), set()) == "duplexes"
 
 
-def test_b12_with_null_units_is_single_family():
-    """No units recorded → can't confirm 2-4 → falls through to
-    single_family (safer default than the old `B12 → multifamily`
-    behavior, which would have lumped these with apartments)."""
-    assert classify_parcel(_row(sptd="B12", units=None), set()) == "single_family"
+def test_b12_with_null_units_is_duplexes():
+    """B12 label is trusted regardless of units value — null, zero, one,
+    or any other value. The label-first rule makes units irrelevant for B12."""
+    assert classify_parcel(_row(sptd="B12", units=None), set()) == "duplexes"
 
 
-def test_b12_with_zero_units_is_single_family():
-    assert classify_parcel(_row(sptd="B12", units=0), set()) == "single_family"
+def test_b12_with_zero_units_is_duplexes():
+    assert classify_parcel(_row(sptd="B12", units=0), set()) == "duplexes"
 
 
-def test_b12_with_five_units_is_single_family():
-    """5+ unit B12 is an anomaly (only 2 such parcels in DCAD per audit).
-    Falls through to single_family — not multifamily, since DCAD's
-    apartment/condo SPTDs are the multifamily anchors."""
-    assert classify_parcel(_row(sptd="B12", units=5), set()) == "single_family"
+def test_b12_with_five_units_is_duplexes():
+    """5+ unit B12 anomaly (only ~2 parcels in DCAD per audit) — the label
+    still wins; trust B12 over an unusual unit count."""
+    assert classify_parcel(_row(sptd="B12", units=5), set()) == "duplexes"
+
+
+# ---------------------------------------------------------------------------
+# Exempt precedence — B12 label-first does NOT poach exempt parcels
+# ---------------------------------------------------------------------------
+
+def test_b12_one_unit_in_exempt_set_is_exempt():
+    assert classify_parcel(_row(sptd="B12", units=1), exempt_set={"X1"}) == "exempt"
+
+
+def test_b12_one_unit_hoa_owner_is_exempt():
+    row = _row(sptd="B12", units=1, owner_name="OAK CLIFF HOMEOWNERS ASSOC")
+    assert classify_parcel(row, set()) == "exempt"
 
 
 # ---------------------------------------------------------------------------
@@ -184,9 +197,10 @@ def test_a11_sfr_normal_returns_single_family():
 
 def test_units_value_is_string_coerces_correctly():
     """The `_safe_int` helper coerces numeric strings — guard against
-    DB driver returning Decimal or string-form numbers without a crash."""
+    DB driver returning Decimal or string-form numbers without a crash.
+    B12 is label-first so units="1" is now duplexes (not single_family)."""
     assert classify_parcel(_row(sptd="B12", units="2"), set()) == "duplexes"
-    assert classify_parcel(_row(sptd="B12", units="1"), set()) == "single_family"
+    assert classify_parcel(_row(sptd="B12", units="1"), set()) == "duplexes"
 
 
 def test_units_value_is_decimal_coerces_correctly():
@@ -200,7 +214,7 @@ def test_units_value_is_float_with_no_fraction_coerces_correctly():
     assert classify_parcel(_row(sptd="B12", units=2.0), set()) == "duplexes"
 
 
-def test_units_value_is_garbage_string_falls_through_safely():
-    """Non-numeric `units` value should be treated as missing (None
-    semantics), not crash. The row falls through to single_family."""
-    assert classify_parcel(_row(sptd="B12", units="garbage"), set()) == "single_family"
+def test_b12_garbage_units_string_is_duplexes():
+    """Non-numeric `units` value must not crash. B12 is label-first, so
+    garbage-units B12 is still duplexes (units field is irrelevant for B12)."""
+    assert classify_parcel(_row(sptd="B12", units="garbage"), set()) == "duplexes"

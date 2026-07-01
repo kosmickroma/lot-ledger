@@ -470,6 +470,70 @@ body.is-not-power-user .power-user-only {
   margin: 0;
 }
 
+/* Neighborhood comp filter */
+.nbhd-filter-wrap {
+  position: relative;
+  width: 100%;
+}
+.nbhd-search-input {
+  width: 100%;
+  box-sizing: border-box;
+}
+.nbhd-options {
+  /* In-flow (NOT absolute): an absolutely-positioned dropdown gets clipped by
+     the ancestor `.collapsible-body { overflow: hidden }` / `.sidebar` overflow,
+     so it rendered invisibly. In-flow, it pushes rows below it down and rides
+     the sidebar's own scroll — never clipped. */
+  margin-top: 2px;
+  background: #1e2530;
+  border: 1px solid rgba(201, 162, 79, 0.35);
+  border-radius: 6px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+.nbhd-option {
+  padding: 5px 9px;
+  font-size: 11px;
+  color: #dbe0e7;
+  cursor: pointer;
+}
+.nbhd-option:hover {
+  background: rgba(201, 162, 79, 0.15);
+}
+.nbhd-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: rgba(201, 162, 79, 0.14);
+  border: 1px solid rgba(201, 162, 79, 0.4);
+  border-radius: 12px;
+  padding: 3px 8px;
+  font-size: 11px;
+  color: #e8d9b0;
+  max-width: 100%;
+}
+.nbhd-chip[hidden] {
+  /* More specific than the .nbhd-chip inline-flex rule above, which otherwise
+     beats the UA hidden-attribute display-none and shows an empty pill. */
+  display: none;
+}
+.nbhd-chip-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.nbhd-chip-x {
+  cursor: pointer;
+  color: rgba(232, 217, 176, 0.55);
+  flex-shrink: 0;
+  font-size: 12px;
+  line-height: 1;
+  user-select: none;
+}
+.nbhd-chip-x:hover {
+  color: #e8d9b0;
+}
+
 .nf-sep {
   color: var(--text-muted);
   font-size: 11px;
@@ -718,6 +782,64 @@ body.is-not-power-user .power-user-only {
   margin-bottom: 0;
 }
 
+/* ─── ARV · NBV · Export filter-view toggle (Feature #3, Chunk C) ───
+   Lives INSIDE the Workspace block (#active-item-slot), as a thin row under
+   the Clear button (KK 2026-06-29: a standalone sticky box didn't pin to the
+   workspace bottom). NO position:sticky here — it rides with the workspace
+   block, which gives the desired "attached to the bottom of workspace" feel
+   without a separate sticky element to coordinate. No max-height/transition/
+   collapse hacks (feedback_slot_no_animation rule); the segment buttons use
+   only a color shift for active state. Flag OFF ⇒ the block is never
+   un-hidden (map.js) ⇒ today's layout is byte-for-byte intact. */
+.view-toggle-block {
+  /* Clean gap below Clear, matching the action buttons' spacing (KK 2026-06-29:
+     -8px tucked it in and blended with Clear). Positive margin so it never
+     overlaps; no divider. */
+  margin-top: 8px;
+  padding-top: 0;
+}
+
+.view-toggle-segments {
+  display: flex;
+  gap: 4px;
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  padding: 2px;
+}
+
+.view-toggle-seg {
+  flex: 1 1 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #c5ccd6;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  /* Compact: shorter than the action buttons, doesn't need the real estate
+     (KK 2026-06-29). */
+  padding: 3px 0;
+  cursor: pointer;
+  transition: background 120ms linear, color 120ms linear;
+}
+
+.view-toggle-seg:hover:not(.active) {
+  background: rgba(255, 255, 255, 0.06);
+  color: #eef2f6;
+}
+
+.view-toggle-seg.active {
+  background: linear-gradient(135deg, #e2c075 0%, #c9a24f 58%, #9c7a2b 100%);
+  color: #1a1410;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.18) inset;
+}
+
+.view-toggle-seg:focus-visible {
+  outline: 2px solid var(--gold);
+  outline-offset: 1px;
+}
+
 .active-item-target-row {
   display: block;
   margin-bottom: 8px;
@@ -899,6 +1021,41 @@ body.is-not-power-user .power-user-only {
 }
 
 .active-item-rename-btn:hover {
+  opacity: 1;
+  background: rgba(201, 162, 79, 0.18);
+}
+
+/* Share button — mirrors .active-item-rename-btn so the 🔗 sits inline-
+   adjacent to the ✎ pencil and wraps with it on long workspace names.
+   Same size/spacing/inline display; only the glyph differs. Native
+   title attribute (browser tooltip), matching the pencil — no custom
+   tooltip element/CSS. */
+/* Keep the pencil + share as a tight pair on one row; the pair wraps together
+   to a second row only if the name is long (KK 2026-06-29). */
+.active-item-name-actions {
+  white-space: nowrap;
+}
+
+.active-item-share-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  margin-left: 2px;        /* tight to the pencil */
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--gold);
+  font-size: 10px;         /* the 🔗 emoji renders chunkier than ✎ — shrink to match */
+  border-radius: 4px;
+  cursor: pointer;
+  vertical-align: middle;
+  opacity: 0.65;
+  transition: opacity 0.14s ease, background 0.14s ease;
+}
+
+.active-item-share-btn:hover {
   opacity: 1;
   background: rgba(201, 162, 79, 0.18);
 }

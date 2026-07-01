@@ -856,13 +856,22 @@ def classify_parcel(row: dict[str, Any], exempt_set: set[str]) -> str:
     # both buckets are fundamentally non-duplex for Mike's flip thesis.
     if sptd in {"B11", "A14", "A13"}:
         return "multifamily"
-    # Duplexes: residential SPTDs with `units` in {2, 3, 4}. Eligible
-    # SPTDs are the existing single-family bucket (A11/A12/A20) PLUS
-    # B12 — DCAD's "Duplexes" label is unreliable for unit count, so we
-    # trust `units` here. Outside that 2-4 band, B12 falls through to
-    # single_family (single-unit B12 parcels are functionally SFR).
+    # Duplexes: trust DCAD's B12 ("Duplexes") label directly. Audit
+    # 2026-06-30 (imagery + countywide spot-check: ~10/10 duplexes, 0
+    # houses; 87.6% of units=1 B12 have an adjacent B12 sibling): units=1
+    # B12 parcels are overwhelmingly duplex HALVES — each side platted as
+    # its own account, so the unit count is legitimately 1 while the
+    # building is a duplex. No scalar CAD field separates a duplex half
+    # from an SFR, so the B12 label is the only reliable signal. Matches
+    # TAD/Collin/Denton, which already trust their B2/B3/B4 codes with no
+    # unit check. The other residential SPTDs (A11/A12/A20) still gate on
+    # units 2-4 to catch multi-unit structures coded single-family/
+    # townhouse/mobile. (B11 "Apartments" 2-4 units deliberately NOT
+    # included — deferred, needs Mike's sign-off.)
     units = _safe_int(row.get("units"))
-    if sptd in {"A11", "A12", "A20", "B12"} and units is not None and 2 <= units <= 4:
+    if sptd == "B12":
+        return "duplexes"
+    if sptd in {"A11", "A12", "A20"} and units is not None and 2 <= units <= 4:
         return "duplexes"
     if sptd == "C11":
         return "vacant"
