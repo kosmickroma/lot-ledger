@@ -275,70 +275,124 @@ def _resolve_subject_parcel_for_target(address: str) -> dict[str, Any] | None:
     return None
 
 
+# B4 perf fix (2026-07-02): _nearest_subject_parcel was a full 4-table UNION
+# with ST_Distance(...::geography) computed over ~2.1M rows then ORDER BY/LIMIT 1
+# (13.6s, all Seq Scans — geography-distance ordering can't use the GiST indexes
+# on centroid). Replaced with a per-county KNN (`<->`, index-assisted, degree-distance)
+# pulling the 20 nearest candidates per county, then computing exact ST_Distance on
+# just those ≤80 finalists to pick the true nearest. `<->` ranks by degree distance,
+# which can diverge from true (meter) distance by bearing at this latitude — the
+# knn_rank column lets the caller detect a winner sitting at the LIMIT boundary
+# (i.e. a closer real match could exist just outside the fetched window) and retry
+# with a wider net.
+_NEAREST_SUBJECT_KNN_LIMIT = 20
+_NEAREST_SUBJECT_KNN_RETRY_LIMIT = 100
+
+_NEAREST_SUBJECT_KNN_SQL = """
+    WITH dcad_topk AS (
+        SELECT p.account_num, p.property_address AS address, p.centroid AS centroid
+        FROM parcels p
+        WHERE p.centroid IS NOT NULL
+          AND p.property_address IS NOT NULL
+          AND p.property_address <> ''
+        ORDER BY p.centroid <-> ST_SetSRID(ST_Point(%s, %s), 4326)
+        LIMIT %s
+    ),
+    dcad_knn AS (
+        SELECT 'dcad'::text AS county, account_num, address, centroid,
+               ROW_NUMBER() OVER (ORDER BY centroid <-> ST_SetSRID(ST_Point(%s, %s), 4326)) AS knn_rank
+        FROM dcad_topk
+    ),
+    tad_topk AS (
+        SELECT t.account_num, t.situs_addr AS address, t.centroid AS centroid
+        FROM tad_parcels t
+        WHERE t.centroid IS NOT NULL
+          AND t.situs_addr IS NOT NULL
+          AND t.situs_addr <> ''
+        ORDER BY t.centroid <-> ST_SetSRID(ST_Point(%s, %s), 4326)
+        LIMIT %s
+    ),
+    tad_knn AS (
+        SELECT 'tad'::text AS county, account_num, address, centroid,
+               ROW_NUMBER() OVER (ORDER BY centroid <-> ST_SetSRID(ST_Point(%s, %s), 4326)) AS knn_rank
+        FROM tad_topk
+    ),
+    collin_topk AS (
+        SELECT c.account_num, c.property_address AS address, c.centroid AS centroid
+        FROM collin_parcels c
+        WHERE c.centroid IS NOT NULL
+          AND c.property_address IS NOT NULL
+          AND c.property_address <> ''
+        ORDER BY c.centroid <-> ST_SetSRID(ST_Point(%s, %s), 4326)
+        LIMIT %s
+    ),
+    collin_knn AS (
+        SELECT 'collin'::text AS county, account_num, address, centroid,
+               ROW_NUMBER() OVER (ORDER BY centroid <-> ST_SetSRID(ST_Point(%s, %s), 4326)) AS knn_rank
+        FROM collin_topk
+    ),
+    denton_topk AS (
+        SELECT d.account_num, d.property_address AS address, d.centroid AS centroid
+        FROM denton_parcels d
+        WHERE d.centroid IS NOT NULL
+          AND d.property_address IS NOT NULL
+          AND d.property_address <> ''
+        ORDER BY d.centroid <-> ST_SetSRID(ST_Point(%s, %s), 4326)
+        LIMIT %s
+    ),
+    denton_knn AS (
+        SELECT 'denton'::text AS county, account_num, address, centroid,
+               ROW_NUMBER() OVER (ORDER BY centroid <-> ST_SetSRID(ST_Point(%s, %s), 4326)) AS knn_rank
+        FROM denton_topk
+    ),
+    finalists AS (
+        SELECT county, account_num, address, centroid, knn_rank FROM dcad_knn
+        UNION ALL
+        SELECT county, account_num, address, centroid, knn_rank FROM tad_knn
+        UNION ALL
+        SELECT county, account_num, address, centroid, knn_rank FROM collin_knn
+        UNION ALL
+        SELECT county, account_num, address, centroid, knn_rank FROM denton_knn
+    )
+    SELECT county, account_num, address,
+           ST_Distance(centroid::geography, ST_SetSRID(ST_Point(%s, %s), 4326)::geography) AS distance_m,
+           knn_rank
+    FROM finalists
+    ORDER BY distance_m ASC
+    LIMIT 1
+"""
+
+
+def _run_nearest_subject_knn(cur, lat: float, lng: float, limit_n: int):
+    cur.execute(
+        _NEAREST_SUBJECT_KNN_SQL,
+        (
+            lng, lat, limit_n,  # dcad_topk
+            lng, lat,           # dcad_knn rank
+            lng, lat, limit_n,  # tad_topk
+            lng, lat,           # tad_knn rank
+            lng, lat, limit_n,  # collin_topk
+            lng, lat,           # collin_knn rank
+            lng, lat, limit_n,  # denton_topk
+            lng, lat,           # denton_knn rank
+            lng, lat,           # final exact-distance calc
+        ),
+    )
+    return cur.fetchone()
+
+
 def _nearest_subject_parcel(lat: float, lng: float) -> dict[str, Any] | None:
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                WITH point AS (
-                    SELECT ST_SetSRID(ST_Point(%s, %s), 4326) AS geom
-                ),
-                candidates AS (
-                    SELECT
-                        'dcad'::text AS county,
-                        p.account_num,
-                        p.property_address AS address,
-                        ST_Distance(p.centroid::geography, point.geom::geography) AS distance_m
-                    FROM parcels p, point
-                    WHERE p.centroid IS NOT NULL
-                      AND p.property_address IS NOT NULL
-                      AND p.property_address <> ''
-
-                    UNION ALL
-
-                    SELECT
-                        'tad'::text AS county,
-                        t.account_num,
-                        t.situs_addr AS address,
-                        ST_Distance(t.centroid::geography, point.geom::geography) AS distance_m
-                    FROM tad_parcels t, point
-                    WHERE t.centroid IS NOT NULL
-                      AND t.situs_addr IS NOT NULL
-                      AND t.situs_addr <> ''
-
-                    UNION ALL
-
-                    SELECT
-                        'collin'::text AS county,
-                        c.account_num,
-                        c.property_address AS address,
-                        ST_Distance(c.centroid::geography, point.geom::geography) AS distance_m
-                    FROM collin_parcels c, point
-                    WHERE c.centroid IS NOT NULL
-                      AND c.property_address IS NOT NULL
-                      AND c.property_address <> ''
-
-                    UNION ALL
-
-                    SELECT
-                        'denton'::text AS county,
-                        d.account_num,
-                        d.property_address AS address,
-                        ST_Distance(d.centroid::geography, point.geom::geography) AS distance_m
-                    FROM denton_parcels d, point
-                    WHERE d.centroid IS NOT NULL
-                      AND d.property_address IS NOT NULL
-                      AND d.property_address <> ''
+            row = _run_nearest_subject_knn(cur, lat, lng, _NEAREST_SUBJECT_KNN_LIMIT)
+            if row is not None and int(row[4]) >= _NEAREST_SUBJECT_KNN_LIMIT:
+                logger.warning(
+                    "[propelio] nearest-subject KNN winner at boundary (rank=%s of limit=%s "
+                    "for county=%s); retrying with limit=%s",
+                    row[4], _NEAREST_SUBJECT_KNN_LIMIT, row[0], _NEAREST_SUBJECT_KNN_RETRY_LIMIT,
                 )
-                SELECT county, account_num, address, distance_m
-                FROM candidates
-                ORDER BY distance_m ASC
-                LIMIT 1
-                """,
-                (lng, lat),
-            )
-            row = cur.fetchone()
+                row = _run_nearest_subject_knn(cur, lat, lng, _NEAREST_SUBJECT_KNN_RETRY_LIMIT)
             if row is None:
                 return None
             distance_m = float(row[3] or 0.0)
