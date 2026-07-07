@@ -10809,6 +10809,7 @@ function _buildParcelDetailPanelHtml(p, matchedComp) {
               ${listingDelta ? _buildParcelDetailTableRow(listingDelta.label, `<span style="color:${listingDelta.color}">${_propelioEscape(listingDelta.text)}</span>`) : ""}
               ${compDelta ? _buildParcelDetailTableRow(compDelta.label, `<span style="color:${compDelta.color}">${_propelioEscape(compDelta.text)}</span>`) : ""}
               ${_buildParcelDetailTableRow("Land % of Total", _panelDisplayValue(p.land_pct))}
+              ${_buildParcelDetailTableRow("Living Area", p.sqft && p.sqft !== "N/A" ? `${p.sqft} sf` : "N/A")}
               ${_buildParcelDetailTableRow("Lot Size", _panelDisplayValue(p.lot_sqft))}
               ${_buildParcelDetailTableRow("Acres", _panelDisplayValue(p.lot_acres))}
               ${_buildParcelDetailTableRow("Frontage", _panelDisplayValue(p.frontage))}
@@ -10817,8 +10818,6 @@ function _buildParcelDetailPanelHtml(p, matchedComp) {
               ${_buildParcelDetailTableRow("Zoning", _panelDisplayValue(p.zoning))}
               ${_buildParcelDetailTableRow("School District", _panelDisplayValue(p.school))}
               ${_buildParcelDetailTableRow("Year Built", _panelDisplayValue(p.yr_built))}
-              ${_buildParcelDetailTableRow("Living Area", p.sqft && p.sqft !== "N/A" ? `${p.sqft} sf` : "N/A")}
-              ${p.subdivision ? _buildParcelDetailTableRow("Neighborhood", _neighborhoodCellHtml(p.subdivision, p.legal_description)) : ""}
               <!-- v3 residential detail expansion (Phase 1): per-county
                    CAD source data exposed on feature.properties via the
                    canonical-field contract in
@@ -10828,6 +10827,7 @@ function _buildParcelDetailPanelHtml(p, matchedComp) {
                    the TAD-half PR; Denton no source data → N/A everywhere. -->
               ${_buildParcelDetailTableRow("Effective Year Built", _panelDisplayValue(p.eff_yr_built))}
               ${_buildParcelDetailTableRow("Actual Age", _panelDisplayValue(p.act_age))}
+              ${p.subdivision ? _buildParcelDetailTableRow("Neighborhood", _neighborhoodCellHtml(p.subdivision, p.legal_description)) : ""}
               ${_buildParcelDetailTableRow("% Complete", _panelDisplayValue(p.pct_complete))}
               ${_buildParcelDetailTableRow("Beds", _panelDisplayValue(p.beds))}
               ${_buildParcelDetailTableRow("Full Baths", _panelDisplayValue(p.full_baths))}
@@ -11188,6 +11188,7 @@ function makePopupHtml(p) {
           ${listingDeltaRow}
           ${propelioDeltaRow}
           ${row("Land % of Total", p.land_pct)}
+          ${row("Living Area", p.sqft && p.sqft !== "N/A" ? p.sqft + " sf" : "N/A")}
           ${row("Lot Size", p.lot_sqft)}
           ${row("Acres", p.lot_acres)}
           ${row("Frontage", p.frontage)}
@@ -11196,7 +11197,6 @@ function makePopupHtml(p) {
           ${row("Zoning", p.zoning)}
           ${row("School District", p.school)}
           ${row("Year Built", p.yr_built)}
-          ${row("Living Area", p.sqft && p.sqft !== "N/A" ? p.sqft + " sf" : "N/A")}
           ${subdivision ? row("Neighborhood", _neighborhoodCellHtml(subdivision, p.legal_description)) : ""}
           ${redfinListingRow}
           ${soldCompRows}
