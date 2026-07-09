@@ -10,12 +10,13 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any, Literal
 
 from psycopg2.extras import Json
 
 from api.config import get_session_conn, release_session_conn
-from api.geo import haversine_miles, polygon_centroid
+from api.geo import haversine_miles, polygon_bbox, polygon_centroid
 from api.redfin import normalize_addr_key
 
 
@@ -694,6 +695,25 @@ def load_comps_by_polygon(
     effective_radius_mi = min(max(buffered_radius_mi, 2.0), 10.0)
     circumradius_meters = effective_radius_mi * 1609.344
 
+    # --- Index-serving bbox prefilter (perf; behavior-identical) ---------------
+    # Envelope = provable SUPERSET of BOTH exact predicates below (ST_Within on the
+    # polygon OR ST_DWithin on the buffered-radius disk). Understated 110000 m/deg
+    # + cos() at the highest |lat| the envelope reaches only ever widen the box, so
+    # AND-ing `pc.geom && envelope` cannot drop a qualifying row; it only lets the
+    # planner use idx_propelio_comps_geom (Bitmap Index Scan) instead of a full seq
+    # scan. Flat-degree approx — safe for this app's (North Texas) latitudes.
+    p_min_lat, p_min_lng, p_max_lat, p_max_lng = polygon_bbox(polygon_latlngs)
+    dlat = circumradius_meters / 110000.0
+    max_abs_lat = min(
+        max(abs(p_min_lat), abs(p_max_lat), abs(centroid_lat) + dlat),
+        89.0,
+    )
+    dlng = circumradius_meters / (110000.0 * math.cos(math.radians(max_abs_lat)))
+    env_min_lat = max(min(p_min_lat, centroid_lat - dlat), -90.0)
+    env_max_lat = min(max(p_max_lat, centroid_lat + dlat), 90.0)
+    env_min_lng = max(min(p_min_lng, centroid_lng - dlng), -180.0)
+    env_max_lng = min(max(p_max_lng, centroid_lng + dlng), 180.0)
+
     geojson_polygon = {
         "type": "Polygon",
         "coordinates": [ring],
@@ -732,6 +752,9 @@ def load_comps_by_polygon(
                     ON crv.comp_id = pc.comp_id
                     AND crv.workspace_id = %(workspace_id)s
                 WHERE pc.geom IS NOT NULL
+                    AND pc.geom && ST_MakeEnvelope(
+                        %(env_min_lng)s, %(env_min_lat)s,
+                        %(env_max_lng)s, %(env_max_lat)s, 4326)
                     AND (
                         ST_Within(pc.geom, ST_GeomFromGeoJSON(%(polygon)s)::geometry)
                         OR ST_DWithin(
@@ -755,6 +778,10 @@ def load_comps_by_polygon(
                     "centroid_lat": centroid_lat,
                     "centroid_lng": centroid_lng,
                     "circumradius_meters": circumradius_meters,
+                    "env_min_lng": env_min_lng,
+                    "env_min_lat": env_min_lat,
+                    "env_max_lng": env_max_lng,
+                    "env_max_lat": env_max_lat,
                 },
             )
             rows = cur.fetchall() or []
