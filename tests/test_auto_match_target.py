@@ -112,3 +112,57 @@ def test_availability_refresh_defined() -> None:
     assert ".disabled" in body, "must toggle .disabled on the checkbox"
     assert "Select a target property first" in body
     assert "Target has no lot/sqft data" in body
+
+
+# ── Task 3: enable/disable/apply + hook ──────────────────────────────────────
+
+def test_action_functions_defined() -> None:
+    src = _map()
+    for fn in ("_enableAutoMatch", "_disableAutoMatch", "_clearAutoMatchMode", "_applyAutoMatchIfEnabled"):
+        assert f"function {fn}(" in src, f"{fn} missing"
+
+
+def test_enable_snapshots_before_writing() -> None:
+    src = _map()
+    body = _fn_body(src, r"function _enableAutoMatch\(")
+    assert "_autoMatchSnapshot = {" in body, "must snapshot current values at enable"
+    assert "_writeAutoMatchBands(" in body
+    assert "applyPropelioClientFilters()" in body
+
+
+def test_disable_restores_snapshot() -> None:
+    src = _map()
+    body = _fn_body(src, r"function _disableAutoMatch\(")
+    assert "_autoMatchSnapshot" in body
+    assert "prop-lot-min" in body and "prop-sqft-min" in body, "must restore the four inputs"
+
+
+def test_clear_mode_does_not_restore_or_apply() -> None:
+    src = _map()
+    body = _fn_body(src, r"function _clearAutoMatchMode\(")
+    assert "_autoMatchOn = false" in body
+    assert "_autoMatchSnapshot = null" in body
+    # It only clears mode — must NOT re-apply or restore inputs.
+    assert "applyPropelioClientFilters(" not in body
+
+
+def test_subject_card_stashes_and_reapplies() -> None:
+    src = _map()
+    body = _fn_body(src, r"function _populateSubjectPropertyCard\(")
+    assert "_lastSubjectProps = props || null" in body
+    assert "_applyAutoMatchIfEnabled()" in body
+
+
+def test_direct_apply_not_debounced_on_toggle() -> None:
+    # Discrete toggles must feel instant — enable/disable call the direct apply.
+    src = _map()
+    for fn in ("_enableAutoMatch", "_applyAutoMatchIfEnabled"):
+        body = _fn_body(src, rf"function {fn}\(")
+        assert "applyPropelioClientFiltersDebounced" not in body
+
+
+def test_checkbox_and_manual_edit_listeners_wired() -> None:
+    src = _map()
+    assert 'getElementById("prop-auto-match")' in src
+    # Manual edit of a lot/sqft field while on turns auto off (user's value wins).
+    assert "if (_autoMatchOn) _clearAutoMatchMode()" in src

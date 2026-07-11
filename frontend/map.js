@@ -1397,6 +1397,8 @@ function _formatFullPropertyAddress(county, props) {
 let _lastSubjectProps = null;
 
 function _populateSubjectPropertyCard(props, county) {
+  _lastSubjectProps = props || null;
+  _applyAutoMatchIfEnabled(); // recompute auto-match band for the new subject (no-op if off)
   // Fills the rich Subject Property card in the Comps List block:
   //   - Total Value (cyan #22d3ee, top-left)
   //   - Subject badge (cyan, top-right) — static text, always "Subject"
@@ -8241,6 +8243,69 @@ function _refreshAutoMatchAvailability() {
   if (!ok && _autoMatchOn) _disableAutoMatch();
 }
 
+// Enable: snapshot the four current field values (for exact restore), write the
+// band, flip the flag, apply DIRECTLY (discrete toggle — not debounced).
+function _enableAutoMatch() {
+  const dims = _autoMatchSubjectDims();
+  if (!dims) {
+    // [Fable R-1] Never leave a checked-but-dead box in front of the client —
+    // the exact failure the spec fears. Unreachable in practice (box is disabled
+    // whenever dims are null), but one line buys the insurance.
+    const box = document.getElementById("prop-auto-match");
+    if (box) box.checked = false;
+    _refreshAutoMatchAvailability();
+    return;
+  }
+  const val = (id) => document.getElementById(id)?.value ?? "";
+  _autoMatchSnapshot = {
+    lotMin: val("prop-lot-min"), lotMax: val("prop-lot-max"),
+    sqftMin: val("prop-sqft-min"), sqftMax: val("prop-sqft-max"),
+  };
+  _autoMatchOn = true;
+  const box = document.getElementById("prop-auto-match");
+  if (box) box.checked = true;
+  _writeAutoMatchBands(dims);
+  applyPropelioClientFilters();
+}
+
+// Disable (user uncheck / became unavailable): restore the snapshot, then apply.
+function _disableAutoMatch() {
+  _autoMatchOn = false;
+  const box = document.getElementById("prop-auto-match");
+  if (box) box.checked = false;
+  if (_autoMatchSnapshot) {
+    const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v == null ? "" : String(v); };
+    set("prop-lot-min", _autoMatchSnapshot.lotMin);
+    set("prop-lot-max", _autoMatchSnapshot.lotMax);
+    set("prop-sqft-min", _autoMatchSnapshot.sqftMin);
+    set("prop-sqft-max", _autoMatchSnapshot.sqftMax);
+    _autoMatchSnapshot = null;
+  }
+  applyPropelioClientFilters();
+}
+
+// Clear the mode WITHOUT restoring inputs or applying — for paths where the
+// caller is already stomping the inputs (manual edit, Reset, area load, view
+// switch). Discards the snapshot so uncheck never restores stale values.
+function _clearAutoMatchMode() {
+  _autoMatchOn = false;
+  _autoMatchSnapshot = null;
+  const box = document.getElementById("prop-auto-match");
+  if (box) box.checked = false;
+}
+
+// Target changed: refresh availability, and if on, recompute the band for the
+// NEW subject (keeping the original snapshot so uncheck still restores the
+// user's real manual values). No-op when off. New target lacking dims → revert.
+function _applyAutoMatchIfEnabled() {
+  _refreshAutoMatchAvailability();
+  if (!_autoMatchOn) return;
+  const dims = _autoMatchSubjectDims();
+  if (!dims) { _disableAutoMatch(); return; }
+  _writeAutoMatchBands(dims);
+  applyPropelioClientFilters();
+}
+
 // Option-list cache: rebuilt once per comp-load (reference-equality guard),
 // never on keystrokes. Null until the first comp set arrives.
 let _nbhdOptionsCache = null;
@@ -9313,6 +9378,21 @@ let propelioStickyBtn = null;
   if (oacBox) {
     oacBox.addEventListener("change", applyPropelioClientFilters);
   }
+  // Auto-match target (comp POC): the checkbox IS the demo — direct apply.
+  const autoBox = document.getElementById("prop-auto-match");
+  if (autoBox) {
+    autoBox.addEventListener("change", (ev) => {
+      if (ev.target.checked) _enableAutoMatch();
+      else _disableAutoMatch();
+    });
+  }
+  // Manual edit of a lot/sqft field while auto is on → auto turns off, the
+  // user's typed value wins (snapshot discarded, not restored). The existing
+  // debounced listener still applies the typed value.
+  ["prop-lot-min", "prop-lot-max", "prop-sqft-min", "prop-sqft-max"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener("input", () => { if (_autoMatchOn) _clearAutoMatchMode(); });
+  });
   ["sold", "active", "pending"].forEach((status) => {
     const mapBox = document.getElementById(`prop-status-${status}`);
     const cfBox = document.getElementById(`cf-status-${status}`);
