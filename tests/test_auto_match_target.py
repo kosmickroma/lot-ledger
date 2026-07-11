@@ -83,3 +83,32 @@ def test_ephemeral_state_vars_declared() -> None:
     assert "let _autoMatchOn = false" in src
     assert "let _autoMatchSnapshot = null" in src
     assert "let _lastSubjectProps = null" in src
+
+
+# ── Task 2: UI control + availability ────────────────────────────────────────
+
+def test_checkbox_markup_present() -> None:
+    html = _html()
+    assert 'id="prop-auto-match"' in html, "auto-match checkbox missing from index.html"
+    assert "Auto-match target" in html, "label text missing"
+    # [Copilot] Honest "rough preset, not a comp recommendation" disclosure must
+    # ride with the control — protects credibility, sharpens the upsell wedge.
+    assert "preset" in html.lower(), "rough-preset disclosure microcopy missing"
+
+
+def test_label_has_no_sparkle() -> None:
+    html = _html()
+    # Rung 0 is arithmetic — reserve the ✨ for the rung that earns it. Check the
+    # ~500 chars around the control, not the whole file.
+    idx = html.index('id="prop-auto-match"')
+    window = html[max(0, idx - 500) : idx + 500]
+    assert "✨" not in window, "no AI sparkle on the arithmetic rung"
+
+
+def test_availability_refresh_defined() -> None:
+    src = _map()
+    assert "function _refreshAutoMatchAvailability(" in src
+    body = _fn_body(src, r"function _refreshAutoMatchAvailability\(")
+    assert ".disabled" in body, "must toggle .disabled on the checkbox"
+    assert "Select a target property first" in body
+    assert "Target has no lot/sqft data" in body

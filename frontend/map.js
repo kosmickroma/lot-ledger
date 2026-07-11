@@ -8223,6 +8223,24 @@ function _writeAutoMatchBands(dims) {
   if (sqftBand) { set("prop-sqft-min", sqftBand.min); set("prop-sqft-max", sqftBand.max); }
 }
 
+// Enable/disable the checkbox based on whether the current subject has usable
+// dims. A silent no-op reads as broken; a disabled control with a reason reads
+// as guidance. If it goes unavailable while checked, revert.
+function _refreshAutoMatchAvailability() {
+  const box = document.getElementById("prop-auto-match");
+  if (!box) return;
+  const dims = _autoMatchSubjectDims();
+  const ok = !!dims;
+  box.disabled = !ok;
+  const row = document.getElementById("prop-auto-match-row");
+  if (row) {
+    row.title = ok
+      ? "Fill Lot + Living Sqft from the selected target"
+      : (_lastSubjectProps ? "Target has no lot/sqft data" : "Select a target property first");
+  }
+  if (!ok && _autoMatchOn) _disableAutoMatch();
+}
+
 // Option-list cache: rebuilt once per comp-load (reference-equality guard),
 // never on keystrokes. Null until the first comp set arrives.
 let _nbhdOptionsCache = null;
