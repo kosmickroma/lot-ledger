@@ -81,8 +81,8 @@ def test_no_43560_in_automatch_helpers() -> None:
 def test_ephemeral_state_vars_declared() -> None:
     src = _map()
     assert "let _autoMatchOn = false" in src
-    assert "let _autoMatchSnapshot = null" in src
     assert "let _lastSubjectProps = null" in src
+    assert "_autoMatchSnapshot" not in src  # POC: no snapshot; uncheck blanks fields
 
 
 # ── Task 2: UI control + availability ────────────────────────────────────────
@@ -90,7 +90,7 @@ def test_ephemeral_state_vars_declared() -> None:
 def test_checkbox_markup_present() -> None:
     html = _html()
     assert 'id="prop-auto-match"' in html, "auto-match checkbox missing from index.html"
-    assert "Auto-match target" in html, "label text missing"
+    assert "Auto match" in html, "label text missing"
     # [Copilot] Honest "rough preset, not a comp recommendation" disclosure must
     # ride with the control — protects credibility, sharpens the upsell wedge.
     assert "preset" in html.lower(), "rough-preset disclosure microcopy missing"
@@ -122,27 +122,28 @@ def test_action_functions_defined() -> None:
         assert f"function {fn}(" in src, f"{fn} missing"
 
 
-def test_enable_snapshots_before_writing() -> None:
+def test_enable_writes_band_and_applies() -> None:
     src = _map()
     body = _fn_body(src, r"function _enableAutoMatch\(")
-    assert "_autoMatchSnapshot = {" in body, "must snapshot current values at enable"
     assert "_writeAutoMatchBands(" in body
+    assert "applyPropelioClientFilters()" in body
+    assert "_autoMatchSnapshot" not in body  # POC: enable no longer snapshots
+
+
+def test_disable_clears_fields_to_blank() -> None:
+    src = _map()
+    body = _fn_body(src, r"function _disableAutoMatch\(")
+    assert "_autoMatchSnapshot" not in body  # POC: no snapshot restore
+    assert 'el.value = ""' in body           # blanks the fields
+    for fid in ("prop-lot-min", "prop-lot-max", "prop-sqft-min", "prop-sqft-max"):
+        assert fid in body
     assert "applyPropelioClientFilters()" in body
 
 
-def test_disable_restores_snapshot() -> None:
-    src = _map()
-    body = _fn_body(src, r"function _disableAutoMatch\(")
-    assert "_autoMatchSnapshot" in body
-    assert "prop-lot-min" in body and "prop-sqft-min" in body, "must restore the four inputs"
-
-
-def test_clear_mode_does_not_restore_or_apply() -> None:
+def test_clear_mode_does_not_apply() -> None:
     src = _map()
     body = _fn_body(src, r"function _clearAutoMatchMode\(")
     assert "_autoMatchOn = false" in body
-    assert "_autoMatchSnapshot = null" in body
-    # It only clears mode — must NOT re-apply or restore inputs.
     assert "applyPropelioClientFilters(" not in body
 
 

@@ -8192,7 +8192,6 @@ let propelioFilterState = { ...DEFAULT_PROPELIO_FILTERS };
 // does not. Spec: docs/COMP_ENGINE_POC_PLAN_2026-07-11.md.
 const AUTO_MATCH_BAND = 0.2; // ±20% — v1 default; the band is an upsell hook.
 let _autoMatchOn = false;        // per-tab, in-memory ONLY
-let _autoMatchSnapshot = null;   // {lotMin,lotMax,sqftMin,sqftMax} captured at enable
 
 // Parse a subject-card display value ("2,450", "0.29 ac", "N/A") to a number.
 // Mirrors the _compMatchedTotVal precedent (map.js:8291): strip $ and commas,
@@ -8264,11 +8263,6 @@ function _enableAutoMatch() {
     _refreshAutoMatchAvailability();
     return;
   }
-  const val = (id) => document.getElementById(id)?.value ?? "";
-  _autoMatchSnapshot = {
-    lotMin: val("prop-lot-min"), lotMax: val("prop-lot-max"),
-    sqftMin: val("prop-sqft-min"), sqftMax: val("prop-sqft-max"),
-  };
   _autoMatchOn = true;
   const box = document.getElementById("prop-auto-match");
   if (box) box.checked = true;
@@ -8281,14 +8275,11 @@ function _disableAutoMatch() {
   _autoMatchOn = false;
   const box = document.getElementById("prop-auto-match");
   if (box) box.checked = false;
-  if (_autoMatchSnapshot) {
-    const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v == null ? "" : String(v); };
-    set("prop-lot-min", _autoMatchSnapshot.lotMin);
-    set("prop-lot-max", _autoMatchSnapshot.lotMax);
-    set("prop-sqft-min", _autoMatchSnapshot.sqftMin);
-    set("prop-sqft-max", _autoMatchSnapshot.sqftMax);
-    _autoMatchSnapshot = null;
-  }
+  // POC: clear the fields auto-match filled back to blank (KK call). A later
+  // build can restore the user's prior manual values; the POC keeps it simple.
+  const set = (id) => { const el = document.getElementById(id); if (el) el.value = ""; };
+  set("prop-lot-min"); set("prop-lot-max");
+  set("prop-sqft-min"); set("prop-sqft-max");
   applyPropelioClientFilters();
 }
 
@@ -8297,7 +8288,6 @@ function _disableAutoMatch() {
 // switch). Discards the snapshot so uncheck never restores stale values.
 function _clearAutoMatchMode() {
   _autoMatchOn = false;
-  _autoMatchSnapshot = null;
   const box = document.getElementById("prop-auto-match");
   if (box) box.checked = false;
 }
