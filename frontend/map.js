@@ -1980,14 +1980,15 @@ function applyPropelioFilterStateToUI(persisted) {
   if (_nbhdEl) _nbhdEl.value = merged.neighborhood ?? "";
   _renderNbhdChip(merged.neighborhood || null);
   propelioFilterState = readPropelioFiltersFromUI();
-  // [Fable R-4] Every caller of applyPropelioFilterStateToUI stomps the four
-  // inputs, so dropping the mode is the honest response. This covers not just
-  // area load + ARV/NBV/Export view switch, but also the CLEAR button path
-  // (clearDrawResults nulls the target first → the subject hook already reverted
-  // via _disableAutoMatch → this is then an idempotent no-op) and a remote SSE
-  // co-viewer editing a propelio filter (remote stomp of shared band values →
-  // local mode drops, by design).
-  _clearAutoMatchMode();
+  // [Fable R-4 + self-cancel fix] Drop auto-match mode on a GENUINE external stomp
+  // of the four inputs (area load, view switch, remote co-viewer edit) — but NOT on
+  // the SSE self-echo of our own band write, which re-applies the SAME values and
+  // would otherwise cancel auto-match the instant it's enabled. Equal fields → our
+  // echo, keep the mode; different → real change, drop it.
+  if (_autoMatchOn) {
+    const _amDims = _autoMatchSubjectDims();
+    if (!_amDims || !_fieldsMatchAutoMatchBand(_amDims)) _clearAutoMatchMode();
+  }
 }
 
 function _filterStatesEqual(a, b) {
@@ -8230,6 +8231,20 @@ function _writeAutoMatchBands(dims) {
   const sqftBand = _autoMatchBand(dims.sqft, AUTO_MATCH_BAND, Math.round);
   if (acreBand) { set("prop-lot-min", acreBand.min); set("prop-lot-max", acreBand.max); }
   if (sqftBand) { set("prop-sqft-min", sqftBand.min); set("prop-sqft-max", sqftBand.max); }
+}
+
+// True when the four filter inputs currently hold exactly the band this subject
+// would produce — i.e. the values auto-match wrote. Lets applyPropelioFilterStateToUI
+// tell a self-echo of our own write (keep the mode) from a real external stomp (drop it).
+function _fieldsMatchAutoMatchBand(dims) {
+  const roundAcre = (x) => Math.round(x * 100) / 100;
+  const acreBand = _autoMatchBand(dims.acres, AUTO_MATCH_BAND, roundAcre);
+  const sqftBand = _autoMatchBand(dims.sqft, AUTO_MATCH_BAND, Math.round);
+  const val = (id) => document.getElementById(id)?.value ?? "";
+  const eq = (a, b) => String(a) === String(b);
+  if (acreBand && !(eq(val("prop-lot-min"), acreBand.min) && eq(val("prop-lot-max"), acreBand.max))) return false;
+  if (sqftBand && !(eq(val("prop-sqft-min"), sqftBand.min) && eq(val("prop-sqft-max"), sqftBand.max))) return false;
+  return true;
 }
 
 // Enable/disable the checkbox based on whether the current subject has usable

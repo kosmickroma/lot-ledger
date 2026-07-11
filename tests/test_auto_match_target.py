@@ -204,3 +204,13 @@ def test_apply_orchestrator_not_modified() -> None:
     src = _map()
     body = _fn_body(src, r"function applyPropelioClientFilters\(")
     assert "automatch" not in body.lower()
+
+
+def test_region_e_guards_against_self_echo() -> None:
+    src = _map()
+    assert "function _fieldsMatchAutoMatchBand(" in src
+    body = _fn_body(src, r"function applyPropelioFilterStateToUI\(")
+    # Region E must clear only on a genuine change, not unconditionally — else the
+    # SSE self-echo of our own band write cancels auto-match the moment it's enabled.
+    assert "_fieldsMatchAutoMatchBand(" in body
+    assert "if (_autoMatchOn)" in body
