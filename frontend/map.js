@@ -1980,6 +1980,14 @@ function applyPropelioFilterStateToUI(persisted) {
   if (_nbhdEl) _nbhdEl.value = merged.neighborhood ?? "";
   _renderNbhdChip(merged.neighborhood || null);
   propelioFilterState = readPropelioFiltersFromUI();
+  // [Fable R-4] Every caller of applyPropelioFilterStateToUI stomps the four
+  // inputs, so dropping the mode is the honest response. This covers not just
+  // area load + ARV/NBV/Export view switch, but also the CLEAR button path
+  // (clearDrawResults nulls the target first → the subject hook already reverted
+  // via _disableAutoMatch → this is then an idempotent no-op) and a remote SSE
+  // co-viewer editing a propelio filter (remote stomp of shared band values →
+  // local mode drops, by design).
+  _clearAutoMatchMode();
 }
 
 function _filterStatesEqual(a, b) {
@@ -9223,6 +9231,7 @@ function resetPropelioFilters() {
   set("prop-price-min", ""); set("prop-price-max", "");
   set("prop-neighborhood", "");
   _renderNbhdChip(null);
+  _clearAutoMatchMode();
   applyPropelioClientFilters();
 }
 

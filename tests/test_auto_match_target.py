@@ -166,3 +166,40 @@ def test_checkbox_and_manual_edit_listeners_wired() -> None:
     assert 'getElementById("prop-auto-match")' in src
     # Manual edit of a lot/sqft field while on turns auto off (user's value wins).
     assert "if (_autoMatchOn) _clearAutoMatchMode()" in src
+
+
+# ── Task 4: reset / view-switch state machine ────────────────────────────────
+
+def test_reset_clears_automatch_mode() -> None:
+    src = _map()
+    body = _fn_body(src, r"function resetPropelioFilters\(")
+    assert "_clearAutoMatchMode()" in body, "Reset must clear auto-match mode"
+
+
+def test_view_switch_and_area_load_clear_mode() -> None:
+    # applyPropelioFilterStateToUI is the single choke for area load + ARV/NBV/
+    # Export view switches; both stomp the four inputs, so both must clear mode.
+    src = _map()
+    body = _fn_body(src, r"function applyPropelioFilterStateToUI\(")
+    assert "_clearAutoMatchMode()" in body
+
+
+def test_automatch_not_persisted() -> None:
+    # The MODE is ephemeral — must never leak into autosave/PATCH/another session.
+    # [Fable R-2] Check the three realistic leak vectors, not just the default obj.
+    src = _map()
+    defaults = _fn_body(src, r"const DEFAULT_PROPELIO_FILTERS")
+    assert "autoMatch" not in defaults and "prop-auto-match" not in defaults
+    reads = _fn_body(src, r"function readPropelioFiltersFromUI\(")
+    assert "autoMatch" not in reads and "prop-auto-match" not in reads
+    capture = _fn_body(src, r"function captureFilterState\(")
+    assert "autoMatch" not in capture and "prop-auto-match" not in capture
+
+
+def test_apply_orchestrator_not_modified() -> None:
+    # [Fable R-3] Global Constraint teeth: applyPropelioClientFilters must NOT
+    # learn about auto-match (it is where the June regression shipped). All new
+    # behavior is additive AROUND it.
+    src = _map()
+    body = _fn_body(src, r"function applyPropelioClientFilters\(")
+    assert "automatch" not in body.lower()
