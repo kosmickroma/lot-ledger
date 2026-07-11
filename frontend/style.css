@@ -4738,3 +4738,10 @@ body.is-not-power-user .power-user-only {
   font-weight: 600;
 }
 
+
+/* Auto-match target checkbox (comp POC, Rung 0) */
+.auto-match-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.auto-match-label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; font-size: 13px; }
+.auto-match-label input:disabled { cursor: not-allowed; }
+.auto-match-row:has(input:disabled) { opacity: 0.55; }
+.auto-match-hint { font-size: 11px; opacity: 0.7; }

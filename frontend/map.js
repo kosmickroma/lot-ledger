@@ -1392,7 +1392,13 @@ function _formatFullPropertyAddress(county, props) {
   return parts.join(", ");
 }
 
+// Last resolved subject-property props (display-formatted strings), stashed so
+// the Auto-match toggle can read the subject's lot/sqft off the current target.
+let _lastSubjectProps = null;
+
 function _populateSubjectPropertyCard(props, county) {
+  _lastSubjectProps = props || null;
+  _applyAutoMatchIfEnabled(); // recompute auto-match band for the new subject (no-op if off)
   // Fills the rich Subject Property card in the Comps List block:
   //   - Total Value (cyan #22d3ee, top-left)
   //   - Subject badge (cyan, top-right) — static text, always "Subject"
@@ -1974,6 +1980,15 @@ function applyPropelioFilterStateToUI(persisted) {
   if (_nbhdEl) _nbhdEl.value = merged.neighborhood ?? "";
   _renderNbhdChip(merged.neighborhood || null);
   propelioFilterState = readPropelioFiltersFromUI();
+  // [Fable R-4 + self-cancel fix] Drop auto-match mode on a GENUINE external stomp
+  // of the four inputs (area load, view switch, remote co-viewer edit) — but NOT on
+  // the SSE self-echo of our own band write, which re-applies the SAME values and
+  // would otherwise cancel auto-match the instant it's enabled. Equal fields → our
+  // echo, keep the mode; different → real change, drop it.
+  if (_autoMatchOn) {
+    const _amDims = _autoMatchSubjectDims();
+    if (!_amDims || !_fieldsMatchAutoMatchBand(_amDims)) _clearAutoMatchMode();
+  }
 }
 
 function _filterStatesEqual(a, b) {
@@ -8170,6 +8185,140 @@ const DEFAULT_PROPELIO_FILTERS = {
   neighborhood: null,
 };
 let propelioFilterState = { ...DEFAULT_PROPELIO_FILTERS };
+
+// ── Auto-match target (comp POC, Rung 0) ────────────────────────────────────
+// A reversible checkbox that fills the lot/sqft comp filters with a ± band
+// around the selected subject. EPHEMERAL: in-memory, per-tab, never persisted.
+// The band VALUES persist via the normal autosave (WYSIWYG-honest); the MODE
+// does not. Spec: docs/COMP_ENGINE_POC_PLAN_2026-07-11.md.
+const AUTO_MATCH_BAND = 0.2; // ±20% — v1 default; the band is an upsell hook.
+let _autoMatchOn = false;        // per-tab, in-memory ONLY
+
+// Parse a subject-card display value ("2,450", "0.29 ac", "N/A") to a number.
+// Mirrors the _compMatchedTotVal precedent (map.js:8291): strip $ and commas,
+// take the leading numeric run. Returns null when there is no parseable number.
+function _parseSubjectNum(v) {
+  const m = String(v == null ? "" : v).replace(/[$,]/g, "").match(/^[\d.]+/);
+  return m ? Number(m[0]) : null;
+}
+
+// Resolve the subject's lot (acres) + living area (sqft) from the stashed props.
+// lot_acres is ALREADY acres (no 43560 conversion). Returns null if neither
+// dimension is available.
+function _autoMatchSubjectDims() {
+  const p = _lastSubjectProps;
+  if (!p) return null;
+  const acres = _parseSubjectNum(p.lot_acres);
+  const sqft = _parseSubjectNum(p.sqft);
+  if (acres == null && sqft == null) return null;
+  return { acres, sqft };
+}
+
+// Build a ± band around a center value. `round` shapes each end (int for sqft,
+// 2dp for acres). Returns null for missing/non-positive centers.
+function _autoMatchBand(center, frac, round) {
+  if (center == null || !Number.isFinite(center) || center <= 0) return null;
+  return { min: round(center * (1 - frac)), max: round(center * (1 + frac)) };
+}
+
+// Write the lot/sqft filter inputs from the subject dims. Programmatic .value
+// writes do NOT fire input events, so the existing debounced listeners won't
+// double-apply. Does NOT call applyPropelioClientFilters (callers do).
+function _writeAutoMatchBands(dims) {
+  const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v == null ? "" : String(v); };
+  const roundAcre = (x) => Math.round(x * 100) / 100;
+  const acreBand = _autoMatchBand(dims.acres, AUTO_MATCH_BAND, roundAcre);
+  const sqftBand = _autoMatchBand(dims.sqft, AUTO_MATCH_BAND, Math.round);
+  if (acreBand) { set("prop-lot-min", acreBand.min); set("prop-lot-max", acreBand.max); }
+  if (sqftBand) { set("prop-sqft-min", sqftBand.min); set("prop-sqft-max", sqftBand.max); }
+}
+
+// True when the four filter inputs currently hold exactly the band this subject
+// would produce — i.e. the values auto-match wrote. Lets applyPropelioFilterStateToUI
+// tell a self-echo of our own write (keep the mode) from a real external stomp (drop it).
+function _fieldsMatchAutoMatchBand(dims) {
+  const roundAcre = (x) => Math.round(x * 100) / 100;
+  const acreBand = _autoMatchBand(dims.acres, AUTO_MATCH_BAND, roundAcre);
+  const sqftBand = _autoMatchBand(dims.sqft, AUTO_MATCH_BAND, Math.round);
+  const val = (id) => document.getElementById(id)?.value ?? "";
+  const eq = (a, b) => String(a) === String(b);
+  if (acreBand && !(eq(val("prop-lot-min"), acreBand.min) && eq(val("prop-lot-max"), acreBand.max))) return false;
+  if (sqftBand && !(eq(val("prop-sqft-min"), sqftBand.min) && eq(val("prop-sqft-max"), sqftBand.max))) return false;
+  return true;
+}
+
+// Enable/disable the checkbox based on whether the current subject has usable
+// dims. A silent no-op reads as broken; a disabled control with a reason reads
+// as guidance. If it goes unavailable while checked, revert.
+function _refreshAutoMatchAvailability() {
+  const box = document.getElementById("prop-auto-match");
+  if (!box) return;
+  const dims = _autoMatchSubjectDims();
+  const ok = !!dims;
+  box.disabled = !ok;
+  const row = document.getElementById("prop-auto-match-row");
+  if (row) {
+    row.title = ok
+      ? "Fill Lot + Living Sqft from the selected target"
+      : (_lastSubjectProps ? "Target has no lot/sqft data" : "Select a target property first");
+  }
+  if (!ok && _autoMatchOn) _disableAutoMatch();
+}
+
+// Enable: snapshot the four current field values (for exact restore), write the
+// band, flip the flag, apply DIRECTLY (discrete toggle — not debounced).
+function _enableAutoMatch() {
+  const dims = _autoMatchSubjectDims();
+  if (!dims) {
+    // [Fable R-1] Never leave a checked-but-dead box in front of the client —
+    // the exact failure the spec fears. Unreachable in practice (box is disabled
+    // whenever dims are null), but one line buys the insurance.
+    const box = document.getElementById("prop-auto-match");
+    if (box) box.checked = false;
+    _refreshAutoMatchAvailability();
+    return;
+  }
+  _autoMatchOn = true;
+  const box = document.getElementById("prop-auto-match");
+  if (box) box.checked = true;
+  _writeAutoMatchBands(dims);
+  applyPropelioClientFilters();
+}
+
+// Disable (user uncheck / became unavailable): restore the snapshot, then apply.
+function _disableAutoMatch() {
+  _autoMatchOn = false;
+  const box = document.getElementById("prop-auto-match");
+  if (box) box.checked = false;
+  // POC: clear the fields auto-match filled back to blank (KK call). A later
+  // build can restore the user's prior manual values; the POC keeps it simple.
+  const set = (id) => { const el = document.getElementById(id); if (el) el.value = ""; };
+  set("prop-lot-min"); set("prop-lot-max");
+  set("prop-sqft-min"); set("prop-sqft-max");
+  applyPropelioClientFilters();
+}
+
+// Clear the mode WITHOUT restoring inputs or applying — for paths where the
+// caller is already stomping the inputs (manual edit, Reset, area load, view
+// switch). Discards the snapshot so uncheck never restores stale values.
+function _clearAutoMatchMode() {
+  _autoMatchOn = false;
+  const box = document.getElementById("prop-auto-match");
+  if (box) box.checked = false;
+}
+
+// Target changed: refresh availability, and if on, recompute the band for the
+// NEW subject (keeping the original snapshot so uncheck still restores the
+// user's real manual values). No-op when off. New target lacking dims → revert.
+function _applyAutoMatchIfEnabled() {
+  _refreshAutoMatchAvailability();
+  if (!_autoMatchOn) return;
+  const dims = _autoMatchSubjectDims();
+  if (!dims) { _disableAutoMatch(); return; }
+  _writeAutoMatchBands(dims);
+  applyPropelioClientFilters();
+}
+
 // Option-list cache: rebuilt once per comp-load (reference-equality guard),
 // never on keystrokes. Null until the first comp set arrives.
 let _nbhdOptionsCache = null;
@@ -9087,6 +9236,7 @@ function resetPropelioFilters() {
   set("prop-price-min", ""); set("prop-price-max", "");
   set("prop-neighborhood", "");
   _renderNbhdChip(null);
+  _clearAutoMatchMode();
   applyPropelioClientFilters();
 }
 
@@ -9242,6 +9392,21 @@ let propelioStickyBtn = null;
   if (oacBox) {
     oacBox.addEventListener("change", applyPropelioClientFilters);
   }
+  // Auto-match target (comp POC): the checkbox IS the demo — direct apply.
+  const autoBox = document.getElementById("prop-auto-match");
+  if (autoBox) {
+    autoBox.addEventListener("change", (ev) => {
+      if (ev.target.checked) _enableAutoMatch();
+      else _disableAutoMatch();
+    });
+  }
+  // Manual edit of a lot/sqft field while auto is on → auto turns off, the
+  // user's typed value wins (snapshot discarded, not restored). The existing
+  // debounced listener still applies the typed value.
+  ["prop-lot-min", "prop-lot-max", "prop-sqft-min", "prop-sqft-max"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener("input", () => { if (_autoMatchOn) _clearAutoMatchMode(); });
+  });
   ["sold", "active", "pending"].forEach((status) => {
     const mapBox = document.getElementById(`prop-status-${status}`);
     const cfBox = document.getElementById(`cf-status-${status}`);
