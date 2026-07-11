@@ -1392,6 +1392,10 @@ function _formatFullPropertyAddress(county, props) {
   return parts.join(", ");
 }
 
+// Last resolved subject-property props (display-formatted strings), stashed so
+// the Auto-match toggle can read the subject's lot/sqft off the current target.
+let _lastSubjectProps = null;
+
 function _populateSubjectPropertyCard(props, county) {
   // Fills the rich Subject Property card in the Comps List block:
   //   - Total Value (cyan #22d3ee, top-left)
@@ -8170,6 +8174,55 @@ const DEFAULT_PROPELIO_FILTERS = {
   neighborhood: null,
 };
 let propelioFilterState = { ...DEFAULT_PROPELIO_FILTERS };
+
+// ── Auto-match target (comp POC, Rung 0) ────────────────────────────────────
+// A reversible checkbox that fills the lot/sqft comp filters with a ± band
+// around the selected subject. EPHEMERAL: in-memory, per-tab, never persisted.
+// The band VALUES persist via the normal autosave (WYSIWYG-honest); the MODE
+// does not. Spec: docs/COMP_ENGINE_POC_PLAN_2026-07-11.md.
+const AUTO_MATCH_BAND = 0.2; // ±20% — v1 default; the band is an upsell hook.
+let _autoMatchOn = false;        // per-tab, in-memory ONLY
+let _autoMatchSnapshot = null;   // {lotMin,lotMax,sqftMin,sqftMax} captured at enable
+
+// Parse a subject-card display value ("2,450", "0.29 ac", "N/A") to a number.
+// Mirrors the _compMatchedTotVal precedent (map.js:8291): strip $ and commas,
+// take the leading numeric run. Returns null when there is no parseable number.
+function _parseSubjectNum(v) {
+  const m = String(v == null ? "" : v).replace(/[$,]/g, "").match(/^[\d.]+/);
+  return m ? Number(m[0]) : null;
+}
+
+// Resolve the subject's lot (acres) + living area (sqft) from the stashed props.
+// lot_acres is ALREADY acres (no 43560 conversion). Returns null if neither
+// dimension is available.
+function _autoMatchSubjectDims() {
+  const p = _lastSubjectProps;
+  if (!p) return null;
+  const acres = _parseSubjectNum(p.lot_acres);
+  const sqft = _parseSubjectNum(p.sqft);
+  if (acres == null && sqft == null) return null;
+  return { acres, sqft };
+}
+
+// Build a ± band around a center value. `round` shapes each end (int for sqft,
+// 2dp for acres). Returns null for missing/non-positive centers.
+function _autoMatchBand(center, frac, round) {
+  if (center == null || !Number.isFinite(center) || center <= 0) return null;
+  return { min: round(center * (1 - frac)), max: round(center * (1 + frac)) };
+}
+
+// Write the lot/sqft filter inputs from the subject dims. Programmatic .value
+// writes do NOT fire input events, so the existing debounced listeners won't
+// double-apply. Does NOT call applyPropelioClientFilters (callers do).
+function _writeAutoMatchBands(dims) {
+  const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v == null ? "" : String(v); };
+  const roundAcre = (x) => Math.round(x * 100) / 100;
+  const acreBand = _autoMatchBand(dims.acres, AUTO_MATCH_BAND, roundAcre);
+  const sqftBand = _autoMatchBand(dims.sqft, AUTO_MATCH_BAND, Math.round);
+  if (acreBand) { set("prop-lot-min", acreBand.min); set("prop-lot-max", acreBand.max); }
+  if (sqftBand) { set("prop-sqft-min", sqftBand.min); set("prop-sqft-max", sqftBand.max); }
+}
+
 // Option-list cache: rebuilt once per comp-load (reference-equality guard),
 // never on keystrokes. Null until the first comp set arrives.
 let _nbhdOptionsCache = null;
