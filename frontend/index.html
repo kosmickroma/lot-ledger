@@ -13,6 +13,7 @@
         integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
   <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css" crossorigin="">
   <link rel="stylesheet" href="/style.css?v=__BUILD_ID__">
+  <link rel="stylesheet" href="/ai-card.css?v=__BUILD_ID__">
   <script>window.LL_CONFIG = { tilesUrl: "__TILES_URL__", buildId: "__BUILD_ID__", appVersion: "__APP_VERSION__", instantReshape: true, arvNbvExport: true };</script>
 </head>
 <body>
@@ -445,6 +446,7 @@
             <div class="comps-block-target-card-meta2" id="comps-block-target-card-meta2"></div>
             <div class="comps-block-target-card-meta3" id="comps-block-target-card-meta3"></div>
           </div>
+          <div id="ai-card-mount"></div>
           <section id="propelio-good-comps-section" class="propelio-good-comps-section hidden" aria-label="Good comps in this saved area">
             <header class="propelio-good-comps-head">
               <span class="propelio-section-label">Good Comps</span>
@@ -561,6 +563,7 @@
   <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js" crossorigin=""></script>
   <script src="https://unpkg.com/protomaps-leaflet@3.1.2/dist/protomaps-leaflet.min.js"></script>
   <script src="/map.js?v=__BUILD_ID__"></script>
+  <script src="/ai-card.js?v=__BUILD_ID__"></script>
 
   <!-- Auth modal — rendered / populated entirely by map.js -->
   <div id="auth-modal" class="auth-modal-overlay hidden" role="dialog" aria-modal="true">

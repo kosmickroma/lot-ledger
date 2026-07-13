@@ -8627,6 +8627,7 @@ function applyPropelioClientFilters() {
   _renderGoodCompsSection();
   // v1 §2.1 — auto-save filter_state after propelio client filter apply.
   _filterSaveQueueSave();
+  window.__aiVisibleComps = visibleOnMap;   // AI module seam (read-only mirror of the VISIBLE set)
 }
 
 function _sortPropelioComps(comps, mode) {
@@ -13945,6 +13946,16 @@ function _applyRoleVisibility() {
 }
 
 _applyRoleVisibility();
+
+// AI module seam — the ONLY thing frontend/ai-card.js reads from map.js.
+// Deleting the AI module = delete this function, the stash line in
+// applyPropelioClientFilters(), and the 2 index.html lines.
+window.__aiGetVisibleCompContext = () => ({
+  areaId: _currentLoadedAreaId,
+  comps: Array.isArray(window.__aiVisibleComps) ? window.__aiVisibleComps : [],
+  isAdmin: _isAdmin(),
+  headers: authHeaders(),
+});
 
 // ---------------------------------------------------------------------------
 // Helpers to show/hide the modal

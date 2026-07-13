@@ -122,11 +122,12 @@ async def read_comps(
         fresh_results: dict[int, dict[str, Any]] = {}
         usage = {"tokens_in": 0, "tokens_out": 0}
         rejected_quotes = 0
+        rejected_detail: list[dict[str, Any]] = []
         partial = False
 
         if to_read:
             try:
-                fresh_results, usage, rejected_quotes, partial = extract(to_read)
+                fresh_results, usage, rejected_quotes, rejected_detail, partial = extract(to_read)
             except Exception as exc:
                 # Zero batches completed -> nothing to show; say so (§A.6 step 9).
                 logger.info(
@@ -208,6 +209,11 @@ async def read_comps(
             "mix": {k: v for k, v in mix.items() if v > 0},
             "comps": comps_out,
             "excluded": excluded_out,
+            # §A.6.1 — dropped-tag detail behind meta.rejected_quotes. Display-only
+            # (rendered transiently in the modal's "Dropped tags" panel); never
+            # logged. Empty for a fully-cached run — rejections only happen at
+            # extraction time, not on a cache hit.
+            "rejected": rejected_detail,
             "meta": meta,
         }
     finally:

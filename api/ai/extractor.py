@@ -97,34 +97,51 @@ def _call_vertex(chunk: list[dict[str, Any]], timeout_s: int) -> tuple[list[dict
     raise RuntimeError("unreachable")   # loop always returns or raises
 
 
+def _reject(rejected_detail, comp, tag, quote, reason) -> None:
+    # §A.6.1 — display-only, returned to an authenticated owner/developer and
+    # rendered transiently. NEVER logged (§A.8.1 stands absolutely).
+    rejected_detail.append({
+        "comp_address_key": comp["comp_address_key"] if comp else None,
+        "address": comp["address"] if comp else None,
+        "tag": tag,
+        "quote": quote if isinstance(quote, str) else None,
+        "reason": reason,
+    })
+
+
 def _verify_and_collect(
     chunk: list[dict[str, Any]],
     model_rows: list[dict[str, Any]],
     results: dict[int, dict[str, Any]],
+    rejected_detail: list[dict[str, Any]],
 ) -> int:
     """Validate the model's rows against THIS chunk only. Returns the number of
-    tags dropped (rejected_quotes delta). Never repairs, never fuzzy-matches —
-    a failed check drops the tag outright (§A.5.1)."""
+    tags dropped this call (appended to rejected_detail). Never repairs, never
+    fuzzy-matches — a failed check drops the tag outright (§A.5.1)."""
     sent_ids = {c["comp_id"] for c in chunk}
+    by_comp_id = {c["comp_id"]: c for c in chunk}
     remarks_norm_by_id = {c["comp_id"]: _norm(c["remarks"]) for c in chunk}
-    rejected = 0
+    before = len(rejected_detail)
 
     for row in model_rows:
         if not isinstance(row, dict):
-            rejected += 1
+            _reject(rejected_detail, None, None, None, "malformed_row")
             continue
         try:
             cid = int(row.get("comp_id", -1))
         except (TypeError, ValueError):
-            rejected += 1
+            _reject(rejected_detail, None, row.get("condition"), row.get("condition_quote"), "malformed_row")
             continue
         if cid not in sent_ids:
             # ⛔ §A.5.1.c — the model can return a comp_id that was never in this
             # batch. Accepting it would let a hallucinated id plus a boilerplate
-            # quote poison the cache for a comp the model never read.
-            rejected += 1
+            # quote poison the cache for a comp the model never read. We don't
+            # know which real comp (if any) this was meant for, so comp identity
+            # is None — only the attempted tag/quote survive for tuning.
+            _reject(rejected_detail, None, row.get("condition"), row.get("condition_quote"), "comp_id_not_in_batch")
             continue
 
+        comp = by_comp_id[cid]
         remarks_norm = remarks_norm_by_id[cid]
         out: dict[str, Any] = {"condition": "unknown", "condition_quote": None, "flags": []}
 
@@ -132,32 +149,30 @@ def _verify_and_collect(
         quote = row.get("condition_quote")
         if condition == "unknown":
             pass   # no quote required for "unknown"
-        elif (
-            condition in CONDITIONS
-            and isinstance(quote, str)
-            and len(_norm(quote)) >= AI_MIN_QUOTE_CHARS
-            and _norm(quote) in remarks_norm
-        ):
+        elif condition not in CONDITIONS:
+            _reject(rejected_detail, comp, condition, quote, "unknown_tag")
+        elif not (isinstance(quote, str) and len(_norm(quote)) >= AI_MIN_QUOTE_CHARS):
+            _reject(rejected_detail, comp, condition, quote, "quote_too_short")
+        elif _norm(quote) not in remarks_norm:
+            _reject(rejected_detail, comp, condition, quote, "quote_not_in_remarks")
+        else:
             out["condition"] = condition
             out["condition_quote"] = quote
-        else:
-            rejected += 1   # dropped condition tag -> falls back to "unknown"
 
         for flag in row.get("flags") or []:
             if not isinstance(flag, dict):
-                rejected += 1
+                _reject(rejected_detail, comp, None, None, "malformed_row")
                 continue
             tag = flag.get("tag")
             fquote = flag.get("quote")
-            if (
-                tag in FLAGS
-                and isinstance(fquote, str)
-                and len(_norm(fquote)) >= AI_MIN_QUOTE_CHARS
-                and _norm(fquote) in remarks_norm
-            ):
-                out["flags"].append({"tag": tag, "quote": fquote})
+            if tag not in FLAGS:
+                _reject(rejected_detail, comp, tag, fquote, "unknown_tag")
+            elif not (isinstance(fquote, str) and len(_norm(fquote)) >= AI_MIN_QUOTE_CHARS):
+                _reject(rejected_detail, comp, tag, fquote, "quote_too_short")
+            elif _norm(fquote) not in remarks_norm:
+                _reject(rejected_detail, comp, tag, fquote, "quote_not_in_remarks")
             else:
-                rejected += 1   # dropped flag simply disappears
+                out["flags"].append({"tag": tag, "quote": fquote})
 
         results[cid] = out
 
@@ -168,16 +183,21 @@ def _verify_and_collect(
     for c in chunk:
         results.setdefault(c["comp_id"], {"condition": "unknown", "condition_quote": None, "flags": []})
 
-    return rejected
+    return len(rejected_detail) - before
 
 
-def extract(to_read: list[dict[str, Any]]) -> tuple[dict[int, dict[str, Any]], dict[str, int], int, bool]:
+def extract(
+    to_read: list[dict[str, Any]]
+) -> tuple[dict[int, dict[str, Any]], dict[str, int], int, list[dict[str, Any]], bool]:
     """
     to_read: [{comp_id, comp_address_key, address, price, remarks}, ...] — already
     permit + scope + remarks gated by gate.fetch_permitted_comps, and already
     excludes anything served from cache.
 
-    Returns (results_by_comp_id, usage{tokens_in,tokens_out}, rejected_quotes, partial).
+    Returns (results_by_comp_id, usage{tokens_in,tokens_out}, rejected_quotes,
+    rejected_detail, partial). rejected_detail (§A.6.1) is the per-tag detail
+    behind the rejected_quotes count — display-only, never logged, and empty
+    for any comp served from cache (rejections only happen at extraction time).
 
     Raises only when the FIRST batch fails outright (zero batches completed) —
     the route turns that into a 502. Any later-batch failure, or hitting the
@@ -188,6 +208,7 @@ def extract(to_read: list[dict[str, Any]]) -> tuple[dict[int, dict[str, Any]], d
     tokens_in = 0
     tokens_out = 0
     rejected_quotes = 0
+    rejected_detail: list[dict[str, Any]] = []
     partial = False
 
     batches = [to_read[i:i + AI_BATCH_SIZE] for i in range(0, len(to_read), AI_BATCH_SIZE)]
@@ -206,6 +227,6 @@ def extract(to_read: list[dict[str, Any]]) -> tuple[dict[int, dict[str, Any]], d
             break
         tokens_in += usage["tokens_in"]
         tokens_out += usage["tokens_out"]
-        rejected_quotes += _verify_and_collect(chunk, rows, results)
+        rejected_quotes += _verify_and_collect(chunk, rows, results, rejected_detail)
 
-    return results, {"tokens_in": tokens_in, "tokens_out": tokens_out}, rejected_quotes, partial
+    return results, {"tokens_in": tokens_in, "tokens_out": tokens_out}, rejected_quotes, rejected_detail, partial
