@@ -9142,4 +9142,15 @@ async def index() -> HTMLResponse:
     return HTMLResponse(_INDEX_HTML_CACHE)
 
 
+# AI module seam (the ONLY backend touch point). The env var is read directly
+# here — NOT via `from api.ai.config import AI_ENABLED` — so that when the flag
+# is off, api/ai is never imported at all. That keeps the guarantee absolute:
+# a broken, half-deployed, or deleted api/ai/ package cannot stop the app from
+# starting. Must stay ABOVE the StaticFiles catch-all mount below, or every
+# /api/ai/* route is shadowed and 404s.
+if os.getenv("AI_ENABLED", "false").strip().lower() == "true":
+    from api.ai.routes import router as ai_router
+
+    app.include_router(ai_router)
+
 app.mount("/", StaticFiles(directory=FRONTEND_DIR), name="frontend")
