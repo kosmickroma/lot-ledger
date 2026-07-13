@@ -14014,6 +14014,13 @@ window.__valueDraftsGetContext = () => ({
   areaId: _currentLoadedAreaId,
   isAdmin: _isAdmin(),
   headers: authHeaders(),
+  // Which view the user is actually LOOKING at. Only the active view's filters are
+  // live -- _viewFilterCache is written on view SWITCH (map.js:15321), so the
+  // inactive view's filters are stale (and, if that view was never opened, null ->
+  // DEFAULTS -> no price cap at all). Drafting from that is not WYSIWYG, it's a
+  // number computed from filters the user cannot see. So value-drafts.js only
+  // drafts the ACTIVE view and tells the user to switch for the other.
+  activeView: _activeView,
   arv: { comps: __valueDraftsViewComps("arv") },
   nbv: { comps: __valueDraftsViewComps("nbv") },
   storedValues: _storedValueState

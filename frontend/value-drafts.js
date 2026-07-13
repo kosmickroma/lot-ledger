@@ -514,7 +514,20 @@
         const setChanged = fs.keys !== null && fs.keys !== newKeys;
         const prevDraft = fs.draft;
 
-        const draft = fieldKey === "arv" ? computeArvDraft(view.comps) : computeNbvDraft(view.comps);
+        // Only draft the view the user is LOOKING at. The inactive view's filters
+        // come from _viewFilterCache, which is only written on view switch -- so
+        // they're stale, and if that view was never opened they're DEFAULTS (no
+        // price cap). A number computed from filters the user cannot see is not a
+        // draft, it's a lie: with a $2M max-price filter on, the NBV chip was
+        // happily reporting $14.9M off an unfiltered pool.
+        const isActiveView = !c.activeView || c.activeView === fieldKey;
+        const draft = !isActiveView
+          ? {
+              value: null,
+              label: `switch to the ${fieldKey.toUpperCase()} view to draft this`,
+              basis: "inactive", mathComps: [], excludedComps: [], keptCount: 0,
+            }
+          : (fieldKey === "arv" ? computeArvDraft(view.comps) : computeNbvDraft(view.comps));
         fs.draft = draft;
         fs.ratings = newMap;
         fs.keys = newKeys;
