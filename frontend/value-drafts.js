@@ -21,7 +21,10 @@
   try {
     if (!(window.LL_CONFIG && window.LL_CONFIG.valueDraftsEnabled)) return;
 
-    const FIELDS = ["arv", "nbv"];
+    // NBV first, to match the Stored Values panel's own order (NBV, TDPP, ARV).
+    // Accept order matters too: accepting NBV first lets its x0.2 TDPP cascade land
+    // before ARV drives MAO, which is the order the app's own arithmetic runs in.
+    const FIELDS = ["nbv", "arv"];
     const MEDIAN_MIN_KEPT = 2;
     // "New build" = built 2008 or later. This is NOT a guess and NOT the scraper's
     // NEW_BUILDS_MIN_YEAR (2015, api/propelio/config.py) — that constant is for an
