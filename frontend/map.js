@@ -8627,6 +8627,7 @@ function applyPropelioClientFilters() {
   _renderGoodCompsSection();
   // v1 §2.1 — auto-save filter_state after propelio client filter apply.
   _filterSaveQueueSave();
+  window.__aiVisibleComps = visibleOnMap;   // AI module seam (read-only mirror of the VISIBLE set)
 }
 
 function _sortPropelioComps(comps, mode) {
@@ -13945,6 +13946,112 @@ function _applyRoleVisibility() {
 }
 
 _applyRoleVisibility();
+
+// AI module seam — the ONLY thing frontend/ai-card.js reads from map.js.
+// Deleting the AI module = delete this function, the stash line in
+// applyPropelioClientFilters(), and the 2 index.html lines.
+window.__aiGetVisibleCompContext = () => ({
+  areaId: _currentLoadedAreaId,
+  comps: Array.isArray(window.__aiVisibleComps) ? window.__aiVisibleComps : [],
+  isAdmin: _isAdmin(),
+  headers: authHeaders(),
+});
+
+// Value Drafts module seam (docs/AI/VALUE_DRAFTS_SPEC_2026-07-13.md). No AI
+// endpoint involved -- deterministic client-side arithmetic only. This helper
+// + the two window functions below are the ENTIRE map.js touch point:
+// deleting them + frontend/value-drafts.js/.css + the 3 index.html lines
+// (script, stylesheet, LL_CONFIG key) leaves the app byte-identical.
+//
+// __valueDraftsViewComps(view) reconstructs what the ARV or NBV VIEW's
+// visible+kept set would be WITHOUT switching _activeView, re-rendering, or
+// autosaving -- it reuses the exact same filter-application function
+// (compPassesPropelioFilters) map.js already uses, and the same per-view
+// filter-cache + seed-from-ARV fallback _setActiveView itself uses
+// (map.js:15230), purely read-only. For the active view it reads the live
+// propelioFilterState; for the inactive view it reads that view's cached
+// filter blob (or the ARV blob, or plain defaults, in that order -- same
+// fallback order _setActiveView uses when a view has never been visited).
+function __valueDraftsViewComps(view) {
+  const all = (window._propelioLast && Array.isArray(window._propelioLast.comps))
+    ? window._propelioLast.comps
+    : [];
+  let fstate;
+  if (view === _activeView) {
+    fstate = propelioFilterState;
+  } else {
+    const cached = _viewFilterCache[view];
+    if (cached && cached.v && cached.propelio) {
+      fstate = { ...DEFAULT_PROPELIO_FILTERS, ...cached.propelio };
+    } else {
+      // This view has never been opened, so it has no filters of its own. When it
+      // IS opened, _setActiveView seeds it from the CURRENT view -- so that is what
+      // we mirror here.
+      //
+      // The old code fell back to DEFAULT_PROPELIO_FILTERS (i.e. NO filters at all).
+      // That is how the NBV chip reported $14.9M while a $2M max-price filter was
+      // active: it was drafting from an unfiltered pool the user could not see.
+      // Never fall back to defaults -- fall back to what the user is looking at.
+      fstate = { ...propelioFilterState };
+    }
+  }
+  const nbhdNorm = normalizeNbhd(fstate.neighborhood);
+  return all
+    .filter((c) => c && compPassesPropelioFilters(c, fstate, nbhdNorm))
+    .map((c) => ({
+      comp_address_key: c.comp_address_key,
+      address: c.address,
+      price: Number.isFinite(Number(c.price)) ? Number(c.price) : null,
+      year_built: Number.isFinite(Number(c.year_built)) ? Number(c.year_built) : null,
+      // permit_avm is not currently present on ANY comp-loading response the
+      // frontend receives (verified -- no path sets it). Reading it
+      // defensively means the math-exclusion check activates automatically
+      // the day it IS wired onto the wire, with no further map.js change.
+      // Until then this is always null and that exclusion reason never
+      // fires. Flagged in the coder report.
+      permit_avm: (typeof c.permit_avm === "boolean") ? c.permit_avm : null,
+      user_rating: view === "arv"
+        ? ((c._ratingArv === "good" || c._ratingArv === "bad") ? c._ratingArv : null)
+        : _ratingForView(c._ratingArv, c.ratings_by_view, view),
+    }));
+}
+
+window.__valueDraftsGetContext = () => ({
+  areaId: _currentLoadedAreaId,
+  isAdmin: _isAdmin(),
+  headers: authHeaders(),
+  // Which view the user is actually LOOKING at. Only the active view's filters are
+  // live -- _viewFilterCache is written on view SWITCH (map.js:15321), so the
+  // inactive view's filters are stale (and, if that view was never opened, null ->
+  // DEFAULTS -> no price cap at all). Drafting from that is not WYSIWYG, it's a
+  // number computed from filters the user cannot see. So value-drafts.js only
+  // drafts the ACTIVE view and tells the user to switch for the other.
+  activeView: _activeView,
+  arv: { comps: __valueDraftsViewComps("arv") },
+  nbv: { comps: __valueDraftsViewComps("nbv") },
+  storedValues: _storedValueState
+    ? { arv: _storedValueState.arv.numeric_value, nbv: _storedValueState.nbv.numeric_value }
+    : { arv: null, nbv: null },
+});
+
+// The ONLY function that ever writes an ARV/NBV stored-value field from a
+// draft (§0.1 / §3.3 -- the draft itself NEVER touches input.value). Goes
+// through the exact path a keystroke would (_storedValueOnNumericInput ->
+// _storedValueQueueSave), which also runs the shipped NBV->TDPP / MAO /
+// TDPP-MAO cascade for free, then forces an immediate flush (reusing
+// _storedValueFlushPending, already used by the beforeunload handler)
+// instead of waiting out the debounce -- an explicit accept click is one
+// final signed action, not a keystroke stream. Restricted to arv/nbv only --
+// drafting TDPP is explicitly out of scope (§0.2).
+window.__valueDraftsAcceptDraft = (fieldKey, value) => {
+  if (fieldKey !== "arv" && fieldKey !== "nbv") return false;
+  if (!_storedValueState) return false;
+  _storedValueOnNumericInput(fieldKey, String(value));
+  const input = document.getElementById(`sv-input-${fieldKey}`);
+  if (input) input.value = _storedValueFormatDisplay(_storedValueState[fieldKey].numeric_value);
+  void _storedValueFlushPending();
+  return true;
+};
 
 // ---------------------------------------------------------------------------
 // Helpers to show/hide the modal

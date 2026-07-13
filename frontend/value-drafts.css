@@ -1,0 +1,323 @@
+/* Value Drafts frontend styles. Everything namespaced under .vd-draft-* /
+   .vd-modal-*. Zero changes to style.css. Mirrors the .sv-row / dark-theme
+   idiom but never shares those selectors or DOM nodes, and never touches
+   .ai-modal-* / #auth-modal (plug-out contract, feature independence). */
+
+/* FULL WIDTH. The basis line ("median of your 3 kept comps: $310K") IS the
+   feature -- truncating it to "draft $2,..." makes the whole thing pointless.
+   Matches the comment box's width so it's actually readable. */
+.vd-draft-chip {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  box-sizing: border-box;
+  margin: 6px 0 0;
+  padding: 6px 9px;
+  border-radius: 8px;
+  border: 1px dashed rgba(201, 162, 79, 0.4);
+  background: rgba(201, 162, 79, 0.06);
+  font-size: 11px;
+  font-style: italic;
+}
+
+.vd-draft-label {
+  color: var(--text-soft);
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: normal;      /* wrap, never truncate — this text is the point */
+  line-height: 1.35;
+}
+
+/* --- The ONE Accept button for the whole panel ------------------------- */
+.vd-accept-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 0 0 10px;
+  padding: 7px 9px;
+  border-radius: 8px;
+  border: 1px solid rgba(201, 162, 79, 0.35);
+  background: rgba(201, 162, 79, 0.10);
+}
+
+.vd-accept-bar.vd-hidden { display: none; }
+
+.vd-accept-hint {
+  color: var(--text-soft);
+  font-size: 11px;
+  font-style: italic;
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.vd-accept-val {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.vd-accept-sep { opacity: 0.45; }
+
+/* The "?" — opens the derivation panel. This is the whole point of the feature:
+   he has to be able to SEE the rule in order to argue with it. */
+.vd-explain {
+  cursor: pointer;
+  width: 15px;
+  height: 15px;
+  line-height: 1;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid rgba(201, 162, 79, 0.5);
+  background: transparent;
+  color: var(--text-soft);
+  font-size: 9px;
+  font-style: normal;
+}
+
+.vd-explain:hover { background: rgba(201, 162, 79, 0.25); }
+
+.vd-accept-done {
+  flex: 0 0 auto;
+  color: var(--text-soft);
+  font-size: 11px;
+  font-style: italic;
+  opacity: 0.75;
+}
+
+.vd-accept-all {
+  flex: 0 0 auto;
+  cursor: pointer;
+  padding: 4px 12px;
+  border-radius: 6px;
+  border: 1px solid rgba(201, 162, 79, 0.55);
+  background: rgba(201, 162, 79, 0.18);
+  color: var(--text, #e8f0ea);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.vd-accept-all:hover { background: rgba(201, 162, 79, 0.30); }
+
+.vd-draft-empty {
+  color: var(--text-soft);
+  opacity: 0.8;
+}
+
+.vd-draft-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.vd-draft-explain {
+  border: 1px solid rgba(201, 162, 79, 0.3);
+  background: transparent;
+  color: var(--text-soft);
+  border-radius: 999px;
+  width: 18px;
+  height: 18px;
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+  font-style: normal;
+}
+
+.vd-draft-explain:hover {
+  color: var(--gold);
+}
+
+.vd-draft-accept {
+  border: 1px solid rgba(201, 162, 79, 0.38);
+  background: rgba(0, 0, 0, 0.16);
+  color: var(--gold);
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 10px;
+  font-style: normal;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.vd-draft-accept:hover {
+  background: rgba(0, 0, 0, 0.28);
+}
+
+/* ---- Derivation panel — own node, own classes ---- */
+
+.vd-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.72);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+  backdrop-filter: blur(3px);
+}
+
+.vd-modal-box {
+  position: relative;
+  background:
+    linear-gradient(165deg, rgba(255, 255, 255, 0.08) 0%, rgba(255, 255, 255, 0.02) 40%, rgba(0, 0, 0, 0.12) 100%),
+    #0d3429;
+  border: 1px solid rgba(201, 162, 79, 0.3);
+  border-radius: 14px;
+  padding: 24px 28px;
+  width: 560px;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 64px);
+  overflow-y: auto;
+  box-shadow: 0 24px 56px rgba(0, 0, 0, 0.7);
+  color: var(--text-main);
+  font-size: 13px;
+}
+
+.vd-modal-close {
+  position: absolute;
+  top: 14px;
+  right: 16px;
+  border: 0;
+  background: transparent;
+  color: var(--text-soft);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.vd-modal-close:hover {
+  color: var(--gold);
+}
+
+.vd-modal-header {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--gold);
+  margin-bottom: 6px;
+  padding-right: 24px;
+}
+
+.vd-modal-saved-note {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+}
+
+.vd-modal-section {
+  margin-bottom: 14px;
+}
+
+.vd-modal-section-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-soft);
+  margin-bottom: 6px;
+}
+
+.vd-modal-comps {
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.vd-modal-comp-row {
+  display: flex;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+  padding: 3px 4px;
+  border-radius: 4px;
+}
+
+.vd-modal-comp-row span:first-child {
+  color: var(--text-main);
+  font-weight: 600;
+  min-width: 80px;
+}
+
+.vd-modal-comp-row-hl {
+  background: rgba(201, 162, 79, 0.16);
+  border: 1px solid rgba(201, 162, 79, 0.32);
+}
+
+.vd-modal-arithmetic {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+.vd-modal-exclusions {
+  font-size: 11px;
+  color: var(--text-soft);
+}
+
+.vd-modal-excl-row {
+  padding: 2px 0;
+}
+
+.vd-modal-empty {
+  font-size: 12px;
+  color: var(--text-soft);
+  font-style: italic;
+}
+
+.vd-modal-question {
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  padding-top: 12px;
+}
+
+.vd-modal-question-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-main);
+  margin-bottom: 4px;
+}
+
+.vd-modal-question-mult {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-soft);
+}
+
+.vd-modal-mult-input {
+  width: 56px;
+  background: rgba(0, 0, 0, 0.2);
+  border: 1px solid rgba(201, 162, 79, 0.3);
+  border-radius: 4px;
+  color: var(--text-main);
+  padding: 2px 4px;
+  font-size: 12px;
+}
+
+.vd-modal-question-accept {
+  border: 1px solid rgba(201, 162, 79, 0.38);
+  background: rgba(0, 0, 0, 0.16);
+  color: var(--gold);
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.vd-modal-question-accept:hover {
+  background: rgba(0, 0, 0, 0.28);
+}
+
+.vd-modal-question-note {
+  font-size: 11px;
+  color: var(--text-soft);
+  font-style: italic;
+}
