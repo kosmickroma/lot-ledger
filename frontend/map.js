@@ -13957,6 +13957,89 @@ window.__aiGetVisibleCompContext = () => ({
   headers: authHeaders(),
 });
 
+// Value Drafts module seam (docs/AI/VALUE_DRAFTS_SPEC_2026-07-13.md). No AI
+// endpoint involved -- deterministic client-side arithmetic only. This helper
+// + the two window functions below are the ENTIRE map.js touch point:
+// deleting them + frontend/value-drafts.js/.css + the 3 index.html lines
+// (script, stylesheet, LL_CONFIG key) leaves the app byte-identical.
+//
+// __valueDraftsViewComps(view) reconstructs what the ARV or NBV VIEW's
+// visible+kept set would be WITHOUT switching _activeView, re-rendering, or
+// autosaving -- it reuses the exact same filter-application function
+// (compPassesPropelioFilters) map.js already uses, and the same per-view
+// filter-cache + seed-from-ARV fallback _setActiveView itself uses
+// (map.js:15230), purely read-only. For the active view it reads the live
+// propelioFilterState; for the inactive view it reads that view's cached
+// filter blob (or the ARV blob, or plain defaults, in that order -- same
+// fallback order _setActiveView uses when a view has never been visited).
+function __valueDraftsViewComps(view) {
+  const all = (window._propelioLast && Array.isArray(window._propelioLast.comps))
+    ? window._propelioLast.comps
+    : [];
+  let fstate;
+  if (view === _activeView) {
+    fstate = propelioFilterState;
+  } else {
+    const cached = _viewFilterCache[view];
+    const arvCached = _viewFilterCache.arv;
+    const source = (cached && cached.v && cached.propelio)
+      ? cached.propelio
+      : (view !== "arv" && arvCached && arvCached.v && arvCached.propelio)
+        ? arvCached.propelio
+        : null;
+    fstate = source ? { ...DEFAULT_PROPELIO_FILTERS, ...source } : { ...DEFAULT_PROPELIO_FILTERS };
+  }
+  const nbhdNorm = normalizeNbhd(fstate.neighborhood);
+  return all
+    .filter((c) => c && compPassesPropelioFilters(c, fstate, nbhdNorm))
+    .map((c) => ({
+      comp_address_key: c.comp_address_key,
+      address: c.address,
+      price: Number.isFinite(Number(c.price)) ? Number(c.price) : null,
+      year_built: Number.isFinite(Number(c.year_built)) ? Number(c.year_built) : null,
+      // permit_avm is not currently present on ANY comp-loading response the
+      // frontend receives (verified -- no path sets it). Reading it
+      // defensively means the math-exclusion check activates automatically
+      // the day it IS wired onto the wire, with no further map.js change.
+      // Until then this is always null and that exclusion reason never
+      // fires. Flagged in the coder report.
+      permit_avm: (typeof c.permit_avm === "boolean") ? c.permit_avm : null,
+      user_rating: view === "arv"
+        ? ((c._ratingArv === "good" || c._ratingArv === "bad") ? c._ratingArv : null)
+        : _ratingForView(c._ratingArv, c.ratings_by_view, view),
+    }));
+}
+
+window.__valueDraftsGetContext = () => ({
+  areaId: _currentLoadedAreaId,
+  isAdmin: _isAdmin(),
+  headers: authHeaders(),
+  arv: { comps: __valueDraftsViewComps("arv") },
+  nbv: { comps: __valueDraftsViewComps("nbv") },
+  storedValues: _storedValueState
+    ? { arv: _storedValueState.arv.numeric_value, nbv: _storedValueState.nbv.numeric_value }
+    : { arv: null, nbv: null },
+});
+
+// The ONLY function that ever writes an ARV/NBV stored-value field from a
+// draft (§0.1 / §3.3 -- the draft itself NEVER touches input.value). Goes
+// through the exact path a keystroke would (_storedValueOnNumericInput ->
+// _storedValueQueueSave), which also runs the shipped NBV->TDPP / MAO /
+// TDPP-MAO cascade for free, then forces an immediate flush (reusing
+// _storedValueFlushPending, already used by the beforeunload handler)
+// instead of waiting out the debounce -- an explicit accept click is one
+// final signed action, not a keystroke stream. Restricted to arv/nbv only --
+// drafting TDPP is explicitly out of scope (§0.2).
+window.__valueDraftsAcceptDraft = (fieldKey, value) => {
+  if (fieldKey !== "arv" && fieldKey !== "nbv") return false;
+  if (!_storedValueState) return false;
+  _storedValueOnNumericInput(fieldKey, String(value));
+  const input = document.getElementById(`sv-input-${fieldKey}`);
+  if (input) input.value = _storedValueFormatDisplay(_storedValueState[fieldKey].numeric_value);
+  void _storedValueFlushPending();
+  return true;
+};
+
 // ---------------------------------------------------------------------------
 // Helpers to show/hide the modal
 // ---------------------------------------------------------------------------

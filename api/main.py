@@ -9138,6 +9138,16 @@ async def index() -> HTMLResponse:
         html = html.replace("__TILES_URL__", TILES_BASE_URL)
         html = html.replace("__BUILD_ID__", BUILD_ID)
         html = html.replace("__APP_VERSION__", APP_VERSION)
+        # Value Drafts seam: the feature is pure client-side arithmetic (no
+        # endpoint gates it), so window.LL_CONFIG is the ONLY way the frontend
+        # can know the flag is off and stay fully inert on prod. Read directly
+        # via os.getenv (not `from api.value_drafts.config import ...`) so a
+        # broken/deleted api/value_drafts/ package can never stop the app
+        # from starting — same reasoning as the AI_ENABLED seam below.
+        html = html.replace(
+            "__VALUE_DRAFTS_ENABLED__",
+            "true" if os.getenv("VALUE_DRAFTS_ENABLED", "false").strip().lower() == "true" else "false",
+        )
         _INDEX_HTML_CACHE = html
     return HTMLResponse(_INDEX_HTML_CACHE)
 
@@ -9152,5 +9162,14 @@ if os.getenv("AI_ENABLED", "false").strip().lower() == "true":
     from api.ai.routes import router as ai_router
 
     app.include_router(ai_router)
+
+# Value Drafts module seam — same reasoning as the AI seam above: read the env
+# var directly, never import api.value_drafts at module top, so the package
+# can be broken/deleted without affecting app startup. Must stay ABOVE the
+# StaticFiles catch-all mount or /api/value-drafts/* 404s.
+if os.getenv("VALUE_DRAFTS_ENABLED", "false").strip().lower() == "true":
+    from api.value_drafts.routes import router as value_drafts_router
+
+    app.include_router(value_drafts_router)
 
 app.mount("/", StaticFiles(directory=FRONTEND_DIR), name="frontend")
