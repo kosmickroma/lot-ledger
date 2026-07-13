@@ -13981,13 +13981,19 @@ function __valueDraftsViewComps(view) {
     fstate = propelioFilterState;
   } else {
     const cached = _viewFilterCache[view];
-    const arvCached = _viewFilterCache.arv;
-    const source = (cached && cached.v && cached.propelio)
-      ? cached.propelio
-      : (view !== "arv" && arvCached && arvCached.v && arvCached.propelio)
-        ? arvCached.propelio
-        : null;
-    fstate = source ? { ...DEFAULT_PROPELIO_FILTERS, ...source } : { ...DEFAULT_PROPELIO_FILTERS };
+    if (cached && cached.v && cached.propelio) {
+      fstate = { ...DEFAULT_PROPELIO_FILTERS, ...cached.propelio };
+    } else {
+      // This view has never been opened, so it has no filters of its own. When it
+      // IS opened, _setActiveView seeds it from the CURRENT view -- so that is what
+      // we mirror here.
+      //
+      // The old code fell back to DEFAULT_PROPELIO_FILTERS (i.e. NO filters at all).
+      // That is how the NBV chip reported $14.9M while a $2M max-price filter was
+      // active: it was drafting from an unfiltered pool the user could not see.
+      // Never fall back to defaults -- fall back to what the user is looking at.
+      fstate = { ...propelioFilterState };
+    }
   }
   const nbhdNorm = normalizeNbhd(fstate.neighborhood);
   return all

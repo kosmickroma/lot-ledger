@@ -242,17 +242,62 @@
         valueHtml = esc(draft.label);
       }
 
+      // The chip is full-width (see .vd-draft-chip in the CSS) so the basis is
+      // actually READABLE -- "median of your 3 kept comps: $310K" is the whole
+      // point, and truncating it to "draft $2,..." makes the feature pointless.
+      // No per-field Accept button: there is ONE Accept for the panel (§accept bar),
+      // because the stored values are per-AREA and the user accepts them together.
       chip.innerHTML =
         `<span class="vd-draft-label">${hasSaved ? esc(valueHtml) : esc(draft.label)}</span>` +
-        '<span class="vd-draft-actions">' +
-        '<button type="button" class="vd-draft-explain" title="How did it get this?" aria-label="How did it get this?">?</button>' +
-        '<button type="button" class="vd-draft-accept">Accept</button>' +
-        "</span>";
+        '<button type="button" class="vd-draft-explain" title="How did it get this?" aria-label="How did it get this?">?</button>';
 
       const explainBtn = chip.querySelector(".vd-draft-explain");
       if (explainBtn) explainBtn.addEventListener("click", () => openDerivationModal(fieldKey));
-      const acceptBtn = chip.querySelector(".vd-draft-accept");
-      if (acceptBtn) acceptBtn.addEventListener("click", () => acceptDraft(fieldKey));
+    }
+
+    // --- ONE Accept button for the whole panel -----------------------------
+    // Accepts every live draft at once (ARV + NBV). Accepting NBV also cascades
+    // TDPP (x0.2) through map.js's existing code, so one click can fill three boxes.
+    function ensureAcceptBar() {
+      const body = document.getElementById("stored-value-body");
+      if (!body) return null;
+      let bar = document.getElementById("vd-accept-bar");
+      if (!bar) {
+        bar = document.createElement("div");
+        bar.id = "vd-accept-bar";
+        bar.className = "vd-accept-bar";
+        bar.innerHTML =
+          '<span class="vd-accept-hint"></span>' +
+          '<button type="button" class="vd-accept-all">Accept drafts</button>';
+        body.insertAdjacentElement("afterbegin", bar);
+        bar.querySelector(".vd-accept-all").addEventListener("click", () => {
+          FIELDS.forEach((f) => {
+            const d = fieldState[f] && fieldState[f].draft;
+            if (d && d.value !== null) acceptDraft(f);
+          });
+        });
+      }
+      return bar;
+    }
+
+    function renderAcceptBar() {
+      const bar = ensureAcceptBar();
+      if (!bar) return;
+      const live = FIELDS.filter((f) => {
+        const d = fieldState[f] && fieldState[f].draft;
+        return d && d.value !== null;
+      });
+      const btn = bar.querySelector(".vd-accept-all");
+      const hint = bar.querySelector(".vd-accept-hint");
+      if (live.length === 0) {
+        bar.classList.add("vd-hidden");
+        return;
+      }
+      bar.classList.remove("vd-hidden");
+      btn.textContent = live.length === 1
+        ? `Accept ${live[0].toUpperCase()} draft`
+        : "Accept both drafts";
+      hint.textContent = live.map((f) => `${f.toUpperCase()} ${fmt(fieldState[f].draft.value)}`).join(" · ");
     }
 
     function acceptDraft(fieldKey) {
@@ -514,20 +559,12 @@
         const setChanged = fs.keys !== null && fs.keys !== newKeys;
         const prevDraft = fs.draft;
 
-        // Only draft the view the user is LOOKING at. The inactive view's filters
-        // come from _viewFilterCache, which is only written on view switch -- so
-        // they're stale, and if that view was never opened they're DEFAULTS (no
-        // price cap). A number computed from filters the user cannot see is not a
-        // draft, it's a lie: with a $2M max-price filter on, the NBV chip was
-        // happily reporting $14.9M off an unfiltered pool.
-        const isActiveView = !c.activeView || c.activeView === fieldKey;
-        const draft = !isActiveView
-          ? {
-              value: null,
-              label: `switch to the ${fieldKey.toUpperCase()} view to draft this`,
-              basis: "inactive", mathComps: [], excludedComps: [], keptCount: 0,
-            }
-          : (fieldKey === "arv" ? computeArvDraft(view.comps) : computeNbvDraft(view.comps));
+        // BOTH drafts always compute. The stored values are per-AREA and identical
+        // on every tab -- making the user switch views to draft one of them would be
+        // nonsense. The $14.9M bug was never about which view was active; it was
+        // __valueDraftsViewComps falling back to NO filters for a view that had
+        // never been opened. Fixed at the source (map.js).
+        const draft = fieldKey === "arv" ? computeArvDraft(view.comps) : computeNbvDraft(view.comps);
         fs.draft = draft;
         fs.ratings = newMap;
         fs.keys = newKeys;
@@ -549,6 +586,8 @@
           }
         }
       });
+
+      renderAcceptBar();   // the ONE Accept button — reflects whatever is live now
     }
 
     wireInputObservers();
