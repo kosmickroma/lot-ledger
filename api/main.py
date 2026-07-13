@@ -7970,8 +7970,30 @@ async def update_saved_area(area_id: str, request: SavedAreaUpdateRequest, req: 
     )
     editor_fields = request.filter_state is not None
 
+    # Fix B (2026-07-12): app-role `owner` may rename areas SHARED TO THEM — not just
+    # areas they created, and NOT arbitrary areas. This override does NOT skip
+    # authorization: it SWAPS the creator-ownership assert for a membership assert
+    # (see the gate below). `name` is the sole owner-only field it permits — polygon
+    # reshape / type / originator stay creator-owner-only for the owner role.
+    # `developer` keeps its existing full bypass, unchanged.
+    is_owner_role = str(user.get("role") or "").strip().lower() == "owner"
+    rename_only = (
+        request.name is not None
+        and request.type is None
+        and request.lat is None
+        and request.lng is None
+        and request.polygon is None
+        and request.originator_parcel_county is None
+        and request.originator_parcel_account_num is None
+    )
+    owner_rename_override = is_owner_role and rename_only
+
     if not is_developer:
-        if owner_only_fields:
+        if owner_rename_override:
+            # App-role owner renaming: allowed on any area they can SEE (own or shared to
+            # them), not on arbitrary areas. DECIDED with KK 2026-07-12 (scope option "b").
+            _assert_user_is_area_member(area_id, int(user["id"]))
+        elif owner_only_fields:
             _assert_user_owns_area(area_id, int(user["id"]))
         elif editor_fields:
             _assert_user_is_area_member(area_id, int(user["id"]))
