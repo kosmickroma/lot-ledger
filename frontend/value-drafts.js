@@ -48,6 +48,7 @@
       nbv: { draft: null, ratings: new Map(), keys: null, savedSnapshot: undefined, hasEverAccepted: false },
     };
     let seenAreaId = undefined;
+    let lastCtx = null;   // most recent context — renderAcceptBar reads storedValues from it
 
     function ctx() {
       try {
@@ -221,38 +222,12 @@
       return chip;
     }
 
-    function renderChip(fieldKey, draft, savedValue) {
-      const chip = ensureChip(fieldKey);
-      if (!chip) return;
-
-      if (draft.value === null) {
-        chip.innerHTML = `<span class="vd-draft-label vd-draft-empty">${esc(draft.label)}</span>`;
-        return;
-      }
-
-      const hasSaved = savedValue !== null && savedValue !== undefined;
-      let valueHtml;
-      if (hasSaved && savedValue !== draft.value) {
-        const delta = savedValue - draft.value;
-        const deltaText = delta === 0 ? "(saved = draft)" : `(${delta > 0 ? "+" : "−"}${fmt(Math.abs(delta))})`;
-        valueHtml = `draft ${fmtFull(draft.value)} · saved ${fmtFull(savedValue)} ${deltaText}`;
-      } else if (hasSaved) {
-        valueHtml = `draft ${fmtFull(draft.value)} · saved ${fmtFull(savedValue)}`;
-      } else {
-        valueHtml = esc(draft.label);
-      }
-
-      // The chip is full-width (see .vd-draft-chip in the CSS) so the basis is
-      // actually READABLE -- "median of your 3 kept comps: $310K" is the whole
-      // point, and truncating it to "draft $2,..." makes the feature pointless.
-      // No per-field Accept button: there is ONE Accept for the panel (§accept bar),
-      // because the stored values are per-AREA and the user accepts them together.
-      chip.innerHTML =
-        `<span class="vd-draft-label">${hasSaved ? esc(valueHtml) : esc(draft.label)}</span>` +
-        '<button type="button" class="vd-draft-explain" title="How did it get this?" aria-label="How did it get this?">?</button>';
-
-      const explainBtn = chip.querySelector(".vd-draft-explain");
-      if (explainBtn) explainBtn.addEventListener("click", () => openDerivationModal(fieldKey));
+    // No per-field chips. KK: "those little draft things gone PLEASE" -- and he's
+    // right, they were noise (once accepted they read "draft $2,922,655 · saved
+    // $2,922,655", the same number twice). Everything lives in the ONE accept bar.
+    function removeChip(fieldKey) {
+      const chip = document.querySelector(`.sv-row[data-field-key="${fieldKey}"] .vd-draft-chip`);
+      if (chip) chip.remove();
     }
 
     // --- ONE Accept button for the whole panel -----------------------------
@@ -266,15 +241,17 @@
         bar = document.createElement("div");
         bar.id = "vd-accept-bar";
         bar.className = "vd-accept-bar";
-        bar.innerHTML =
-          '<span class="vd-accept-hint"></span>' +
-          '<button type="button" class="vd-accept-all">Accept drafts</button>';
         body.insertAdjacentElement("afterbegin", bar);
-        bar.querySelector(".vd-accept-all").addEventListener("click", () => {
-          FIELDS.forEach((f) => {
-            const d = fieldState[f] && fieldState[f].draft;
-            if (d && d.value !== null) acceptDraft(f);
-          });
+        // Delegated: the bar's innards are re-rendered on every tick.
+        bar.addEventListener("click", (e) => {
+          const explain = e.target.closest(".vd-explain");
+          if (explain) { openDerivationModal(explain.getAttribute("data-field")); return; }
+          if (e.target.closest(".vd-accept-all")) {
+            FIELDS.forEach((f) => {
+              const d = fieldState[f] && fieldState[f].draft;
+              if (d && d.value !== null) acceptDraft(f);
+            });
+          }
         });
       }
       return bar;
@@ -283,21 +260,40 @@
     function renderAcceptBar() {
       const bar = ensureAcceptBar();
       if (!bar) return;
+
       const live = FIELDS.filter((f) => {
         const d = fieldState[f] && fieldState[f].draft;
         return d && d.value !== null;
       });
-      const btn = bar.querySelector(".vd-accept-all");
-      const hint = bar.querySelector(".vd-accept-hint");
       if (live.length === 0) {
         bar.classList.add("vd-hidden");
+        bar.innerHTML = "";
         return;
       }
       bar.classList.remove("vd-hidden");
-      btn.textContent = live.length === 1
-        ? `Accept ${live[0].toUpperCase()} draft`
-        : "Accept both drafts";
-      hint.textContent = live.map((f) => `${f.toUpperCase()} ${fmt(fieldState[f].draft.value)}`).join(" · ");
+
+      // Each value carries its own "?" -- that opens the derivation panel, which is
+      // the whole point of the feature: he has to be able to see the rule to argue
+      // with it. Everything else about the per-field chips is gone.
+      const vals = live.map((f) => {
+        const d = fieldState[f].draft;
+        return `<span class="vd-accept-val">${f.toUpperCase()} ${esc(fmt(d.value))}` +
+               `<button type="button" class="vd-explain" data-field="${f}" ` +
+               `title="How did it get this?" aria-label="How did it get this?">?</button></span>`;
+      }).join('<span class="vd-accept-sep">·</span>');
+
+      // If every live draft already equals what's saved, there is nothing to accept
+      // -- don't nag him to re-accept a number he's already signed.
+      const allMatch = live.every((f) => {
+        const saved = lastCtx && lastCtx.storedValues ? lastCtx.storedValues[f] : null;
+        return saved !== null && saved !== undefined && saved === fieldState[f].draft.value;
+      });
+
+      bar.innerHTML =
+        `<span class="vd-accept-hint">${vals}</span>` +
+        (allMatch
+          ? '<span class="vd-accept-done">saved</span>'
+          : '<button type="button" class="vd-accept-all">Accept draft</button>');
     }
 
     function acceptDraft(fieldKey) {
@@ -534,8 +530,11 @@
 
     function tick(force) {
       const c = ctx();
+      lastCtx = c;
       if (!c || !c.isAdmin || !c.areaId) {
-        FIELDS.forEach((f) => { const chip = document.querySelector(`.sv-row[data-field-key="${f}"] .vd-draft-chip`); if (chip) chip.remove(); });
+        FIELDS.forEach(removeChip);
+        const bar = document.getElementById("vd-accept-bar");
+        if (bar) bar.remove();
         return;
       }
 
@@ -580,7 +579,7 @@
               from_value: prevDraft.value, to_value: draft.value, cause,
             });
           }
-          renderChip(fieldKey, draft, savedValue);
+          removeChip(fieldKey);   // no per-field chips — everything is in the accept bar
           if (modalEl && modalEl.getAttribute("data-field") === fieldKey) {
             openDerivationModal(fieldKey);
           }

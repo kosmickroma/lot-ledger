@@ -52,6 +52,45 @@
   font-style: italic;
   flex: 1 1 auto;
   min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.vd-accept-val {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.vd-accept-sep { opacity: 0.45; }
+
+/* The "?" — opens the derivation panel. This is the whole point of the feature:
+   he has to be able to SEE the rule in order to argue with it. */
+.vd-explain {
+  cursor: pointer;
+  width: 15px;
+  height: 15px;
+  line-height: 1;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid rgba(201, 162, 79, 0.5);
+  background: transparent;
+  color: var(--text-soft);
+  font-size: 9px;
+  font-style: normal;
+}
+
+.vd-explain:hover { background: rgba(201, 162, 79, 0.25); }
+
+.vd-accept-done {
+  flex: 0 0 auto;
+  color: var(--text-soft);
+  font-size: 11px;
+  font-style: italic;
+  opacity: 0.75;
 }
 
 .vd-accept-all {
