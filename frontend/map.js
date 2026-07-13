@@ -2498,7 +2498,9 @@ function _updateActiveItemRenameVisibility() {
     ? _savedAreasCache.find((a) => String(a.id) === String(_currentLoadedAreaId))
     : null;
   const isOwnerOfLoaded = loadedArea ? (loadedArea.role || "owner") === "owner" : true;
-  const shouldShow = (Boolean(_currentLoadedAreaId) || hasRealName) && isOwnerOfLoaded;
+  // Fix B (2026-07-12): app-role admins (owner + developer) may rename any area.
+  const canRenameLoaded = isOwnerOfLoaded || _isAdmin();
+  const shouldShow = (Boolean(_currentLoadedAreaId) || hasRealName) && canRenameLoaded;
   btn.classList.toggle("hidden", !shouldShow);
   // Share button: shown whenever the loaded area is shareable (has a share_id).
   // NOT owner-only — anyone can copy a share link (mirrors the saved-areas-list
@@ -5925,11 +5927,14 @@ function _renderList(sectionId, listId, items, options = {}) {
     const secondaryLine = [chip, `saved ${date}`, sharedTag].filter(Boolean).join(" · ");
 
     // Sprint 1 multi-user collab: role-based affordance gating (spec §3.3, §5).
-    // Owner sees full controls (rename, etc.). Editor sees the Make-my-copy
-    // path (existing behavior). Developer-bypass via _canEditAnyArea keeps
-    // KK able to operate on anyone's area.
+    // Row-owner sees Rename; editor sees the Make-my-copy path.
+    // Fix B (2026-07-12): app-role admins (owner + developer, via _isAdmin) also get
+    // Rename on rows shared to them — the server still gates on area membership.
+    // Rename and fork are now independent: admins see BOTH on a shared row, and
+    // fork stays the default workflow for everyone else.
     const isOwnerRow = (area.role || "owner") === "owner";
-    const showFullControls = isOwnerRow || _canEditAnyArea();
+    const canRenameRow = (isOwnerRow || _isAdmin()) && canRename;
+    const canForkRow = !isOwnerRow && canShare;
     const nameId = `name-${listKey}-${area.id}`;
     const typeLabel = _typeLabel(area.type);
 
@@ -5946,8 +5951,8 @@ function _renderList(sectionId, listId, items, options = {}) {
         <div class="saved-area-row-secondary-actions">
           <hr class="saved-area-actions-divider">
           <div class="saved-area-secondary-btns">
-            ${!showFullControls && canShare ? `<button type="button" class="saved-area-action-btn" data-action="fork" data-share-id="${_esc(area.share_id)}" title="Make my own copy">📋 Make my copy</button>` : ""}
-            ${showFullControls && canRename ? `<button type="button" class="saved-area-action-btn rename" data-action="rename" title="Rename">✎ Rename</button>` : ""}
+            ${canForkRow ? `<button type="button" class="saved-area-action-btn" data-action="fork" data-share-id="${_esc(area.share_id)}" title="Make my own copy">📋 Make my copy</button>` : ""}
+            ${canRenameRow ? `<button type="button" class="saved-area-action-btn rename" data-action="rename" title="Rename">✎ Rename</button>` : ""}
           </div>
         </div>
       </div>`;
@@ -13767,6 +13772,11 @@ function _applyRoleVisibility() {
   } else {
     document.body.classList.add("is-not-power-user");
   }
+  // Fix B: rename gating now depends on app role (_isAdmin), so the pencil must be
+  // re-derived on EVERY auth transition — login, init, 401, signout. Folding the call
+  // in here covers all nine _applyRoleVisibility() call sites, and any added later.
+  // Idempotent + null-safe (no #active-item-rename → early return).
+  _updateActiveItemRenameVisibility();
 }
 
 _applyRoleVisibility();
