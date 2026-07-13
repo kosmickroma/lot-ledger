@@ -2552,6 +2552,10 @@ async function _handleActiveItemRenameClick() {
   if (!nameEl || !btn) return;
   if (nameEl.classList.contains("is-editing")) return;
 
+  // The pencil + 🔗 live inside .active-item-name-actions (index.html:52). Resolve the
+  // container once; fall back to the button so a future markup change degrades, not crashes.
+  const actionsEl = btn.closest(".active-item-name-actions") || btn;
+
   const currentName = (nameEl.textContent || "").trim();
   const input = document.createElement("input");
   input.type = "text";
@@ -2561,8 +2565,11 @@ async function _handleActiveItemRenameClick() {
 
   nameEl.classList.add("is-editing");
   nameEl.style.display = "none";
-  nameEl.parentElement.insertBefore(input, btn);
-  btn.classList.add("hidden");
+  // The pencil is a GRANDCHILD of nameEl.parentElement since the buttons were wrapped
+  // in .active-item-name-actions (d6459bb) — insertBefore(input, btn) threw NotFoundError.
+  // insertAdjacentElement needs no reference node, so it survives markup reshuffles.
+  nameEl.insertAdjacentElement("afterend", input);
+  actionsEl.classList.add("hidden");   // hide pencil AND 🔗 — the 🔗 must not sit beside the input
   input.focus();
   input.select();
 
@@ -2571,7 +2578,12 @@ async function _handleActiveItemRenameClick() {
     nameEl.classList.remove("is-editing");
     nameEl.style.display = "";
     if (input.parentElement) input.parentElement.removeChild(input);
-    btn.classList.toggle("hidden", !_currentLoadedAreaId);
+    // Un-hide the SPAN before re-deriving per-button visibility.
+    // _updateActiveItemRenameVisibility() toggles the individual BUTTONS, not this span —
+    // if the span stayed hidden, pencil and 🔗 would both remain invisible while that
+    // function believed it had shown them.
+    actionsEl.classList.remove("hidden");
+    _updateActiveItemRenameVisibility();   // single source of truth (was: ad-hoc btn toggle)
   };
 
   const finish = async (mode) => {
