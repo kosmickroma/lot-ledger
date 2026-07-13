@@ -68,7 +68,14 @@
     function fmt(n) {
       if (n === null || n === undefined || !Number.isFinite(Number(n))) return "?";
       const v = Math.round(Number(n));
-      if (Math.abs(v) >= 1000) return "$" + Math.round(v / 1000) + "K";
+      const a = Math.abs(v);
+      // His teardown deals run $1-8M. Rounding those to "$3895K" reads as a
+      // mistake; they belong in millions. Flips are $150-500k and belong in K.
+      if (a >= 1000000) {
+        const m = v / 1000000;
+        return "$" + (Math.abs(m) >= 10 ? m.toFixed(1) : m.toFixed(2)).replace(/\.?0+$/, "") + "M";
+      }
+      if (a >= 1000) return "$" + Math.round(v / 1000) + "K";
       return "$" + v.toLocaleString("en-US");
     }
 
