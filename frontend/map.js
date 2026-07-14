@@ -15674,5 +15674,15 @@ if (ARV_NBV_EXPORT_ENABLED) {
 // v1 §2.1 — flush pending filter save on tab close. Mirror of
 // stored-values beforeunload inside _storedValueWireListeners above.
 window.addEventListener("beforeunload", () => {
-  if (_filterSavePending) void _filterSaveProcessQueue();
+  // ⛔ Guard on the QUEUE, not the in-flight boolean. _filterSavePending only
+  // goes true once a save is ALREADY in flight (map.js:4362); the edits waiting
+  // on the 600ms debounce live in _filterSavePendingFields. Checking the wrong
+  // one meant: tick a checkbox, reload inside 600ms, and the edit was silently
+  // dropped -- the debounce hadn't fired and this flush decided there was
+  // nothing to flush. KK hit it on preview 2026-07-14 (Vacant lost on a fast
+  // reload, saved on a slower retry -- the classic signature).
+  // Pre-existing, unrelated to AI mode, and it hit every filter edit for every
+  // user. The stored-values mirror this claims to copy (map.js:15511) guards on
+  // .size > 0, which is the correct pattern.
+  if (_filterSavePendingFields.size > 0 || _filterSavePending) void _filterSaveProcessQueue();
 });
