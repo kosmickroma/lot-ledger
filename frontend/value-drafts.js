@@ -35,15 +35,26 @@
     // (the 29th is 2020). At 2015 we would silently drop every 2008-2014 build out
     // of the ceiling pool -- which can drop the very comp that IS the NBV.
     //
-    // ⚠️ Confirm with him on the call ("is 2008 your line, or does it move by
-    // neighbourhood?"). If it moves, this becomes a knob, not a constant.
+    // ✅ CONFIRMED by the client on the 2026-07-13 call: 2008 is his line. NBV
+    // comps are new builds (year >= 2008); ARV comps are old houses (year <= 2008).
+    // ⚠️ STILL OPEN: does that line move by neighbourhood? If it does, this
+    // becomes a knob, not a constant.
+    //
+    // ⚠️ WYSIWYG DIVERGENCE — KNOWN, DELIBERATE, AND TEMPORARY.
+    // This gate is invisible to the user: it filters the no-keeps pool by year
+    // without anything on screen saying so. Task 2 (2026-07-14) put the same rule
+    // in the VISIBLE per-view year filter, where it belongs.
+    //
+    // REMOVE THIS GATE (and this constant) the moment the year filter fires
+    // AUTOMATICALLY on draw rather than behind a manual auto-match toggle. Until
+    // then, deleting it makes the no-keeps NBV fall back to the highest price among
+    // ALL visible comps — potentially a pre-war mansion. Keep it. It is the lesser
+    // of two wrongs, and it is written down so it does not become permanent.
     const NEW_BUILD_MIN_YEAR = 2008;
     const POLL_MS = 700;
-    const DEFAULT_ARV_MULTIPLIER = 0.5;
 
     let modalEl = null;
     let modalKeydownHandler = null;
-    let arvMultiplier = DEFAULT_ARV_MULTIPLIER;
 
     // Per-field bookkeeping for telemetry + reactive re-render.
     const fieldState = {
@@ -407,30 +418,6 @@
         arithmetic = `highest kept/visible new-build price = ${fmtFull(draft.value)}`;
       }
 
-      // §3.4 — ARV ≈ NBV × multiplier, framed as a question, never as truth.
-      // There is no 0.5 anywhere else in the codebase; this is shown ONLY on
-      // the ARV panel, only when an NBV value (draft or saved) exists to
-      // multiply against.
-      let questionHtml = "";
-      if (fieldKey === "arv") {
-        const nbvValue = (c && c.storedValues && c.storedValues.nbv !== null && c.storedValues.nbv !== undefined)
-          ? c.storedValues.nbv
-          : (fieldState.nbv.draft && fieldState.nbv.draft.value !== null ? fieldState.nbv.draft.value : null);
-        if (nbvValue !== null) {
-          const suggested = Math.round(nbvValue * arvMultiplier);
-          questionHtml = `
-            <div class="vd-modal-section vd-modal-question">
-              <div class="vd-modal-section-title">Half of your new-build value — is that your rule?</div>
-              <div class="vd-modal-question-row">
-                <span>ARV ≈ ${esc(fmtFull(suggested))}</span>
-                <span class="vd-modal-question-mult">× <input type="number" step="0.01" min="0" max="2" class="vd-modal-mult-input" value="${esc(arvMultiplier)}"></span>
-                <button type="button" class="vd-modal-question-accept">Use this instead</button>
-              </div>
-              <div class="vd-modal-question-note">There is no ${esc(arvMultiplier)} rule anywhere in the app — this is a pattern in your team's own data. Your answer is the point.</div>
-            </div>`;
-        }
-      }
-
       const overlay = document.createElement("div");
       overlay.className = "vd-modal-overlay";
       overlay.setAttribute("data-field", fieldKey);
@@ -446,7 +433,6 @@
         `<div class="vd-modal-arithmetic">${esc(arithmetic)}</div></div>` +
         '<div class="vd-modal-section"><div class="vd-modal-section-title">Excluded from the math</div>' +
         `<div class="vd-modal-exclusions">${exclusionsHtml}</div></div>` +
-        questionHtml +
         "</div>";
 
       document.body.appendChild(overlay);
@@ -455,39 +441,6 @@
       overlay.addEventListener("click", (e) => { if (e.target === overlay) closeModal(); });
       const closeBtn = overlay.querySelector(".vd-modal-close");
       if (closeBtn) closeBtn.addEventListener("click", () => closeModal());
-
-      const multInput = overlay.querySelector(".vd-modal-mult-input");
-      const qAcceptBtn = overlay.querySelector(".vd-modal-question-accept");
-      if (multInput) {
-        multInput.addEventListener("input", () => {
-          const v = Number(multInput.value);
-          if (Number.isFinite(v) && v >= 0) {
-            arvMultiplier = v;
-            openDerivationModal(fieldKey);   // re-render with the new multiplier
-          }
-        });
-      }
-      if (qAcceptBtn) {
-        qAcceptBtn.addEventListener("click", () => {
-          const nbvValue = (c && c.storedValues && c.storedValues.nbv !== null && c.storedValues.nbv !== undefined)
-            ? c.storedValues.nbv
-            : (fieldState.nbv.draft && fieldState.nbv.draft.value !== null ? fieldState.nbv.draft.value : null);
-          if (nbvValue === null) return;
-          const suggested = Math.round(nbvValue * arvMultiplier);
-          const ok = typeof window.__valueDraftsAcceptDraft === "function"
-            && window.__valueDraftsAcceptDraft("arv", suggested);
-          if (ok) {
-            fieldState.arv.hasEverAccepted = true;
-            fieldState.arv.savedSnapshot = suggested;
-            sendTelemetry({
-              event_type: "commit", field: "arv", draft_value: suggested, final_value: suggested,
-              outcome: "accepted_verbatim", kept_comp_keys: [],
-            });
-            closeModal();
-            tick(true);
-          }
-        });
-      }
 
       modalKeydownHandler = (e) => { if (e.key === "Escape") closeModal(); };
       document.addEventListener("keydown", modalKeydownHandler);

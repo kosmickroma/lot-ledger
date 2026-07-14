@@ -8209,7 +8209,23 @@ let propelioFilterState = { ...DEFAULT_PROPELIO_FILTERS };
 // The band VALUES persist via the normal autosave (WYSIWYG-honest); the MODE
 // does not. Spec: docs/COMP_ENGINE_POC_PLAN_2026-07-11.md.
 const AUTO_MATCH_BAND = 0.2; // ±20% — v1 default; the band is an upsell hook.
+// The CLIENT'S OWN LINE, from his team's saved filters and confirmed on the
+// 2026-07-13 call: ARV comps are OLD houses (what you'd flip, year <= 2008);
+// NBV comps are NEW builds (what you'd construct, year >= 2008).
+// ⚠️ OPEN with the client: is 2008 the line everywhere, or does it move by
+// neighbourhood? If it moves, this becomes a knob, not a constant.
+const AUTO_MATCH_YEAR_PIVOT = 2008;
 let _autoMatchOn = false;        // per-tab, in-memory ONLY
+
+// Which year field auto-match writes for the current view, per the client's
+// own line (§2.1): ARV = old houses (year <= pivot) -> prop-year-max, NBV =
+// new builds (year >= pivot) -> prop-year-min. Export is a review/export
+// view, not a valuation view — it gets no year constant.
+function _autoMatchYearFieldForView() {
+  if (_activeView === "arv") return "prop-year-max";
+  if (_activeView === "nbv") return "prop-year-min";
+  return null;
+}
 
 // Parse a subject-card display value ("2,450", "0.29 ac", "N/A") to a number.
 // Mirrors the _compMatchedTotVal precedent (map.js:8291): strip $ and commas,
@@ -8248,6 +8264,8 @@ function _writeAutoMatchBands(dims) {
   const sqftBand = _autoMatchBand(dims.sqft, AUTO_MATCH_BAND, Math.round);
   if (acreBand) { set("prop-lot-min", acreBand.min); set("prop-lot-max", acreBand.max); }
   if (sqftBand) { set("prop-sqft-min", sqftBand.min); set("prop-sqft-max", sqftBand.max); }
+  const yearField = _autoMatchYearFieldForView();
+  if (yearField) set(yearField, AUTO_MATCH_YEAR_PIVOT);
 }
 
 // True when the four filter inputs currently hold exactly the band this subject
@@ -8261,6 +8279,8 @@ function _fieldsMatchAutoMatchBand(dims) {
   const eq = (a, b) => String(a) === String(b);
   if (acreBand && !(eq(val("prop-lot-min"), acreBand.min) && eq(val("prop-lot-max"), acreBand.max))) return false;
   if (sqftBand && !(eq(val("prop-sqft-min"), sqftBand.min) && eq(val("prop-sqft-max"), sqftBand.max))) return false;
+  const yearField = _autoMatchYearFieldForView();
+  if (yearField && !eq(val(yearField), AUTO_MATCH_YEAR_PIVOT)) return false;
   return true;
 }
 
@@ -8312,6 +8332,8 @@ function _disableAutoMatch() {
   const set = (id) => { const el = document.getElementById(id); if (el) el.value = ""; };
   set("prop-lot-min"); set("prop-lot-max");
   set("prop-sqft-min"); set("prop-sqft-max");
+  const yearField = _autoMatchYearFieldForView();
+  if (yearField) set(yearField);
   applyPropelioClientFilters();
 }
 
@@ -9424,6 +9446,19 @@ let propelioStickyBtn = null;
   ["prop-lot-min", "prop-lot-max", "prop-sqft-min", "prop-sqft-max"].forEach((id) => {
     const el = document.getElementById(id);
     if (el) el.addEventListener("input", () => { if (_autoMatchOn) _clearAutoMatchMode(); });
+  });
+  // Same protection for the year field auto-match wrote — but ONLY that field.
+  // _applyAutoMatchIfEnabled() (a target change) calls _writeAutoMatchBands()
+  // directly and never consults the self-echo guard, so without this listener
+  // a deliberate edit to the auto-written year field gets silently overwritten
+  // back to AUTO_MATCH_YEAR_PIVOT on the next target change, or blanked on
+  // uncheck. The OTHER year field (untouched by auto-match) is the user's own
+  // and must not clear the mode.
+  ["prop-year-min", "prop-year-max"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener("input", () => {
+      if (_autoMatchOn && _autoMatchYearFieldForView() === id) _clearAutoMatchMode();
+    });
   });
   ["sold", "active", "pending"].forEach((status) => {
     const mapBox = document.getElementById(`prop-status-${status}`);
