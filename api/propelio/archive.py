@@ -10,14 +10,18 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import Any, Literal
 
 from psycopg2.extras import Json
 
+from api.ai.enrichment import enrich_comps
 from api.config import get_session_conn, release_session_conn
 from api.geo import haversine_miles, polygon_bbox, polygon_centroid
 from api.redfin import normalize_addr_key
+
+logger = logging.getLogger(__name__)
 
 
 def _comp_address_key(comp: dict[str, Any]) -> str:
@@ -665,7 +669,14 @@ def load_comps_by_polygon(
     polygon_latlngs: raw [[lng, lat], ...] ring from the frontend (NOT closed).
     Returns a list of dicts ready for direct inclusion in the API response —
     each dict is {**parsed_payload, comp_address_key, user_rating, ratings_by_view,
-    parcel_geom, parcel_account_num, parcel_county}.  Comps with NULL geom are excluded.
+    parcel_geom, parcel_account_num, parcel_county, cad_subdivision, isd}.  Comps
+    with NULL geom are excluded.
+
+    cad_subdivision / isd (Task A, docs/AI/CODER_SPEC_FACTS_2026-07-14.md §A.5):
+    computed at request time via api.ai.enrichment.enrich_comps(), grouped by
+    parcel_county (<=4 extra indexed PK queries against the parcels DB, one per
+    county present in this result set). Never stored — nothing here writes to
+    propelio_comps.
 
     Per-view ratings spec §3.2 (Alt-D, FMEA C3/C4/H5): user_rating stays the ARV
     value from the existing comp_ratings JOIN (unchanged). ratings_by_view is the
@@ -826,6 +837,39 @@ def load_comps_by_polygon(
             if isinstance(extra, dict):
                 extra["is_outside_polygon"] = True
         result.append(comp)
+
+    # Task A (docs/AI/CODER_SPEC_FACTS_2026-07-14.md §A.5) — enrich at request
+    # time, grouped by county so each county costs exactly one indexed PK
+    # lookup regardless of how many of its comps are in this result set.
+    #
+    # §A.3 FAIL-OPEN, unconditionally: enrich_comps() already catches its own
+    # DB-level failures, but the bar here is "comps MUST NOT 500" full stop —
+    # not "must not 500 for the specific failure mode we thought of." Wrapping
+    # the whole step means a bug in the grouping/dispatch code above (not just
+    # a dead CAD connection) still can't take the comp list down with it.
+    try:
+        accounts_by_county: dict[str, list[str]] = {}
+        for comp in result:
+            county = comp.get("parcel_county")
+            account_num = comp.get("parcel_account_num")
+            if county and account_num:
+                accounts_by_county.setdefault(county, []).append(account_num)
+
+        enrichment: dict[str, dict[str, Any]] = {}
+        for county, account_nums in accounts_by_county.items():
+            enrichment.update(enrich_comps(county, account_nums))
+    except Exception:
+        logger.exception(
+            "load_comps_by_polygon: comp enrichment failed for %d comps — "
+            "failing open to nulls, comp list unaffected",
+            len(result),
+        )
+        enrichment = {}
+
+    for comp in result:
+        found = enrichment.get(comp.get("parcel_account_num"))
+        comp["cad_subdivision"] = found["cad_subdivision"] if found else None
+        comp["isd"] = found["isd"] if found else None
 
     return result
 

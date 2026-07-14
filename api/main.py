@@ -63,6 +63,7 @@ from api.auth import (
     verify_password,
     write_auth_audit_log,
 )
+from api.ai.enrichment import enrich_comps
 from api.config import get_conn, get_session_conn, get_settings, release_conn, release_session_conn
 from api.counties.collin import _classify_collin, _normalize_collin_row, query_collin_parcels
 from api.counties.dcad import SPTD_LABELS, _clean_text, _estimate_front_depth, _fetch_additional_owners, build_feature, classify_parcel, query_parcels
@@ -4395,6 +4396,33 @@ async def get_parcel_detail(
         feature["properties"]["owner_history"] = block
     # Outreach role gate — strip if user is not power_user+.
     _strip_outreach_from_feature(feature, user)
+
+    # Task A.2b (docs/AI/CODER_SPEC_FACTS_2026-07-14.md) — the subject must be
+    # enriched through the SAME function as comps, or subject and comp stop
+    # speaking the same dialect and the fuzzy-matching problem comes back.
+    # Deliberately NOT the existing `school`/`subdivision` popup fields above:
+    # those are per-endpoint ad-hoc values (TAD's is a raw "ISD <code>" string
+    # with no county qualifier), not the enrich_comps() output this feature's
+    # comparator relies on.
+    #
+    # §A.3 FAIL-OPEN, unconditionally (mirrors load_comps_by_polygon): the
+    # popup itself must not break over a degraded badge, regardless of
+    # whether the failure is a dead CAD connection or a bug in this glue code.
+    try:
+        enriched = enrich_comps(county_key, [account_num]).get(account_num) or {
+            "cad_subdivision": None,
+            "isd": None,
+        }
+    except Exception:
+        logger.exception(
+            "get_parcel_detail: subject enrichment failed for %s/%s — failing open to nulls",
+            county_key,
+            account_num,
+        )
+        enriched = {"cad_subdivision": None, "isd": None}
+    feature["properties"]["cad_subdivision"] = enriched["cad_subdivision"]
+    feature["properties"]["isd"] = enriched["isd"]
+
     return feature
 
 
