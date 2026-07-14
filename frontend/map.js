@@ -15811,6 +15811,25 @@ function _setActiveView(view) {
   // Final); off-mode is a no-op since _aiOverlay[view] is null.
   if (_aiModeOn && (view === "arv" || view === "nbv")) {
     _applyAiOverlayToDom(view);
+    // ⛔ AND RE-RENDER. restoreFilterState() above already ran
+    // applyPropelioClientFilters() (map.js:2925) against the USER's restored
+    // filters -- i.e. BEFORE the overlay existed. Painting the overlay after it
+    // updates the boxes and propelioFilterState but repaints NOTHING, so the
+    // comp list stays filtered by the user's state while the box shows AI's.
+    // KK on preview: NBV, yearMin box reading 2008, a 1954 house in the list.
+    // (_enableAiMode gets this right -- map.js:8508 -- which is why pressing AI
+    // mode worked and SWITCHING VIEWS did not.)
+    //
+    // Suppress autosave across it: "a view switch must not save, only display"
+    // (map.js:1056-1058). captureFilterState() already hides AI's fields from
+    // any diff, so this is belt-and-braces, not the load-bearing guard.
+    const _prevSuppress = _suppressFilterAutosave;
+    _suppressFilterAutosave = true;
+    try {
+      applyPropelioClientFilters();
+    } finally {
+      _suppressFilterAutosave = _prevSuppress;
+    }
   }
   if (_seeded) {
     // Persist the seed via the per-field PATCH path, but diff against the app
