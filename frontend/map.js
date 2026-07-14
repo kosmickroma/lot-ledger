@@ -1285,7 +1285,19 @@ async function _resolveTargetParcelFeatureProps(county, account) {
       const p = f?.properties || {};
       if (String(p.account_num || "").trim() === a
         && String(p.source_county || "").trim().toLowerCase() === c) {
-        return p;
+        // ⛔ The analysis GeoJSON is NOT enriched -- only /api/parcel runs the
+        // subject through enrich_comps(). And the subject is almost always
+        // INSIDE the drawn area, so this cache-first path was silently serving
+        // an un-enriched subject every single time: the badges had nothing to
+        // compare against and the count line said "not available" on a Dallas
+        // parcel that has both (KK, preview, 2026-07-14 -- 2455 HARTLINE DR,
+        // legal1 "CASA VIEW OAKS NO 5", isd_desc "DALLAS ISD").
+        //
+        // Test for the KEY, not the value: cad_subdivision is legitimately null
+        // on the 468 garbage parses, so `!p.cad_subdivision` would re-fetch
+        // forever on those. An analysis feature simply doesn't carry the key.
+        if ("cad_subdivision" in p) return p;
+        break;   // enrichment missing -> fall through to /api/parcel
       }
     }
   }
