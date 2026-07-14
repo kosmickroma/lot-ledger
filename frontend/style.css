@@ -915,6 +915,36 @@ body.is-not-power-user .power-user-only {
     0 0 0 1px rgba(201, 162, 79, 0.35);
 }
 
+/* Task C §C.2 (2026-07-14) — the fact count line. Quiet, not a callout: it's
+   context for the sort/badges below it, not an alert. */
+.ai-fact-count-line {
+  width: 100%;
+  font-size: 11px;
+  color: var(--text-soft);
+  padding-top: 2px;
+}
+
+/* Task C §C.1 — badges. Shown only when TRUE, so a bare small pill is
+   enough; no color-coded severity, no icon — the presence IS the signal. */
+.ai-fact-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.ai-fact-badge {
+  display: inline-block;
+  border: 1px solid rgba(201, 162, 79, 0.45);
+  background: rgba(201, 162, 79, 0.14);
+  color: var(--gold);
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
 .active-item-target-row {
   display: block;
   margin-bottom: 8px;

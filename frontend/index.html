@@ -85,6 +85,12 @@
             <span class="ai-mode-toggle-icon" aria-hidden="true">⚡</span>AI mode<span class="ai-mode-toggle-dot" aria-hidden="true"></span>
           </button>
           <div id="ai-card-mount"></div>
+          <!-- Task C §C.2 (2026-07-14) -- the fact count line. AI mode +
+               owner/developer only; rendered by map.js's
+               _renderAiFactCountLine, called wherever the comp list itself
+               re-renders (applyPropelioClientFilters), never a separate
+               poll. Hidden by default; empty text also renders nothing. -->
+          <div id="ai-fact-count-line" class="ai-fact-count-line hidden"></div>
         </div>
       </div>
       <div id="sidebar-results" class="sidebar-section hidden">
@@ -474,6 +480,13 @@
                 <option value="sqft_desc">Sqft ↓</option>
                 <option value="year_desc">Year ↓</option>
                 <option value="distance_asc">Distance ↑</option>
+                <!-- AI mode's fact-sort (2026-07-14 Task C, §C.3). Never a VA's
+                     choice -- set only by _applyAiOverlayToDom while AI mode is
+                     on. Not `hidden` (Safari/Firefox still show a hidden
+                     selected <option>'s text in the closed control) -- the
+                     label itself communicates that this is AI's doing, not a
+                     manual option to pick. -->
+                <option value="ai_fact">AI fact-sort (subdivision → ISD → distance)</option>
               </select>
             </div>
             <div id="propelio-comp-list" class="propelio-comp-list"></div>

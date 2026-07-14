@@ -7117,6 +7117,7 @@ function _buildPropelioCompSectionHtml(c) {
     <div class="popup-propelio-section">
       <div class="popup-propelio-header">MLS Comp</div>
       <div class="propelio-popup-price">${priceLineParts.join(" · ")}</div>
+      ${_compFactsBadgesHtml(c)}
       ${capturedLabel ? `<div class="propelio-popup-meta">${_propelioEscape(capturedLabel)}</div>` : ""}
       ${listVsCloseHtml}
       ${soldMeta.length ? `<div class="propelio-popup-meta">${_propelioEscape(soldMeta.join(" · "))}</div>` : ""}
@@ -7326,6 +7327,7 @@ function _propelioBuildPopup(c) {
     <div class="propelio-popup">
       <div class="propelio-popup-addr">${_propelioEscape(c?.address || "")}</div>
       <div class="propelio-popup-price">${priceLineParts.join(" · ")}</div>
+      ${_compFactsBadgesHtml(c)}
       ${listVsCloseHtml}
       ${soldMeta.length ? `<div class="propelio-popup-meta">${_propelioEscape(soldMeta.join(" · "))}</div>` : ""}
       ${dims.length ? `<div class="propelio-popup-meta">${_propelioEscape(dims.join(" · "))}</div>` : ""}
@@ -8385,7 +8387,11 @@ function _aiRealArvBase() {
   const real = _viewFilterCache.arv;
   return (real && real.v)
     ? JSON.parse(JSON.stringify(real))
-    : { v: 1, checkboxes: { ...DEFAULT_FILTERS }, numeric: {}, sold: {}, comp: {}, propelio: { ...DEFAULT_PROPELIO_FILTERS } };
+    // sortMode rides outside DEFAULT_PROPELIO_FILTERS (captureFilterState
+    // spreads it in separately from propelioCompSortMode) -- add it here
+    // explicitly or this fallback hands captureFilterState()'s substitution
+    // loop an undefined sortMode the moment there's no real cache to copy.
+    : { v: 1, checkboxes: { ...DEFAULT_FILTERS }, numeric: {}, sold: {}, comp: {}, propelio: { ...DEFAULT_PROPELIO_FILTERS, sortMode: propelioCompSortMode } };
 }
 
 // The user's real NBV base to snapshot at AI-mode-enable time. Mirrors
@@ -8401,21 +8407,33 @@ function _aiRealNbvBase() {
   const arv = _viewFilterCache.arv;
   const base = (arv && arv.v)
     ? JSON.parse(JSON.stringify(arv))
-    : { v: 1, checkboxes: { ...DEFAULT_FILTERS }, numeric: {}, sold: {}, comp: {}, propelio: { ...DEFAULT_PROPELIO_FILTERS } };
+    // See _aiRealArvBase -- sortMode needs an explicit fallback default too.
+    : { v: 1, checkboxes: { ...DEFAULT_FILTERS }, numeric: {}, sold: {}, comp: {}, propelio: { ...DEFAULT_PROPELIO_FILTERS, sortMode: propelioCompSortMode } };
   if (base.propelio) { delete base.propelio.yearMin; delete base.propelio.yearMax; }
   return base;
 }
 
-// Compute AI's six picked fields for one view -- pure function of the
-// subject's dims + AUTO_MATCH_YEAR_PIVOT, exactly the band math
-// _writeAutoMatchBands uses. NEVER reads propelioFilterState, the DOM, or
-// any cache -- this is the "built by computation, never by DOM capture"
-// guarantee the fix depends on. Returns exactly the six keys
-// captureFilterState() knows how to substitute; nothing else.
-// The SIX propelio fields AI mode paints onto the DOM -- and the ONLY fields any
-// AI-mode-aware code path may treat specially. Single source of truth: keep
-// _buildAiOverlayFields' keys and this set in lockstep, or the fifth hole is back.
-const _AI_OVERLAY_FIELDS = new Set(["lotMin", "lotMax", "sqftMin", "sqftMax", "yearMin", "yearMax"]);
+// Sentinel sortMode value meaning "AI's fact-sort" (same subdivision -> same
+// ISD -> distance, §C.3 2026-07-14 Task C spec). Never a user-selectable
+// <option> in #propelio-comp-sort -- AI mode is the only thing that ever
+// sets it, exactly like the other six overlay fields are never typed by a
+// human, only painted by _applyAiOverlayToDom.
+const AI_FACT_SORT_MODE = "ai_fact";
+
+// Compute AI's seven picked fields for one view -- pure function of the
+// subject's dims + AUTO_MATCH_YEAR_PIVOT (+ the fixed fact-sort mode), NEVER
+// a captured value. NEVER reads propelioFilterState, the DOM, or any cache
+// -- this is the "built by computation, never by DOM capture" guarantee the
+// fix depends on. Returns exactly the keys captureFilterState() knows how
+// to substitute; nothing else.
+// The propelio fields AI mode paints onto the DOM/UI -- and the ONLY fields
+// any AI-mode-aware code path may treat specially. Single source of truth:
+// keep _buildAiOverlayFields' keys and this set in lockstep, or the fifth
+// hole is back. sortMode joined this set 2026-07-14 (Task C): the comp sort
+// is PERSISTED exactly like the other six, so it needed the same structural
+// protection -- a second hardcoded field list is literally how the last
+// hole got in, so there is no second list anywhere for sortMode either.
+const _AI_OVERLAY_FIELDS = new Set(["lotMin", "lotMax", "sqftMin", "sqftMax", "yearMin", "yearMax", "sortMode"]);
 
 function _buildAiOverlayFields(dims, view) {
   const roundAcre = (x) => Math.round(x * 100) / 100;
@@ -8428,14 +8446,18 @@ function _buildAiOverlayFields(dims, view) {
     sqftMax: sqftBand ? sqftBand.max : null,
     yearMin: view === "nbv" ? AUTO_MATCH_YEAR_PIVOT : null,
     yearMax: view === "arv" ? AUTO_MATCH_YEAR_PIVOT : null,
+    sortMode: AI_FACT_SORT_MODE,
   };
 }
 
-// Paint _aiOverlay[view]'s six fields onto the live DOM -- display only.
-// Used both at enable time and on every view-switch restore while AI mode
-// is on, so there is exactly one code path that ever writes AI's picks to
-// screen. Programmatic .value writes do not fire input events (map.js
-// precedent), so sync propelioFilterState explicitly afterward.
+// Paint _aiOverlay[view]'s fields onto the live DOM/UI state -- display
+// only. Used both at enable time and on every view-switch restore while AI
+// mode is on, so there is exactly one code path that ever writes AI's picks
+// to screen. Programmatic .value writes do not fire input events (map.js
+// precedent), so sync propelioFilterState explicitly afterward. sortMode
+// has no DOM input to write (the <select> stays showing the VA's own
+// choice is misleading, so we point it at the sentinel too) -- it drives
+// propelioCompSortMode directly, the same variable the dropdown itself sets.
 function _applyAiOverlayToDom(view) {
   const overlay = _aiOverlay[view];
   if (!overlay) return;
@@ -8447,6 +8469,9 @@ function _applyAiOverlayToDom(view) {
   set("prop-year-min", overlay.yearMin);
   set("prop-year-max", overlay.yearMax);
   propelioFilterState = readPropelioFiltersFromUI();
+  propelioCompSortMode = overlay.sortMode;
+  const sortEl = document.getElementById("propelio-comp-sort");
+  if (sortEl) sortEl.value = AI_FACT_SORT_MODE;
 }
 
 // Turning AI mode ON (§2.1). Snapshots both views' real state FIRST (so Hole
@@ -8517,6 +8542,13 @@ function _dropAiModeForEdit(editedFieldId) {
   // 2. Re-apply the single edited field on top -- the user's edit wins.
   if (editedEl) editedEl.value = editedValue;
   propelioFilterState = readPropelioFiltersFromUI();
+  // sortMode lives outside propelioFilterState (captureFilterState spreads it
+  // in from propelioCompSortMode separately), so readPropelioFiltersFromUI()
+  // above cannot pick it up -- sync it explicitly. A no-op for the other six
+  // fields (the dropdown wasn't touched, so this just reaffirms what step 1
+  // already restored).
+  const _sortEl = document.getElementById("propelio-comp-sort");
+  if (_sortEl) propelioCompSortMode = _sortEl.value || "price_desc";
   // 3. Rebaseline to the user's REAL, PRE-EDIT state -- NOT captureFilterState().
   // captureFilterState() here would snapshot the UI *including* the fresh edit,
   // so step 4's diff would find current == snapshot, emit ZERO fields, and the
@@ -8778,6 +8810,7 @@ function applyPropelioClientFilters() {
     const countEl = document.getElementById("propelio-filter-count");
     if (countEl) countEl.textContent = "";
     renderPropelioCompList([]);
+    _renderAiFactCountLine([]);
     _renderGoodCompsSection();  // hides section when no comp cache
     return;
   }
@@ -8812,6 +8845,7 @@ function applyPropelioClientFilters() {
   // List view: hide bad-rated comps entirely from the sidebar list.
   const visibleInList = visibleOnMap.filter((c) => c?.user_rating !== "bad");
   renderPropelioCompList(visibleInList);
+  _renderAiFactCountLine(visibleInList);
   // Update the card-head count chip
   const countEl = document.getElementById("propelio-filter-count");
   if (countEl) {
@@ -8827,6 +8861,90 @@ function applyPropelioClientFilters() {
   // v1 §2.1 — auto-save filter_state after propelio client filter apply.
   _filterSaveQueueSave();
   window.__aiVisibleComps = visibleOnMap;   // AI module seam (read-only mirror of the VISIBLE set)
+}
+
+// Task C (2026-07-14, docs/AI/CODER_SPEC_FACTS_2026-07-14.md §C) — the
+// client-side fact comparator, mirroring api/ai/comparator.py's
+// compare_to_subject(). Backend Tasks A/B already computed and enriched
+// cad_subdivision/isd for both the subject and every comp (plain equality,
+// garbage-filtered, county-qualified) -- this does NOT re-derive any of
+// that. Plain equality only, unknown (either side null) is null, never
+// false: a false "same_isd" would read as "different district," a lie for
+// every Tarrant/Collin comp that simply has no name to compare.
+function _compFacts(comp) {
+  const subject = _lastSubjectProps;
+  const subSub = subject ? (subject.cad_subdivision || null) : null;
+  const compSub = comp ? (comp.cad_subdivision || null) : null;
+  const same_subdivision = (subSub && compSub) ? (subSub === compSub) : null;
+
+  const subIsd = subject ? (subject.isd || null) : null;
+  const compIsd = comp ? (comp.isd || null) : null;
+  const same_isd = (subIsd && compIsd) ? (subIsd === compIsd) : null;
+
+  let distance_mi = null;
+  const subLat = subject ? Number(subject.lat) : NaN;
+  const subLng = subject ? Number(subject.lng) : NaN;
+  const compLatLng = _propelioCompLatLng(comp);
+  if (Number.isFinite(subLat) && Number.isFinite(subLng) && compLatLng) {
+    distance_mi = _haversineFeet(subLat, subLng, compLatLng[0], compLatLng[1]) / 5280;
+  }
+
+  return { same_subdivision, same_isd, distance_mi };
+}
+
+// §A.3b (docs/AI/CODER_SPEC_FACTS_2026-07-14.md) -- Dallas + Denton carry a
+// real district NAME; Tarrant + Collin carry only a numeric CODE. "ISD 905"
+// is an internal key, not a district -- printing it as one is a fake fact,
+// so those two counties get the generic phrasing instead. Single source of
+// truth for the NAME/CODE split, mirroring the backend's own per-county table.
+const _ISD_NAME_FORM_COUNTIES = new Set(["dcad", "denton"]);
+
+function _isdDisplayName(isdKey) {
+  const s = String(isdKey || "");
+  const i = s.indexOf(":");
+  return i === -1 ? s : s.slice(i + 1);
+}
+
+// Task C §C.2 -- the count line. AI mode + owner/developer only. Describes
+// EXACTLY the comp set the list/map are showing (same `comps` array
+// applyPropelioClientFilters just rendered) -- never a different count than
+// what's on screen. Never a silent zero: when the subject itself lacks a
+// subdivision (garbage parse) or an ISD, says so plainly instead of
+// printing "0 of N" as if the fact were simply absent from every comp.
+function _renderAiFactCountLine(comps) {
+  const el = document.getElementById("ai-fact-count-line");
+  if (!el) return;
+  if (!_aiModeOn || !_isAdmin()) {
+    el.classList.add("hidden");
+    el.textContent = "";
+    return;
+  }
+
+  const list = Array.isArray(comps) ? comps : [];
+  const subject = _lastSubjectProps;
+  const total = list.length;
+
+  const subdivisionClause = subject && subject.cad_subdivision
+    ? (() => {
+        const n = list.filter((c) => _compFacts(c).same_subdivision === true).length;
+        return `${n} in the subject's subdivision`;
+      })()
+    : "subdivision not available for this subject";
+
+  let isdClause;
+  if (subject && subject.isd) {
+    const n = list.filter((c) => _compFacts(c).same_isd === true).length;
+    const county = String(subject.source_county || "").trim().toLowerCase();
+    const label = _ISD_NAME_FORM_COUNTIES.has(county)
+      ? _isdDisplayName(subject.isd)
+      : "the subject's school district";
+    isdClause = `${n} of ${total} comp${total === 1 ? "" : "s"} ${total === 1 ? "shares" : "share"} ${label}`;
+  } else {
+    isdClause = "school district not available";
+  }
+
+  el.textContent = `${isdClause} · ${subdivisionClause}.`;
+  el.classList.remove("hidden");
 }
 
 function _sortPropelioComps(comps, mode) {
@@ -8854,12 +8972,47 @@ function _sortPropelioComps(comps, mode) {
     case "distance_asc":
       list.sort((a, b) => cmp(num(a?.distance_mi), num(b?.distance_mi), "asc"));
       break;
+    case AI_FACT_SORT_MODE:
+      // §C.3 -- same subdivision -> same ISD -> distance. TRUE beats
+      // unknown beats FALSE at each step (a badge you can't show is not
+      // grounds to rank a comp below one proven "different"). Price is
+      // NEVER a tie-break here, by explicit rule (§2 root-cause table) --
+      // the app's own default sort already orders attention by price, and
+      // carrying that into AI mode's ordering is exactly the anchor this
+      // feature exists to remove. Final tie-break is stable insertion order
+      // (Array.prototype.sort is stable), not a second numeric field.
+      list.sort((a, b) => {
+        const fa = _compFacts(a);
+        const fb = _compFacts(b);
+        const rank = (v) => (v === true ? 0 : v == null ? 1 : 2);
+        const subDiff = rank(fa.same_subdivision) - rank(fb.same_subdivision);
+        if (subDiff !== 0) return subDiff;
+        const isdDiff = rank(fa.same_isd) - rank(fb.same_isd);
+        if (isdDiff !== 0) return isdDiff;
+        return cmp(num(fa.distance_mi), num(fb.distance_mi), "asc");
+      });
+      break;
     case "price_desc":
     default:
       list.sort((a, b) => cmp(num(a?.price), num(b?.price), "desc"));
       break;
   }
   return list;
+}
+
+// Task C §C.1 — badges, shown ONLY when true. Never "different X": absence
+// is the signal, and it keeps the row quiet. AI mode + owner/developer only
+// -- power_user never sees these (AI mode itself is inaccessible to them,
+// so _aiModeOn can never be true in their session, but the _isAdmin() check
+// here is explicit rather than relying on that alone).
+function _compFactsBadgesHtml(comp) {
+  if (!_aiModeOn || !_isAdmin()) return "";
+  const facts = _compFacts(comp);
+  const badges = [];
+  if (facts.same_subdivision === true) badges.push("Same subdivision");
+  if (facts.same_isd === true) badges.push("Same ISD");
+  if (!badges.length) return "";
+  return `<div class="ai-fact-badges">${badges.map((b) => `<span class="ai-fact-badge">${_propelioEscape(b)}</span>`).join("")}</div>`;
 }
 
 function _propelioCompRowHtml(comp) {
@@ -8898,6 +9051,7 @@ function _propelioCompRowHtml(comp) {
       <div class="propelio-comp-row-mid">${_propelioEscape(comp?.address || "")}</div>
       ${neighborhood ? `<div class="propelio-comp-row-nbhd">${_propelioEscape(neighborhood)}</div>` : ""}
       ${dim.length ? `<div class="propelio-comp-row-meta">${_propelioEscape(dim.join(" · "))}</div>` : ""}
+      ${_compFactsBadgesHtml(comp)}
     </div>
   `;
 }
@@ -9648,6 +9802,13 @@ let propelioStickyBtn = null;
   if (sortEl) {
     sortEl.value = propelioCompSortMode;
     sortEl.addEventListener("change", () => {
+      // sortMode is the 7th AI overlay field (2026-07-14 Task C) -- a manual
+      // sort change during AI mode is a Hole-B edit exactly like typing into
+      // one of the six numeric fields: the user's choice wins, AI mode drops.
+      if (_aiModeOn) {
+        _dropAiModeForEdit("propelio-comp-sort");
+        return;
+      }
       propelioCompSortMode = sortEl.value || "price_desc";
       applyPropelioClientFilters();
       // v1 §2.1 — auto-save filter_state after sort mode change.
