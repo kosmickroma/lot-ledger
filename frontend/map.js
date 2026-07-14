@@ -1399,6 +1399,10 @@ let _lastSubjectProps = null;
 
 function _populateSubjectPropertyCard(props, county) {
   _lastSubjectProps = props || null;
+  // The AI-mode button's enabled/disabled state depends on the subject's dims
+  // (no subject -> nothing to build a lot/sqft band from), so it has to be
+  // re-evaluated the moment the subject changes under it.
+  try { _renderAiBar(); } catch { /* bar not mounted yet — harmless */ }
   // Deliberately NOT recomputed here on a target change (Task 4, 2026-07-14
   // AI bar spec — this was auto-match's job via _applyAutoMatchIfEnabled,
   // now removed). AI mode is pressed by a human; it does not silently
@@ -15500,6 +15504,19 @@ function _renderAiBar() {
   if (toggle) {
     toggle.setAttribute("aria-pressed", _aiModeOn ? "true" : "false");
     toggle.classList.toggle("active", _aiModeOn);
+    // The lot + sqft bands are +/-20% around THE SUBJECT'S dims. With no subject
+    // selected there is nothing to compute from, and AI mode would write the year
+    // alone and silently leave lot/sqft blank -- looking broken, and claiming to
+    // show "what our system picked for this house" when it does not know which
+    // house. auto-match disabled its own checkbox for exactly this reason
+    // (_refreshAutoMatchAvailability); that gate was lost when the mode was
+    // retired. Restored here: no subject, no claim.
+    const _dims = _autoMatchSubjectDims();
+    const _ready = Boolean(_dims);
+    toggle.disabled = !_ready && !_aiModeOn;   // never trap the user INSIDE the mode
+    toggle.title = _ready
+      ? "Show what our automation would have picked instead of the current filters"
+      : (_lastSubjectProps ? "Target has no lot/sqft data" : "Select a target property first");
   }
   // AI-mode-on must be UNMISTAKABLE (§Task 3): the comp-filter panel also
   // gets a gold treatment while it's showing AI's picks instead of the
