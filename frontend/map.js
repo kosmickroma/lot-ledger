@@ -1906,7 +1906,14 @@ function captureFilterState() {
   // (saveCurrentArea, saveCurrentSession) only run while _activeView === 'arv'
   // (draw severs the bond on drawstart; session-save has no view context).
   // Do NOT use for non-ARV whole-blob writes — see spec §5.7.
-  return {
+  //
+  // AI MODE FIX (docs/AI/CODER_SPEC_AIMODE_FIX_2026-07-14.md §0/§2.2) — THE
+  // INVARIANT: with AI mode ON, this function returns BYTE-IDENTICAL output
+  // to the same UI with AI mode OFF. This is the ONLY place that holds. No
+  // caller-selectable fork, no `raw` parameter — every caller gets user
+  // truth, unconditionally, because "which caller needs to see the screen?"
+  // is NONE. See the substitution block below.
+  const state = {
     v: 1,
     checkboxes: { ...filterState },
     numeric: { ...numericFilters },
@@ -1920,6 +1927,23 @@ function captureFilterState() {
     comp: { ...compNumericFilters },
     propelio: { ...propelioFilterState, sortMode: propelioCompSortMode },
   };
+  // AI mode writes exactly six propelio fields into the live DOM so the owner
+  // SEES the picked bands (§2.1) — but the persistence layer must never see
+  // them. Substitute those six from _aiModeUserSnapshot[_activeView], the
+  // canonical real-state object (kept fresh by the Hole-C SSE stash in
+  // _writeFilterFieldDirect) — never re-derived from the DOM, never a second
+  // source of truth to drift from this one.
+  if (_aiModeOn && (_activeView === "arv" || _activeView === "nbv")) {
+    const real = _aiModeUserSnapshot[_activeView];
+    if (real && real.propelio) {
+      // Iterate _AI_OVERLAY_FIELDS rather than listing the six names again. A
+      // second hardcoded copy of this list is exactly how the fifth hole got in:
+      // two places deciding "which fields are AI's", free to drift apart.
+      state.propelio = { ...state.propelio };
+      for (const k of _AI_OVERLAY_FIELDS) state.propelio[k] = real.propelio[k];
+    }
+  }
+  return state;
 }
 
 // Normalizes a flat ARV-form capture for equality comparison. Operates on
@@ -2025,17 +2049,18 @@ function _diffFilterState(current, lastSnapshot) {
   // per-field PATCH writes to _views.<view>.* rows, never the flat ARV rows.
   // Flag-gated: when off, _viewPrefix is "" and behavior is byte-for-byte today's.
   //
-  // AI mode (2026-07-14 AI bar spec §2.1 step 5): the LOAD-BEARING key-
-  // building point. While AI mode is on and the active view is arv/nbv,
-  // every diffed field routes to _views.ai_<view>.* instead -- the user's
-  // real keys (flat ARV, _views.nbv.*) become STRUCTURALLY UNREACHABLE from
-  // this function for as long as AI mode stays on, because nothing else
-  // builds a PATCH field_key. Export is untouched: AI does not touch Final.
-  const _viewPrefix = (_aiModeOn && (_activeView === "arv" || _activeView === "nbv"))
-    ? `_views.ai_${_activeView}.`
-    : (ARV_NBV_EXPORT_ENABLED && _activeView !== "arv")
-      ? `_views.${_activeView}.`
-      : "";
+  // AI MODE FIX (docs/AI/CODER_SPEC_AIMODE_FIX_2026-07-14.md §2.3) — there is
+  // no AI-mode branch here anymore. captureFilterState() already returns
+  // user truth while AI mode is on (it substitutes the six AI-written
+  // fields before this function ever sees them), so a normal edit during AI
+  // mode diffs and routes to the user's REAL keys exactly as it would with
+  // AI mode off — which is what "structurally unreachable" was supposed to
+  // mean, and what the previous AI-only view namespace only half-built (it
+  // required every OTHER caller to know to route around it; this deletes
+  // the need to know at all).
+  const _viewPrefix = (ARV_NBV_EXPORT_ENABLED && _activeView !== "arv")
+    ? `_views.${_activeView}.`
+    : "";
   for (const section of sections) {
     const currSection = (current[section] && typeof current[section] === "object") ? current[section] : {};
     const snapSection = (snap[section] && typeof snap[section] === "object") ? snap[section] : {};
@@ -2129,13 +2154,30 @@ function _writeFilterFieldDirect(fieldKey, value) {
   // the spec text). It's still the user's real, current truth, so stash it
   // into the AI-mode snapshot (read back on drop-out/off) instead of the
   // live DOM -- never dropped, never applied to what's on screen.
+  // ⛔ FIFTH HOLE (found by the coder, 2026-07-14) -- SCOPED TO THE OVERLAY FIELDS.
+  // This guard used to check only WHICH VIEW the write targeted, never WHICH FIELD,
+  // so it diverted EVERY incoming field into the snapshot while AI mode was
+  // overlaying only six of them. Same root cause as the four it was written to fix:
+  // NARROW LENS, WIDE MACHINERY.
+  //
+  // Under the overlay model the DOM IS the user's truth for every field AI is not
+  // displaying -- so a co-viewer's edit to a Vacant checkbox BELONGS on screen.
+  // Diverting it made the owner's screen silently stale AND lost the edit on exit
+  // (_disableAiMode only ever restores real.propelio back to the DOM).
+  //
+  // So: divert ONLY the six fields AI is actually painting. For those, stash into the
+  // snapshot (the co-viewer's edit is never lost) and leave the DOM alone (the owner's
+  // comparison is never scribbled over). Everything else writes through, normally.
   if (_aiModeOn && (_keyView === "arv" || _keyView === "nbv") && _keyView === _activeView) {
     const [section, key] = _effectiveKey.split(".");
-    const real = _aiModeUserSnapshot[_keyView];
-    if (real && real[section] && typeof real[section] === "object") {
-      real[section][key] = value;
+    if (section === "propelio" && _AI_OVERLAY_FIELDS.has(key)) {
+      const real = _aiModeUserSnapshot[_keyView];
+      if (real && real[section] && typeof real[section] === "object") {
+        real[section][key] = value;
+      }
+      return;
     }
-    return;
+    // Not an overlay field -> fall through and write the DOM like any other edit.
   }
   const [section, key] = _effectiveKey.split(".");
   if (section === "checkboxes") {
@@ -8302,36 +8344,38 @@ function _writeAutoMatchBands(dims) {
   if (yearField) set(yearField, AUTO_MATCH_YEAR_PIVOT);
 }
 
-// ── AI mode (2026-07-14 AI bar spec) ─────────────────────────────────────
+// ── AI mode (2026-07-14 AI bar spec; persistence fix 2026-07-14) ─────────
 // An A/B lens, not a filter. A VA sets up an area's filters; the owner
 // presses AI mode to see what our automation would have picked instead, and
 // presses it again to be back to exactly what the VA had. AI mode DISPLAYS
-// -- it never overwrites the user's work. Architecture (§2.2): AI mode gets
-// its OWN filter views in the persistence layer (_views.ai_arv.*,
-// _views.ai_nbv.*) so the user's real keys are STRUCTURALLY UNREACHABLE
-// while it's on -- not "protected by a flag." EPHEMERAL: in-memory,
-// per-tab, never persisted (dies on reload).
+// -- it never overwrites the user's work.
+//
+// AI MODE FIX (docs/AI/CODER_SPEC_AIMODE_FIX_2026-07-14.md) — AI's own
+// filter-view persistence namespace is GONE. It was the wrong layer: a
+// write-only buffer that nothing ever read back, while the mode's actual
+// footprint is six propelio fields. The fix moves AI's state out of the filter-blob
+// world entirely -- _aiOverlay (below) is a small computed object, never a
+// captured blob -- and lets captureFilterState() (the one sacred function)
+// hide it from every caller, unconditionally. The persistence layer no
+// longer needs to KNOW about AI mode; it's structurally incapable of
+// seeing it. EPHEMERAL throughout: in-memory, per-tab, never persisted
+// (dies on reload).
 let _aiModeOn = false;
-// Mirrors _viewFilterCache but for AI mode's OWN picks (§2.5 Hole A). While
-// AI mode is on, the view-switch capture/restore machinery reads and writes
-// THIS cache for arv/nbv -- _viewFilterCache is never touched. No `export`
-// entry: AI does not touch Final, so Export always uses the real
-// _viewFilterCache.export, AI mode on or off (§2.3 asymmetry).
-let _aiViewFilterCache = { arv: null, nbv: null };
+// AI's own six picked values per view -- NOT a filter blob, NOT captured
+// from the DOM. Built ONCE at enable, purely by computation (subject dims +
+// AUTO_MATCH_YEAR_PIVOT -- see _buildAiOverlayFields). Display paints this
+// on top of the user's real, restored state; it is never itself captured,
+// diffed, or persisted. No `export` entry: AI does not touch Final.
+let _aiOverlay = { arv: null, nbv: null };
 // The user's REAL filters for arv/nbv, captured once when AI mode turns ON.
 // This is the "untouched cache/store" Hole B's restore step reads from --
 // deliberately NOT _viewFilterCache, which can itself be stale relative to
 // the live DOM (a hand-edit with no view-switch in between never lands
 // there). Hole C also writes into this -- never the live DOM -- when a
 // co-viewer's SSE edit targets the view AI mode is currently substituting,
-// so the freshest real value is what comes back on drop-out/off.
+// so the freshest real value is what comes back on drop-out/off, AND what
+// captureFilterState() substitutes from while AI mode is on.
 let _aiModeUserSnapshot = { arv: null, nbv: null };
-
-// Which in-memory cache _setActiveView's capture/restore machinery should
-// use for `view`. Export is EXCLUDED even when AI mode is on globally.
-function _filterCacheFor(view) {
-  return (_aiModeOn && view !== "export") ? _aiViewFilterCache : _viewFilterCache;
-}
 
 // The user's real ARV base to snapshot at AI-mode-enable time: the live DOM
 // if ARV is currently active (the one moment it's guaranteed current even
@@ -8362,68 +8406,67 @@ function _aiRealNbvBase() {
   return base;
 }
 
-// Build the propelio blob for a view AI mode is NOT currently displaying
-// live -- same band math as _writeAutoMatchBands, applied to a plain object
-// instead of DOM elements, so the OTHER view is ready the instant the user
-// switches to it (§2.4 Do NOT: never fake a view switch to write it).
-function _buildAiPropelioBlob(base, dims, view) {
-  const blob = JSON.parse(JSON.stringify(
-    base || { v: 1, checkboxes: { ...DEFAULT_FILTERS }, numeric: {}, sold: {}, comp: {}, propelio: { ...DEFAULT_PROPELIO_FILTERS } }
-  ));
-  blob.propelio = blob.propelio || { ...DEFAULT_PROPELIO_FILTERS };
-  if (dims) {
-    const roundAcre = (x) => Math.round(x * 100) / 100;
-    const acreBand = _autoMatchBand(dims.acres, AUTO_MATCH_BAND, roundAcre);
-    const sqftBand = _autoMatchBand(dims.sqft, AUTO_MATCH_BAND, Math.round);
-    if (acreBand) { blob.propelio.lotMin = acreBand.min; blob.propelio.lotMax = acreBand.max; }
-    if (sqftBand) { blob.propelio.sqftMin = sqftBand.min; blob.propelio.sqftMax = sqftBand.max; }
-  }
-  if (view === "arv") { blob.propelio.yearMax = AUTO_MATCH_YEAR_PIVOT; blob.propelio.yearMin = null; }
-  else if (view === "nbv") { blob.propelio.yearMin = AUTO_MATCH_YEAR_PIVOT; blob.propelio.yearMax = null; }
-  return blob;
+// Compute AI's six picked fields for one view -- pure function of the
+// subject's dims + AUTO_MATCH_YEAR_PIVOT, exactly the band math
+// _writeAutoMatchBands uses. NEVER reads propelioFilterState, the DOM, or
+// any cache -- this is the "built by computation, never by DOM capture"
+// guarantee the fix depends on. Returns exactly the six keys
+// captureFilterState() knows how to substitute; nothing else.
+// The SIX propelio fields AI mode paints onto the DOM -- and the ONLY fields any
+// AI-mode-aware code path may treat specially. Single source of truth: keep
+// _buildAiOverlayFields' keys and this set in lockstep, or the fifth hole is back.
+const _AI_OVERLAY_FIELDS = new Set(["lotMin", "lotMax", "sqftMin", "sqftMax", "yearMin", "yearMax"]);
+
+function _buildAiOverlayFields(dims, view) {
+  const roundAcre = (x) => Math.round(x * 100) / 100;
+  const acreBand = dims ? _autoMatchBand(dims.acres, AUTO_MATCH_BAND, roundAcre) : null;
+  const sqftBand = dims ? _autoMatchBand(dims.sqft, AUTO_MATCH_BAND, Math.round) : null;
+  return {
+    lotMin: acreBand ? acreBand.min : null,
+    lotMax: acreBand ? acreBand.max : null,
+    sqftMin: sqftBand ? sqftBand.min : null,
+    sqftMax: sqftBand ? sqftBand.max : null,
+    yearMin: view === "nbv" ? AUTO_MATCH_YEAR_PIVOT : null,
+    yearMax: view === "arv" ? AUTO_MATCH_YEAR_PIVOT : null,
+  };
 }
 
-// Turning AI mode ON (§2.1). Writes whichever view is CURRENTLY ACTIVE
-// through the live DOM via the existing _writeAutoMatchBands (so the owner
-// SEES the boxes fill -- that's the point); the other view is built as a
-// blob straight into _aiViewFilterCache, ready the instant the user
-// switches to it. Both views' real state is snapshotted first, before
-// anything is written, so Hole B / OFF can always restore exactly.
+// Paint _aiOverlay[view]'s six fields onto the live DOM -- display only.
+// Used both at enable time and on every view-switch restore while AI mode
+// is on, so there is exactly one code path that ever writes AI's picks to
+// screen. Programmatic .value writes do not fire input events (map.js
+// precedent), so sync propelioFilterState explicitly afterward.
+function _applyAiOverlayToDom(view) {
+  const overlay = _aiOverlay[view];
+  if (!overlay) return;
+  const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v == null ? "" : String(v); };
+  set("prop-lot-min", overlay.lotMin);
+  set("prop-lot-max", overlay.lotMax);
+  set("prop-sqft-min", overlay.sqftMin);
+  set("prop-sqft-max", overlay.sqftMax);
+  set("prop-year-min", overlay.yearMin);
+  set("prop-year-max", overlay.yearMax);
+  propelioFilterState = readPropelioFiltersFromUI();
+}
+
+// Turning AI mode ON (§2.1). Snapshots both views' real state FIRST (so Hole
+// B / OFF can always restore exactly), computes both views' overlay fields
+// by pure math, then paints the currently-active view's overlay to the
+// DOM. No baseline manipulation: captureFilterState() already hides AI's
+// six fields from any diff, so there is nothing to protect against here --
+// turning AI mode on cannot itself produce a PATCH.
 function _enableAiMode() {
   if (_aiModeOn) return;
   if (!_currentLoadedAreaId) return;   // AI mode is pressed by a human, on a loaded area
   _aiModeUserSnapshot = { arv: _aiRealArvBase(), nbv: _aiRealNbvBase() };
-  _aiViewFilterCache = { arv: null, nbv: null };
-  // Baseline BEFORE anything is written, while the live DOM still holds the
-  // user's real values -- this is what the autosave this function triggers
-  // at the end diffs against, so AI's own write shows up as a change and
-  // actually gets PATCHed into ai_arv/ai_nbv (§2.1 step 5). Capturing this
-  // AFTER the DOM write would make the diff see current == baseline and
-  // silently skip persisting AI's picks at all.
-  if (_activeView === "arv" || _activeView === "nbv") {
-    _filterSaveLastSnapshot = captureFilterState();
-  }
-  _aiModeOn = true;
   const dims = _autoMatchSubjectDims();
-
-  if (_activeView === "arv") {
-    _writeAutoMatchBands(dims || { acres: null, sqft: null });
-    // _writeAutoMatchBands is a raw DOM writer (map.js precedent — doesn't
-    // touch propelioFilterState); sync explicitly before capturing so the
-    // cache mirror below is correct immediately, not dependent on
-    // self-correcting the next time the user departs this view.
-    propelioFilterState = readPropelioFiltersFromUI();
-    _aiViewFilterCache.arv = captureFilterState();
-  } else {
-    _aiViewFilterCache.arv = _buildAiPropelioBlob(_aiModeUserSnapshot.arv, dims, "arv");
-  }
-
-  if (_activeView === "nbv") {
-    _writeAutoMatchBands(dims || { acres: null, sqft: null });
-    propelioFilterState = readPropelioFiltersFromUI();
-    _aiViewFilterCache.nbv = captureFilterState();
-  } else {
-    _aiViewFilterCache.nbv = _buildAiPropelioBlob(_aiModeUserSnapshot.nbv, dims, "nbv");
+  _aiOverlay = {
+    arv: _buildAiOverlayFields(dims, "arv"),
+    nbv: _buildAiOverlayFields(dims, "nbv"),
+  };
+  _aiModeOn = true;
+  if (_activeView === "arv" || _activeView === "nbv") {
+    _applyAiOverlayToDom(_activeView);
   }
   _renderAiBar();
   applyPropelioClientFilters();
@@ -8431,14 +8474,16 @@ function _enableAiMode() {
 
 // Turning AI mode OFF (§2.2). Re-read from the user's real, untouched
 // snapshot -- never a repair, since nothing real was ever modified (Hole A).
+// No rebaseline: baseline and capture live in the same space as always
+// (captureFilterState() has been returning user truth this whole time), so
+// there is nothing to re-synchronize.
 function _disableAiMode() {
   if (!_aiModeOn) return;
   const real = (_activeView === "arv" || _activeView === "nbv") ? _aiModeUserSnapshot[_activeView] : null;
   _aiModeOn = false;
-  _aiViewFilterCache = { arv: null, nbv: null };
+  _aiOverlay = { arv: null, nbv: null };
   _aiModeUserSnapshot = { arv: null, nbv: null };
   if (real && real.propelio) applyPropelioFilterStateToUI(real.propelio);
-  _filterSaveLastSnapshot = captureFilterState();
   _renderAiBar();
   applyPropelioClientFilters();
 }
@@ -8449,7 +8494,7 @@ function _disableAiMode() {
 // routes through stale AI state left over from a DIFFERENT area's subject.
 function _resetAiMode() {
   _aiModeOn = false;
-  _aiViewFilterCache = { arv: null, nbv: null };
+  _aiOverlay = { arv: null, nbv: null };
   _aiModeUserSnapshot = { arv: null, nbv: null };
 }
 
@@ -8484,7 +8529,7 @@ function _dropAiModeForEdit(editedFieldId) {
   // 4. THEN drop the mode and apply -- key-building is real/flat again, so
   // this PATCHes exactly the user's edit, nothing else.
   _aiModeOn = false;
-  _aiViewFilterCache = { arv: null, nbv: null };
+  _aiOverlay = { arv: null, nbv: null };
   _aiModeUserSnapshot = { arv: null, nbv: null };
   _renderAiBar();
   applyPropelioClientFilters();
@@ -14184,6 +14229,11 @@ window.__valueDraftsGetContext = () => ({
   areaId: _currentLoadedAreaId,
   isAdmin: _isAdmin(),
   headers: authHeaders(),
+  // §3, docs/AI/CODER_SPEC_AIMODE_FIX_2026-07-14.md — nothing in the record
+  // distinguishes a number signed under the AI lens from one signed under
+  // the VA's own filters. Accept stays live while AI mode is on (the human
+  // signature is real); this just makes that fact visible on the record.
+  aiMode: _aiModeOn,
   // Which view the user is actually LOOKING at. Only the active view's filters are
   // live -- _viewFilterCache is written on view SWITCH (map.js:15321), so the
   // inactive view's filters are stale (and, if that view was never opened, null ->
@@ -15532,12 +15582,13 @@ function _setActiveView(view) {
     return;
   }
   if (view === _activeView) return; // already active — no-op
-  // Save the departing view's live UI back to its cache. AI mode (§2.5 Hole
-  // A): while AI mode is on, this is the departing view's AI-written DOM --
-  // route it to _aiViewFilterCache, never the user's real _viewFilterCache,
-  // or the user's real cache ends up holding AI's values and a later seed
-  // (below) persists them into the user's real _views.<view>.* rows.
-  _filterCacheFor(_activeView)[_activeView] = captureFilterState();
+  // Save the departing view's live UI back to its cache. AI MODE FIX
+  // (docs/AI/CODER_SPEC_AIMODE_FIX_2026-07-14.md §2.3): unconditionally
+  // _viewFilterCache now -- there is no separate AI cache to route around.
+  // captureFilterState() already returns the user's real values (AI's six
+  // fields are substituted out before this line ever sees them), so this
+  // cannot pick up AI's picks even while AI mode is on.
+  _viewFilterCache[_activeView] = captureFilterState();
   _activeView = view;
   // Per-view ratings (Chunk E): re-project ratings to the new active view up
   // front, independent of whether the filter restore below actually re-renders
@@ -15551,15 +15602,14 @@ function _setActiveView(view) {
   // ARV filters so the view starts from a baseline, not blank, and persist each
   // seeded field via the per-field PATCH (as _views.<view>.*) so it survives a
   // reload.
-  let _cached = _filterCacheFor(view)[view];
+  let _cached = _viewFilterCache[view];
   let _seeded = false;
   if ((view === "nbv" || view === "export") && !(_cached && _cached.v)) {
-    // Seed source is ALWAYS the user's real ARV, never AI's (§2.3 asymmetry,
-    // §2.5 Hole A) -- Export in particular must seed from the truth even
-    // while AI mode is on, since AI does not touch Final. In practice AI
-    // mode pre-populates _aiViewFilterCache.nbv the instant it turns on
-    // (_enableAiMode), so this branch normally only fires for Export or for
-    // NBV outside of AI mode.
+    // Seed source is ALWAYS the user's real ARV, never AI's (§2.3 asymmetry)
+    // -- Export in particular must seed from the truth even while AI mode is
+    // on, since AI does not touch Final. This falls out for free now:
+    // _viewFilterCache is always the real cache, so this branch cannot see
+    // AI's picks regardless of which view AI mode is currently painting.
     const _arv = _viewFilterCache.arv;
     _cached = (_arv && _arv.v)
       ? JSON.parse(JSON.stringify(_arv))
@@ -15576,13 +15626,19 @@ function _setActiveView(view) {
       delete _cached.propelio.yearMin;
       delete _cached.propelio.yearMax;
     }
-    _filterCacheFor(view)[view] = _cached;
+    _viewFilterCache[view] = _cached;
     _seeded = true;
   }
   const _toRestore = (_cached && _cached.v)
     ? _cached
     : { v: 1, checkboxes: { ...DEFAULT_FILTERS }, numeric: {}, sold: {}, comp: {}, propelio: {} };
   restoreFilterState(_toRestore);
+  // AI MODE FIX §2.1 — paint the overlay AFTER restoring the user's real
+  // cached state, never before. Export has no overlay (AI does not touch
+  // Final); off-mode is a no-op since _aiOverlay[view] is null.
+  if (_aiModeOn && (view === "arv" || view === "nbv")) {
+    _applyAiOverlayToDom(view);
+  }
   if (_seeded) {
     // Persist the seed via the per-field PATCH path, but diff against the app
     // DEFAULTS (not empty) so we only PATCH fields that actually DIFFER from

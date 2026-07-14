@@ -330,6 +330,10 @@
         final_value: draft.value,
         outcome: "accepted_verbatim",
         kept_comp_keys: keptKeys,
+        // §3, docs/AI/CODER_SPEC_AIMODE_FIX_2026-07-14.md — distinguishes a
+        // number signed under the AI lens from one signed under the VA's
+        // own filters. Accept stays live under AI mode; this is the record.
+        ai_mode: Boolean(c && c.aiMode),
       });
 
       closeModal();
@@ -374,6 +378,7 @@
             final_value: newVal,
             outcome,
             kept_comp_keys: keptKeys,
+            ai_mode: Boolean(c && c.aiMode),
           });
           fs.savedSnapshot = newVal;
         });

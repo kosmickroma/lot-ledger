@@ -46,6 +46,11 @@ class DraftTelemetryRequest(BaseModel):
     outcome: Optional[Literal["accepted_verbatim", "edited", "typed_while_draft_visible"]] = None
     kept_comp_keys: Optional[list[str]] = None          # commit events only — resolved, never logged raw
     filter_state: Optional[dict[str, Any]] = None       # commit events only — UI toggle state, no licensed content
+    # §3, docs/AI/CODER_SPEC_AIMODE_FIX_2026-07-14.md — commit events only.
+    # Nothing else in the record distinguishes a number signed under the AI
+    # lens from one signed under the VA's own filters; Accept stays live
+    # while AI mode is on, so this is the one place that fact gets logged.
+    ai_mode: Optional[bool] = None
 
 
 def _resolve_comp_ids(keys: list[str]) -> dict[str, int]:
@@ -107,9 +112,10 @@ async def draft_telemetry(
         filter_summary = payload.filter_state if isinstance(payload.filter_state, dict) else {}
         logger.info(
             "value_drafts.commit area_id=%s user=%s role=%s field=%s draft_value=%s final_value=%s "
-            "outcome=%s kept_count=%s kept_comp_ids=%s filter_state=%s",
+            "outcome=%s kept_count=%s kept_comp_ids=%s filter_state=%s ai_mode=%s",
             area_id, user_id, role, payload.field, payload.draft_value, payload.final_value,
             payload.outcome, len(kept_ids), ",".join(str(i) for i in kept_ids), filter_summary,
+            bool(payload.ai_mode),
         )
 
     return {"ok": True}

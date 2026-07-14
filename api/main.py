@@ -1987,14 +1987,19 @@ _FILTER_FIELD_BASE_KEYS: frozenset[str] = frozenset({
     "propelio.parcelTypeExempt",      "propelio.parcelTypeOffMarket",
 })
 
-# Derive view-prefixed keys for the ARV · NBV · Export toggle (Feature #3),
-# plus AI mode's own write-only mirrors of ARV/NBV (§2.2, 2026-07-14 AI bar
-# spec). Each base key K also gets _views.nbv.K, _views.export.K,
-# _views.ai_arv.K and _views.ai_nbv.K, built programmatically so the sets can
-# never drift. AI mode has no ai_export — AI does not touch Final.
+# Derive view-prefixed keys for the ARV · NBV · Export toggle (Feature #3).
+# Each base key K also gets _views.nbv.K and _views.export.K, built
+# programmatically so the sets can never drift.
+#
+# AI MODE FIX (docs/AI/CODER_SPEC_AIMODE_FIX_2026-07-14.md §2.3) — AI mode no
+# longer gets its own view-prefixed mirror here. That namespace was a
+# write-only buffer nothing ever read back (an adversarial review found four
+# reachable data-loss/destruction holes hanging off exactly that gap); the
+# fix moved AI's state out of the persistence layer entirely, so there is
+# nothing for this allowlist to carry for it anymore.
 _FILTER_FIELD_KEYS: frozenset[str] = frozenset(
     _FILTER_FIELD_BASE_KEYS
-    | {f"_views.{v}.{k}" for v in ("nbv", "export", "ai_arv", "ai_nbv") for k in _FILTER_FIELD_BASE_KEYS}
+    | {f"_views.{v}.{k}" for v in ("nbv", "export") for k in _FILTER_FIELD_BASE_KEYS}
 )
 
 
