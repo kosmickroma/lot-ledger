@@ -15387,6 +15387,18 @@ function _setActiveView(view) {
     _cached = (_arv && _arv.v)
       ? JSON.parse(JSON.stringify(_arv))
       : { v: 1, checkboxes: { ...DEFAULT_FILTERS }, numeric: {}, sold: {}, comp: {}, propelio: {} };
+    // NBV must NOT inherit ARV's year gate. The year is the one filter whose
+    // MEANING INVERTS between the views: on ARV, yearMax = old houses (what
+    // you'd flip); on NBV, yearMin = new builds (what you'd construct). Seeding
+    // ARV's yearMax onto NBV and then letting auto-match add yearMin leaves BOTH
+    // bounds at 2008 — a pool of houses built in exactly one year — and the NBV
+    // draft is a PICK, so it still returns a confident, wrong number. NBV starts
+    // clean on year and fills its own. (Export is a review of the ARV set and
+    // legitimately inherits it.)
+    if (view === "nbv" && _cached.propelio) {
+      delete _cached.propelio.yearMin;
+      delete _cached.propelio.yearMax;
+    }
     _viewFilterCache[view] = _cached;
     _seeded = true;
   }
