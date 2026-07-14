@@ -840,6 +840,81 @@ body.is-not-power-user .power-user-only {
   outline-offset: 1px;
 }
 
+/* ─── AI bar (2026-07-14 AI bar spec, Task 3) ───
+   Lives INSIDE the Workspace block (#active-item-slot), directly under the
+   ARV/NBV/Final toggle — same "rides with the slot, no separate sticky
+   element" reasoning as .view-toggle-block above. Flush bar, NOT a card:
+   no border box, no background panel, just the slot's own padding rhythm.
+   #active-item-slot never animates (KK standing rule) — visibility and the
+   active state are both instant class toggles, nothing transitions. Hidden
+   unless admin + area loaded (map.js _renderAiBar). */
+.ai-bar-block {
+  margin-top: 8px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ai-mode-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid rgba(201, 162, 79, 0.38);
+  background: rgba(0, 0, 0, 0.16);
+  color: var(--text-soft);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.ai-mode-toggle-btn:hover {
+  background: rgba(0, 0, 0, 0.28);
+  color: var(--text-main);
+}
+
+.ai-mode-toggle-icon {
+  font-size: 12px;
+}
+
+.ai-mode-toggle-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: transparent;
+  margin-left: 2px;
+}
+
+/* Active state must be UNMISTAKABLE at a glance (KK: "I want to know when
+   we are in AI mode") — gold fill on the button itself, plus the lit dot. */
+.ai-mode-toggle-btn.active {
+  border-color: var(--gold);
+  background: linear-gradient(135deg, #e2c075 0%, #c9a24f 58%, #9c7a2b 100%);
+  color: #1a1410;
+}
+
+.ai-mode-toggle-btn.active .ai-mode-toggle-dot {
+  background: #1a1410;
+  box-shadow: 0 0 4px 1px rgba(26, 20, 16, 0.5);
+}
+
+/* The comp-filter panel itself also gets a visible AI treatment while it's
+   showing AI's picks instead of the user's real filters — the second half
+   of "unmistakable at a glance." */
+.filter-card.ai-mode-active {
+  border-color: var(--gold);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.2),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.08),
+    0 0 0 1px rgba(201, 162, 79, 0.35);
+}
+
 .active-item-target-row {
   display: block;
   margin-bottom: 8px;
@@ -4738,10 +4813,3 @@ body.is-not-power-user .power-user-only {
   font-weight: 600;
 }
 
-
-/* Auto-match target checkbox (comp POC, Rung 0) */
-.auto-match-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.auto-match-label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; font-size: 13px; }
-.auto-match-label input:disabled { cursor: not-allowed; }
-.auto-match-row:has(input:disabled) { opacity: 0.55; }
-.auto-match-hint { font-size: 11px; opacity: 0.7; }

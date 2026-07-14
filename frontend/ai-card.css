@@ -7,24 +7,21 @@
   display: none;
 }
 
+/* Flush bar, not a card (2026-07-14 AI bar spec, Task 3): the row now lives
+   inside #ai-bar-block (style.css), which already carries the slot's own
+   padding rhythm -- no border box, no background panel, no card-style
+   margin here. Moved out of the Comps List block; this file's OWN logic is
+   otherwise unchanged (still resolves #ai-card-mount by id). */
 .ai-card-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 8px 12px;
-  margin-bottom: 14px;
-  border-radius: 10px;
-  border: 1px solid rgba(201, 162, 79, 0.28);
-  background:
-    linear-gradient(175deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.04) 35%, rgba(0, 0, 0, 0.14)),
-    rgba(15, 61, 47, 0.82);
   font-size: 12px;
 }
 
-.ai-card-row-error {
-  border-color: rgba(220, 90, 90, 0.4);
-}
+/* .ai-card-row-error itself carries no styling now that the card border is
+   gone — the error state reads entirely from .ai-card-error-text's color. */
 
 .ai-card-label {
   font-size: 11px;

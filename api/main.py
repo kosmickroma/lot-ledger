@@ -1986,12 +1986,14 @@ _FILTER_FIELD_BASE_KEYS: frozenset[str] = frozenset({
     "propelio.parcelTypeExempt",      "propelio.parcelTypeOffMarket",
 })
 
-# Derive view-prefixed keys for the ARV · NBV · Export toggle (Feature #3).
-# Each base key K also gets _views.nbv.K and _views.export.K, built
-# programmatically so the two sets can never drift.
+# Derive view-prefixed keys for the ARV · NBV · Export toggle (Feature #3),
+# plus AI mode's own write-only mirrors of ARV/NBV (§2.2, 2026-07-14 AI bar
+# spec). Each base key K also gets _views.nbv.K, _views.export.K,
+# _views.ai_arv.K and _views.ai_nbv.K, built programmatically so the sets can
+# never drift. AI mode has no ai_export — AI does not touch Final.
 _FILTER_FIELD_KEYS: frozenset[str] = frozenset(
     _FILTER_FIELD_BASE_KEYS
-    | {f"_views.{v}.{k}" for v in ("nbv", "export") for k in _FILTER_FIELD_BASE_KEYS}
+    | {f"_views.{v}.{k}" for v in ("nbv", "export", "ai_arv", "ai_nbv") for k in _FILTER_FIELD_BASE_KEYS}
 )
 
 
@@ -5020,6 +5022,10 @@ class DownloadFilterRequest(BaseModel):
     # parcel ratings. Frontend sends this in Chunk E; Chunk C defaults to
     # 'arv' = today's behavior.
     view: str = "arv"
+    # AI bar spec (2026-07-14) Task 5: was AI mode on for this export? Drives
+    # the "Filters" provenance column. Absent/old clients -> False -> today's
+    # "manual" everywhere, byte-for-byte.
+    ai_mode: bool = False
 
 
 @app.get("/api/download/{job_id}")
@@ -5069,6 +5075,8 @@ async def download_filtered(
         # Per-view ratings §3.4 (FMEA H1): thread the active view so the
         # Good Comp column reflects it. Defaults to 'arv' (coexistence).
         view=body.view,
+        # AI bar spec Task 5: was AI mode on for this export.
+        ai_mode=body.ai_mode,
     )
 
 
@@ -5082,6 +5090,7 @@ async def _run_download_csv(
     bad_comp_ids: set[int] | None = None,
     loaded_area_id: str | None = None,
     view: str = "arv",
+    ai_mode: bool = False,
 ) -> StreamingResponse:
     # H9 (FMEA): role gate runs FIRST, before any view handling. The CSV
     # export role check is never weakened by per-view wiring.
@@ -5095,6 +5104,17 @@ async def _run_download_csv(
     norm_view = str(view or "").strip().lower() or "arv"
     if norm_view not in ("arv", "nbv", "export"):
         raise HTTPException(status_code=400, detail="view must be 'arv', 'nbv', 'export', or null")
+
+    # AI bar spec (2026-07-14) Task 5: "Filters" column value for every row
+    # in this export. The column claims ONLY that AI set the FILTERS — never
+    # that it picked the comps or produced a number (§5). Final/export is
+    # always "manual": AI does not touch Final, so even with AI mode on
+    # elsewhere in the session, an export FROM Final reflects the truth —
+    # "manual" plus a note that the mode was active, never bare "ai".
+    if norm_view == "export":
+        csv_filters_cell = "manual · AI mode active" if ai_mode else "manual"
+    else:
+        csv_filters_cell = "ai" if ai_mode else "manual"
 
     job = _get_job(job_id, int(user["id"]))
     if job is None:
@@ -5649,6 +5669,10 @@ async def _run_download_csv(
                 "Contact Info Retrieved",
                 "Last Mailer Sent",
                 "Flood Zone",
+                # AI bar spec (2026-07-14) Task 5 — appended at the right edge,
+                # same "byte-stable existing columns" discipline as v4a §2.8.
+                # Claims ONLY that AI set the FILTERS (never the comps/number).
+                "Filters",
             ]
         )
         buffer.seek(0)
@@ -5961,6 +5985,7 @@ async def _run_download_csv(
                     # emitted; outreach 3 blanked for non-power_user roles).
                     *_outreach_csv_cells(row, user),
                     _flood_zone_csv_cell(row),
+                    csv_filters_cell,
                 ]
             )
             buffer.seek(0)
@@ -6299,6 +6324,7 @@ async def _run_download_csv(
                     # handles _cad=None internally (returns 4 blanks).
                     *_outreach_csv_cells(_cad, user),
                     _flood_zone_csv_cell(_cad),
+                    csv_filters_cell,
                 ]
             )
             buffer.seek(0)
@@ -9147,6 +9173,15 @@ async def index() -> HTMLResponse:
         html = html.replace(
             "__VALUE_DRAFTS_ENABLED__",
             "true" if os.getenv("VALUE_DRAFTS_ENABLED", "false").strip().lower() == "true" else "false",
+        )
+        # AI bar seam (2026-07-14 AI bar spec, Acceptance #12): the sidebar row
+        # + AI mode toggle are DOM the frontend renders unconditionally today;
+        # without this flag the bar has no client-side way to know AI_ENABLED
+        # is off and would still render (and error) on every request. Same
+        # os.getenv-direct reasoning as VALUE_DRAFTS_ENABLED above.
+        html = html.replace(
+            "__AI_ENABLED__",
+            "true" if os.getenv("AI_ENABLED", "false").strip().lower() == "true" else "false",
         )
         _INDEX_HTML_CACHE = html
     return HTMLResponse(_INDEX_HTML_CACHE)

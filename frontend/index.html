@@ -15,7 +15,7 @@
   <link rel="stylesheet" href="/style.css?v=__BUILD_ID__">
   <link rel="stylesheet" href="/ai-card.css?v=__BUILD_ID__">
   <link rel="stylesheet" href="/value-drafts.css?v=__BUILD_ID__">
-  <script>window.LL_CONFIG = { tilesUrl: "__TILES_URL__", buildId: "__BUILD_ID__", appVersion: "__APP_VERSION__", instantReshape: true, arvNbvExport: true, valueDraftsEnabled: __VALUE_DRAFTS_ENABLED__ };</script>
+  <script>window.LL_CONFIG = { tilesUrl: "__TILES_URL__", buildId: "__BUILD_ID__", appVersion: "__APP_VERSION__", instantReshape: true, arvNbvExport: true, valueDraftsEnabled: __VALUE_DRAFTS_ENABLED__, aiEnabled: __AI_ENABLED__ };</script>
 </head>
 <body>
   <div class="app-shell">
@@ -72,6 +72,19 @@
             <button type="button" class="view-toggle-seg" data-view="nbv" role="tab" aria-selected="false">NBV</button>
             <button type="button" class="view-toggle-seg" data-view="export" role="tab" aria-selected="false">Final</button>
           </div>
+        </div>
+        <!-- AI bar (2026-07-14 AI bar spec, Task 3). Flush row, not a card --
+             same slot rhythm as the toggle above it. Gated admin-only +
+             area-loaded (map.js _renderAiBar, folded into _renderViewToggle
+             so it stays in lockstep with the toggle's own visibility).
+             ai-card-mount is the EXISTING one-line AI-read row (moved here
+             from the Comps List block, unchanged) -- ai-mode-toggle is new
+             (Task 2). Never animates (#active-item-slot standing rule). -->
+        <div id="ai-bar-block" class="ai-bar-block hidden">
+          <button type="button" id="ai-mode-toggle" class="ai-mode-toggle-btn" aria-pressed="false" title="Show what our automation would have picked instead of the current filters">
+            <span class="ai-mode-toggle-icon" aria-hidden="true">⚡</span>AI mode<span class="ai-mode-toggle-dot" aria-hidden="true"></span>
+          </button>
+          <div id="ai-card-mount"></div>
         </div>
       </div>
       <div id="sidebar-results" class="sidebar-section hidden">
@@ -371,13 +384,6 @@
                 <input type="checkbox" id="prop-outside-area">
               </label>
             </div>
-            <div class="numeric-filter-row auto-match-row" id="prop-auto-match-row" title="Select a target property first">
-              <label class="auto-match-label">
-                <input type="checkbox" id="prop-auto-match" disabled>
-                <span>Auto match</span>
-              </label>
-              <span class="auto-match-hint">rough lot + sqft preset from the target — a starting point, not a comp pick</span>
-            </div>
           </div>
           <div class="propelio-client-section">
             <p class="propelio-section-label">Comp Display Filters (instant)</p>
@@ -447,7 +453,6 @@
             <div class="comps-block-target-card-meta2" id="comps-block-target-card-meta2"></div>
             <div class="comps-block-target-card-meta3" id="comps-block-target-card-meta3"></div>
           </div>
-          <div id="ai-card-mount"></div>
           <section id="propelio-good-comps-section" class="propelio-good-comps-section hidden" aria-label="Good comps in this saved area">
             <header class="propelio-good-comps-head">
               <span class="propelio-section-label">Good Comps</span>
