@@ -309,3 +309,22 @@
   border-top: 1px solid rgba(255, 255, 255, 0.08);
   padding-top: 10px;
 }
+
+/* An excluded comp is still a comp. It sits in the list with the others --
+   same shape, same price, same address, same GOOD/BAD badge -- just visibly
+   quieter, and honest about the one thing we don't have: a condition read.
+   Hiding it made an all-gated area render an empty brief, which reads as
+   broken (KK, preview, 2026-07-14). */
+.ai-modal-comp-unread { opacity: 0.72; }
+
+.ai-modal-comp-cond-unread {
+  color: var(--text-soft);
+  font-style: italic;
+}
+
+.ai-modal-comp-unread-why {
+  font-size: 11px;
+  color: var(--text-soft);
+  font-style: italic;
+  margin-top: 2px;
+}

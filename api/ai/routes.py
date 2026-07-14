@@ -168,7 +168,8 @@ async def read_comps(
             })
 
         excluded_out = [
-            {"comp_address_key": e["comp_address_key"], "address": e["address"], "reason": e["reason"]}
+            {"comp_address_key": e["comp_address_key"], "address": e["address"],
+             "price": e.get("price"), "reason": e["reason"]}
             for e in excluded
         ]
 

@@ -256,6 +256,36 @@
       );
     }
 
+    // ⛔ An excluded comp is still a COMP. It belongs in the brief.
+    // The permit_avm gate stops us sending a flagged listing's TEXT to the model
+    // -- it is not a reason to make the comp disappear from the user's own brief.
+    // Before this, `excluded` comps were demoted to a text footer, so an area
+    // whose comps were ALL flagged rendered an EMPTY list and read as broken
+    // (KK, preview, 2026-07-14: "Read 0 of 0 comps · 2 no AVM permission").
+    // Same shape as a read comp -- price, address, rating -- minus the one thing
+    // we genuinely do not have: a condition tag. No quote, because we never read
+    // it. Nothing hidden, nothing invented.
+    function renderExcludedCompRow(e) {
+      const rating = ratingByKey ? ratingByKey.get(e.comp_address_key) : null;
+      const badge = rating === "good"
+        ? '<span class="ai-modal-badge ai-modal-badge-good">GOOD</span>'
+        : rating === "bad"
+          ? '<span class="ai-modal-badge ai-modal-badge-bad">BAD</span>'
+          : "";
+      const why = esc(EXCLUDED_REASON_LABEL[e.reason] || e.reason || "not read");
+      return (
+        '<div class="ai-modal-comp ai-modal-comp-unread">' +
+        '<div class="ai-modal-comp-head">' +
+        '<span class="ai-modal-comp-cond ai-modal-comp-cond-unread">not read</span>' +
+        `<span class="ai-modal-comp-price">${esc(fmtPrice(e.price))}</span>` +
+        `<span class="ai-modal-comp-addr">${esc(e.address || e.comp_address_key || "?")}</span>` +
+        badge +
+        "</div>" +
+        `<div class="ai-modal-comp-unread-why">${why}</div>` +
+        "</div>"
+      );
+    }
+
     function renderDroppedRow(d) {
       const addr = d.address ? esc(d.address) : "(unattributed)";
       const tag = d.tag ? esc(d.tag) : "(none)";
@@ -291,7 +321,12 @@
         const k = CONDITION_ORDER.includes(comp.condition) ? comp.condition : "unknown";
         (byCondition[k] = byCondition[k] || []).push(comp);
       }
-      const compsHtml = CONDITION_ORDER.flatMap((k) => (byCondition[k] || []).map(renderCompRow)).join("");
+      // Read comps first, grouped by condition -- then the ones we couldn't read,
+      // still in the list, still yours, just honestly labelled. An empty comp list
+      // when every comp was gated is worse than useless: it reads as broken.
+      const compsHtml =
+        CONDITION_ORDER.flatMap((k) => (byCondition[k] || []).map(renderCompRow)).join("")
+        + excluded.map(renderExcludedCompRow).join("");
 
       // §A.6.1 — rejections only happen at extraction time, never on a cache
       // hit. Any cached portion of this run has dropped tags we can't see.

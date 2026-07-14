@@ -44,7 +44,9 @@ def fetch_permitted_comps(area_id: str, comp_keys: list[str]) -> tuple[list[dict
 
     Returns:
       permitted: [{comp_id, comp_address_key, address, price, remarks}]
-      excluded:  [{comp_id|None, comp_address_key, address, reason}]
+      excluded:  [{comp_id|None, comp_address_key, address, price, reason}]
+                 (price carried through: an excluded comp is still a comp, and it
+                  still renders in the user's brief — it just has no condition tag.)
 
     Exclusion reasons (exact strings — the card renders them):
       "not_found"           -> comp_address_key resolved to no row
@@ -106,32 +108,33 @@ def fetch_permitted_comps(area_id: str, comp_keys: list[str]) -> tuple[list[dict
     for key in comp_keys:
         row = by_key.get(key)
         if row is None:
-            excluded.append({"comp_id": None, "comp_address_key": key, "address": None, "reason": "not_found"})
+            excluded.append({"comp_id": None, "comp_address_key": key, "address": None, "price": None, "reason": "not_found"})
             continue
 
         comp_id = int(row["comp_id"])
         address = row["address"]
+        price = float(row["price"]) if row["price"] is not None else None
 
         if row["no_geom"]:
-            excluded.append({"comp_id": comp_id, "comp_address_key": key, "address": address, "reason": "no_geometry"})
+            excluded.append({"comp_id": comp_id, "comp_address_key": key, "address": address, "price": price, "reason": "no_geometry"})
             continue
         if not row["in_area"]:
-            excluded.append({"comp_id": comp_id, "comp_address_key": key, "address": address, "reason": "outside_drawn_area"})
+            excluded.append({"comp_id": comp_id, "comp_address_key": key, "address": address, "price": price, "reason": "outside_drawn_area"})
             continue
         if row["permit_avm"] != "true":
-            excluded.append({"comp_id": comp_id, "comp_address_key": key, "address": address, "reason": "no_avm_permission"})
+            excluded.append({"comp_id": comp_id, "comp_address_key": key, "address": address, "price": price, "reason": "no_avm_permission"})
             continue
 
         remarks = row["remarks"] or ""
         if len(remarks) < AI_MIN_REMARKS_CHARS:
-            excluded.append({"comp_id": comp_id, "comp_address_key": key, "address": address, "reason": "no_remarks"})
+            excluded.append({"comp_id": comp_id, "comp_address_key": key, "address": address, "price": price, "reason": "no_remarks"})
             continue
 
         permitted.append({
             "comp_id": comp_id,
             "comp_address_key": key,
             "address": address,
-            "price": float(row["price"]) if row["price"] is not None else None,
+            "price": price,
             "remarks": remarks,
         })
 
