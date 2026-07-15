@@ -303,8 +303,18 @@
         return saved !== null && saved !== undefined && saved === fieldState[f].draft.value;
       });
 
+      // Task D hard condition (docs/AI/CODER_SPEC_FACTS_2026-07-14.md): the
+      // button signs only what's shown -- true structurally (the click
+      // handler below only ever loops the SAME `live` list) -- but a missing
+      // field must be SAID, not just silently absent from the row, or an
+      // empty slot reads as a bug rather than "there was nothing to sign."
+      const missing = FIELDS.filter((f) => !live.includes(f));
+      const missingHtml = missing.length
+        ? `<span class="vd-accept-missing">(${missing.map((f) => f.toUpperCase()).join(", ")} not available)</span>`
+        : "";
+
       bar.innerHTML =
-        `<span class="vd-accept-hint">${vals}</span>` +
+        `<span class="vd-accept-hint">${vals}</span>${missingHtml}` +
         (allMatch
           ? '<span class="vd-accept-done">saved</span>'
           : '<button type="button" class="vd-accept-all">Accept draft</button>');

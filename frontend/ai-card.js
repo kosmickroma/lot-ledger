@@ -120,14 +120,15 @@
         return;
       }
 
-      // idle -- no run yet
+      // idle -- no run yet. NO "Read comps" button (KK: "no read comps button,
+      // just read brief"). Entering AI mode is the sole trigger now
+      // (_enableAiMode -> __aiCardTriggerRead), which keeps the read an explicit
+      // human act -- we must NOT auto-read here on every admin area-load, since
+      // that would fire a Vertex call ambiently. Idle is a quiet hint, not a button.
       mount.innerHTML =
         '<div class="ai-card-row">' +
-        '<span class="ai-card-label">AI read</span>' +
-        '<button type="button" class="ai-card-btn ai-card-read-btn">Read comps</button>' +
+        '<span class="ai-card-label ai-card-hint">Turn on AI mode to read the comps</span>' +
         "</div>";
-      const readBtn = mount.querySelector(".ai-card-read-btn");
-      if (readBtn) readBtn.addEventListener("click", () => { void runRead(); });
     }
 
     // --- Fetch (§B.1.5) ---------------------------------------------------
@@ -195,6 +196,15 @@
         renderSidebar();
       }
     }
+
+    // Task E (docs/AI/CODER_SPEC_FACTS_2026-07-14.md) — pressing AI mode is
+    // the explicit human act that fires the read; map.js's _enableAiMode
+    // calls this instead of requiring a second "Read comps" click. ONE SHOT:
+    // runRead() has no retry loop of its own (a single fetch, no internal
+    // re-attempt), so calling it once here is already the correct shape —
+    // failure just lands in the existing error state with its manual Retry
+    // button, same as today. The manual Read/Re-read buttons are untouched.
+    window.__aiCardTriggerRead = () => { void runRead(); };
 
     // --- Modal (§B.1.3(b)) — own DOM node, own classes, never shares #auth-modal ---
 

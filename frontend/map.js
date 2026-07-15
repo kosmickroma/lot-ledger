@@ -8507,6 +8507,11 @@ function _enableAiMode() {
   }
   _renderAiBar();
   applyPropelioClientFilters();
+  // Task E — pressing AI mode IS the read request; no second "Read comps"
+  // click. ai-card.js owns the fetch/state machine entirely (loading/error/
+  // done, one-shot, no retry loop) -- this just fires it. The manual Read /
+  // Re-read buttons in ai-card.js still work for explicit re-runs.
+  if (typeof window.__aiCardTriggerRead === "function") window.__aiCardTriggerRead();
 }
 
 // Turning AI mode OFF (§2.2). Re-read from the user's real, untouched

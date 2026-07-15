@@ -93,6 +93,16 @@
   opacity: 0.75;
 }
 
+/* Task D hard condition -- says which field the button will NOT sign,
+   rather than leaving its absence unexplained. */
+.vd-accept-missing {
+  flex: 0 0 auto;
+  color: var(--text-soft);
+  font-size: 10px;
+  font-style: italic;
+  opacity: 0.6;
+}
+
 .vd-accept-all {
   flex: 0 0 auto;
   cursor: pointer;
