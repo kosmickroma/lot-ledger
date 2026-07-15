@@ -120,15 +120,13 @@
         return;
       }
 
-      // idle -- no run yet. NO "Read comps" button (KK: "no read comps button,
-      // just read brief"). Entering AI mode is the sole trigger now
-      // (_enableAiMode -> __aiCardTriggerRead), which keeps the read an explicit
-      // human act -- we must NOT auto-read here on every admin area-load, since
-      // that would fire a Vertex call ambiently. Idle is a quiet hint, not a button.
-      mount.innerHTML =
-        '<div class="ai-card-row">' +
-        '<span class="ai-card-label ai-card-hint">Turn on AI mode to read the comps</span>' +
-        "</div>";
+      // idle -- no run yet. Render NOTHING. No "Read comps" button and no hint
+      // (KK): entering AI mode is the trigger (_enableAiMode ->
+      // __aiCardTriggerRead), so the read fires on its own and this row never
+      // needs to prompt for it. We still must NOT auto-read here on every admin
+      // area-load -- that would fire a Vertex call ambiently, which the design
+      // forbids -- so idle simply shows an empty row.
+      mount.innerHTML = "";
     }
 
     // --- Fetch (§B.1.5) ---------------------------------------------------
