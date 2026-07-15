@@ -399,6 +399,12 @@
         // own filters. Accept stays live under AI mode; this is the record.
         ai_mode: Boolean(c && c.aiMode),
         fact_filters: (c && c.factFilters) || null,
+        // Part D item 3 (2026-07-15 coder spec) — the lens/band state that
+        // determined THIS field's draft pool at commit time, sourced from
+        // map.js's __valueDraftsViewComps (via __valueDraftsGetContext's
+        // per-field `filterState`) — the single existing resolution, never
+        // re-derived here.
+        filter_state: (view && view.filterState) || null,
       });
 
       closeModal();
@@ -445,6 +451,8 @@
             kept_comp_keys: keptKeys,
             ai_mode: Boolean(c && c.aiMode),
             fact_filters: (c && c.factFilters) || null,
+            // Part D item 3 — same provenance as the accept-draft commit above.
+            filter_state: (view && view.filterState) || null,
           });
           fs.savedSnapshot = newVal;
         });

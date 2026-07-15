@@ -14627,7 +14627,7 @@ function __valueDraftsViewComps(view) {
   // memorializes, one lens later. _applyFactFilters runs on the FULL comp
   // objects (cad_subdivision/isd/parcel_county) before the .map() below
   // strips them down to the draft's slim shape.
-  return _applyFactFilters(all.filter((c) => c && compPassesPropelioFilters(c, fstate, nbhdNorm)))
+  const comps = _applyFactFilters(all.filter((c) => c && compPassesPropelioFilters(c, fstate, nbhdNorm)))
     .map((c) => ({
       comp_address_key: c.comp_address_key,
       address: c.address,
@@ -14644,41 +14644,62 @@ function __valueDraftsViewComps(view) {
         ? ((c._ratingArv === "good" || c._ratingArv === "bad") ? c._ratingArv : null)
         : _ratingForView(c._ratingArv, c.ratings_by_view, view),
     }));
+  // Part D item 3 (2026-07-15 coder spec) — return the resolved `fstate`
+  // alongside the comps instead of just the mapped array. This is the ONE
+  // place the per-view filter state (bands included, once Part A's overlay
+  // spread above has run) is fully resolved; __valueDraftsGetContext below
+  // forwards it untouched as telemetry's `filterState` so a signed number's
+  // provenance can be logged without re-deriving this resolution a second
+  // way (the exact duplication risk A.1's shared-helper fix was about).
+  return { comps, fstate };
 }
 
-window.__valueDraftsGetContext = () => ({
-  areaId: _currentLoadedAreaId,
-  isAdmin: _isAdmin(),
-  headers: authHeaders(),
-  // §3, docs/AI/CODER_SPEC_AIMODE_FIX_2026-07-14.md — nothing in the record
-  // distinguishes a number signed under the AI lens from one signed under
-  // the VA's own filters. Accept stays live while AI mode is on (the human
-  // signature is real); this just makes that fact visible on the record.
-  aiMode: _aiModeOn,
-  // §8 (2026-07-15 coder spec) — same idea one lens further: a shallow copy
-  // (never the live object) so the record can see WHICH fact toggles were
-  // active when a number was drafted, without the record holding a live
-  // reference into ephemeral in-memory state.
-  factFilters: { ..._factFilters },
-  // Which view the user is actually LOOKING at (telemetry/UI context — NOT a
-  // gate on which view gets drafted). ⛔ CORRECTED (Part E, 2026-07-15 coder
-  // spec): this comment used to claim value-drafts.js only drafts the
-  // ACTIVE view — stale since 8f50c15 ("accept-all drafts both"), and it
-  // nearly misled the $7.6M regression hunt. BOTH views draft
-  // unconditionally below, always — making the user switch tabs to draft
-  // one of two stored values that are per-AREA and identical on every tab
-  // would be nonsense. __valueDraftsViewComps resolves the inactive/never-
-  // visited view's filters via _resolveViewFilterSeed (map.js:~16016) — the
-  // SAME resolution a real _setActiveView switch would use, never the live
-  // active-view state and never bare defaults — so the draft pool and the
-  // eventual on-screen pool can't diverge (A.1).
-  activeView: _activeView,
-  arv: { comps: __valueDraftsViewComps("arv") },
-  nbv: { comps: __valueDraftsViewComps("nbv") },
-  storedValues: _storedValueState
-    ? { arv: _storedValueState.arv.numeric_value, nbv: _storedValueState.nbv.numeric_value }
-    : { arv: null, nbv: null },
-});
+window.__valueDraftsGetContext = () => {
+  // Part D item 3 (2026-07-15 coder spec) — resolve each view ONCE here and
+  // reuse both halves (comps + fstate) below, rather than calling
+  // __valueDraftsViewComps twice per view (once for comps, once for
+  // filters) and risking the two calls resolving to different states.
+  const arvView = __valueDraftsViewComps("arv");
+  const nbvView = __valueDraftsViewComps("nbv");
+  return {
+    areaId: _currentLoadedAreaId,
+    isAdmin: _isAdmin(),
+    headers: authHeaders(),
+    // §3, docs/AI/CODER_SPEC_AIMODE_FIX_2026-07-14.md — nothing in the record
+    // distinguishes a number signed under the AI lens from one signed under
+    // the VA's own filters. Accept stays live while AI mode is on (the human
+    // signature is real); this just makes that fact visible on the record.
+    aiMode: _aiModeOn,
+    // §8 (2026-07-15 coder spec) — same idea one lens further: a shallow copy
+    // (never the live object) so the record can see WHICH fact toggles were
+    // active when a number was drafted, without the record holding a live
+    // reference into ephemeral in-memory state.
+    factFilters: { ..._factFilters },
+    // Which view the user is actually LOOKING at (telemetry/UI context — NOT a
+    // gate on which view gets drafted). ⛔ CORRECTED (Part E, 2026-07-15 coder
+    // spec): this comment used to claim value-drafts.js only drafts the
+    // ACTIVE view — stale since 8f50c15 ("accept-all drafts both"), and it
+    // nearly misled the $7.6M regression hunt. BOTH views draft
+    // unconditionally below, always — making the user switch tabs to draft
+    // one of two stored values that are per-AREA and identical on every tab
+    // would be nonsense. __valueDraftsViewComps resolves the inactive/never-
+    // visited view's filters via _resolveViewFilterSeed (map.js:~16016) — the
+    // SAME resolution a real _setActiveView switch would use, never the live
+    // active-view state and never bare defaults — so the draft pool and the
+    // eventual on-screen pool can't diverge (A.1).
+    activeView: _activeView,
+    // filterState: the SAME `fstate` __valueDraftsViewComps resolved to build
+    // this view's comp pool (bands included, when AI mode applied its overlay)
+    // — forwarded as-is, never re-derived, so Part D's telemetry logs the
+    // actual lens a signed number was drafted under (task-3-brief.md PART D
+    // item 3 / §3 filter_state provenance).
+    arv: { comps: arvView.comps, filterState: arvView.fstate },
+    nbv: { comps: nbvView.comps, filterState: nbvView.fstate },
+    storedValues: _storedValueState
+      ? { arv: _storedValueState.arv.numeric_value, nbv: _storedValueState.nbv.numeric_value }
+      : { arv: null, nbv: null },
+  };
+};
 
 // The ONLY function that ever writes an ARV/NBV stored-value field from a
 // draft (§0.1 / §3.3 -- the draft itself NEVER touches input.value). Goes

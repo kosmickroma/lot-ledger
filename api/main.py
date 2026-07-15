@@ -24,6 +24,7 @@ import re
 import secrets
 import string
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -75,6 +76,39 @@ from api.propelio.routes import router as propelio_router
 from api.redfin import normalize_addr_key
 from api.sold import log_redfin_sold_row_count, query_active_listings, query_sold_parcels
 
+
+# Part D, docs/AI/CODER_SPEC_AIMODE_FIX (task-3-brief.md PART D): there is no
+# logging configuration anywhere in this codebase. uvicorn.config.Config
+# .configure_logging() runs BEFORE this module is even imported and its
+# LOGGING_CONFIG only wires up "uvicorn"/"uvicorn.error"/"uvicorn.access"
+# (each propagate=False) — it never touches the root logger or anything
+# under our own package. Every logger in this app is `logging.getLogger(
+# __name__)`, which always resolves to a child of "api" (api.main,
+# api.value_drafts.routes, api.propelio.routes, ...). So every logger.info
+# call in the codebase has been propagating up to a handler-less root and
+# getting silently dropped (root's lastResort handler only fires at
+# WARNING+) — 48h of dev logs with zero app-logger lines, incl. the
+# anchoring tripwire this was supposed to catch.
+#
+# Fix: configure the "api" parent logger directly, not root. This sidesteps
+# the whole question of whether uvicorn/gunicorn/some future --log-config
+# owns root — we never touch or depend on it. propagate=False means we also
+# can't double-log if root later grows a handler from some other source.
+def _configure_app_logging() -> None:
+    app_logger = logging.getLogger("api")
+    if app_logger.handlers:
+        # Already configured — e.g. a second import of this module in the
+        # same process (uvicorn --reload respawn, or a stray re-import).
+        # Adding a second StreamHandler would double every line on stdout.
+        return
+    handler = logging.StreamHandler(sys.stdout)   # Cloud Run captures stdout, not stderr-only
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+    app_logger.addHandler(handler)
+    app_logger.setLevel(logging.INFO)
+    app_logger.propagate = False
+
+
+_configure_app_logging()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 FRONTEND_DIR = BASE_DIR / "frontend"

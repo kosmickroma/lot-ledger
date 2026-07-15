@@ -46,6 +46,11 @@ class DraftTelemetryRequest(BaseModel):
     outcome: Optional[Literal["accepted_verbatim", "edited", "typed_while_draft_visible"]] = None
     kept_comp_keys: Optional[list[str]] = None          # commit events only — resolved, never logged raw
     filter_state: Optional[dict[str, Any]] = None       # commit events only — UI toggle state, no licensed content
+    # Part D item 2, task-3-brief.md: the frontend has sent this since 053576f
+    # (value-drafts.js:347, 393) but there was no field here to receive it, so
+    # pydantic silently dropped it on every request — a no-op fix, not new
+    # capture. Same shape/safety as filter_state: UI toggle state, no licensed content.
+    fact_filters: Optional[dict[str, Any]] = None       # commit events only — the fact-filter lens state
     # §3, docs/AI/CODER_SPEC_AIMODE_FIX_2026-07-14.md — commit events only.
     # Nothing else in the record distinguishes a number signed under the AI
     # lens from one signed under the VA's own filters; Accept stays live
@@ -110,12 +115,17 @@ async def draft_telemetry(
         # filter_state is UI toggle state only (checkboxes/ranges) — no
         # licensed content, safe to log in full as the kept-set snapshot §6 asks for.
         filter_summary = payload.filter_state if isinstance(payload.filter_state, dict) else {}
+        # fact_filters: same safety class as filter_state (UI toggle state).
+        # Part D item 2 — this field existed on the frontend since 053576f but
+        # had nowhere to land server-side; wiring it into the log line is the
+        # other half of that fix (the model field alone is a no-op otherwise).
+        fact_filters_summary = payload.fact_filters if isinstance(payload.fact_filters, dict) else {}
         logger.info(
             "value_drafts.commit area_id=%s user=%s role=%s field=%s draft_value=%s final_value=%s "
-            "outcome=%s kept_count=%s kept_comp_ids=%s filter_state=%s ai_mode=%s",
+            "outcome=%s kept_count=%s kept_comp_ids=%s filter_state=%s fact_filters=%s ai_mode=%s",
             area_id, user_id, role, payload.field, payload.draft_value, payload.final_value,
             payload.outcome, len(kept_ids), ",".join(str(i) for i in kept_ids), filter_summary,
-            bool(payload.ai_mode),
+            fact_filters_summary, bool(payload.ai_mode),
         )
 
     return {"ok": True}
