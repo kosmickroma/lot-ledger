@@ -8416,11 +8416,20 @@ function _aiRealNbvBase() {
   if (_activeView === "nbv") return captureFilterState();
   const real = _viewFilterCache.nbv;
   if (real && real.v) return JSON.parse(JSON.stringify(real));
-  const arv = _viewFilterCache.arv;
-  const base = (arv && arv.v)
-    ? JSON.parse(JSON.stringify(arv))
+  // NBV never visited -> seed from the user's real ARV, year gate stripped (NBV
+  // must not inherit ARV's yearMax). ⛔ Prefer the LIVE DOM when ARV is active:
+  // _viewFilterCache.arv is refreshed only on a view SWITCH, so a hand-edit with
+  // no switch leaves it STALE. Seeding NBV's OFF-restore from a stale ARV snaps
+  // NBV to a MORE restrictive set on disable -- "fewer comps than were showing"
+  // (KK, preview 2026-07-14). Mirrors _aiRealArvBase's live-DOM preference.
+  // _aiModeOn is still false here (enable snapshots BEFORE flipping it), so
+  // captureFilterState() returns pure DOM truth with nothing substituted.
+  const arv = (_activeView === "arv")
+    ? captureFilterState()
+    : (_viewFilterCache.arv && _viewFilterCache.arv.v ? JSON.parse(JSON.stringify(_viewFilterCache.arv)) : null);
+  const base = arv
     // See _aiRealArvBase -- sortMode needs an explicit fallback default too.
-    : { v: 1, checkboxes: { ...DEFAULT_FILTERS }, numeric: {}, sold: {}, comp: {}, propelio: { ...DEFAULT_PROPELIO_FILTERS, sortMode: propelioCompSortMode } };
+    || { v: 1, checkboxes: { ...DEFAULT_FILTERS }, numeric: {}, sold: {}, comp: {}, propelio: { ...DEFAULT_PROPELIO_FILTERS, sortMode: propelioCompSortMode } };
   if (base.propelio) { delete base.propelio.yearMin; delete base.propelio.yearMax; }
   return base;
 }
