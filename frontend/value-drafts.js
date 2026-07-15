@@ -344,6 +344,7 @@
         // number signed under the AI lens from one signed under the VA's
         // own filters. Accept stays live under AI mode; this is the record.
         ai_mode: Boolean(c && c.aiMode),
+        fact_filters: (c && c.factFilters) || null,
       });
 
       closeModal();
@@ -389,6 +390,7 @@
             outcome,
             kept_comp_keys: keptKeys,
             ai_mode: Boolean(c && c.aiMode),
+            fact_filters: (c && c.factFilters) || null,
           });
           fs.savedSnapshot = newVal;
         });
