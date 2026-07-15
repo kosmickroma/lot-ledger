@@ -911,6 +911,20 @@ body.is-not-power-user .power-user-only {
     0 0 0 1px rgba(201, 162, 79, 0.35);
 }
 
+/* ⛔ B.1.3 (2026-07-15 coder spec) — MIXED DURABILITY MUST BE VISIBLE. The
+   panel-level .ai-mode-active gold above says "AI mode is on"; this extends
+   the SAME gold language down to the seven specific lens inputs (six band
+   boxes + the sort <select>) so a user can tell, at a glance, WHICH boxes in
+   this card are the ephemeral lens (vanish on AI-off/reload) vs. which are
+   real persisting filters (status/price/neighborhood) sitting right next to
+   them. Toggled in _renderAiBar (map.js:~15984), gated on _activeView being
+   arv/nbv — band edits on Final are real edits and must not look ephemeral. */
+.ai-lens-active {
+  border-color: var(--gold) !important;
+  background: rgba(201, 162, 79, 0.14) !important;
+  box-shadow: 0 0 0 1px rgba(201, 162, 79, 0.4);
+}
+
 /* Tier 1 fact-filter toggles (2026-07-15 coder spec) — matches the existing
    .filter-row checkbox styling (accent-color: gold, 14px) rather than
    inventing a new checkbox look; laid out inline since there's no

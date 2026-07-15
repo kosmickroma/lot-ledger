@@ -131,13 +131,22 @@
 
     function computeArvDraft(allComps) {
       if (allComps.length === 0) {
-        return { value: null, label: "Keep comps to draft a value", basis: "none", mathComps: [], excludedComps: [], keptCount: 0 };
+        return { value: null, label: "Keep comps to draft a value", basis: "none", mathComps: [], excludedComps: [], keptCount: 0, poolCount: 0 };
       }
       const kept = allComps.filter((c) => c.user_rating === "good");
       if (kept.length === 1) {
-        return { value: null, label: "1 kept — keep another to draft ARV", basis: "kept", mathComps: [], excludedComps: [], keptCount: 1 };
+        return { value: null, label: "1 kept — keep another to draft ARV", basis: "kept", mathComps: [], excludedComps: [], keptCount: 1, poolCount: 1 };
       }
-      const basisComps = kept.length >= MEDIAN_MIN_KEPT ? kept : allComps;
+      // ⛔ PART F (2026-07-15 coder spec) -- the no/one-kept "pool" basis must
+      // match the sidebar LIST, which hides bad-rated comps entirely
+      // (map.js:~8967, `visibleInList = displayComps.filter(c => c?.user_rating !== "bad")`).
+      // Without this, a comp the user explicitly rated BAD could still enter
+      // the median the user isn't looking at -- the same "signed from
+      // something you're not looking at" shape as the $7.6M bug, on the
+      // rating axis instead of the filter axis. `kept` above never needs this
+      // (it already requires === "good"), so this only changes the fallback.
+      const poolComps = allComps.filter((c) => c.user_rating !== "bad");
+      const basisComps = kept.length >= MEDIAN_MIN_KEPT ? kept : poolComps;
       const basis = kept.length >= MEDIAN_MIN_KEPT ? "kept" : "pool";
       const mathComps = basisComps.filter(isMathEligible);
       const excludedComps = basisComps.filter((c) => !isMathEligible(c));
@@ -145,7 +154,7 @@
         return {
           value: null,
           label: `${basisComps.length} ${basis === "kept" ? "kept" : "visible"} comp${basisComps.length === 1 ? "" : "s"}, all excluded from the math`,
-          basis, mathComps: [], excludedComps, keptCount: kept.length,
+          basis, mathComps: [], excludedComps, keptCount: kept.length, poolCount: basisComps.length,
         };
       }
       const { value, midIdx } = median(mathComps.map((c) => c.price));
@@ -154,12 +163,19 @@
         : `median of ${basisComps.length} visible comps: ${fmt(value)}`;
       const sorted = mathComps.slice().sort((a, b) => a.price - b.price);
       const highlightKeys = midIdx.map((i) => sorted[i].comp_address_key);
-      return { value, label, basis, mathComps: sorted, excludedComps, keptCount: kept.length, highlightKeys };
+      // ⛔ PART C (2026-07-15 coder spec) -- poolCount is the "N" in "median
+      // of N" (basisComps.length, not mathComps.length -- excluded-from-math
+      // comps are still part of the basis being described, just not the
+      // arithmetic). NOT free: this is a NEW field on the returned object,
+      // the local basisComps.length would otherwise never leave this
+      // function. renderAcceptBar (value-drafts.js:~296) reads it so a
+      // one-comp median reads as a median, never hidden as a bare number.
+      return { value, label, basis, mathComps: sorted, excludedComps, keptCount: kept.length, poolCount: basisComps.length, highlightKeys };
     }
 
     function computeNbvDraft(allComps) {
       if (allComps.length === 0) {
-        return { value: null, label: "Keep comps to draft a value", basis: "none", mathComps: [], excludedComps: [], keptCount: 0 };
+        return { value: null, label: "Keep comps to draft a value", basis: "none", mathComps: [], excludedComps: [], keptCount: 0, poolCount: 0 };
       }
       const kept = allComps.filter((c) => c.user_rating === "good");
       if (kept.length >= 1) {
@@ -169,20 +185,31 @@
           return {
             value: null,
             label: `${kept.length} kept comp${kept.length === 1 ? "" : "s"}, all excluded from the math`,
-            basis: "kept", mathComps: [], excludedComps, keptCount: kept.length,
+            basis: "kept", mathComps: [], excludedComps, keptCount: kept.length, poolCount: kept.length,
           };
         }
         const ceiling = mathComps.slice().sort((a, b) => b.price - a.price)[0];
+        // ⛔ PART C (2026-07-15 coder spec) — poolCount is the "N" in "top of
+        // N kept comps". `kept.length` is already local to this branch (the
+        // MAX-PICK basis, not a statistic) — one new field on the returned
+        // object, not new math, so renderAcceptBar can say how thin this
+        // ceiling-pick's pool was without recomputing it.
         return {
           value: ceiling.price,
           label: "your kept ceiling comp: " + fmt(ceiling.price),
-          basis: "kept", mathComps: [ceiling], excludedComps, keptCount: kept.length,
+          basis: "kept", mathComps: [ceiling], excludedComps, keptCount: kept.length, poolCount: kept.length,
           highlightKeys: [ceiling.comp_address_key],
         };
       }
-      const pool = allComps.filter((c) => Number.isFinite(c.year_built) && c.year_built >= NEW_BUILD_MIN_YEAR);
+      // ⛔ PART F (2026-07-15 coder spec) -- the no-keeps ceiling pool must
+      // match the sidebar LIST, which hides bad-rated comps entirely
+      // (map.js:~8967). Without `user_rating !== "bad"` here, a comp the
+      // user explicitly rejected could still BE the max-picked NBV number --
+      // the exact "$7.6M signed from something not on screen" shape, just
+      // triggered by a rating instead of a filter gap.
+      const pool = allComps.filter((c) => c.user_rating !== "bad" && Number.isFinite(c.year_built) && c.year_built >= NEW_BUILD_MIN_YEAR);
       if (pool.length === 0) {
-        return { value: null, label: "no new-build sale visible — keep one to draft NBV", basis: "pool", mathComps: [], excludedComps: [], keptCount: 0 };
+        return { value: null, label: "no new-build sale visible — keep one to draft NBV", basis: "pool", mathComps: [], excludedComps: [], keptCount: 0, poolCount: 0 };
       }
       const mathComps = pool.filter(isMathEligible);
       const excludedComps = pool.filter((c) => !isMathEligible(c));
@@ -190,14 +217,14 @@
         return {
           value: null,
           label: `${pool.length} new-build sale${pool.length === 1 ? "" : "s"} visible, all excluded from the math`,
-          basis: "pool", mathComps: [], excludedComps, keptCount: 0,
+          basis: "pool", mathComps: [], excludedComps, keptCount: 0, poolCount: pool.length,
         };
       }
       const ceiling = mathComps.slice().sort((a, b) => b.price - a.price)[0];
       return {
         value: ceiling.price,
         label: "top new-build sale visible: " + fmt(ceiling.price),
-        basis: "pool", mathComps: [ceiling], excludedComps, keptCount: 0,
+        basis: "pool", mathComps: [ceiling], excludedComps, keptCount: 0, poolCount: pool.length,
         highlightKeys: [ceiling.comp_address_key],
       };
     }
@@ -271,6 +298,27 @@
       return bar;
     }
 
+    // ⛔ PART C (2026-07-15 coder spec) — the same incident that produced the
+    // $7.6M bug also silently signed an ARV that was a "median" of ONE comp.
+    // Before Accept, the user must see how THIN each draft is, beside the
+    // number itself, not buried behind the "?" (which many users will never
+    // click) -- a one-comp "median" reading as a median is the exact trap
+    // that started this. Derives its phrase from `poolCount` (the field
+    // computeArvDraft/computeNbvDraft now return, added for exactly this —
+    // see those functions) plus `basis`, rather than parsing the (differently
+    // worded, more verbose) `label` string the derivation modal already uses.
+    function basisPhrase(fieldKey, draft) {
+      const n = draft.poolCount;
+      const noun = n === 1 ? "comp" : "comps";
+      if (fieldKey === "arv") {
+        return draft.basis === "kept" ? `median of ${n} kept ${noun}` : `median of ${n} visible ${noun}`;
+      }
+      // nbv
+      return draft.basis === "kept"
+        ? `top of ${n} kept ${noun}`
+        : `top of ${n} new-build${n === 1 ? "" : "s"}`;
+    }
+
     function renderAcceptBar() {
       const bar = ensureAcceptBar();
       if (!bar) return;
@@ -289,9 +337,15 @@
       // Each value carries its own "?" -- that opens the derivation panel, which is
       // the whole point of the feature: he has to be able to see the rule to argue
       // with it. Everything else about the per-field chips is gone.
+      //
+      // ⛔ PART C -- the basis phrase (median of N / top of N) sits right next to
+      // the number, ALWAYS rendered, never conditional on anything the user has
+      // to click or hover for. A one-comp draft says "median of 1 comp" in the
+      // same breath as the dollar figure.
       const vals = live.map((f) => {
         const d = fieldState[f].draft;
         return `<span class="vd-accept-val">${f.toUpperCase()} ${esc(fmt(d.value))}` +
+               `<span class="vd-accept-basis">${esc(basisPhrase(f, d))}</span>` +
                `<button type="button" class="vd-explain" data-field="${f}" ` +
                `title="How did it get this?" aria-label="How did it get this?">?</button></span>`;
       }).join('<span class="vd-accept-sep">·</span>');
@@ -533,9 +587,22 @@
 
         // BOTH drafts always compute. The stored values are per-AREA and identical
         // on every tab -- making the user switch views to draft one of them would be
-        // nonsense. The $14.9M bug was never about which view was active; it was
-        // __valueDraftsViewComps falling back to NO filters for a view that had
-        // never been opened. Fixed at the source (map.js).
+        // nonsense.
+        //
+        // ⛔ CORRECTED (Part E, 2026-07-15 coder spec): this comment used to read
+        // "The $14.9M bug was never about which view was active" -- true for THAT
+        // bug (it was __valueDraftsViewComps falling back to NO filters for a
+        // never-opened view), but the $7.6M bug that prompted this spec is
+        // EXACTLY a which-view-was-active divergence: the inactive view's draft
+        // ran on user-truth filters with AI mode's six bands stripped out
+        // (map.js's captureFilterState() deliberately keeps them out of
+        // persistence), grabbing a comp neither screen showed. Part A fixes it at
+        // the source -- __valueDraftsViewComps now applies the view's own
+        // _aiOverlay bands to its LOCAL fstate before filtering, ephemerally, so
+        // this function keeps receiving exactly the comps the corresponding
+        // screen would show, active view or not. This function itself has no
+        // view awareness and needs none -- it only ever sees the comp list it's
+        // handed.
         const draft = fieldKey === "arv" ? computeArvDraft(view.comps) : computeNbvDraft(view.comps);
         fs.draft = draft;
         fs.ratings = newMap;

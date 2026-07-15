@@ -67,6 +67,20 @@
 
 .vd-accept-sep { opacity: 0.45; }
 
+/* Part C (2026-07-15 coder spec) -- the draft's basis (median of N / top of
+   N), rendered ALWAYS beside the number, never hidden behind the "?". A
+   one-comp "median" must read as a median -- that's the whole point. The
+   "·" is CSS content, not HTML, so basisPhrase() stays plain text. */
+.vd-accept-basis {
+  opacity: 0.7;
+  font-style: normal;
+}
+
+.vd-accept-basis::before {
+  content: "· ";
+  opacity: 0.6;
+}
+
 /* The "?" — opens the derivation panel. This is the whole point of the feature:
    he has to be able to SEE the rule in order to argue with it. */
 .vd-explain {

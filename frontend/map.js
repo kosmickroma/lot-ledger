@@ -8515,8 +8515,16 @@ function _applyAiOverlayToDom(view) {
   set("prop-year-max", overlay.yearMax);
   propelioFilterState = readPropelioFiltersFromUI();
   propelioCompSortMode = overlay.sortMode;
+  // ⛔ B.1.1 (2026-07-15 coder spec) — read `overlay.sortMode`, NOT the
+  // AI_FACT_SORT_MODE constant. Under Part B, sort is the 7th EDITABLE lens
+  // field: a sort change writes `_aiOverlay[_activeView].sortMode` directly
+  // (map.js:~9975), so it can hold something OTHER than the sentinel after a
+  // tweak. Hardcoding the constant here would silently snap a tweaked sort
+  // back to "ai_fact" on every view-switch repaint -- passing acceptance
+  // item 5 (tweak survives a round-trip) for six fields and failing it
+  // silently for the seventh.
   const sortEl = document.getElementById("propelio-comp-sort");
-  if (sortEl) sortEl.value = AI_FACT_SORT_MODE;
+  if (sortEl) sortEl.value = overlay.sortMode == null ? "" : String(overlay.sortMode);
 }
 
 // Turning AI mode ON (§2.1). Snapshots both views' real state FIRST (so Hole
@@ -8581,47 +8589,60 @@ function _resetAiMode() {
   _factFilters = { subdivision: false, isd: false };
 }
 
-// Manual edit of a field AI mode wrote (§2.3, §2.5 Hole B). The user has
-// taken the wheel: their edit stands, but the OTHER AI-written fields must
-// not survive into the user's real keys. The naive "drop the mode, keep the
-// edit" leaves the other boxes holding AI's values with the key-building
-// prefix now real/flat -- the very next autosave diffs them against the
-// pre-AI snapshot and PATCHes every AI-differing field into the user's real
-// filters. Exact 4-step sequence, in this order, or it reproduces the bug
-// it exists to fix.
-function _dropAiModeForEdit(editedFieldId) {
+// ⛔ PART B (2026-07-15 coder spec) — editing a band TWEAKS THE LENS, it does
+// not discard it. REPLACES the old _dropAiModeForEdit ("drop mode, keep this
+// one edit, revert the other five") entirely -- that behavior was itself
+// Problem 2 in the spec: editing any AI-painted field silently reverted the
+// other five bands to whatever pre-AI state the user had, so "AI gave me
+// sqft [4378, 6568], let me widen the max to 8000" actually discarded the
+// other five bands out from under the user. KK's stated intent: AI fills the
+// bands, you TWEAK them, and only turning AI mode fully OFF restores your
+// real filters -- symmetric on/off, no mid-flight drop-outs.
+//
+// So a band edit now writes straight into `_aiOverlay[_activeView]` -- the
+// SAME ephemeral, never-persisted lens object `_applyAiOverlayToDom` paints
+// from (map.js:8506) and `__valueDraftsViewComps` reads from for Part A
+// (map.js:~14570). Nothing routes through `_aiModeUserSnapshot` (the user's
+// REAL pre-AI filters) here -- that snapshot is untouched by a tweak and is
+// exactly what OFF restores (acceptance item 6). Nothing persists: `captureFilterState()`
+// never sees `_aiOverlay` at all (it substitutes from `_aiModeUserSnapshot`,
+// map.js:1972), so a tweak cannot produce a diff, cannot PATCH, and §1's
+// invariant holds after a tweak by the SAME machinery that already made it
+// hold before one -- no new persistence code (see the spec's Buildability
+// note).
+//
+// The six numeric band fields' DOM ids, mapped to their _aiOverlay key and
+// the SAME reader `readPropelioFiltersFromUI()` already uses for each
+// (map.js:~8689-8694) -- one small object, not a second hardcoded id list;
+// B.1.3's visual cue (map.js:~15984) derives its selector from these same
+// keys so the "which fields are the lens" answer can never drift between
+// the write path and the display cue.
+const _AI_LENS_FIELD_READERS = {
+  "prop-lot-min": { key: "lotMin", read: _propNumIn },
+  "prop-lot-max": { key: "lotMax", read: _propNumIn },
+  "prop-sqft-min": { key: "sqftMin", read: _propIntIn },
+  "prop-sqft-max": { key: "sqftMax", read: _propIntIn },
+  "prop-year-min": { key: "yearMin", read: _propIntIn },
+  "prop-year-max": { key: "yearMax", read: _propIntIn },
+};
+
+function _updateAiLensField(fieldId) {
   if (!_aiModeOn) return;
-  if (_activeView !== "arv" && _activeView !== "nbv") return;   // AI never wrote Final's fields
-  const editedEl = document.getElementById(editedFieldId);
-  const editedValue = editedEl ? editedEl.value : "";
-  const real = _aiModeUserSnapshot[_activeView];
-  // 1. Restore the user's real filters to the UI (their untouched snapshot).
-  if (real && real.propelio) applyPropelioFilterStateToUI(real.propelio);
-  // 2. Re-apply the single edited field on top -- the user's edit wins.
-  if (editedEl) editedEl.value = editedValue;
-  propelioFilterState = readPropelioFiltersFromUI();
-  // sortMode lives outside propelioFilterState (captureFilterState spreads it
-  // in from propelioCompSortMode separately), so readPropelioFiltersFromUI()
-  // above cannot pick it up -- sync it explicitly. A no-op for the other six
-  // fields (the dropdown wasn't touched, so this just reaffirms what step 1
-  // already restored).
-  const _sortEl = document.getElementById("propelio-comp-sort");
-  if (_sortEl) propelioCompSortMode = _sortEl.value || "price_desc";
-  // 3. Rebaseline to the user's REAL, PRE-EDIT state -- NOT captureFilterState().
-  // captureFilterState() here would snapshot the UI *including* the fresh edit,
-  // so step 4's diff would find current == snapshot, emit ZERO fields, and the
-  // user's edit would never be PATCHed at all -- present on screen, absent from
-  // the DB, gone on reload. The snapshot must equal what the DB actually holds
-  // for the user's real keys (their pre-AI filters), so the edit shows up as
-  // exactly one diff and lands in their real namespace. Everything AI wrote was
-  // already restored away in step 1, so it cannot diff.
-  _filterSaveLastSnapshot = real ? JSON.parse(JSON.stringify(real)) : captureFilterState();
-  // 4. THEN drop the mode and apply -- key-building is real/flat again, so
-  // this PATCHes exactly the user's edit, nothing else.
-  _aiModeOn = false;
-  _aiOverlay = { arv: null, nbv: null };
-  _aiModeUserSnapshot = { arv: null, nbv: null };
-  _renderAiBar();
+  // ⛔ B.1.2 -- the export-view guard _dropAiModeForEdit used to carry.
+  // `_aiOverlay.export` does not exist (AI never touches Final, map.js:8407)
+  // -- a band edit while looking at Final is a REAL edit that must persist
+  // normally through the ordinary debounced-apply/save path, not a lens
+  // write that this function would otherwise silently swallow.
+  if (_activeView !== "arv" && _activeView !== "nbv") return;
+  const spec = _AI_LENS_FIELD_READERS[fieldId];
+  const overlay = _aiOverlay[_activeView];
+  if (!spec || !overlay) return;
+  overlay[spec.key] = spec.read(fieldId);
+  // Recompute display against the tweaked lens immediately -- the parallel
+  // debounced listener (map.js:~9902) will also fire and re-read the DOM
+  // into propelioFilterState, but that is 150ms later and is about the
+  // user's REAL state, not this lens write; don't wait on it for the boxes
+  // the user is looking at right now.
   applyPropelioClientFilters();
 }
 
@@ -9922,8 +9943,8 @@ let propelioStickyBtn = null;
   }
   // Tier 1 fact-filter toggles (2026-07-15 coder spec) — direct apply like
   // OAC/status above, no debounce (checkbox click, not a typed range).
-  // Deliberately NOT routed through _dropAiModeForEdit (§5): these are not
-  // AI-overlay fields, so checking one must not drop AI mode.
+  // Deliberately NOT routed through _updateAiLensField (Part B): these are not
+  // AI-overlay fields, so checking one must not touch the lens.
   const subFilterBox = document.getElementById("ai-fact-filter-subdivision");
   if (subFilterBox) {
     subFilterBox.addEventListener("change", () => {
@@ -9938,12 +9959,16 @@ let propelioStickyBtn = null;
       applyPropelioClientFilters();
     });
   }
-  // Manual edit of ANY field AI mode may have written → drop the mode via
-  // the exact 4-step Hole-B sequence (§2.5), never the naive "just clear the
-  // flag" — see _dropAiModeForEdit's own comment for why.
-  ["prop-lot-min", "prop-lot-max", "prop-sqft-min", "prop-sqft-max", "prop-year-min", "prop-year-max"].forEach((id) => {
+  // ⛔ PART B (2026-07-15 coder spec) — a manual edit of ANY field AI mode
+  // painted TWEAKS THE LENS (_updateAiLensField, map.js:~8629), it does not
+  // drop the mode or discard the other five bands. No-op while AI mode is
+  // off (the function's own guard) or on Final (the export-view guard) —
+  // in both of those cases this listener does nothing and the parallel
+  // applyPropelioClientFiltersDebounced listener (registered on these same
+  // ids above) handles the edit exactly as it always has.
+  Object.keys(_AI_LENS_FIELD_READERS).forEach((id) => {
     const el = document.getElementById(id);
-    if (el) el.addEventListener("input", () => _dropAiModeForEdit(id));
+    if (el) el.addEventListener("input", () => _updateAiLensField(id));
   });
   ["sold", "active", "pending"].forEach((status) => {
     const mapBox = document.getElementById(`prop-status-${status}`);
@@ -9968,11 +9993,24 @@ let propelioStickyBtn = null;
   if (sortEl) {
     sortEl.value = propelioCompSortMode;
     sortEl.addEventListener("change", () => {
-      // sortMode is the 7th AI overlay field (2026-07-14 Task C) -- a manual
-      // sort change during AI mode is a Hole-B edit exactly like typing into
-      // one of the six numeric fields: the user's choice wins, AI mode drops.
-      if (_aiModeOn) {
-        _dropAiModeForEdit("propelio-comp-sort");
+      // ⛔ B.1.1 (2026-07-15 coder spec) -- sortMode is the 7th LENS field,
+      // consistent with the other six (_AI_OVERLAY_FIELDS, map.js:8481). A
+      // sort change during AI mode is now a TWEAK: it writes
+      // _aiOverlay[_activeView].sortMode directly and STAYS in AI mode --
+      // it does not drop the mode the way it used to (the old
+      // _dropAiModeForEdit is fully deleted, map.js:~8592; if this "should"
+      // revert to a drop, it shouldn't — that behavior was Problem 2 in the
+      // spec). Export-view guard mirrors _updateAiLensField's: _aiOverlay.export
+      // does not exist, so a sort change on Final is a real, persisting edit.
+      if (_aiModeOn && (_activeView === "arv" || _activeView === "nbv")) {
+        _aiOverlay[_activeView].sortMode = sortEl.value;
+        propelioCompSortMode = sortEl.value || "price_desc";
+        applyPropelioClientFilters();
+        // No explicit _filterSaveQueueSave() here -- applyPropelioClientFilters()
+        // still calls it internally (map.js:~9006), but captureFilterState()'s
+        // substitution loop (map.js:1972, keyed off _AI_OVERLAY_FIELDS which
+        // already includes "sortMode") erases this field before any diff runs,
+        // so it is structurally a no-op. Ephemeral, same as the six bands.
         return;
       }
       propelioCompSortMode = sortEl.value || "price_desc";
@@ -14540,16 +14578,45 @@ function __valueDraftsViewComps(view) {
     if (cached && cached.v && cached.propelio) {
       fstate = { ...DEFAULT_PROPELIO_FILTERS, ...cached.propelio };
     } else {
-      // This view has never been opened, so it has no filters of its own. When it
-      // IS opened, _setActiveView seeds it from the CURRENT view -- so that is what
-      // we mirror here.
+      // ⛔ A.1 (2026-07-15 coder spec, "the never-visited-view gap") — this
+      // view has never been opened, so it has no filters of its own. When it
+      // IS opened, _setActiveView seeds it -- so mirror THAT resolution
+      // exactly, via the shared _resolveViewFilterSeed helper (map.js:~15968),
+      // not the live active-view state.
       //
-      // The old code fell back to DEFAULT_PROPELIO_FILTERS (i.e. NO filters at all).
-      // That is how the NBV chip reported $14.9M while a $2M max-price filter was
-      // active: it was drafting from an unfiltered pool the user could not see.
-      // Never fall back to defaults -- fall back to what the user is looking at.
-      fstate = { ...propelioFilterState };
+      // The old code before THIS fix fell back to `{...propelioFilterState}`
+      // -- the ACTIVE view's live state. That looks plausible (it's real,
+      // current data) but it is the WRONG resolution: a real switch seeds
+      // from the ARV CACHE (year-stripped for NBV), not from whatever the
+      // active view's live DOM currently holds. The two diverge the moment
+      // the user edits a non-band filter (e.g. unchecks statusActive) without
+      // ever switching views -- the draft pool would exclude active comps
+      // while the eventual NBV screen (seeded fresh from the untouched ARV
+      // cache) would include them. Same "draft != screen" shape as the
+      // $7.6M bug, just on the non-band axis instead of the band axis.
+      //
+      // (The code BEFORE that fell back to DEFAULT_PROPELIO_FILTERS, i.e. NO
+      // filters at all -- how the NBV chip once reported $14.9M while a $2M
+      // max-price filter was active. Never fall back to defaults either.)
+      fstate = { ...DEFAULT_PROPELIO_FILTERS, ..._resolveViewFilterSeed(view).propelio };
     }
+  }
+  // ⛔ PART A (2026-07-15 coder spec, the $7.6M bug) — apply AI mode's bands
+  // to the draft's fstate EPHEMERALLY, at compute time only. _aiOverlay[view]
+  // is the same never-persisted lens _applyAiOverlayToDom paints to the DOM
+  // (map.js:8507) -- reusing it here (instead of re-deriving AI's picks a
+  // second way) is what keeps the draft pool and the screen the same pool
+  // under AI mode. _buildAiOverlayFields returns all seven keys with explicit
+  // nulls, so this spread REPLACES the whole band set on the local `fstate`
+  // -- an inherited ARV yearMax on the NBV draft is nulled exactly as a real
+  // view switch would clear the box.
+  //
+  // ⛔ This mutates the LOCAL `fstate` object ONLY (spread into a fresh
+  // object, never `_viewFilterCache`/`propelioFilterState`/anything
+  // persisted -- `_aiOverlay` itself is already ephemeral and never
+  // captured/diffed/persisted, see map.js:8407).
+  if (_aiModeOn && (view === "arv" || view === "nbv") && _aiOverlay[view]) {
+    fstate = { ...fstate, ..._aiOverlay[view] };
   }
   const nbhdNorm = normalizeNbhd(fstate.neighborhood);
   // Tier 1 fact-filter toggles (§3.2, 2026-07-15 coder spec) — this function
@@ -14593,12 +14660,18 @@ window.__valueDraftsGetContext = () => ({
   // active when a number was drafted, without the record holding a live
   // reference into ephemeral in-memory state.
   factFilters: { ..._factFilters },
-  // Which view the user is actually LOOKING at. Only the active view's filters are
-  // live -- _viewFilterCache is written on view SWITCH (map.js:15321), so the
-  // inactive view's filters are stale (and, if that view was never opened, null ->
-  // DEFAULTS -> no price cap at all). Drafting from that is not WYSIWYG, it's a
-  // number computed from filters the user cannot see. So value-drafts.js only
-  // drafts the ACTIVE view and tells the user to switch for the other.
+  // Which view the user is actually LOOKING at (telemetry/UI context — NOT a
+  // gate on which view gets drafted). ⛔ CORRECTED (Part E, 2026-07-15 coder
+  // spec): this comment used to claim value-drafts.js only drafts the
+  // ACTIVE view — stale since 8f50c15 ("accept-all drafts both"), and it
+  // nearly misled the $7.6M regression hunt. BOTH views draft
+  // unconditionally below, always — making the user switch tabs to draft
+  // one of two stored values that are per-AREA and identical on every tab
+  // would be nonsense. __valueDraftsViewComps resolves the inactive/never-
+  // visited view's filters via _resolveViewFilterSeed (map.js:~16016) — the
+  // SAME resolution a real _setActiveView switch would use, never the live
+  // active-view state and never bare defaults — so the draft pool and the
+  // eventual on-screen pool can't diverge (A.1).
   activeView: _activeView,
   arv: { comps: __valueDraftsViewComps("arv") },
   nbv: { comps: __valueDraftsViewComps("nbv") },
@@ -15932,6 +16005,25 @@ function _renderAiBar() {
   // user's real filters.
   const filterCard = document.getElementById("propelio-filters");
   if (filterCard) filterCard.classList.toggle("ai-mode-active", show && _aiModeOn);
+  // ⛔ B.1.3 (2026-07-15 coder spec) -- MIXED DURABILITY MUST BE VISIBLE.
+  // Under Part B, the seven lens fields (six bands + sort) are EPHEMERAL
+  // (vanish on AI-off/reload) while every other box in the same card
+  // (status, price, neighborhood) persists normally -- adjacent boxes with
+  // opposite durability and, before this, no cue telling them apart. Extends
+  // the existing .ai-mode-active gold language (above) down to the specific
+  // seven inputs, gated on _activeView too: on Final, these same DOM boxes
+  // hold REAL persisting edits (AI does not touch Final, _aiOverlay.export
+  // does not exist), so the lens treatment must NOT show there even though
+  // AI mode itself can still be on. One selector, keyed off
+  // _AI_LENS_FIELD_READERS' own ids (map.js:~8620) -- not a second hardcoded
+  // id list -- so this can never drift from B.1.2's field set.
+  const _lensActive = show && _aiModeOn && (_activeView === "arv" || _activeView === "nbv");
+  Object.keys(_AI_LENS_FIELD_READERS).forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.classList.toggle("ai-lens-active", _lensActive);
+  });
+  const sortSelEl = document.getElementById("propelio-comp-sort");
+  if (sortSelEl) sortSelEl.classList.toggle("ai-lens-active", _lensActive);
   // Tier 1 fact-filter toggles (§4/§6, 2026-07-15 coder spec) -- paint only;
   // the underlying _factFilters state is cleared at the actual transitions
   // (_disableAiMode, _resetAiMode, _populateSubjectPropertyCard), not here.
@@ -15963,6 +16055,45 @@ function _renderAiBar() {
     "Turn on AI mode to filter by school district",
     "Subject has no school district on record",
   );
+}
+
+// ⛔ A.1 (2026-07-15 coder spec, "the never-visited-view gap") — the ONE
+// resolution for "what would view's filters be if it were opened right now,"
+// shared by _setActiveView's real seed (below) AND __valueDraftsViewComps's
+// dry-run fallback (map.js:~14538). Read-only: never writes _viewFilterCache
+// itself — the caller decides whether to persist the result (a real switch
+// does; a draft computation must not).
+//
+// Exact fallback order, mirrored from _setActiveView pre-refactor: this
+// view's own cache if it's ever been visited -> else seed from the REAL ARV
+// cache (year-gate stripped for NBV, since yearMax on ARV means "old house"
+// and yearMin on NBV means "new build" -- the same meaning-inverts note as
+// the seed block below) -> else app defaults. Never the LIVE DOM/
+// propelioFilterState — that was the bug: __valueDraftsViewComps used to
+// fall back to `{...propelioFilterState}` (the ACTIVE view's live state) for
+// a never-visited view, which silently diverges from what a real switch
+// would seed the instant the user edits a NON-band filter (e.g. unchecks
+// statusActive) without ever switching views. Two call sites resolving this
+// differently is exactly the shape of the $7.6M bug, just on the non-band
+// axis — hence one function, not two copies.
+function _resolveViewFilterSeed(view) {
+  const cached = _viewFilterCache[view];
+  if (cached && cached.v) return cached;
+  if (view === "arv") {
+    // ARV is the seed SOURCE for the other views — it has nothing to seed
+    // FROM. A never-visited ARV (shouldn't happen in practice; ARV loads
+    // first) falls straight to defaults, same as _setActiveView always did.
+    return { v: 1, checkboxes: { ...DEFAULT_FILTERS }, numeric: {}, sold: {}, comp: {}, propelio: {} };
+  }
+  const arv = _viewFilterCache.arv;
+  const seed = (arv && arv.v)
+    ? JSON.parse(JSON.stringify(arv))
+    : { v: 1, checkboxes: { ...DEFAULT_FILTERS }, numeric: {}, sold: {}, comp: {}, propelio: {} };
+  if (view === "nbv" && seed.propelio) {
+    delete seed.propelio.yearMin;
+    delete seed.propelio.yearMax;
+  }
+  return seed;
 }
 
 function _setActiveView(view) {
@@ -16000,28 +16131,20 @@ function _setActiveView(view) {
     // on, since AI does not touch Final. This falls out for free now:
     // _viewFilterCache is always the real cache, so this branch cannot see
     // AI's picks regardless of which view AI mode is currently painting.
-    const _arv = _viewFilterCache.arv;
-    _cached = (_arv && _arv.v)
-      ? JSON.parse(JSON.stringify(_arv))
-      : { v: 1, checkboxes: { ...DEFAULT_FILTERS }, numeric: {}, sold: {}, comp: {}, propelio: {} };
-    // NBV must NOT inherit ARV's year gate. The year is the one filter whose
-    // MEANING INVERTS between the views: on ARV, yearMax = old houses (what
-    // you'd flip); on NBV, yearMin = new builds (what you'd construct). Seeding
-    // ARV's yearMax onto NBV and then letting auto-match add yearMin leaves BOTH
-    // bounds at 2008 — a pool of houses built in exactly one year — and the NBV
-    // draft is a PICK, so it still returns a confident, wrong number. NBV starts
-    // clean on year and fills its own. (Export is a review of the ARV set and
-    // legitimately inherits it.)
-    if (view === "nbv" && _cached.propelio) {
-      delete _cached.propelio.yearMin;
-      delete _cached.propelio.yearMax;
-    }
+    //
+    // ⛔ A.1 (2026-07-15 coder spec) — this resolution is now shared with
+    // __valueDraftsViewComps's never-visited-view fallback via
+    // _resolveViewFilterSeed (map.js:~15968), so the real switch and the
+    // draft's dry-run of "what if I switched" can never drift apart. See
+    // that helper's comment for the year-gate note (NBV must not inherit
+    // ARV's yearMax) and the bug this closes.
+    _cached = _resolveViewFilterSeed(view);
     _viewFilterCache[view] = _cached;
     _seeded = true;
   }
   const _toRestore = (_cached && _cached.v)
     ? _cached
-    : { v: 1, checkboxes: { ...DEFAULT_FILTERS }, numeric: {}, sold: {}, comp: {}, propelio: {} };
+    : _resolveViewFilterSeed(view);
   restoreFilterState(_toRestore);
   // AI MODE FIX §2.1 — paint the overlay AFTER restoring the user's real
   // cached state, never before. Export has no overlay (AI does not touch
