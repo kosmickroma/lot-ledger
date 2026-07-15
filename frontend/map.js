@@ -8944,6 +8944,8 @@ function _compFacts(comp) {
 // is an internal key, not a district -- printing it as one is a fake fact,
 // so those two counties get the generic phrasing instead. Single source of
 // truth for the NAME/CODE split, mirroring the backend's own per-county table.
+// ai-card.js keeps its own copy (ISD_NAME_FORM_PREFIXES) since it has no
+// import from this file -- keep both in sync when a county is added.
 const _ISD_NAME_FORM_COUNTIES = new Set(["dcad", "denton"]);
 
 function _isdDisplayName(isdKey) {
@@ -14381,7 +14383,7 @@ window.__aiGetVisibleCompContext = () => ({
     ? {
         cad_subdivision: _lastSubjectProps.cad_subdivision || null,
         isd: _lastSubjectProps.isd || null,
-        county: (_lastSubjectProps.source_county || _lastSubjectProps.county || null),
+        county: (_lastSubjectProps.source_county || null),   // same field _compFacts reads -- badges and scorecard must never disagree
       }
     : null,
   isAdmin: _isAdmin(),

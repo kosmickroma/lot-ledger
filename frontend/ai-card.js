@@ -42,7 +42,9 @@
     // carry only a numeric CODE, which is never a district name -- print
     // nothing for those and rely on the gold match indicator alone. Keyed
     // off the KEY's own prefix (never a county field), which is right for
-    // both a comp row and the subject in a cross-county drawn area.
+    // both a comp row and the subject in a cross-county drawn area. Mirrors
+    // map.js's _ISD_NAME_FORM_COUNTIES -- keep both in sync when a county
+    // is added (this file has no import from map.js, so it's a hand copy).
     const ISD_NAME_FORM_PREFIXES = new Set(["dcad", "denton"]);
 
     let state = "idle";        // idle | loading | error | done
