@@ -52,6 +52,9 @@ Thumbs.db
 # Build script checkpoint — local resume state, not for repo
 .build_checkpoint.json
 
+# Subagent-driven-development scratch state (progress ledger, task briefs)
+.superpowers/
+
 # PMTiles build artifacts — large binary files, never commit
 *.pmtiles
 *.mbtiles
