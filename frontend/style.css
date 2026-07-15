@@ -879,10 +879,6 @@ body.is-not-power-user .power-user-only {
   color: var(--text-main);
 }
 
-.ai-mode-toggle-icon {
-  font-size: 12px;
-}
-
 .ai-mode-toggle-dot {
   width: 6px;
   height: 6px;
@@ -913,6 +909,45 @@ body.is-not-power-user .power-user-only {
     inset 0 1px 0 rgba(255, 255, 255, 0.2),
     inset 0 -1px 0 rgba(255, 255, 255, 0.08),
     0 0 0 1px rgba(201, 162, 79, 0.35);
+}
+
+/* Tier 1 fact-filter toggles (2026-07-15 coder spec) — matches the existing
+   .filter-row checkbox styling (accent-color: gold, 14px) rather than
+   inventing a new checkbox look; laid out inline since there's no
+   swatch/count column here, just the AI-mode button's two lens toggles. */
+.ai-fact-filters {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.ai-fact-filter-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--text-soft);
+  cursor: pointer;
+  user-select: none;
+}
+
+.ai-fact-filter-row input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--gold);
+}
+
+.ai-fact-filter-row input[type="checkbox"]:disabled {
+  cursor: not-allowed;
+}
+
+/* JS toggles this class alongside the checkbox's own .disabled attribute
+   (map.js _renderAiBar) -- same pattern as .ai-mode-toggle-btn.active above,
+   not a :has() selector (unused elsewhere in this stylesheet). */
+.ai-fact-filter-row.is-disabled {
+  color: var(--text-muted);
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 /* Task C §C.2 (2026-07-14) — the fact count line. Quiet, not a callout: it's

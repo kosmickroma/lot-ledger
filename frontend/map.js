@@ -1411,10 +1411,34 @@ let _lastSubjectProps = null;
 
 function _populateSubjectPropertyCard(props, county) {
   _lastSubjectProps = props || null;
+  // Tier 1 fact-filter toggles (§5/§6, 2026-07-15 coder spec) -- a checked
+  // box is a claim about THIS subject's subdivision/ISD. The subject can
+  // change under it without a full _resetAiMode() (this function is the one
+  // funnel all three "subject goes null mid-session" sites route through --
+  // map.js:1262/1651/1669 below -- and also runs on every ordinary subject
+  // resolve), so re-check availability every time, not just at initial
+  // render. A null subject or one that simply lacks the fact both mean the
+  // same thing here: _compFacts would return null for every comp, and a
+  // still-checked box would silently blank the list instead of reading as
+  // "off." Uncheck + let _renderAiBar()'s disabled/title paint explain why.
+  let _factFiltersChanged = false;
+  if (_factFilters.subdivision && !(_lastSubjectProps && _lastSubjectProps.cad_subdivision)) {
+    _factFilters.subdivision = false;
+    _factFiltersChanged = true;
+  }
+  if (_factFilters.isd && !(_lastSubjectProps && _lastSubjectProps.isd)) {
+    _factFilters.isd = false;
+    _factFiltersChanged = true;
+  }
   // The AI-mode button's enabled/disabled state depends on the subject's dims
   // (no subject -> nothing to build a lot/sqft band from), so it has to be
   // re-evaluated the moment the subject changes under it.
   try { _renderAiBar(); } catch { /* bar not mounted yet — harmless */ }
+  // A toggle just got force-cleared above -- the visible set widens back out
+  // from under it, so the list/map/draft need to actually repaint, not just
+  // the checkbox. Safe pre-comp-load (applyPropelioClientFilters no-ops when
+  // window._propelioLast isn't populated yet).
+  if (_factFiltersChanged) { try { applyPropelioClientFilters(); } catch { /* comps not loaded yet — harmless */ } }
   // Deliberately NOT recomputed here on a target change (Task 4, 2026-07-14
   // AI bar spec — this was auto-match's job via _applyAutoMatchIfEnabled,
   // now removed). AI mode is pressed by a human; it does not silently
@@ -8534,6 +8558,11 @@ function _disableAiMode() {
   _aiModeOn = false;
   _aiOverlay = { arv: null, nbv: null };
   _aiModeUserSnapshot = { arv: null, nbv: null };
+  // §4 (2026-07-15 coder spec) -- the fact-filter toggles are AI-mode-only
+  // (badges/count-line explaining them are _aiModeOn-gated too); leaving
+  // one checked past AI-off would silently keep narrowing the real filters'
+  // output with no on-screen "why" left to explain it.
+  _factFilters = { subdivision: false, isd: false };
   if (real && real.propelio) applyPropelioFilterStateToUI(real.propelio);
   _renderAiBar();
   applyPropelioClientFilters();
@@ -8547,6 +8576,9 @@ function _resetAiMode() {
   _aiModeOn = false;
   _aiOverlay = { arv: null, nbv: null };
   _aiModeUserSnapshot = { arv: null, nbv: null };
+  // §5 -- a fact toggle checked against area A's subject must not silently
+  // re-aim at area B's the moment a different area/session loads.
+  _factFilters = { subdivision: false, isd: false };
 }
 
 // Manual edit of a field AI mode wrote (§2.3, §2.5 Hole B). The user has
@@ -8830,6 +8862,45 @@ function compPassesPropelioFilters(comp, filters, _nbhdNorm) {
 let _propelioFilterDebounceId = null;
 let propelioCompSortMode = "price_desc";
 
+// ── Tier 1 fact-filter toggles (2026-07-15 coder spec) ────────────────────
+// AI mode's lens, NOT a filter: "Subject's subdivision" / "Same school
+// district" narrow the visible comp set (and the ARV/NBV draft with it,
+// __valueDraftsViewComps below) while checked. EPHEMERAL by deliberate
+// exclusion, not by omission -- this lives in its own plain object, never
+// inside propelioFilterState / captureFilterState's output / any key
+// readPropelioFiltersFromUI() or a persist path touches. The app's own
+// gravity pulls every filter into the saved blob; this object is the one
+// thing structurally incapable of getting there. Cleared (not just
+// unchecked in the UI) at every place the subject/area context can change
+// out from under a checked box -- see _resetAiMode, _disableAiMode, and
+// _populateSubjectPropertyCard's null/no-fact guard.
+let _factFilters = { subdivision: false, isd: false };
+
+// Filters `comps` to those matching the subject on the ACTIVE fact-toggles.
+// Reuses _compFacts (county-guarded facts we already compute). null on either
+// side => not a confirmed match => excluded when that toggle is on.
+function _applyFactFilters(comps) {
+  if (!_aiModeOn || (!_factFilters.subdivision && !_factFilters.isd)) return comps;
+  return comps.filter((c) => {
+    const f = _compFacts(c);
+    if (_factFilters.subdivision && f.same_subdivision !== true) return false;
+    if (_factFilters.isd && f.same_isd !== true) return false;
+    return true;
+  });
+}
+
+// The reason a fact-toggle emptied the list, for the comp-list empty state
+// (§6 -- never a blank list under a checked box, which reads as broken).
+// Only ever consulted when the toggle-filtered set is strictly smaller than
+// the pre-toggle visible set (see applyPropelioClientFilters), so this never
+// overrides the plain "No comps to show." message for an unrelated empty
+// pull.
+function _factFilterEmptyMessage() {
+  const parts = [];
+  if (_factFilters.subdivision) parts.push("the subject's subdivision");
+  if (_factFilters.isd) parts.push("the subject's school district");
+  return parts.length ? `No comps in ${parts.join(" and ")}.` : "No comps to show.";
+}
 
 function applyPropelioClientFilters() {
   if (!window._propelioLast || !Array.isArray(window._propelioLast.comps)) {
@@ -8857,6 +8928,19 @@ function applyPropelioClientFilters() {
   // the `.bad-comp` class for visual de-emphasis but stays on the map).
   const _nbhdNorm = normalizeNbhd(propelioFilterState.neighborhood);
   const visibleOnMap = all.filter((c) => compPassesPropelioFilters(c, propelioFilterState, _nbhdNorm));
+  // AI module seam (read-only mirror of the VISIBLE set) — stashed BEFORE the
+  // fact-filter post-pass below, deliberately. ai-card.js's read derives its
+  // comp_keys from this exact array (ai-card.js:167); stashing the
+  // PRE-toggle set keeps that scope stable. Stashing the toggle-narrowed set
+  // instead would shrink the next re-read's comp_keys the moment a toggle is
+  // checked, destroying the very conditions being filtered on — the
+  // $14.9M-class bug __valueDraftsViewComps memorializes below.
+  window.__aiVisibleComps = visibleOnMap;
+  // Tier 1 fact-filter toggles (§3.2, 2026-07-15 coder spec) — the shared
+  // post-pass, applied AFTER the stash above. No-op (returns `visibleOnMap`
+  // unchanged) unless AI mode is on and a toggle is checked, so this is safe
+  // to apply unconditionally to every downstream consumer of the visible set.
+  const displayComps = _applyFactFilters(visibleOnMap);
   _updatePropelioStatusCounts();
   // Render-only dedup: collapse multi-status records on the same parcel
   // to only the highest-priority status (good-rated wins tie-break).
@@ -8864,15 +8948,25 @@ function applyPropelioClientFilters() {
   // user's actual OAC toggle state ("what would this status deliver right
   // now?"), while the OAC badge stays informational ("how many comps are
   // currently filtered out by OAC?"). See
-  // docs/propelio/STATUS_BADGE_OAC_AWARENESS_SPEC.md.
-  const visibleOnMapForRender = _dedupCompsForRender(visibleOnMap);
+  // docs/propelio/STATUS_BADGE_OAC_AWARENESS_SPEC.md. Deliberately NOT
+  // fact-toggle aware (§7) — those baselines call compPassesPropelioFilters
+  // directly, never _applyFactFilters, so "Sold 12" can outrun a 5-comp
+  // toggled list; accepted for Tier 1, flagged in the coder report.
+  const visibleOnMapForRender = _dedupCompsForRender(displayComps);
   _renderPropelioComps({ ...window._propelioLast, comps: visibleOnMapForRender });
   if (window._propelioLast) propelioCmaChip.setData(window._propelioLast);
-  // List view: hide bad-rated comps entirely from the sidebar list.
-  const visibleInList = visibleOnMap.filter((c) => c?.user_rating !== "bad");
-  renderPropelioCompList(visibleInList);
+  // List view: hide bad-rated comps entirely from the sidebar list. A
+  // toggle emptying the list gets an explicit reason (§6), never a blank
+  // "No comps to show." that reads as broken — only fires when the toggle
+  // is what shrank it, not on an unrelated empty pull.
+  const visibleInList = displayComps.filter((c) => c?.user_rating !== "bad");
+  const emptyMsg = (visibleOnMap.length > 0 && displayComps.length === 0)
+    ? _factFilterEmptyMessage()
+    : undefined;
+  renderPropelioCompList(visibleInList, emptyMsg);
   _renderAiFactCountLine(visibleInList);
-  // Update the card-head count chip
+  // Update the card-head count chip — reflects the toggles too (§7: the
+  // primary comp-count must be honest about what's actually on screen).
   const countEl = document.getElementById("propelio-filter-count");
   if (countEl) {
     countEl.textContent = visibleOnMapForRender.length === all.length
@@ -8881,12 +8975,14 @@ function applyPropelioClientFilters() {
   }
   // Good Comps section — sibling list inside #comps-list-block-body. Per
   // SAVED_AREA_GOOD_COMPS_BLOCK_SPEC.md v2 §Goal #7: always shows ALL good-
-  // rated comps in the workspace, IGNORING active filter chips. We read
-  // from the unfiltered `all` array (not visibleOnMap).
+  // rated comps in the workspace, IGNORING active filter chips (and, per
+  // Tier 1 §7, the fact toggles too — stated here so nobody "fixes" it). We
+  // read from the unfiltered `all` array (not visibleOnMap/displayComps).
   _renderGoodCompsSection();
   // v1 §2.1 — auto-save filter_state after propelio client filter apply.
+  // _factFilters never enters this save — it isn't part of propelioFilterState
+  // or any other object this function persists.
   _filterSaveQueueSave();
-  window.__aiVisibleComps = visibleOnMap;   // AI module seam (read-only mirror of the VISIBLE set)
 }
 
 // Task C (2026-07-14, docs/AI/CODER_SPEC_FACTS_2026-07-14.md §C) — the
@@ -9105,12 +9201,15 @@ function _propelioCompRowHtml(comp) {
   `;
 }
 
-function renderPropelioCompList(comps) {
+function renderPropelioCompList(comps, emptyMessage) {
   const listEl = document.getElementById("propelio-comp-list");
   if (!listEl) return;
   const sorted = _sortPropelioComps(comps, propelioCompSortMode);
   if (!sorted.length) {
-    listEl.innerHTML = `<div class="propelio-comp-list-empty">No comps to show.</div>`;
+    // emptyMessage (§6, Tier 1 fact-filter toggles) names WHY when a toggle
+    // is the cause — a checked box + a bare "No comps to show." reads as
+    // broken, not as "this filter is working as intended."
+    listEl.innerHTML = `<div class="propelio-comp-list-empty">${_propelioEscape(emptyMessage || "No comps to show.")}</div>`;
     return;
   }
   listEl.innerHTML = sorted.map(_propelioCompRowHtml).join("");
@@ -9819,6 +9918,24 @@ let propelioStickyBtn = null;
     aiModeToggleBtn.addEventListener("click", () => {
       if (_aiModeOn) _disableAiMode();
       else _enableAiMode();
+    });
+  }
+  // Tier 1 fact-filter toggles (2026-07-15 coder spec) — direct apply like
+  // OAC/status above, no debounce (checkbox click, not a typed range).
+  // Deliberately NOT routed through _dropAiModeForEdit (§5): these are not
+  // AI-overlay fields, so checking one must not drop AI mode.
+  const subFilterBox = document.getElementById("ai-fact-filter-subdivision");
+  if (subFilterBox) {
+    subFilterBox.addEventListener("change", () => {
+      _factFilters.subdivision = subFilterBox.checked;
+      applyPropelioClientFilters();
+    });
+  }
+  const isdFilterBox = document.getElementById("ai-fact-filter-isd");
+  if (isdFilterBox) {
+    isdFilterBox.addEventListener("change", () => {
+      _factFilters.isd = isdFilterBox.checked;
+      applyPropelioClientFilters();
     });
   }
   // Manual edit of ANY field AI mode may have written → drop the mode via
@@ -13707,9 +13824,15 @@ document.getElementById("btn-download").addEventListener("click", async () => {
         })
         .filter((p) => p.source_county && p.account_num);
       const currentPropelioFilters = readPropelioFiltersFromUI();
+      // Tier 1 fact-filter toggles (§7, 2026-07-15 coder spec) — WYSIWYG:
+      // exports mirror the VISIBLE set, so a checked toggle must narrow the
+      // export the same way it narrowed the screen. _applyFactFilters runs
+      // on the full comp objects (compPassesPropelioFilters output) before
+      // the .map() below strips them down to bare comp_address_keys.
       const visibleCompKeys = (window._propelioLast && Array.isArray(window._propelioLast.comps))
-        ? window._propelioLast.comps
-            .filter((c) => compPassesPropelioFilters(c, currentPropelioFilters))
+        ? _applyFactFilters(
+            window._propelioLast.comps.filter((c) => compPassesPropelioFilters(c, currentPropelioFilters)),
+          )
             .map((c) => String(c?.comp_address_key || "").trim())
             .filter((k) => k.length > 0)
         : [];
@@ -14429,8 +14552,15 @@ function __valueDraftsViewComps(view) {
     }
   }
   const nbhdNorm = normalizeNbhd(fstate.neighborhood);
-  return all
-    .filter((c) => c && compPassesPropelioFilters(c, fstate, nbhdNorm))
+  // Tier 1 fact-filter toggles (§3.2, 2026-07-15 coder spec) — this function
+  // calls compPassesPropelioFilters directly, bypassing applyPropelioClientFilters
+  // entirely (that's the whole reason it exists — draft math without a real
+  // re-render). Without this line the chip would draft from comps the user
+  // filtered off screen — the exact bug the fallback comment above
+  // memorializes, one lens later. _applyFactFilters runs on the FULL comp
+  // objects (cad_subdivision/isd/parcel_county) before the .map() below
+  // strips them down to the draft's slim shape.
+  return _applyFactFilters(all.filter((c) => c && compPassesPropelioFilters(c, fstate, nbhdNorm)))
     .map((c) => ({
       comp_address_key: c.comp_address_key,
       address: c.address,
@@ -14458,6 +14588,11 @@ window.__valueDraftsGetContext = () => ({
   // the VA's own filters. Accept stays live while AI mode is on (the human
   // signature is real); this just makes that fact visible on the record.
   aiMode: _aiModeOn,
+  // §8 (2026-07-15 coder spec) — same idea one lens further: a shallow copy
+  // (never the live object) so the record can see WHICH fact toggles were
+  // active when a number was drafted, without the record holding a live
+  // reference into ephemeral in-memory state.
+  factFilters: { ..._factFilters },
   // Which view the user is actually LOOKING at. Only the active view's filters are
   // live -- _viewFilterCache is written on view SWITCH (map.js:15321), so the
   // inactive view's filters are stale (and, if that view was never opened, null ->
@@ -15797,6 +15932,37 @@ function _renderAiBar() {
   // user's real filters.
   const filterCard = document.getElementById("propelio-filters");
   if (filterCard) filterCard.classList.toggle("ai-mode-active", show && _aiModeOn);
+  // Tier 1 fact-filter toggles (§4/§6, 2026-07-15 coder spec) -- paint only;
+  // the underlying _factFilters state is cleared at the actual transitions
+  // (_disableAiMode, _resetAiMode, _populateSubjectPropertyCard), not here.
+  // AI-mode-only (§4): disabled the instant AI mode is off, same as the
+  // badges/count-line that would otherwise explain what a checked box is
+  // doing. Further disabled per-box when the subject lacks that specific
+  // fact (§6), with a reason in the title tooltip.
+  const subj = _lastSubjectProps;
+  const _syncFactFilterBox = (id, checked, available, offTitle, missingTitle) => {
+    const box = document.getElementById(id);
+    if (!box) return;
+    box.checked = checked;
+    box.disabled = !available;
+    box.title = !_aiModeOn ? offTitle : (available ? "" : missingTitle);
+    const row = box.closest(".ai-fact-filter-row");
+    if (row) row.classList.toggle("is-disabled", !available);
+  };
+  _syncFactFilterBox(
+    "ai-fact-filter-subdivision",
+    _factFilters.subdivision,
+    _aiModeOn && Boolean(subj && subj.cad_subdivision),
+    "Turn on AI mode to filter by subdivision",
+    "Subject has no subdivision on record",
+  );
+  _syncFactFilterBox(
+    "ai-fact-filter-isd",
+    _factFilters.isd,
+    _aiModeOn && Boolean(subj && subj.isd),
+    "Turn on AI mode to filter by school district",
+    "Subject has no school district on record",
+  );
 }
 
 function _setActiveView(view) {

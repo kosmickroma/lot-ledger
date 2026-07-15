@@ -82,8 +82,26 @@
              (Task 2). Never animates (#active-item-slot standing rule). -->
         <div id="ai-bar-block" class="ai-bar-block hidden">
           <button type="button" id="ai-mode-toggle" class="ai-mode-toggle-btn" aria-pressed="false" title="Show what our automation would have picked instead of the current filters">
-            <span class="ai-mode-toggle-icon" aria-hidden="true">⚡</span>AI mode<span class="ai-mode-toggle-dot" aria-hidden="true"></span>
+            AI mode<span class="ai-mode-toggle-dot" aria-hidden="true"></span>
           </button>
+          <!-- Tier 1 fact-filter toggles (2026-07-15 coder spec) -- AI-mode-only
+               lens on the visible comp set, NEVER persisted (see map.js
+               _factFilters). Disabled unless AI mode is on AND the subject has
+               the underlying fact; map.js _renderAiBar keeps checked/disabled/
+               title in sync. "Subject's subdivision" (not "Neighborhood" --
+               the app already has an MLS-vocabulary neighborhood SEARCH filter,
+               a different thing; two same-named controls that filter
+               differently is a trap). -->
+          <div id="ai-fact-filters" class="ai-fact-filters">
+            <label class="ai-fact-filter-row" for="ai-fact-filter-subdivision">
+              <input type="checkbox" id="ai-fact-filter-subdivision" disabled>
+              <span>Subject's subdivision</span>
+            </label>
+            <label class="ai-fact-filter-row" for="ai-fact-filter-isd">
+              <input type="checkbox" id="ai-fact-filter-isd" disabled>
+              <span>Same school district</span>
+            </label>
+          </div>
           <div id="ai-card-mount"></div>
           <!-- Task C §C.2 (2026-07-14) -- the fact count line. AI mode +
                owner/developer only; rendered by map.js's
