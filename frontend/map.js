@@ -8901,7 +8901,28 @@ function _compFacts(comp) {
   const subject = _lastSubjectProps;
   const subSub = subject ? (subject.cad_subdivision || null) : null;
   const compSub = comp ? (comp.cad_subdivision || null) : null;
-  const same_subdivision = (subSub && compSub) ? (subSub === compSub) : null;
+  // §1.2 (docs/AI/CODER_SPEC_BRIEF_SCORECARD_2026-07-15.md, Fable) --
+  // cad_subdivision is a bare name, and generic names ("OAK GROVE PH 1")
+  // recur across counties, so a drawn area straddling a county line (real
+  // in DFW border cities) could otherwise assert a match between two
+  // different subdivisions that merely share a name. Mirrors the ISD key's
+  // own county-qualification: same_subdivision now requires the SAME
+  // county too, not just the same name. When either side's county is
+  // unknown we can't confirm the match, so we fall back to null (unknown)
+  // rather than assuming a match -- a wrong gold highlight is a lie on the
+  // row, and asserting nothing is always safer than asserting wrongly.
+  const subCounty = subject ? String(subject.source_county || "").trim().toLowerCase() : "";
+  const compCounty = comp ? String(comp.parcel_county || "").trim().toLowerCase() : "";
+  let same_subdivision;
+  if (!subSub || !compSub) {
+    same_subdivision = null;
+  } else if (subSub !== compSub) {
+    same_subdivision = false;
+  } else if (!subCounty || !compCounty) {
+    same_subdivision = null;
+  } else {
+    same_subdivision = subCounty === compCounty;
+  }
 
   const subIsd = subject ? (subject.isd || null) : null;
   const compIsd = comp ? (comp.isd || null) : null;
@@ -14346,9 +14367,23 @@ _applyRoleVisibility();
 // AI module seam — the ONLY thing frontend/ai-card.js reads from map.js.
 // Deleting the AI module = delete this function, the stash line in
 // applyPropelioClientFilters(), and the 2 index.html lines.
+// §1.1 (docs/AI/CODER_SPEC_BRIEF_SCORECARD_2026-07-15.md) — the scorecard
+// needs the subject's own facts to score comps against; carries a `county`
+// alongside cad_subdivision/isd so the scorecard can apply the same
+// county-guard _compFacts() applies below (§1.2). Null-cleared on
+// subject-less loads via _populateSubjectPropertyCard(null) (see
+// map.js:1262, 1651, 1669), so a stale subject can't leak into a
+// subject-less area.
 window.__aiGetVisibleCompContext = () => ({
   areaId: _currentLoadedAreaId,
   comps: Array.isArray(window.__aiVisibleComps) ? window.__aiVisibleComps : [],
+  subject: _lastSubjectProps
+    ? {
+        cad_subdivision: _lastSubjectProps.cad_subdivision || null,
+        isd: _lastSubjectProps.isd || null,
+        county: (_lastSubjectProps.source_county || _lastSubjectProps.county || null),
+      }
+    : null,
   isAdmin: _isAdmin(),
   headers: authHeaders(),
 });

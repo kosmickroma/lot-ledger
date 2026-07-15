@@ -336,3 +336,52 @@
   font-style: italic;
   font-size: 12px;
 }
+
+/* ---- Scorecard facts row (2026-07-15, comp-scorecard spec §2.2) ----
+   Neighborhood + school district, shown for EVERY row regardless of the AI
+   layer. A gold border/box on a match -- same gold as the sidebar's
+   ai-fact-badge treatment, on purpose (one visual language for "this
+   matches"), but a highlighted FIELD rather than a separate pill: slick,
+   not garish, and it never competes visually with the AI condition tag. */
+.ai-modal-comp-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 4px 0 0 2px;
+}
+
+.ai-modal-fact {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 1px 7px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.ai-modal-fact-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-soft);
+}
+
+.ai-modal-fact-value {
+  color: var(--text-main);
+}
+
+/* ⛔ Facts are facts (spec §3): this class is applied ONLY on a confirmed,
+   non-null, plain-equality match -- never on "unknown." A wrong highlight
+   here is a lie on the row. */
+.ai-modal-fact-gold {
+  border-color: rgba(201, 162, 79, 0.55);
+  background: var(--gold-soft);
+}
+
+.ai-modal-fact-gold .ai-modal-fact-label,
+.ai-modal-fact-gold .ai-modal-fact-value {
+  color: var(--gold);
+}

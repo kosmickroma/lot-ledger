@@ -36,9 +36,17 @@
       not_found: "not found",
     };
 
+    // §2.1 (docs/AI/CODER_SPEC_BRIEF_SCORECARD_2026-07-15.md) -- the ISD key
+    // carries its own county prefix ("dcad:DALLAS ISD" / "tad:905"). Dallas +
+    // Denton carry a real district NAME after the colon; Tarrant + Collin
+    // carry only a numeric CODE, which is never a district name -- print
+    // nothing for those and rely on the gold match indicator alone. Keyed
+    // off the KEY's own prefix (never a county field), which is right for
+    // both a comp row and the subject in a cross-county drawn area.
+    const ISD_NAME_FORM_PREFIXES = new Set(["dcad", "denton"]);
+
     let state = "idle";        // idle | loading | error | done
     let lastResponse = null;   // full API response from the last successful run
-    let ratingByKey = null;    // Map(comp_address_key -> user_rating), snapshotted at request time
     let seenIsAdmin = null;
     let seenAreaId = undefined;
     let modalEl = null;
@@ -90,13 +98,20 @@
       }
 
       if (state === "error") {
+        // §2.0 (Fable) -- the facts-only scorecard needs no AI read, so a
+        // failed read must not be a dead end. Retry stays; "see brief" is
+        // added so the facts + gold matches are still reachable.
         mount.innerHTML =
           '<div class="ai-card-row ai-card-row-error">' +
           '<span class="ai-card-error-text">Couldn’t read the comps right now.</span>' +
+          '<span class="ai-card-actions">' +
           '<button type="button" class="ai-card-btn ai-card-retry-btn">Retry</button>' +
-          "</div>";
+          '<button type="button" class="ai-card-btn ai-card-brief-btn">see brief</button>' +
+          "</span></div>";
         const retryBtn = mount.querySelector(".ai-card-retry-btn");
         if (retryBtn) retryBtn.addEventListener("click", () => { void runRead(); });
+        const briefBtn = mount.querySelector(".ai-card-brief-btn");
+        if (briefBtn) briefBtn.addEventListener("click", () => openModal());
         return;
       }
 
@@ -120,13 +135,21 @@
         return;
       }
 
-      // idle -- no run yet. Render NOTHING. No "Read comps" button and no hint
-      // (KK): entering AI mode is the trigger (_enableAiMode ->
-      // __aiCardTriggerRead), so the read fires on its own and this row never
-      // needs to prompt for it. We still must NOT auto-read here on every admin
-      // area-load -- that would fire a Vertex call ambiently, which the design
-      // forbids -- so idle simply shows an empty row.
-      mount.innerHTML = "";
+      // idle -- no run yet (or nothing to read: e.g. every visible comp is
+      // outside the drawn area, so runRead() left the row idle on purpose --
+      // see the early return in runRead()). We still do NOT show a "Read
+      // comps" button or auto-read here (KK: entering AI mode is the trigger,
+      // and an ambient Vertex call on every admin area-load is forbidden by
+      // design) -- but §2.0 (Fable) requires the facts-only scorecard to stay
+      // reachable even when no read has ever run, so "see brief" is shown.
+      mount.innerHTML =
+        '<div class="ai-card-row">' +
+        '<span class="ai-card-hint">not read yet</span>' +
+        '<span class="ai-card-actions">' +
+        '<button type="button" class="ai-card-btn ai-card-brief-btn">see brief</button>' +
+        "</span></div>";
+      const idleBriefBtn = mount.querySelector(".ai-card-brief-btn");
+      if (idleBriefBtn) idleBriefBtn.addEventListener("click", () => openModal());
     }
 
     // --- Fetch (§B.1.5) ---------------------------------------------------
@@ -155,10 +178,6 @@
       state = "loading";
       renderSidebar();
 
-      const ratingSnapshot = new Map(
-        comps.filter((cp) => cp && cp.comp_address_key).map((cp) => [cp.comp_address_key, cp.user_rating || null])
-      );
-
       try {
         const res = await fetch("/api/ai/read-comps", {
           method: "POST",
@@ -176,7 +195,6 @@
           if (!stillCurrent()) return;
           state = "idle";
           lastResponse = null;
-          ratingByKey = null;
           mount.innerHTML = "";
           return;
         }
@@ -185,7 +203,6 @@
         const data = await res.json();
         if (!stillCurrent()) return;
         lastResponse = data;
-        ratingByKey = ratingSnapshot;
         state = "done";
         renderSidebar();
       } catch (err) {
@@ -237,59 +254,153 @@
       return [base, ...quals, ...reasonParts].join(" · ");
     }
 
-    function renderCompRow(comp) {
-      const rating = ratingByKey ? ratingByKey.get(comp.comp_address_key) : null;
-      const badge = rating === "good"
-        ? '<span class="ai-modal-badge ai-modal-badge-good">GOOD</span>'
-        : rating === "bad"
-          ? '<span class="ai-modal-badge ai-modal-badge-bad">BAD</span>'
-          : "";
-      const quoteHtml = comp.condition_quote
-        ? `<div class="ai-modal-quote" title="${esc(comp.condition_quote)}">“${esc(truncate(comp.condition_quote, 90))}”</div>`
-        : "";
-      const flagsHtml = (comp.flags || [])
-        .map((f) => `<div class="ai-modal-flag" title="${esc(f.quote)}">⚑ ${esc(f.tag)}: “${esc(truncate(f.quote, 80))}”</div>`)
-        .join("");
-      return (
-        '<div class="ai-modal-comp">' +
-        '<div class="ai-modal-comp-head">' +
-        `<span class="ai-modal-comp-cond">${esc(comp.condition)}</span>` +
-        `<span class="ai-modal-comp-price">${esc(fmtPrice(comp.price))}</span>` +
-        `<span class="ai-modal-comp-addr">${esc(comp.address)}</span>` +
-        badge +
-        "</div>" +
-        quoteHtml +
-        flagsHtml +
-        "</div>"
-      );
+    // --- Facts (§2 of the scorecard spec) — deterministic, no model -------
+
+    // §2.1 -- reimplements map.js's _isdDisplayName exactly (this file has no
+    // imports from map.js, so it cannot call that function). Splits the ISD
+    // key on ":" and returns the tail ONLY when the key's own county prefix
+    // is a name-form county (dcad/denton) -- Tarrant ("tad:905") and Collin
+    // ("collin:...") carry a numeric code, never a name, so those return
+    // null and the caller falls back to the quiet "—" (gold indicator only).
+    function isdDisplayName(isdKey) {
+      const s = String(isdKey || "");
+      const i = s.indexOf(":");
+      if (i === -1) return null;
+      const prefix = s.slice(0, i).toLowerCase();
+      return ISD_NAME_FORM_PREFIXES.has(prefix) ? s.slice(i + 1) : null;
     }
 
-    // ⛔ An excluded comp is still a COMP. It belongs in the brief.
-    // The permit_avm gate stops us sending a flagged listing's TEXT to the model
-    // -- it is not a reason to make the comp disappear from the user's own brief.
-    // Before this, `excluded` comps were demoted to a text footer, so an area
-    // whose comps were ALL flagged rendered an EMPTY list and read as broken
-    // (KK, preview, 2026-07-14: "Read 0 of 0 comps · 2 no AVM permission").
-    // Same shape as a read comp -- price, address, rating -- minus the one thing
-    // we genuinely do not have: a condition tag. No quote, because we never read
-    // it. Nothing hidden, nothing invented.
-    function renderExcludedCompRow(e) {
-      const rating = ratingByKey ? ratingByKey.get(e.comp_address_key) : null;
+    // §1.2 / §2.2 -- plain-equality fact comparator, mirroring map.js's
+    // _compFacts() (same file cannot call it directly). same_subdivision
+    // additionally requires the SAME county on both sides (a drawn area can
+    // straddle a county line, and generic subdivision names like "OAK GROVE
+    // PH 1" recur across counties) -- unknown county on either side means we
+    // can't confirm the match, so it resolves to null (never asserted true).
+    // Unknown (null on either side) is always null, never false: a false
+    // "different" would be as much a lie as a false "same."
+    function compFacts(subject, comp) {
+      const subSub = subject ? (subject.cad_subdivision || null) : null;
+      const compSub = comp ? (comp.cad_subdivision || null) : null;
+      const subCounty = subject ? String(subject.county || "").trim().toLowerCase() : "";
+      const compCounty = comp ? String(comp.parcel_county || "").trim().toLowerCase() : "";
+      let same_subdivision;
+      if (!subSub || !compSub) {
+        same_subdivision = null;
+      } else if (subSub !== compSub) {
+        same_subdivision = false;
+      } else if (!subCounty || !compCounty) {
+        same_subdivision = null;
+      } else {
+        same_subdivision = subCounty === compCounty;
+      }
+
+      const subIsd = subject ? (subject.isd || null) : null;
+      const compIsd = comp ? (comp.isd || null) : null;
+      const same_isd = (subIsd && compIsd) ? (subIsd === compIsd) : null;
+
+      return { same_subdivision, same_isd };
+    }
+
+    // §2.3 -- the AI read is a bonus layer, keyed by comp_address_key onto
+    // the full visible set. Three outcomes: read (condition + quote),
+    // excluded (gated before the model ever saw it, still a comp), or
+    // neither (visible but never sent -- e.g. outside the drawn area). Only
+    // "neither" renders no condition line at all; the facts render in all
+    // three cases regardless.
+    function aiLayerFor(comp, readByKey, excludedByKey) {
+      const key = comp && comp.comp_address_key;
+      if (key && readByKey.has(key)) return { kind: "read", data: readByKey.get(key) };
+      if (key && excludedByKey.has(key)) return { kind: "excluded", data: excludedByKey.get(key) };
+      return { kind: "none", data: null };
+    }
+
+    // Builds one scorecard row descriptor per visible comp. Pure data --
+    // rendering and ordering are separate steps so the sort comparator can
+    // read `same_subdivision`/`same_isd` without re-deriving them.
+    function buildScoreRow(comp, subject, readByKey, excludedByKey) {
+      const facts = compFacts(subject, comp);
+      return {
+        comp,
+        same_subdivision: facts.same_subdivision,
+        same_isd: facts.same_isd,
+        schoolName: comp && comp.isd ? isdDisplayName(comp.isd) : null,
+        ai: aiLayerFor(comp, readByKey, excludedByKey),
+        // Explicit, non-price sort key (§2.4): the seam intentionally does
+        // not carry the subject's lat/lng (kept minimal per the spec), so a
+        // true distance_asc tie-break isn't derivable in this decoupled
+        // file -- address is deterministic, stable, and never price.
+        sortKey: String((comp && (comp.address || comp.comp_address_key)) || "").toLowerCase(),
+      };
+    }
+
+    // §2.4 -- gold matches first (neighborhood match, then school match),
+    // then everything else, in a fixed non-price order within each tier.
+    // ⛔ Never price: the app's default sort is price_desc, and inheriting
+    // ctx().comps' own order here would silently re-introduce it.
+    function compareScoreRows(a, b) {
+      const rank = (v) => (v === true ? 0 : 1);
+      const subDiff = rank(a.same_subdivision) - rank(b.same_subdivision);
+      if (subDiff !== 0) return subDiff;
+      const isdDiff = rank(a.same_isd) - rank(b.same_isd);
+      if (isdDiff !== 0) return isdDiff;
+      if (a.sortKey < b.sortKey) return -1;
+      if (a.sortKey > b.sortKey) return 1;
+      return 0;
+    }
+
+    // One unified row renderer -- facts always render; the AI layer (§2.3)
+    // is layered on only where present. Every CAD-derived string is esc()'d
+    // (cad_subdivision and the ISD display text are free text, not trusted).
+    function renderScoreRow(row) {
+      const comp = row.comp;
+      const rating = comp && comp.user_rating ? comp.user_rating : null;   // §2.1 -- LIVE rating, not a read-time snapshot
       const badge = rating === "good"
         ? '<span class="ai-modal-badge ai-modal-badge-good">GOOD</span>'
         : rating === "bad"
           ? '<span class="ai-modal-badge ai-modal-badge-bad">BAD</span>'
           : "";
-      const why = esc(EXCLUDED_REASON_LABEL[e.reason] || e.reason || "not read");
+
+      const neighGold = row.same_subdivision === true ? " ai-modal-fact-gold" : "";
+      const schoolGold = row.same_isd === true ? " ai-modal-fact-gold" : "";
+      const neighText = comp && comp.cad_subdivision ? esc(comp.cad_subdivision) : "—";
+      const schoolText = row.schoolName ? esc(row.schoolName) : "—";
+
+      let condHtml = "";
+      let bodyHtml = "";
+      let rowClass = "ai-modal-comp";
+      if (row.ai.kind === "read") {
+        const rc = row.ai.data;
+        condHtml = `<span class="ai-modal-comp-cond">${esc(rc.condition)}</span>`;
+        const quoteHtml = rc.condition_quote
+          ? `<div class="ai-modal-quote" title="${esc(rc.condition_quote)}">“${esc(truncate(rc.condition_quote, 90))}”</div>`
+          : "";
+        const flagsHtml = (rc.flags || [])
+          .map((f) => `<div class="ai-modal-flag" title="${esc(f.quote)}">⚑ ${esc(f.tag)}: “${esc(truncate(f.quote, 80))}”</div>`)
+          .join("");
+        bodyHtml = quoteHtml + flagsHtml;
+      } else if (row.ai.kind === "excluded") {
+        rowClass += " ai-modal-comp-unread";
+        condHtml = '<span class="ai-modal-comp-cond ai-modal-comp-cond-unread">not read</span>';
+        const why = esc(EXCLUDED_REASON_LABEL[row.ai.data.reason] || row.ai.data.reason || "not read");
+        bodyHtml = `<div class="ai-modal-comp-unread-why">${why}</div>`;
+      }
+      // kind === "none" -- the comp is visible but was never sent to the read
+      // (e.g. outside the drawn area). No condition line at all (§2.3): the
+      // row is still here, just with no AI layer to show.
+
       return (
-        '<div class="ai-modal-comp ai-modal-comp-unread">' +
+        `<div class="${rowClass}">` +
         '<div class="ai-modal-comp-head">' +
-        '<span class="ai-modal-comp-cond ai-modal-comp-cond-unread">not read</span>' +
-        `<span class="ai-modal-comp-price">${esc(fmtPrice(e.price))}</span>` +
-        `<span class="ai-modal-comp-addr">${esc(e.address || e.comp_address_key || "?")}</span>` +
+        condHtml +
+        `<span class="ai-modal-comp-price">${esc(fmtPrice(comp && comp.price))}</span>` +
+        `<span class="ai-modal-comp-addr">${esc((comp && (comp.address || comp.comp_address_key)) || "?")}</span>` +
         badge +
         "</div>" +
-        `<div class="ai-modal-comp-unread-why">${why}</div>` +
+        '<div class="ai-modal-comp-facts">' +
+        `<span class="ai-modal-fact${neighGold}"><span class="ai-modal-fact-label">Neighborhood</span><span class="ai-modal-fact-value">${neighText}</span></span>` +
+        `<span class="ai-modal-fact${schoolGold}"><span class="ai-modal-fact-label">School</span><span class="ai-modal-fact-value">${schoolText}</span></span>` +
+        "</div>" +
+        bodyHtml +
         "</div>"
       );
     }
@@ -308,66 +419,96 @@
       );
     }
 
+    // §2.0 (Fable) -- lastResponse is now OPTIONAL. The scorecard is driven
+    // by ctx().comps (the full visible set), never by data.comps -- a comp
+    // read but no longer visible does not appear; a comp visible but never
+    // read still appears, facts-only (§2.5). The AI response, when present,
+    // is layered on top by comp_address_key and only adds the condition
+    // read/exclusion-reason/dropped-tags/raw-JSON blocks that depend on it.
     function openModal() {
-      if (!lastResponse) return;
+      const c = ctx();
+      if (!c || !c.isAdmin) return;   // sidebar already gates this; guard anyway since idle/error now expose the button directly
       closeModal();
 
-      const data = lastResponse;
-      const meta = data.meta || {};
-      const mix = data.mix || {};
-      const comps = Array.isArray(data.comps) ? data.comps : [];
-      const excluded = Array.isArray(data.excluded) ? data.excluded : [];
-      const rejected = Array.isArray(data.rejected) ? data.rejected : [];
+      const subject = c.subject || null;
+      const visibleComps = Array.isArray(c.comps) ? c.comps : [];
+      const data = lastResponse;   // may be null (idle) or from a prior run (error / done)
+
+      const readByKey = new Map();
+      const excludedByKey = new Map();
+      if (data) {
+        for (const rc of (Array.isArray(data.comps) ? data.comps : [])) {
+          if (rc && rc.comp_address_key) readByKey.set(rc.comp_address_key, rc);
+        }
+        for (const e of (Array.isArray(data.excluded) ? data.excluded : [])) {
+          if (e && e.comp_address_key) excludedByKey.set(e.comp_address_key, e);
+        }
+      }
+
+      const rows = visibleComps
+        .map((comp) => buildScoreRow(comp, subject, readByKey, excludedByKey))
+        .sort(compareScoreRows);
+      const compsHtml = rows.map(renderScoreRow).join("");
+
+      const excluded = data && Array.isArray(data.excluded) ? data.excluded : [];
+      const rejected = data && Array.isArray(data.rejected) ? data.rejected : [];
+      const meta = (data && data.meta) || {};
+      const mix = (data && data.mix) || {};
+
+      const headerText = data
+        ? buildHeaderLine(meta, excluded)
+        : (state === "error" ? "Read failed — facts only." : "Not read yet — facts only.");
 
       const mixHtml = CONDITION_ORDER
         .filter((k) => mix[k] > 0)
         .map((k) => `<span class="ai-modal-mix-item">${mix[k]} ${esc(k)}</span>`)
         .join(" · ");
-
-      const byCondition = {};
-      for (const comp of comps) {
-        const k = CONDITION_ORDER.includes(comp.condition) ? comp.condition : "unknown";
-        (byCondition[k] = byCondition[k] || []).push(comp);
-      }
-      // Read comps first, grouped by condition -- then the ones we couldn't read,
-      // still in the list, still yours, just honestly labelled. An empty comp list
-      // when every comp was gated is worse than useless: it reads as broken.
-      const compsHtml =
-        CONDITION_ORDER.flatMap((k) => (byCondition[k] || []).map(renderCompRow)).join("")
-        + excluded.map(renderExcludedCompRow).join("");
-
-      // §A.6.1 — rejections only happen at extraction time, never on a cache
-      // hit. Any cached portion of this run has dropped tags we can't see.
-      const cachedNote = meta.cached > 0
-        ? '<div class="ai-modal-cached-note">(cached — re-read to see dropped tags)</div>'
+      // The mix line, dropped-tags block, and raw-JSON copy button all
+      // describe a specific AI run -- nothing to show without one, and
+      // showing them empty would read as broken rather than "not read yet."
+      const mixLineHtml = data
+        ? `<div class="ai-modal-mix-line">${mixHtml || "(no conditions read)"}</div>`
         : "";
-      const droppedHtml = rejected.length
-        ? rejected.map(renderDroppedRow).join("")
-        : '<div class="ai-modal-dropped-empty">Nothing dropped this run.</div>';
 
-      const excludedFooter = excluded.length
-        ? excluded
-            .map((e) => `${esc(e.address || e.comp_address_key || "?")} (${esc(EXCLUDED_REASON_LABEL[e.reason] || e.reason)})`)
-            .join(", ")
-        : "none";
+      let droppedBlockHtml = "";
+      let copyBtnHtml = "";
+      let footerHtml = "";
+      if (data) {
+        const cachedNote = meta.cached > 0
+          ? '<div class="ai-modal-cached-note">(cached — re-read to see dropped tags)</div>'
+          : "";
+        const droppedHtml = rejected.length
+          ? rejected.map(renderDroppedRow).join("")
+          : '<div class="ai-modal-dropped-empty">Nothing dropped this run.</div>';
+        droppedBlockHtml =
+          '<details class="ai-modal-dropped-block">' +
+          `<summary>Dropped tags (${rejected.length})</summary>` +
+          cachedNote +
+          `<div class="ai-modal-dropped-list">${droppedHtml}</div>` +
+          "</details>";
+        copyBtnHtml = '<button type="button" class="ai-modal-copy-btn">Copy raw JSON</button>';
+        const excludedFooter = excluded.length
+          ? excluded
+              .map((e) => `${esc(e.address || e.comp_address_key || "?")} (${esc(EXCLUDED_REASON_LABEL[e.reason] || e.reason)})`)
+              .join(", ")
+          : "none";
+        footerHtml =
+          '<div class="ai-modal-footer">' +
+          `Excluded: ${excludedFooter} · prompt ${esc(meta.prompt_version)} · $${Number(meta.est_cost || 0).toFixed(4)} · ${meta.cached || 0} served from cache` +
+          "</div>";
+      }
 
       const overlay = document.createElement("div");
       overlay.className = "ai-modal-overlay";
       overlay.innerHTML =
         '<div class="ai-modal-box" role="dialog" aria-modal="true" aria-label="AI read brief">' +
         '<button type="button" class="ai-modal-close" aria-label="Close">×</button>' +
-        `<div class="ai-modal-header">${esc(buildHeaderLine(meta, excluded))}</div>` +
-        `<div class="ai-modal-mix-line">${mixHtml || "(no conditions read)"}</div>` +
-        `<div class="ai-modal-comps">${compsHtml || '<div class="ai-modal-empty">No comps read.</div>'}</div>` +
-        '<details class="ai-modal-dropped-block">' +
-        `<summary>Dropped tags (${rejected.length})</summary>` +
-        cachedNote +
-        `<div class="ai-modal-dropped-list">${droppedHtml}</div>` +
-        "</details>" +
-        '<button type="button" class="ai-modal-copy-btn">Copy raw JSON</button>' +
-        '<div class="ai-modal-footer">' +
-        `Excluded: ${excludedFooter} · prompt ${esc(meta.prompt_version)} · $${Number(meta.est_cost || 0).toFixed(4)} · ${meta.cached || 0} served from cache` +
-        "</div>" +
+        `<div class="ai-modal-header">${esc(headerText)}</div>` +
+        mixLineHtml +
+        `<div class="ai-modal-comps">${compsHtml || '<div class="ai-modal-empty">No comps currently visible.</div>'}</div>` +
+        droppedBlockHtml +
+        copyBtnHtml +
+        footerHtml +
         "</div>";
 
       document.body.appendChild(overlay);
@@ -417,7 +558,6 @@
         // A different area is loaded (or cleared) -- any previous read is stale.
         state = "idle";
         lastResponse = null;
-        ratingByKey = null;
         closeModal();
       }
       renderSidebar();
