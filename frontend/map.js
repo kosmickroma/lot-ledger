@@ -16191,6 +16191,14 @@ function _setActiveView(view) {
   // Baseline for subsequent user edits on this view.
   _filterSaveLastSnapshot = captureFilterState();
   _renderViewToggle();
+  // ⛔ B.1.3 follow-up (2026-07-15) -- _renderAiBar()'s _lensActive gate reads
+  // _activeView, but nothing re-evaluated it on a view switch: the seven lens
+  // inputs (six bands + sort) kept the .ai-lens-active gold treatment from the
+  // PRIOR view after switching to Final, where those same boxes now hold real,
+  // persisting edits. _renderAiBar() is a pure paint function (DOM class/attr
+  // toggles only -- no fetch, no state mutation), so it's safe/cheap to call on
+  // every switch, same as it's already called from _enableAiMode/_disableAiMode.
+  _renderAiBar();
   console.info("[views] active view →", _activeView, _seeded ? "(seeded from ARV)" : "");
 }
 
