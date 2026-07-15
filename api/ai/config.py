@@ -21,6 +21,15 @@ AI_MIN_QUOTE_CHARS = int(os.getenv("AI_MIN_QUOTE_CHARS", "12"))
 # sending them wastes tokens for no signal.
 AI_MIN_REMARKS_CHARS = int(os.getenv("AI_MIN_REMARKS_CHARS", "40"))
 
+# permit_avm gate on the AI READ. When true, comps the MLS flags
+# permit_avm != 'true' are excluded from the read (their listing text is never
+# sent to the model). DEFAULT TRUE so prod stays gated by default. Set FALSE on
+# dev/preview (KK's call, private testing on his own data) so the AI reads every
+# comp — the scorecard shows them either way; this only governs whether we send
+# their remarks to Vertex. ⚠️ This is the one gate about third-party TEXT
+# transmission, so flipping it is an env decision per environment, not a default.
+AI_ENFORCE_PERMIT_AVM = os.getenv("AI_ENFORCE_PERMIT_AVM", "true").strip().lower() == "true"
+
 # Flash-Lite pricing, $/1M tokens — for the est_cost display only. Stamp the date.
 AI_PRICE_IN_PER_M  = float(os.getenv("AI_PRICE_IN_PER_M",  "0.10"))
 AI_PRICE_OUT_PER_M = float(os.getenv("AI_PRICE_OUT_PER_M", "0.40"))

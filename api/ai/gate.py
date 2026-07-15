@@ -11,7 +11,7 @@ from typing import Any
 
 from psycopg2.extras import RealDictCursor
 
-from api.ai.config import AI_MIN_REMARKS_CHARS
+from api.ai.config import AI_ENFORCE_PERMIT_AVM, AI_MIN_REMARKS_CHARS
 from api.config import get_session_conn, release_session_conn
 
 
@@ -121,7 +121,7 @@ def fetch_permitted_comps(area_id: str, comp_keys: list[str]) -> tuple[list[dict
         if not row["in_area"]:
             excluded.append({"comp_id": comp_id, "comp_address_key": key, "address": address, "price": price, "reason": "outside_drawn_area"})
             continue
-        if row["permit_avm"] != "true":
+        if AI_ENFORCE_PERMIT_AVM and row["permit_avm"] != "true":
             excluded.append({"comp_id": comp_id, "comp_address_key": key, "address": address, "price": price, "reason": "no_avm_permission"})
             continue
 

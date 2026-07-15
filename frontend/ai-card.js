@@ -365,7 +365,14 @@
       const neighGold = row.same_subdivision === true ? " ai-modal-fact-gold" : "";
       const schoolGold = row.same_isd === true ? " ai-modal-fact-gold" : "";
       const neighText = comp && comp.cad_subdivision ? esc(comp.cad_subdivision) : "—";
-      const schoolText = row.schoolName ? esc(row.schoolName) : "—";
+      // Collin + Tarrant carry a school CODE, not a name, so schoolName is null
+      // there. A naked gold box around "—" reads as "it matched [nothing]" (KK,
+      // preview 2026-07-15). When it matches but we have no name to show, say
+      // "same district" so the gold means something; otherwise the quiet "—".
+      // (The real district NAME for code-only counties is a separate task.)
+      const schoolText = row.schoolName
+        ? esc(row.schoolName)
+        : (row.same_isd === true ? "same district" : "—");
 
       let condHtml = "";
       let bodyHtml = "";
