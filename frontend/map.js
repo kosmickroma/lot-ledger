@@ -2043,10 +2043,15 @@ function applyPropelioFilterStateToUI(persisted) {
     const sortEl = document.getElementById("propelio-comp-sort");
     if (sortEl) sortEl.value = propelioCompSortMode;
   }
-  // Neighborhood hidden input (chip render wired in Chunk 3)
-  const _nbhdEl = document.getElementById("prop-neighborhood");
-  if (_nbhdEl) _nbhdEl.value = merged.neighborhood ?? "";
-  _renderNbhdChip(merged.neighborhood || null);
+  // docs/AI/CODER_SPEC_MULTI_NEIGHBORHOOD_2026-07-18 Part 1 — reconcile from
+  // the RAW incoming `persisted` blob, NOT `merged` (which would turn an
+  // absent `neighborhoods` key — an old-shape saved area — into a present
+  // empty array via the DEFAULT_PROPELIO_FILTERS spread, and coerceNbhds
+  // would then misread that as an explicit legacy CLEAR instead of "no array
+  // key at all"). Set the array BEFORE the readPropelioFiltersFromUI()
+  // re-derive below, which reads propelioNbhds to build its dual-write.
+  propelioNbhds = coerceNbhds(persisted);
+  _renderNbhdChip();
   propelioFilterState = readPropelioFiltersFromUI();
 }
 
@@ -2062,6 +2067,19 @@ function _filterStatesEqual(a, b) {
 function _coerceForDiff(v) {
   if (v === "" || v === undefined) return null;
   return v;
+}
+
+// docs/AI/CODER_SPEC_MULTI_NEIGHBORHOOD_2026-07-18 Part 5 — deep-compare when
+// either side is an array. readPropelioFiltersFromUI() returns a fresh
+// `[...propelioNbhds]` on every call, so two captures of the SAME set are
+// different references — `===` is always false, which would spuriously
+// PATCH propelio.neighborhoods on every filter redraw (OAC toggle, comp
+// load, sort, a view-seed snapshot rebuilt from DEFAULT_PROPELIO_FILTERS).
+// Relies on propelioNbhds' stable sorted order (sortDedupe) so equal sets
+// serialize equal regardless of add/remove order.
+function _diffValuesEqual(a, b) {
+  if (Array.isArray(a) || Array.isArray(b)) return JSON.stringify(a) === JSON.stringify(b);
+  return a === b;
 }
 
 // Diff captureFilterState() output against _filterSaveLastSnapshot.
@@ -2107,7 +2125,7 @@ function _diffFilterState(current, lastSnapshot) {
       if (fieldKey === "checkboxes.active" || fieldKey.endsWith(".checkboxes.active")) continue;
       const a = _coerceForDiff(currSection[key]);
       const b = _coerceForDiff(snapSection[key]);
-      if (a === b) continue;
+      if (_diffValuesEqual(a, b)) continue;
       // Convert empty-string back to null for the wire (JSONB null)
       out.push([fieldKey, currSection[key] === "" ? null : currSection[key]]);
     }
@@ -2267,11 +2285,41 @@ function _applyFilterFieldToUI(fieldKey, value) {
     if (_parts[1] !== _activeView) return; // Not the active view — skip.
     _effectiveKey = _parts.slice(2).join(".");
   }
+  // docs/AI/CODER_SPEC_MULTI_NEIGHBORHOOD_2026-07-18 Part 8 -- BLOCKING fix:
+  // the dual-write's OWN two SSE echoes would otherwise clobber the array on
+  // every co-viewer, same-version or not. One edit emits both keys as two
+  // ordered events (neighborhood FIRST, neighborhoods LAST, Part 1); this
+  // branch must not let the first (legacy, single-value) event stomp the set
+  // the second event is about to (re)confirm.
   if (_effectiveKey === "propelio.neighborhood") {
-    propelioFilterState.neighborhood = value ?? null;
-    const _nbhdEl = document.getElementById("prop-neighborhood");
-    if (_nbhdEl) _nbhdEl.value = value ?? "";
-    _renderNbhdChip(value || null);
+    // Echo-guard: skip when the incoming value is consistent with the
+    // current set (propelioNbhds[0]) -- the dual-write's own echo always
+    // satisfies this (it IS neighborhoods[0]); a genuine old-bundle edit or
+    // clear never does (an equal-value edit produces no diff, so no event
+    // fires for it at all).
+    if (normalizeNbhd(value) === normalizeNbhd(propelioNbhds[0])) return;
+    // A genuine legacy edit/clear is fresher than the current set --
+    // reconcile via the shared rule (coerceNbhds sees one !== arr[0] here,
+    // by construction, since the echo-guard above already filtered the
+    // agreeing case) so a real old-bundle co-editor's change is honored, not
+    // silently overridden by a stale array (Part 3/7 acceptance).
+    propelioNbhds = coerceNbhds({ neighborhood: value ?? null, neighborhoods: propelioNbhds });
+    propelioFilterState.neighborhood = propelioNbhds.length ? propelioNbhds[0] : null;
+    propelioFilterState.neighborhoods = [...propelioNbhds];
+    _renderNbhdChip();
+    try { applyPropelioClientFilters(); } catch (_) {}
+    return;
+  }
+  if (_effectiveKey === "propelio.neighborhoods") {
+    // The array-bearing event -- processed LAST in the dual-write's ordered
+    // pair (Part 1), so this is what same-version co-editing actually lands
+    // on. Reconciled against the CURRENT propelioNbhds[0] (never a separate
+    // mirror like propelioFilterState.neighborhood, which could itself be
+    // stale) so the shared coerceNbhds rule stays internally consistent.
+    propelioNbhds = coerceNbhds({ neighborhood: propelioNbhds.length ? propelioNbhds[0] : null, neighborhoods: value });
+    propelioFilterState.neighborhood = propelioNbhds.length ? propelioNbhds[0] : null;
+    propelioFilterState.neighborhoods = [...propelioNbhds];
+    _renderNbhdChip();
     try { applyPropelioClientFilters(); } catch (_) {}
     return;
   }
@@ -8315,6 +8363,12 @@ const DEFAULT_PROPELIO_FILTERS = {
   yearMin: null, yearMax: null,
   priceMin: null, priceMax: null,
   neighborhood: null,
+  // docs/AI/CODER_SPEC_MULTI_NEIGHBORHOOD_2026-07-18 Part 1 — content
+  // hygiene only: the init path works via `propelioNbhds = []` regardless
+  // (this is an object literal, not a coercion call site), but a static
+  // `neighborhoods: []` here means every view-seed snapshot built from
+  // DEFAULT_PROPELIO_FILTERS (map.js:~15103) carries the key too.
+  neighborhoods: [],
 };
 let propelioFilterState = { ...DEFAULT_PROPELIO_FILTERS };
 
@@ -8647,6 +8701,59 @@ function _updateAiLensField(fieldId) {
   applyPropelioClientFilters();
 }
 
+// docs/AI/CODER_SPEC_MULTI_NEIGHBORHOOD_2026-07-18 Part 1 — the OR-set state
+// lives HERE, in a module variable outside the DOM-read cycle, mirroring the
+// propelioCompSortMode precedent (map.js:~8425). propelioFilterState is
+// rebuilt from the DOM by readPropelioFiltersFromUI() constantly; an array
+// stored only on that object would get wiped on the next rebuild. Kept
+// SORTED (by normalized value) and DEDUPED (on normalized value, first-seen
+// casing survives) at all times, via sortDedupe -- so display, serialization,
+// and `[0]` are all deterministic. Never mutated in place (no .push/.splice)
+// -- every update reassigns a new array, so a captured snapshot's reference
+// to an older array never silently changes under it.
+let propelioNbhds = [];
+
+// Sorted + deduped by normalized value; first-seen casing survives a dedup
+// collision. Shared by coerceNbhds (below) and _selectNbhdOption (Part 6) --
+// the ONE place that decides "sorted+deduped" so the two never drift apart.
+function sortDedupe(arr) {
+  const seen = new Map(); // normalized -> first-seen display casing
+  for (const v of (arr || [])) {
+    const key = normalizeNbhd(v);
+    if (!seen.has(key)) seen.set(key, v);
+  }
+  return Array.from(seen.values()).sort((a, b) => normalizeNbhd(a).localeCompare(normalizeNbhd(b)));
+}
+
+// docs/AI/CODER_SPEC_MULTI_NEIGHBORHOOD_2026-07-18 Part 1/3 — the ONE shared
+// coercion helper. Takes the WHOLE `propelio` blob (both keys) and
+// RECONCILES them, because per-key last-writer-wins can't reconcile two keys
+// that encode one filter. A new-bundle write always sets
+// `neighborhood === neighborhoods[0]` (a free freshness oracle) -- so when
+// the two disagree, the SINGLE value is the fresher one (an old-bundle
+// co-editor's edit or clear), and the array must not silently win over it.
+// Apply wherever a persisted/remote blob enters: applyPropelioFilterStateToUI
+// (on the RAW incoming blob, before the DOM-read re-derive) and the SSE
+// branches (Part 8) -- never on `propelioFilterState` after it's already
+// been merged with DEFAULT_PROPELIO_FILTERS, which would turn an absent
+// `neighborhoods` key (old-shape area) into a present-but-empty array and
+// misread it as an explicit legacy CLEAR.
+function coerceNbhds(propelio) {
+  const arr  = Array.isArray(propelio?.neighborhoods) ? propelio.neighborhoods : null;
+  const one  = (typeof propelio?.neighborhood === "string" && propelio.neighborhood) || null;
+  let out;
+  if (arr) {
+    if (one == null)                                      out = [];        // legacy CLEAR wins
+    else if (normalizeNbhd(one) !== normalizeNbhd(arr[0])) out = [one];     // legacy EDIT is fresher
+    else                                                   out = arr;      // agree → the set
+  } else {
+    out = one ? [one] : [];                                                // old area / single key only
+  }
+  // ⛔ blank guard: a junk "" would false-positive every neighborhood-less
+  // comp into the OR set (normalizeNbhd(null) === "").
+  return sortDedupe(out.filter((x) => normalizeNbhd(x) !== ""));
+}
+
 // Option-list cache: rebuilt once per comp-load (reference-equality guard),
 // never on keystrokes. Null until the first comp set arrives.
 let _nbhdOptionsCache = null;
@@ -8695,7 +8802,15 @@ function readPropelioFiltersFromUI() {
     yearMax: _propIntIn("prop-year-max"),
     priceMin: _propPriceIn("prop-price-min"),
     priceMax: _propPriceIn("prop-price-max"),
-    neighborhood: (document.getElementById("prop-neighborhood")?.value || "").trim() || null,
+    // docs/AI/CODER_SPEC_MULTI_NEIGHBORHOOD_2026-07-18 Part 1/3 — dual-write,
+    // sourced from the module array (propelioNbhds), NOT the DOM (the hidden
+    // #prop-neighborhood input is vestigial now). ⛔ Emit `neighborhood`
+    // BEFORE `neighborhoods` — the pending-PATCH Map preserves insertion
+    // order, so a receiver processing the two SSE echoes in order lands on
+    // the array LAST, not the single value (Part 8's emit-order half of the
+    // echo-clobber fix). Old cached bundles read only the single key.
+    neighborhood: propelioNbhds.length ? propelioNbhds[0] : null,
+    neighborhoods: [...propelioNbhds],
     // Property Type Filter toggles — read from the parcel-side filterState
     // so the same toggles gate both parcels and comps.
     parcelTypeMultifamily: filterState.multifamily,
@@ -8769,7 +8884,33 @@ function _compMatchedTotVal(comp) {
   return raw ? Number(raw[0]) : null;
 }
 
-function compPassesPropelioFilters(comp, filters, _nbhdNorm) {
+// docs/AI/CODER_SPEC_MULTI_NEIGHBORHOOD_2026-07-18 Part 4 — O(1)-per-comp
+// neighborhood-set membership test. Reference-memoized on the `filters`
+// object itself (mirrors the existing _nbhdOptionsCacheRef reference-guard
+// pattern below), NOT a single global mirroring propelioFilterState — that
+// would go stale at the four call sites below that don't recompute anything
+// before calling compPassesPropelioFilters: _updatePropelioStatusCounts's
+// statusBaselineFilters/oacBaselineFilters (map.js:~7451/7474, which spread
+// propelioFilterState and are invoked BEFORE applyPropelioClientFilters
+// recomputes anything on several code paths, e.g. ~4406/4444/9069/9490/
+// 9708), _buildNbhdOptionsCache's filtersNoNbhd (~9149, Part 7), and the CSV
+// export path's own fresh readPropelioFiltersFromUI() call (~13136+50,
+// which isn't tied to any applyPropelioClientFilters pass at all). Keying
+// the memo on the actual `filters` reference passed in keeps every call site
+// correct while still only rebuilding the Set once per distinct filters
+// object — O(1) amortized per comp within any single .filter() pass, since
+// each pass reuses the SAME filters reference for every comp.
+let _nbhdNormSetFilters = null;
+let _nbhdNormSet = null;
+function _nbhdNormSetFor(filters) {
+  if (filters !== _nbhdNormSetFilters) {
+    _nbhdNormSetFilters = filters;
+    _nbhdNormSet = new Set((filters.neighborhoods || []).map(normalizeNbhd));
+  }
+  return _nbhdNormSet;
+}
+
+function compPassesPropelioFilters(comp, filters) {
   const status = String(comp?.status || "").toLowerCase();
   // Status checkbox filters
   if (status === "sold" && !filters.statusSold) return false;
@@ -8872,10 +9013,15 @@ function compPassesPropelioFilters(comp, filters, _nbhdNorm) {
   if (bucket === "single_family" && filters.parcelTypeOffMarket   === false) return false;
   if (bucket === null            && filters.parcelTypeOffMarket   === false) return false;
 
-  // Neighborhood filter — null/blank comp drops out when a filter is active
-  if (filters.neighborhood) {
-    const norm = (_nbhdNorm !== undefined) ? _nbhdNorm : normalizeNbhd(filters.neighborhood);
-    if (normalizeNbhd(comp?.neighborhood) !== norm) return false;
+  // docs/AI/CODER_SPEC_MULTI_NEIGHBORHOOD_2026-07-18 Part 4 — OR set via a
+  // precomputed normalized Set, O(1) per comp regardless of set size. Empty
+  // set ⇒ no gate (= today's null). Null/blank comp neighborhood drops out
+  // only when the set is non-empty — normalizeNbhd(null) === "" won't be in
+  // a non-empty set because coerceNbhds' blank guard guarantees no "" ever
+  // enters the set. The predicate reads filters.neighborhoods only —
+  // coercion already turned any legacy-only blob into the array upstream.
+  if (filters.neighborhoods && filters.neighborhoods.length) {
+    if (!_nbhdNormSetFor(filters).has(normalizeNbhd(comp?.neighborhood))) return false;
   }
 
   return true;
@@ -8948,8 +9094,10 @@ function applyPropelioClientFilters() {
   const all = window._propelioLast.comps;
   // Map view: render every passing comp (good/unrated AND bad — bad gets
   // the `.bad-comp` class for visual de-emphasis but stays on the map).
-  const _nbhdNorm = normalizeNbhd(propelioFilterState.neighborhood);
-  const visibleOnMap = all.filter((c) => compPassesPropelioFilters(c, propelioFilterState, _nbhdNorm));
+  // docs/AI/CODER_SPEC_MULTI_NEIGHBORHOOD_2026-07-18 Part 4 — dead 3rd-arg
+  // (_nbhdNorm) dropped; the Set-based OR-gate is reference-memoized inside
+  // compPassesPropelioFilters itself now (_nbhdNormSetFor).
+  const visibleOnMap = all.filter((c) => compPassesPropelioFilters(c, propelioFilterState));
   // AI module seam (read-only mirror of the VISIBLE set) — stashed BEFORE the
   // fact-filter post-pass below, deliberately. ai-card.js's read derives its
   // comp_keys from this exact array (ai-card.js:167); stashing the
@@ -9791,8 +9939,12 @@ function resetPropelioFilters() {
   set("prop-sqft-min", ""); set("prop-sqft-max", "");
   set("prop-year-min", ""); set("prop-year-max", "");
   set("prop-price-min", ""); set("prop-price-max", "");
-  set("prop-neighborhood", "");
-  _renderNbhdChip(null);
+  // docs/AI/CODER_SPEC_MULTI_NEIGHBORHOOD_2026-07-18 Part 6 — this function
+  // writes the DOM directly and BYPASSES applyPropelioFilterStateToUI (and
+  // therefore coerceNbhds), so it must clear the module array itself or
+  // "Reset" would leave the OR set silently active.
+  propelioNbhds = [];
+  _renderNbhdChip();
   _resetAiMode();
   _renderAiBar();
   applyPropelioClientFilters();
@@ -9822,7 +9974,12 @@ function _buildNbhdOptionsCache() {
   // active filters EXCEPT the neighborhood filter itself (so you can still
   // re-pick). This makes the list + counts react live to OAC and every other
   // filter — OAC off shows only in-area neighborhoods, OAC on shows all.
-  const filtersNoNbhd = { ...propelioFilterState, neighborhood: null };
+  // docs/AI/CODER_SPEC_MULTI_NEIGHBORHOOD_2026-07-18 Part 7 — the ONE
+  // strip-site (options cache, not an OAC count): strip BOTH keys so the
+  // type-ahead still lists other neighborhoods to add. The OAC/status
+  // badges keep the gate by spreading propelioFilterState and inherit
+  // `neighborhoods` for free — no other strip path to touch.
+  const filtersNoNbhd = { ...propelioFilterState, neighborhoods: [], neighborhood: null };
   // Signature so a filter change (e.g. OAC toggle — same comps array) forces a
   // rebuild, while typing (no filter change) stays a cheap no-op. No geometry
   // math in the signature itself; the point-in-polygon work happens only on the
@@ -9857,20 +10014,38 @@ function _buildNbhdOptionsCache() {
     .sort((a, b) => a.display.localeCompare(b.display));
 }
 
-function _renderNbhdChip(display) {
+// docs/AI/CODER_SPEC_MULTI_NEIGHBORHOOD_2026-07-18 Part 6 — multi-chip
+// renderer over propelioNbhds (the module array is the source of truth; no
+// `display` param anymore). WYSIWYG: the chips shown ARE the exact OR set
+// applied — no hidden members. Called with no args from every entry point
+// (SSE reconcile, reset, select, per-chip remove, applyPropelioFilterStateToUI)
+// so there is exactly one render path, never a stale display/state split.
+function _renderNbhdChip() {
   const chipEl = document.getElementById("prop-neighborhood-chip");
   const searchEl = document.getElementById("prop-neighborhood-search");
   const optionsEl = document.getElementById("prop-neighborhood-options");
   if (!chipEl) return;
-  if (!display) {
+  if (!propelioNbhds.length) {
     chipEl.hidden = true;
     chipEl.innerHTML = "";
     if (searchEl) searchEl.hidden = false;
     return;
   }
-  chipEl.innerHTML = `<span class="nbhd-chip-label">${_propelioEscape(display)}</span><span class="nbhd-chip-x" role="button" aria-label="Clear neighborhood filter" tabindex="0">✕</span>`;
+  chipEl.innerHTML = propelioNbhds
+    .map((n) => (
+      `<span class="nbhd-chip-item">` +
+      `<span class="nbhd-chip-label">${_propelioEscape(n)}</span>` +
+      `<span class="nbhd-chip-x" data-nbhd="${_propelioEscape(n)}" role="button" ` +
+      `aria-label="Remove ${_propelioEscape(n)}" tabindex="0">✕</span>` +
+      `</span>`
+    ))
+    .join("");
   chipEl.hidden = false;
-  if (searchEl) { searchEl.value = ""; searchEl.hidden = true; }
+  // Multi-select: the search box stays available (never hidden once a chip
+  // exists) so more neighborhoods can be added on top of the current chips —
+  // today's single-select hid it the moment one chip existed; that no longer
+  // applies once the filter is an OR set.
+  if (searchEl) { searchEl.value = ""; searchEl.hidden = false; }
   if (optionsEl) { optionsEl.hidden = true; optionsEl.innerHTML = ""; }
 }
 
@@ -9904,18 +10079,28 @@ function _renderNbhdOptions(query) {
   optionsEl.hidden = false;
 }
 
+// docs/AI/CODER_SPEC_MULTI_NEIGHBORHOOD_2026-07-18 Part 6 — append (today
+// this replaced the single value). Dedup on normalizeNbhd, first-seen casing
+// kept for display (sortDedupe); re-sort so display/serialization/[0] stay
+// deterministic; then the normal apply + autosave path.
 function _selectNbhdOption(display) {
-  const hiddenEl = document.getElementById("prop-neighborhood");
-  if (hiddenEl) hiddenEl.value = display;
-  _renderNbhdChip(display);
+  const val = String(display || "").trim();
+  if (val && !propelioNbhds.some((n) => normalizeNbhd(n) === normalizeNbhd(val))) {
+    propelioNbhds = sortDedupe([...propelioNbhds, val]);
+  }
+  _renderNbhdChip();
   applyPropelioClientFiltersDebounced();
   _filterSaveQueueSave();
 }
 
-function _clearNbhdFilter() {
-  const hiddenEl = document.getElementById("prop-neighborhood");
-  if (hiddenEl) hiddenEl.value = "";
-  _renderNbhdChip(null);
+// docs/AI/CODER_SPEC_MULTI_NEIGHBORHOOD_2026-07-18 Part 6 — per-chip remove
+// (splice just the one being cleared), not a clear-all — no separate
+// clear-all control exists today, so each chip's own ✕ is the only removal
+// mechanism. Removing the last chip ⇒ empty set ⇒ filter off.
+function _clearNbhdFilter(display) {
+  const key = normalizeNbhd(display);
+  propelioNbhds = propelioNbhds.filter((n) => normalizeNbhd(n) !== key);
+  _renderNbhdChip();
   applyPropelioClientFiltersDebounced();
   _filterSaveQueueSave();
 }
@@ -10082,16 +10267,20 @@ let propelioStickyBtn = null;
       _selectNbhdOption(opt.dataset.display || "");
     });
   }
-  // Chip clear (delegation on chip container)
+  // Chip clear (delegation on chip container) — docs/AI/CODER_SPEC_MULTI_
+  // NEIGHBORHOOD_2026-07-18 Part 6: per-chip remove, keyed by the clicked
+  // chip's own data-nbhd, not a blanket clear-all.
   const nbhdChipEl = document.getElementById("prop-neighborhood-chip");
   if (nbhdChipEl) {
     nbhdChipEl.addEventListener("click", (ev) => {
-      if (ev.target.closest(".nbhd-chip-x")) _clearNbhdFilter();
+      const xEl = ev.target.closest(".nbhd-chip-x");
+      if (xEl) _clearNbhdFilter(xEl.dataset.nbhd || "");
     });
     nbhdChipEl.addEventListener("keydown", (ev) => {
-      if (ev.target.closest(".nbhd-chip-x") && (ev.key === "Enter" || ev.key === " ")) {
+      const xEl = ev.target.closest(".nbhd-chip-x");
+      if (xEl && (ev.key === "Enter" || ev.key === " ")) {
         ev.preventDefault();
-        _clearNbhdFilter();
+        _clearNbhdFilter(xEl.dataset.nbhd || "");
       }
     });
   }
