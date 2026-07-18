@@ -1966,7 +1966,7 @@ _FILTER_FIELD_BASE_KEYS: frozenset[str] = frozenset({
     "comp.appr_val_min", "comp.appr_val_max",
     "comp.yr_built_min", "comp.yr_built_max",
     "comp.sqft_min",     "comp.sqft_max",
-    # propelio (23) — includes the 6 parcelType* mirrors of the parcel-side
+    # propelio (24) — includes the 6 parcelType* mirrors of the parcel-side
     # checkboxes synthesized by readPropelioFiltersFromUI() at capture time
     # (frontend/map.js:7146-7151). They're derived/redundant with
     # checkboxes.* but persist into filter_state because the capture spread
@@ -1980,7 +1980,12 @@ _FILTER_FIELD_BASE_KEYS: frozenset[str] = frozenset({
     "propelio.yearMin", "propelio.yearMax",
     "propelio.priceMin", "propelio.priceMax",
     "propelio.sortMode",
+    # docs/AI/CODER_SPEC_MULTI_NEIGHBORHOOD_2026-07-18 Part 2 -- dual-write:
+    # `neighborhood` is the legacy single-value key (kept for cached old
+    # bundles), `neighborhoods` is the new OR-set array. Both PATCHed on
+    # every change; keep both allowlisted long-term, not a temporary shim.
     "propelio.neighborhood",
+    "propelio.neighborhoods",
     "propelio.parcelTypeMultifamily", "propelio.parcelTypeDuplexes",
     "propelio.parcelTypeCommercial",  "propelio.parcelTypeVacant",
     "propelio.parcelTypeExempt",      "propelio.parcelTypeOffMarket",

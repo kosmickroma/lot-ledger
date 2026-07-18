@@ -500,7 +500,23 @@ body.is-not-power-user .power-user-only {
 .nbhd-option:hover {
   background: rgba(201, 162, 79, 0.15);
 }
+/* docs/AI/CODER_SPEC_MULTI_NEIGHBORHOOD_2026-07-18 Part 6 -- the container is
+   now a wrap-flex holding zero or more chip-item pills, not a single pill
+   itself. Pill styling (background/border/radius) moved to .nbhd-chip-item
+   below so each neighborhood renders as its own separate tag. */
 .nbhd-chip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+}
+.nbhd-chip[hidden] {
+  /* More specific than the .nbhd-chip flex rule above, which otherwise
+     beats the UA hidden-attribute display-none and shows an empty container. */
+  display: none;
+}
+.nbhd-chip-item {
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -511,11 +527,6 @@ body.is-not-power-user .power-user-only {
   font-size: 11px;
   color: #e8d9b0;
   max-width: 100%;
-}
-.nbhd-chip[hidden] {
-  /* More specific than the .nbhd-chip inline-flex rule above, which otherwise
-     beats the UA hidden-attribute display-none and shows an empty pill. */
-  display: none;
 }
 .nbhd-chip-label {
   overflow: hidden;
