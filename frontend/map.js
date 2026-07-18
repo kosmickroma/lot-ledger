@@ -8323,23 +8323,21 @@ let propelioFilterState = { ...DEFAULT_PROPELIO_FILTERS };
 // around the selected subject. EPHEMERAL: in-memory, per-tab, never persisted.
 // The band VALUES persist via the normal autosave (WYSIWYG-honest); the MODE
 // does not. Spec: docs/COMP_ENGINE_POC_PLAN_2026-07-11.md.
-const AUTO_MATCH_BAND = 0.2; // ±20% — v1 default; the band is an upsell hook.
+// Per-view, one-sided band factors (Tier 1 "the number" spec, 2026-07-18,
+// Part 1) — replaces the old symmetric ±20% AUTO_MATCH_BAND on both axes.
+// ARV keeps its sqft ceiling (a loose condition proxy — bounds the size
+// effect, doesn't eliminate it) and drops its lot band entirely (KK's call;
+// teardown/land-sale risk stays on record in the spec). NBV keeps its lot
+// ceiling (new builds are sized to the lot, not the old house) and drops its
+// sqft band entirely. Named, tunable, one place — no magic numbers.
+const ARV_SQFT_MAX_FACTOR = 1.30; // ARV sqft ceiling = subject.sqft × this
+const NBV_LOT_MAX_FACTOR = 1.20;  // NBV lot ceiling = subject.acres × this
 // The CLIENT'S OWN LINE, from his team's saved filters and confirmed on the
 // 2026-07-13 call: ARV comps are OLD houses (what you'd flip, year <= 2008);
 // NBV comps are NEW builds (what you'd construct, year >= 2008).
 // ⚠️ OPEN with the client: is 2008 the line everywhere, or does it move by
 // neighbourhood? If it moves, this becomes a knob, not a constant.
 const AUTO_MATCH_YEAR_PIVOT = 2008;
-
-// Which year field the band math writes for a given view, per the client's
-// own line (§2.1): ARV = old houses (year <= pivot) -> prop-year-max, NBV =
-// new builds (year >= pivot) -> prop-year-min. Export is a review/export
-// view, not a valuation view — it gets no year constant.
-function _autoMatchYearFieldForView() {
-  if (_activeView === "arv") return "prop-year-max";
-  if (_activeView === "nbv") return "prop-year-min";
-  return null;
-}
 
 // Parse a subject-card display value ("2,450", "0.29 ac", "N/A") to a number.
 // Mirrors the _compMatchedTotVal precedent (map.js:8291): strip $ and commas,
@@ -8361,25 +8359,12 @@ function _autoMatchSubjectDims() {
   return { acres, sqft };
 }
 
-// Build a ± band around a center value. `round` shapes each end (int for sqft,
-// 2dp for acres). Returns null for missing/non-positive centers.
-function _autoMatchBand(center, frac, round) {
+// One-sided ceiling helper for AI mode's per-view bands (Tier 1 spec Part
+// 1) — returns a single bound (center × factor), never a ± pair. Replaces
+// the old symmetric _autoMatchBand ± helper (removed with the auto-match POC).
+function _autoMatchMaxBound(center, factor, round) {
   if (center == null || !Number.isFinite(center) || center <= 0) return null;
-  return { min: round(center * (1 - frac)), max: round(center * (1 + frac)) };
-}
-
-// Write the lot/sqft filter inputs from the subject dims. Programmatic .value
-// writes do NOT fire input events, so the existing debounced listeners won't
-// double-apply. Does NOT call applyPropelioClientFilters (callers do).
-function _writeAutoMatchBands(dims) {
-  const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v == null ? "" : String(v); };
-  const roundAcre = (x) => Math.round(x * 100) / 100;
-  const acreBand = _autoMatchBand(dims.acres, AUTO_MATCH_BAND, roundAcre);
-  const sqftBand = _autoMatchBand(dims.sqft, AUTO_MATCH_BAND, Math.round);
-  if (acreBand) { set("prop-lot-min", acreBand.min); set("prop-lot-max", acreBand.max); }
-  if (sqftBand) { set("prop-sqft-min", sqftBand.min); set("prop-sqft-max", sqftBand.max); }
-  const yearField = _autoMatchYearFieldForView();
-  if (yearField) set(yearField, AUTO_MATCH_YEAR_PIVOT);
+  return round(center * factor);
 }
 
 // ── AI mode (2026-07-14 AI bar spec; persistence fix 2026-07-14) ─────────
@@ -8480,15 +8465,22 @@ const AI_FACT_SORT_MODE = "ai_fact";
 // hole got in, so there is no second list anywhere for sortMode either.
 const _AI_OVERLAY_FIELDS = new Set(["lotMin", "lotMax", "sqftMin", "sqftMax", "yearMin", "yearMax", "sortMode"]);
 
+// Per-view asymmetric bands (Tier 1 spec Part 1) — ARV keeps only a sqft
+// ceiling, NBV keeps only a lot ceiling; the other axis is DROPPED (both
+// bounds null). Band filters are fail-closed (compPassesPropelioFilters,
+// map.js:~8790) — a comp missing that field is excluded whenever EITHER
+// bound is set, so only null/null (not "no min, keep max") actually readmits
+// comps missing the dropped field. Do not loosen the year gate or either
+// view's primary band (ARV sqft, NBV lot) — those are each view's identity.
 function _buildAiOverlayFields(dims, view) {
   const roundAcre = (x) => Math.round(x * 100) / 100;
-  const acreBand = dims ? _autoMatchBand(dims.acres, AUTO_MATCH_BAND, roundAcre) : null;
-  const sqftBand = dims ? _autoMatchBand(dims.sqft, AUTO_MATCH_BAND, Math.round) : null;
+  const lotMax = (view === "nbv" && dims) ? _autoMatchMaxBound(dims.acres, NBV_LOT_MAX_FACTOR, roundAcre) : null;
+  const sqftMax = (view === "arv" && dims) ? _autoMatchMaxBound(dims.sqft, ARV_SQFT_MAX_FACTOR, Math.round) : null;
   return {
-    lotMin: acreBand ? acreBand.min : null,
-    lotMax: acreBand ? acreBand.max : null,
-    sqftMin: sqftBand ? sqftBand.min : null,
-    sqftMax: sqftBand ? sqftBand.max : null,
+    lotMin: null,
+    lotMax,
+    sqftMin: null,
+    sqftMax,
     yearMin: view === "nbv" ? AUTO_MATCH_YEAR_PIVOT : null,
     yearMax: view === "arv" ? AUTO_MATCH_YEAR_PIVOT : null,
     sortMode: AI_FACT_SORT_MODE,

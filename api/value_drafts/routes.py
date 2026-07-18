@@ -56,6 +56,14 @@ class DraftTelemetryRequest(BaseModel):
     # lens from one signed under the VA's own filters; Accept stays live
     # while AI mode is on, so this is the one place that fact gets logged.
     ai_mode: Optional[bool] = None
+    # Part 4, docs/AI/CODER_SPEC_TIER1_NUMBER_2026-07-17.md — commit events
+    # only. Which band-factor defaults (e.g. "bands-2026-07-18") a signed
+    # number was drafted under, so before/after measurement across a band
+    # tweak can tell which regime produced which number. ⛔ Must land in ALL
+    # THREE of frontend sendTelemetry / this model / the commit log line, or
+    # it's a silent no-op — exactly how ai_mode/fact_filters (053576f) failed
+    # the first time: a model field alone with no log-line read is a no-op.
+    lens_version: Optional[str] = None
 
 
 def _resolve_comp_ids(keys: list[str]) -> dict[str, int]:
@@ -122,10 +130,11 @@ async def draft_telemetry(
         fact_filters_summary = payload.fact_filters if isinstance(payload.fact_filters, dict) else {}
         logger.info(
             "value_drafts.commit area_id=%s user=%s role=%s field=%s draft_value=%s final_value=%s "
-            "outcome=%s kept_count=%s kept_comp_ids=%s filter_state=%s fact_filters=%s ai_mode=%s",
+            "outcome=%s kept_count=%s kept_comp_ids=%s filter_state=%s fact_filters=%s ai_mode=%s "
+            "lens_version=%s",
             area_id, user_id, role, payload.field, payload.draft_value, payload.final_value,
             payload.outcome, len(kept_ids), ",".join(str(i) for i in kept_ids), filter_summary,
-            fact_filters_summary, bool(payload.ai_mode),
+            fact_filters_summary, bool(payload.ai_mode), payload.lens_version,
         )
 
     return {"ok": True}

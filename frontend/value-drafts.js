@@ -26,6 +26,12 @@
     // before ARV drives MAO, which is the order the app's own arithmetic runs in.
     const FIELDS = ["nbv", "arv"];
     const MEDIAN_MIN_KEPT = 2;
+    // Part 4, docs/AI/CODER_SPEC_TIER1_NUMBER_2026-07-17.md — stamped onto
+    // every commit telemetry event so before/after measurement across a band
+    // tweak can tell which band-factor regime a signed number was drafted
+    // under. Bump this string whenever the band constants (map.js's
+    // ARV_SQFT_MAX_FACTOR / NBV_LOT_MAX_FACTOR) change.
+    const LENS_VERSION = "bands-2026-07-18";
     // "New build" = built 2008 or later. This is NOT a guess and NOT the scraper's
     // NEW_BUILDS_MIN_YEAR (2015, api/propelio/config.py) — that constant is for an
     // offline crawl and has nothing to do with this procedure.
@@ -129,7 +135,53 @@
 
     // --- Draft math (spec §1, §3) ------------------------------------------
 
-    function computeArvDraft(allComps) {
+    // AI mode ON — Tier 1 "the number" spec (docs/AI/CODER_SPEC_TIER1_NUMBER_2026-07-17.md
+    // Part 2). Client's locked answer: ARV = median of the top 3 BY PRICE of the
+    // VISIBLE (filtered) comps — literal "visible," not "kept." `allComps` here is
+    // already the AI-banded, fact-filtered, WYSIWYG visible set (map.js's
+    // __valueDraftsViewComps). GOOD ratings go inert for this path (keeping a comp
+    // no longer raises ARV); BAD ratings still delete a comp from the pool, so a bad
+    // rating on a top-3 comp can still drop ARV a price rank — the one rating lever
+    // that still steers this number.
+    //
+    // ⛔ No MEDIAN_MIN_KEPT gate on this path — one comp is a valid ("thin") answer.
+    function computeArvDraftAiMode(allComps) {
+      if (allComps.length === 0) {
+        return { value: null, label: "Keep comps to draft a value", basis: "none", mathComps: [], excludedComps: [], keptCount: 0, poolCount: 0 };
+      }
+      const excludedComps = allComps.filter((c) => c.user_rating === "bad" || !isMathEligible(c));
+      const pool = allComps.filter((c) => c.user_rating !== "bad" && isMathEligible(c));
+      if (pool.length === 0) {
+        return {
+          value: null,
+          label: `${allComps.length} visible comp${allComps.length === 1 ? "" : "s"}, all excluded from the math`,
+          basis: "top3", mathComps: [], excludedComps, keptCount: 0, poolCount: 0,
+        };
+      }
+      const sortedDesc = pool.slice().sort((a, b) => b.price - a.price);
+      const top = sortedDesc.slice(0, Math.min(3, sortedDesc.length));
+      const { value } = median(top.map((c) => c.price));
+      // [Fable framing correction, spec Part 5] "median of 2" is the mean of two —
+      // call N=2 a "midpoint," not a median, so the wording stays honest.
+      let label;
+      if (top.length === 1) {
+        label = `thin: 1 comp · ${fmt(value)}`;
+      } else if (top.length === 2) {
+        label = `midpoint of 2 comps · ${fmt(value)}`;
+      } else {
+        label = `top 3 of ${pool.length} visible · median ${fmt(value)}`;
+      }
+      return {
+        value, label, basis: "top3", mathComps: top, excludedComps,
+        keptCount: allComps.filter((c) => c.user_rating === "good").length,
+        poolCount: pool.length,
+        highlightKeys: top.map((c) => c.comp_address_key),
+      };
+    }
+
+    // AI mode OFF — unchanged (median of kept, falling back to the visible pool).
+    // Value drafts run independent of AI mode; this path is untouched byte-for-byte.
+    function computeArvDraftKeptMedian(allComps) {
       if (allComps.length === 0) {
         return { value: null, label: "Keep comps to draft a value", basis: "none", mathComps: [], excludedComps: [], keptCount: 0, poolCount: 0 };
       }
@@ -171,6 +223,13 @@
       // function. renderAcceptBar (value-drafts.js:~296) reads it so a
       // one-comp median reads as a median, never hidden as a bare number.
       return { value, label, basis, mathComps: sorted, excludedComps, keptCount: kept.length, poolCount: basisComps.length, highlightKeys };
+    }
+
+    // Entry point — branches on AI-mode state from the seam (spec Part 2).
+    // `aiMode` is passed in by tick() from __valueDraftsGetContext()'s `aiMode`
+    // field, the same flag the commit telemetry already records.
+    function computeArvDraft(allComps, aiMode) {
+      return aiMode ? computeArvDraftAiMode(allComps) : computeArvDraftKeptMedian(allComps);
     }
 
     function computeNbvDraft(allComps) {
@@ -311,6 +370,11 @@
       const n = draft.poolCount;
       const noun = n === 1 ? "comp" : "comps";
       if (fieldKey === "arv") {
+        if (draft.basis === "top3") {
+          if (draft.mathComps.length === 1) return "thin: 1 comp";
+          if (draft.mathComps.length === 2) return "midpoint of 2 comps";
+          return `top 3 of ${n} visible`;
+        }
         return draft.basis === "kept" ? `median of ${n} kept ${noun}` : `median of ${n} visible ${noun}`;
       }
       // nbv
@@ -405,6 +469,7 @@
         // per-field `filterState`) — the single existing resolution, never
         // re-derived here.
         filter_state: (view && view.filterState) || null,
+        lens_version: LENS_VERSION,
       });
 
       closeModal();
@@ -453,6 +518,7 @@
             fact_filters: (c && c.factFilters) || null,
             // Part D item 3 — same provenance as the accept-draft commit above.
             filter_state: (view && view.filterState) || null,
+            lens_version: LENS_VERSION,
           });
           fs.savedSnapshot = newVal;
         });
@@ -611,7 +677,7 @@
         // screen would show, active view or not. This function itself has no
         // view awareness and needs none -- it only ever sees the comp list it's
         // handed.
-        const draft = fieldKey === "arv" ? computeArvDraft(view.comps) : computeNbvDraft(view.comps);
+        const draft = fieldKey === "arv" ? computeArvDraft(view.comps, Boolean(c && c.aiMode)) : computeNbvDraft(view.comps);
         fs.draft = draft;
         fs.ratings = newMap;
         fs.keys = newKeys;
