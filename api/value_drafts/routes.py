@@ -34,7 +34,7 @@ class DraftTelemetryRequest(BaseModel):
     event_type: Literal["rating", "draft_change", "commit"]
     area_id: str
     view: Optional[Literal["arv", "nbv"]] = None
-    field: Optional[Literal["arv", "nbv"]] = None
+    field: Optional[Literal["arv", "nbv", "rehab_needed"]] = None
     comp_key: Optional[str] = None                     # rating events only — resolved, never logged raw
     verdict: Optional[Literal["good", "bad", "unrated"]] = None
     draft_state: Optional[Literal["pool", "kept", "none"]] = None

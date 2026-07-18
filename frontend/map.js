@@ -14706,8 +14706,21 @@ window.__valueDraftsGetContext = () => {
     arv: { comps: arvView.comps, filterState: arvView.fstate },
     nbv: { comps: nbvView.comps, filterState: nbvView.fstate },
     storedValues: _storedValueState
-      ? { arv: _storedValueState.arv.numeric_value, nbv: _storedValueState.nbv.numeric_value }
-      : { arv: null, nbv: null },
+      ? {
+          arv: _storedValueState.arv.numeric_value,
+          nbv: _storedValueState.nbv.numeric_value,
+          rehab_needed: _storedValueState.rehab_needed.numeric_value,
+        }
+      : { arv: null, nbv: null, rehab_needed: null },
+    // Rehab draft (docs/AI/CODER_SPEC_REHAB_DRAFT_2026-07-18.md Part 1) — TRI-
+    // STATE, not a bool. A null _lastSubjectProps (subject-goes-null sites,
+    // map.js:1262/1675/1693, the async resolve window at 1678, and AI mode
+    // staying ON when the subject clears, map.js:~16011) must read "unknown,"
+    // never "not vacant" -- a bool would offer 10%-of-ARV on exactly the class
+    // the client asked to exclude. The ghost renders ONLY on "nonvacant".
+    subjectVacancy: _lastSubjectProps
+      ? (_lastSubjectProps.prop_type === "vacant" ? "vacant" : "nonvacant")
+      : "unknown",
   };
 };
 
@@ -14718,10 +14731,12 @@ window.__valueDraftsGetContext = () => {
 // TDPP-MAO cascade for free, then forces an immediate flush (reusing
 // _storedValueFlushPending, already used by the beforeunload handler)
 // instead of waiting out the debounce -- an explicit accept click is one
-// final signed action, not a keystroke stream. Restricted to arv/nbv only --
-// drafting TDPP is explicitly out of scope (§0.2).
+// final signed action, not a keystroke stream. Restricted to arv/nbv/
+// rehab_needed only -- drafting TDPP or the derived fields (mao_arv,
+// tdpp_minus_mao_arv) is explicitly out of scope (§0.2, rehab spec Part 2):
+// those are computed, never drafted.
 window.__valueDraftsAcceptDraft = (fieldKey, value) => {
-  if (fieldKey !== "arv" && fieldKey !== "nbv") return false;
+  if (fieldKey !== "arv" && fieldKey !== "nbv" && fieldKey !== "rehab_needed") return false;
   if (!_storedValueState) return false;
   _storedValueOnNumericInput(fieldKey, String(value));
   const input = document.getElementById(`sv-input-${fieldKey}`);

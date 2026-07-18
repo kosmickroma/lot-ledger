@@ -32,6 +32,9 @@
     // under. Bump this string whenever the band constants (map.js's
     // ARV_SQFT_MAX_FACTOR / NBV_LOT_MAX_FACTOR) change.
     const LENS_VERSION = "bands-2026-07-18";
+    // docs/AI/CODER_SPEC_REHAB_DRAFT_2026-07-18.md — rehab defaults to 10% of
+    // ARV, as an overridable ghost. Named, tunable, one place.
+    const REHAB_FACTOR = 0.10;
     // "New build" = built 2008 or later. This is NOT a guess and NOT the scraper's
     // NEW_BUILDS_MIN_YEAR (2015, api/propelio/config.py) — that constant is for an
     // offline crawl and has nothing to do with this procedure.
@@ -330,6 +333,41 @@
       if (chip) chip.remove();
     }
 
+    // --- Rehab ghost (docs/AI/CODER_SPEC_REHAB_DRAFT_2026-07-18.md) --------
+    // Rehab is NOT comp-derived -- it never goes through computeArvDraft/
+    // computeNbvDraft and is not a FIELDS member (adding it there would make
+    // the tick loop try to comp-draft it). It is a pure per-render adjunct:
+    // 10% of the ARV this click WOULD sign, spliced into the one accept bar's
+    // display and its accept-all click. No persistent rehab state here (no
+    // savedSnapshot/hasEverAccepted for it) -- keeping it a pure derivation is
+    // what makes teardown free (value-drafts.js's existing dead-context/area-
+    // change resets already clear the bar, rehab included, with no separate
+    // reset to maintain).
+
+    // The ARV that WOULD be signed by an accept click right now: the live ARV
+    // draft if one exists, else the already-committed ARV. Nothing to take
+    // 10% of otherwise. NOT used for the actual accept-time computation --
+    // SEAM 3 below reads back the just-committed ARV instead, which is the
+    // ACTUAL (rounded/clamped) number, not this live preview.
+    function rehabArvBasis(c) {
+      const arvDraft = fieldState.arv.draft;
+      if (arvDraft && arvDraft.value !== null) return arvDraft.value;
+      return (c && c.storedValues && c.storedValues.arv != null) ? c.storedValues.arv : null;
+    }
+
+    // ⛔ ONE shared gate — renderAcceptBar (display) AND the vd-accept-all
+    // click (accept) both call this, never a second copy (Fable finding). A
+    // second copy is how display and accept drift and rehab gets signed while
+    // hidden, or shown but unsignable.
+    //   - AI mode ON (matches the Tier-1 ARV calc gate).
+    //   - subjectVacancy === "nonvacant" -- TRI-STATE: "vacant" OR "unknown"
+    //     (null subject) both fail this. A null subject must never slip
+    //     through as "not vacant" (Fable #1).
+    //   - An ARV basis exists (live draft or committed) to take 10% of.
+    function rehabEligible(c) {
+      return !!(c && c.aiMode && c.subjectVacancy === "nonvacant" && rehabArvBasis(c) != null);
+    }
+
     // --- ONE Accept button for the whole panel -----------------------------
     // Accepts every live draft at once (ARV + NBV). Accepting NBV also cascades
     // TDPP (x0.2) through map.js's existing code, so one click can fill three boxes.
@@ -347,10 +385,58 @@
           const explain = e.target.closest(".vd-explain");
           if (explain) { openDerivationModal(explain.getAttribute("data-field")); return; }
           if (e.target.closest(".vd-accept-all")) {
+            // 1. nbv, then arv (unchanged order -- nbv's TDPP cascade lands
+            // before arv drives MAO). acceptDraft's telemetry + flush are
+            // fire-and-forget `void` calls, but __valueDraftsAcceptDraft
+            // itself writes _storedValueState synchronously before
+            // returning, so arv's committed value is ready by the time step
+            // 2 reads it back (Fable verified: the accept path is
+            // synchronous end-to-end).
             FIELDS.forEach((f) => {
               const d = fieldState[f] && fieldState[f].draft;
               if (d && d.value !== null) acceptDraft(f);
             });
+            // 2. THEN, LAST, rehab -- SEAM 3. Computed from a READ-BACK of the
+            // just-committed ARV (ctx() re-resolves through the seam, which
+            // reads map.js's _storedValueState.arv.numeric_value fresh), NOT
+            // draft.value and NOT the pre-click stored value. Read-back is
+            // MORE correct than draft.value: _storedValueOnNumericInput
+            // rounds/clamps what actually gets stored, and an ARV draft can
+            // be non-integer (median of an even-count pool) -- rehab must be
+            // 10% of the number actually signed. Covers both cases: an ARV
+            // just accepted above, OR an ARV already committed with no draft
+            // this click (step 1 touched nothing, read-back still returns the
+            // prior committed value).
+            const freshCtx = ctx();
+            if (rehabEligible(freshCtx)) {
+              const committedArv = freshCtx.storedValues.arv;
+              if (committedArv != null) {
+                const rehabFinal = Math.round(committedArv * REHAB_FACTOR);
+                if (freshCtx.storedValues.rehab_needed !== rehabFinal) {
+                  // ⛔ Direct seam call, NOT the local acceptDraft() wrapper --
+                  // acceptDraft indexes fieldState[fieldKey] and calls
+                  // tick(true); rehab has no fieldState slot (Part 3, not in
+                  // FIELDS), so routing it through the wrapper would break.
+                  const ok = typeof window.__valueDraftsAcceptDraft === "function"
+                    && window.__valueDraftsAcceptDraft("rehab_needed", rehabFinal);
+                  if (ok) {
+                    // Part 4 telemetry, Option A -- same both-ends discipline
+                    // as lens_version in Tier-1: the backend Literal widen
+                    // (api/value_drafts/routes.py) is the other half.
+                    sendTelemetry({
+                      event_type: "commit",
+                      field: "rehab_needed",
+                      draft_value: rehabFinal,
+                      final_value: rehabFinal,
+                      outcome: "accepted_verbatim",
+                      ai_mode: Boolean(freshCtx.aiMode),
+                      lens_version: LENS_VERSION,
+                    });
+                    tick(true);
+                  }
+                }
+              }
+            }
           }
         });
       }
@@ -387,11 +473,24 @@
       const bar = ensureAcceptBar();
       if (!bar) return;
 
+      const c = lastCtx;
       const live = FIELDS.filter((f) => {
         const d = fieldState[f] && fieldState[f].draft;
         return d && d.value !== null;
       });
-      if (live.length === 0) {
+
+      // Rehab basis/eligibility computed up front -- needed both to decide
+      // whether to keep the bar alive below and to render its chip further
+      // down (same shared gate the accept-all click uses).
+      const rehabOn = rehabEligible(c);
+      const rehabShown = rehabOn ? Math.round(rehabArvBasis(c) * REHAB_FACTOR) : null;
+      const rehabSaved = c && c.storedValues ? c.storedValues.rehab_needed : null;
+      const rehabDiffers = rehabOn && rehabSaved !== rehabShown;
+
+      // ⛔ STRANDED-REHAB BRANCH #1 (Fable) -- rehab can differ (need signing)
+      // even when arv/nbv are both already saved and `live` is empty. Without
+      // this the bar would hide and rehab could never be signed.
+      if (live.length === 0 && !rehabDiffers) {
         bar.classList.add("vd-hidden");
         bar.innerHTML = "";
         return;
@@ -406,20 +505,34 @@
       // the number, ALWAYS rendered, never conditional on anything the user has
       // to click or hover for. A one-comp draft says "median of 1 comp" in the
       // same breath as the dollar figure.
-      const vals = live.map((f) => {
+      const valChips = live.map((f) => {
         const d = fieldState[f].draft;
         return `<span class="vd-accept-val">${f.toUpperCase()} ${esc(fmt(d.value))}` +
                `<span class="vd-accept-basis">${esc(basisPhrase(f, d))}</span>` +
                `<button type="button" class="vd-explain" data-field="${f}" ` +
                `title="How did it get this?" aria-label="How did it get this?">?</button></span>`;
-      }).join('<span class="vd-accept-sep">·</span>');
+      });
+      // Rehab renders in the same vd-accept-val style, but is NOT a FIELDS
+      // member -- it has no draft object, no fieldState slot, and its basis
+      // (10% of ARV) is self-evident, so ⛔ NO "?" explain button (Fable):
+      // it is never wired into the explain handler's data-field lookup.
+      if (rehabOn) {
+        valChips.push(
+          `<span class="vd-accept-val">REHAB ${esc(fmtFull(rehabShown))}` +
+          `<span class="vd-accept-basis">${esc(String(Math.round(REHAB_FACTOR * 100)))}% of ARV</span></span>`
+        );
+      }
+      const vals = valChips.join('<span class="vd-accept-sep">·</span>');
 
       // If every live draft already equals what's saved, there is nothing to accept
       // -- don't nag him to re-accept a number he's already signed.
+      // ⛔ STRANDED-REHAB BRANCH #2 (Fable) -- fold rehab into allMatch too, or
+      // a rehab that differs while arv/nbv match would read "saved" and hide
+      // the button, stranding rehab as unsignable.
       const allMatch = live.every((f) => {
-        const saved = lastCtx && lastCtx.storedValues ? lastCtx.storedValues[f] : null;
+        const saved = c && c.storedValues ? c.storedValues[f] : null;
         return saved !== null && saved !== undefined && saved === fieldState[f].draft.value;
-      });
+      }) && !rehabDiffers;
 
       // Task D hard condition (docs/AI/CODER_SPEC_FACTS_2026-07-14.md): the
       // button signs only what's shown -- true structurally (the click
