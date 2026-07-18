@@ -14798,6 +14798,18 @@ function __valueDraftsViewComps(view) {
     const cached = _viewFilterCache[view];
     if (cached && cached.v && cached.propelio) {
       fstate = { ...DEFAULT_PROPELIO_FILTERS, ...cached.propelio };
+      // docs/AI/PLAN_MULTI_NEIGHBORHOOD_TRACK_B_2026-07-18 — reconcile via
+      // coerceNbhds (Track A, reused verbatim) so the draft pool's
+      // neighborhood set matches the screen. Without this, a cached blob
+      // still holding the OLD single-neighborhood-only shape merges to
+      // {neighborhoods: [] (from the DEFAULT_PROPELIO_FILTERS spread above),
+      // neighborhood: "X"} -- new key empty, old key ignored by the
+      // predicate (Part 4 reads filters.neighborhoods only) -- and the
+      // draft pool silently drops the OR set the screen is actually
+      // honoring (draft≠screen, the $7.6M class).
+      const nbhds = coerceNbhds(fstate);
+      fstate.neighborhoods = nbhds;
+      fstate.neighborhood = nbhds.length ? nbhds[0] : null;
     } else {
       // ⛔ A.1 (2026-07-15 coder spec, "the never-visited-view gap") — this
       // view has never been opened, so it has no filters of its own. When it
@@ -16335,22 +16347,45 @@ function _renderAiBar() {
 // axis — hence one function, not two copies.
 function _resolveViewFilterSeed(view) {
   const cached = _viewFilterCache[view];
-  if (cached && cached.v) return cached;
-  if (view === "arv") {
+  let result;
+  if (cached && cached.v) {
+    result = cached;
+  } else if (view === "arv") {
     // ARV is the seed SOURCE for the other views — it has nothing to seed
     // FROM. A never-visited ARV (shouldn't happen in practice; ARV loads
     // first) falls straight to defaults, same as _setActiveView always did.
-    return { v: 1, checkboxes: { ...DEFAULT_FILTERS }, numeric: {}, sold: {}, comp: {}, propelio: {} };
+    result = { v: 1, checkboxes: { ...DEFAULT_FILTERS }, numeric: {}, sold: {}, comp: {}, propelio: {} };
+  } else {
+    const arv = _viewFilterCache.arv;
+    const seed = (arv && arv.v)
+      ? JSON.parse(JSON.stringify(arv))
+      : { v: 1, checkboxes: { ...DEFAULT_FILTERS }, numeric: {}, sold: {}, comp: {}, propelio: {} };
+    if (view === "nbv" && seed.propelio) {
+      delete seed.propelio.yearMin;
+      delete seed.propelio.yearMax;
+    }
+    result = seed;
   }
-  const arv = _viewFilterCache.arv;
-  const seed = (arv && arv.v)
-    ? JSON.parse(JSON.stringify(arv))
-    : { v: 1, checkboxes: { ...DEFAULT_FILTERS }, numeric: {}, sold: {}, comp: {}, propelio: {} };
-  if (view === "nbv" && seed.propelio) {
-    delete seed.propelio.yearMin;
-    delete seed.propelio.yearMax;
+  // docs/AI/PLAN_MULTI_NEIGHBORHOOD_TRACK_B_2026-07-18 — coerce the resolved
+  // propelio blob's neighborhood keys (via Track A's coerceNbhds, reused
+  // verbatim) before it's used/cached. This single spot covers all three
+  // paths above: the never-visited-view seed AND the real view-switch
+  // consumers (_setActiveView + __valueDraftsViewComps both call this one
+  // resolution, A.1) — so a draft pool built from a seeded/switched view can
+  // never see a different neighborhood set than the screen does. Mutating
+  // `result.propelio` in place is deliberate: for the `cached` path this IS
+  // `_viewFilterCache[view]`, and for the other two paths the caller writes
+  // the returned object back into `_viewFilterCache[view]` (map.js:~16399,
+  // __valueDraftsViewComps's own cache-populate) — so this progressively
+  // migrates cached blobs still holding the OLD single-neighborhood-only
+  // shape (pre-#8, or a co-viewer on an old bundle) to the reconciled OR-set
+  // shape, the same way coerceNbhds already self-heals on every real load.
+  if (result.propelio) {
+    const nbhds = coerceNbhds(result.propelio);
+    result.propelio.neighborhoods = nbhds;
+    result.propelio.neighborhood = nbhds.length ? nbhds[0] : null;
   }
-  return seed;
+  return result;
 }
 
 function _setActiveView(view) {
