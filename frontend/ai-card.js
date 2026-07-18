@@ -36,6 +36,17 @@
       not_found: "not found",
     };
 
+    // docs/AI/CODER_SPEC_SORT_2026-07-18 Part 2 -- same fields as the comps-
+    // list dropdown, minus Distance (deferred -- distance_mi isn't a comp
+    // payload field and needs seam plumbing this file doesn't have) and minus
+    // ai_fact (never offered here).
+    const BRIEF_SORT_OPTIONS = [
+      ["price_desc", "Price ↓"],
+      ["price_asc", "Price ↑"],
+      ["sqft_desc", "Sqft ↓"],
+      ["year_desc", "Year ↓"],
+    ];
+
     // §2.1 (docs/AI/CODER_SPEC_BRIEF_SCORECARD_2026-07-15.md) -- the ISD key
     // carries its own county prefix ("dcad:DALLAS ISD" / "tad:905"). Dallas +
     // Denton carry a real district NAME after the colon; Tarrant + Collin
@@ -53,6 +64,15 @@
     let seenAreaId = undefined;
     let modalEl = null;
     let modalKeydownHandler = null;
+    // docs/AI/CODER_SPEC_SORT_2026-07-18 Part 2 -- the brief's OWN sort state,
+    // deliberately SEPARATE from map.js's comps-list sort variable (this file
+    // has no import from map.js and must not gain one just for this: reading
+    // or writing that variable by name would recouple the two views). Neither
+    // reads nor writes the other -- the client's explicit "sorted views
+    // separate" ask (Part 3). In-memory only (resets to price-first per
+    // session); never persisted into the saved filter state, which keeps
+    // this decoupled and avoids a new persisted field.
+    let aiBriefSortMode = "price_desc";
 
     function ctx() {
       try {
@@ -317,8 +337,8 @@
     }
 
     // Builds one scorecard row descriptor per visible comp. Pure data --
-    // rendering and ordering are separate steps so the sort comparator can
-    // read `same_subdivision`/`same_isd` without re-deriving them.
+    // rendering is a separate step. Ordering now happens BEFORE this runs
+    // (sortVisibleComps, below), on the raw comps -- no sort key carried here.
     function buildScoreRow(comp, subject, readByKey, excludedByKey) {
       const facts = compFacts(subject, comp);
       return {
@@ -327,27 +347,51 @@
         same_isd: facts.same_isd,
         schoolName: comp && comp.isd ? isdDisplayName(comp.isd) : null,
         ai: aiLayerFor(comp, readByKey, excludedByKey),
-        // Explicit, non-price sort key (§2.4): the seam intentionally does
-        // not carry the subject's lat/lng (kept minimal per the spec), so a
-        // true distance_asc tie-break isn't derivable in this decoupled
-        // file -- address is deterministic, stable, and never price.
-        sortKey: String((comp && (comp.address || comp.comp_address_key)) || "").toLowerCase(),
       };
     }
 
-    // §2.4 -- gold matches first (neighborhood match, then school match),
-    // then everything else, in a fixed non-price order within each tier.
-    // ⛔ Never price: the app's default sort is price_desc, and inheriting
-    // ctx().comps' own order here would silently re-introduce it.
-    function compareScoreRows(a, b) {
-      const rank = (v) => (v === true ? 0 : 1);
-      const subDiff = rank(a.same_subdivision) - rank(b.same_subdivision);
-      if (subDiff !== 0) return subDiff;
-      const isdDiff = rank(a.same_isd) - rank(b.same_isd);
-      if (isdDiff !== 0) return isdDiff;
-      if (a.sortKey < b.sortKey) return -1;
-      if (a.sortKey > b.sortKey) return 1;
-      return 0;
+    // docs/AI/CODER_SPEC_SORT_2026-07-18 Part 2 -- price-first is now the
+    // honest default: ARV = top-3-by-price, so the brief surfaces the comps
+    // that actually set the number, rather than hiding price behind a fixed
+    // subdivision/ISD/address order (the old §2.4 "never price" design, from
+    // when the AI-mode fact-sort played the same anti-anchor role the comps
+    // list's price_desc default now plays instead). Replaces the dropped
+    // compareScoreRows (score-tier + address) with a straight user-chosen
+    // sort over the SAME fields the comps-list comparator uses
+    // (map.js:_sortPropelioComps -- price/sqft/year_built; this file has no
+    // import from map.js, so it's a hand copy, same precedent as
+    // ISD_NAME_FORM_PREFIXES above). Null-safe: a comp missing the sorted
+    // field sorts last, never crashes. No `ai_fact`, no `distance_asc` here
+    // -- distance isn't a comp payload field and needs seam plumbing this
+    // file doesn't have (deferred fast-follow).
+    function briefSortNum(v) {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : null;
+    }
+    function briefSortCmp(a, b, dir) {
+      if (a == null && b == null) return 0;
+      if (a == null) return 1;
+      if (b == null) return -1;
+      return dir === "asc" ? a - b : b - a;
+    }
+    function sortVisibleComps(comps, mode) {
+      const list = Array.isArray(comps) ? comps.slice() : [];
+      switch (mode) {
+        case "price_asc":
+          list.sort((a, b) => briefSortCmp(briefSortNum(a && a.price), briefSortNum(b && b.price), "asc"));
+          break;
+        case "sqft_desc":
+          list.sort((a, b) => briefSortCmp(briefSortNum(a && a.sqft), briefSortNum(b && b.sqft), "desc"));
+          break;
+        case "year_desc":
+          list.sort((a, b) => briefSortCmp(briefSortNum(a && a.year_built), briefSortNum(b && b.year_built), "desc"));
+          break;
+        case "price_desc":
+        default:
+          list.sort((a, b) => briefSortCmp(briefSortNum(a && a.price), briefSortNum(b && b.price), "desc"));
+          break;
+      }
+      return list;
     }
 
     // One unified row renderer -- facts always render; the AI layer (§2.3)
@@ -454,10 +498,17 @@
         }
       }
 
-      const rows = visibleComps
-        .map((comp) => buildScoreRow(comp, subject, readByKey, excludedByKey))
-        .sort(compareScoreRows);
-      const compsHtml = rows.map(renderScoreRow).join("");
+      // docs/AI/CODER_SPEC_SORT_2026-07-18 Part 2 -- a function, not an
+      // inline value, so the select's change handler can re-render just this
+      // block (re-sort + re-render rows only) without rebuilding the whole
+      // modal, which would visually reset the select.
+      function buildCompsHtml() {
+        return sortVisibleComps(visibleComps, aiBriefSortMode)
+          .map((comp) => buildScoreRow(comp, subject, readByKey, excludedByKey))
+          .map(renderScoreRow)
+          .join("");
+      }
+      const compsHtml = buildCompsHtml();
 
       const excluded = data && Array.isArray(data.excluded) ? data.excluded : [];
       const rejected = data && Array.isArray(data.rejected) ? data.rejected : [];
@@ -507,12 +558,24 @@
           "</div>";
       }
 
+      // docs/AI/CODER_SPEC_SORT_2026-07-18 Part 2 -- mirrors #propelio-comp-
+      // sort's styling (.propelio-sort-select, style.css) so the two controls
+      // read as the same kind of thing despite driving wholly separate state.
+      const sortOptionsHtml = BRIEF_SORT_OPTIONS
+        .map(([v, label]) => `<option value="${v}"${v === aiBriefSortMode ? " selected" : ""}>${esc(label)}</option>`)
+        .join("");
+      const sortSelectHtml =
+        `<select class="propelio-sort-select ai-brief-sort" aria-label="Sort brief comps">${sortOptionsHtml}</select>`;
+
       const overlay = document.createElement("div");
       overlay.className = "ai-modal-overlay";
       overlay.innerHTML =
         '<div class="ai-modal-box" role="dialog" aria-modal="true" aria-label="AI read brief">' +
         '<button type="button" class="ai-modal-close" aria-label="Close">×</button>' +
+        '<div class="ai-modal-header-row">' +
         `<div class="ai-modal-header">${esc(headerText)}</div>` +
+        sortSelectHtml +
+        "</div>" +
         mixLineHtml +
         `<div class="ai-modal-comps">${compsHtml || '<div class="ai-modal-empty">No comps currently visible.</div>'}</div>` +
         droppedBlockHtml +
@@ -528,6 +591,24 @@
       });
       const closeBtn = overlay.querySelector(".ai-modal-close");
       if (closeBtn) closeBtn.addEventListener("click", () => closeModal());
+
+      // docs/AI/CODER_SPEC_SORT_2026-07-18 Part 2 -- re-render the comps
+      // container ONLY, never the whole modal. A full innerHTML rebuild would
+      // replace the <select> node itself, visually resetting it unless its
+      // value were re-applied from aiBriefSortMode; re-rendering just the
+      // rows leaves the select untouched, so its own value is already
+      // correct with nothing to re-apply.
+      const sortSelect = overlay.querySelector(".ai-brief-sort");
+      if (sortSelect) {
+        sortSelect.addEventListener("change", () => {
+          aiBriefSortMode = sortSelect.value;
+          const compsContainer = overlay.querySelector(".ai-modal-comps");
+          if (compsContainer) {
+            compsContainer.innerHTML =
+              buildCompsHtml() || '<div class="ai-modal-empty">No comps currently visible.</div>';
+          }
+        });
+      }
 
       const copyBtn = overlay.querySelector(".ai-modal-copy-btn");
       if (copyBtn) {

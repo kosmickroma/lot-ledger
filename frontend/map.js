@@ -8444,10 +8444,14 @@ function _aiRealNbvBase() {
 }
 
 // Sentinel sortMode value meaning "AI's fact-sort" (same subdivision -> same
-// ISD -> distance, §C.3 2026-07-14 Task C spec). Never a user-selectable
-// <option> in #propelio-comp-sort -- AI mode is the only thing that ever
-// sets it, exactly like the other six overlay fields are never typed by a
-// human, only painted by _applyAiOverlayToDom.
+// ISD -> distance, §C.3 2026-07-14 Task C spec). docs/AI/CODER_SPEC_SORT_
+// 2026-07-18 Part 1 — DORMANT as of 2026-07-18: the client wants highest-
+// price-first everywhere, including AI mode, so _buildAiOverlayFields no
+// longer paints this value and it is no longer a selectable <option> in
+// #propelio-comp-sort. Reserved for a future AI sort; nothing selects this
+// today. Left in place (constant + the comparator's case below) rather than
+// deleted -- the future AI sort will reuse it, and ripping it out risks the
+// overlay-field-set reference this comment used to describe.
 const AI_FACT_SORT_MODE = "ai_fact";
 
 // Compute AI's seven picked fields for one view -- pure function of the
@@ -8483,7 +8487,12 @@ function _buildAiOverlayFields(dims, view) {
     sqftMax,
     yearMin: view === "nbv" ? AUTO_MATCH_YEAR_PIVOT : null,
     yearMax: view === "arv" ? AUTO_MATCH_YEAR_PIVOT : null,
-    sortMode: AI_FACT_SORT_MODE,
+    // docs/AI/CODER_SPEC_SORT_2026-07-18 Part 1 — was AI_FACT_SORT_MODE;
+    // client wants highest-price-first everywhere, AI mode included. Still a
+    // value inside the same _AI_OVERLAY_FIELDS-protected field, so the
+    // captureFilterState invariant is unaffected (value change, not a field
+    // change).
+    sortMode: "price_desc",
   };
 }
 
@@ -9130,17 +9139,30 @@ function _sortPropelioComps(comps, mode) {
       list.sort((a, b) => cmp(num(a?.year_built), num(b?.year_built), "desc"));
       break;
     case "distance_asc":
-      list.sort((a, b) => cmp(num(a?.distance_mi), num(b?.distance_mi), "asc"));
+      // docs/AI/CODER_SPEC_SORT_2026-07-18 Part 4 -- was a silent no-op:
+      // `distance_mi` does not exist on comp objects (DB-verified). Distance
+      // is computed live in _compFacts (map.js:~9009, a haversine off
+      // _lastSubjectProps), the same source the row label ("X ft / mi") and
+      // the fact-sort case below already use -- point this case at it too so
+      // the sort agrees with what's on screen. Nulls (comp/subject without
+      // coords) sort last via `cmp`, unchanged.
+      list.sort((a, b) => cmp(num(_compFacts(a).distance_mi), num(_compFacts(b).distance_mi), "asc"));
       break;
     case AI_FACT_SORT_MODE:
       // §C.3 -- same subdivision -> same ISD -> distance. TRUE beats
       // unknown beats FALSE at each step (a badge you can't show is not
-      // grounds to rank a comp below one proven "different"). Price is
-      // NEVER a tie-break here, by explicit rule (§2 root-cause table) --
-      // the app's own default sort already orders attention by price, and
-      // carrying that into AI mode's ordering is exactly the anchor this
-      // feature exists to remove. Final tie-break is stable insertion order
-      // (Array.prototype.sort is stable), not a second numeric field.
+      // grounds to rank a comp below one proven "different"). Final tie-break
+      // is stable insertion order (Array.prototype.sort is stable), not a
+      // second numeric field.
+      // docs/AI/CODER_SPEC_SORT_2026-07-18 Part 1 -- DORMANT as of 2026-07-18.
+      // This anti-price ordering was AI mode's default; the client now wants
+      // highest-price-first everywhere (ARV = top-3-by-price, so price-first
+      // is the honest default, not an anchor to avoid). Nothing paints
+      // AI_FACT_SORT_MODE anymore (_buildAiOverlayFields now paints
+      // "price_desc") and it's no longer a selectable dropdown option, so
+      // this branch is unreachable today. Reserved for a future AI sort --
+      // left in place rather than deleted, see AI_FACT_SORT_MODE's own
+      // comment (map.js:~8451).
       list.sort((a, b) => {
         const fa = _compFacts(a);
         const fb = _compFacts(b);

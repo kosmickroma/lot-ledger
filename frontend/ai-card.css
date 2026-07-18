@@ -148,12 +148,22 @@
   color: var(--gold);
 }
 
+/* docs/AI/CODER_SPEC_SORT_2026-07-18 Part 2 -- houses the header text beside
+   the brief's own sort <select>, mirroring .propelio-comp-list-head's
+   layout for the comps-list sort. */
+.ai-modal-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+  padding-right: 24px;
+}
+
 .ai-modal-header {
   font-size: 13px;
   font-weight: 600;
   color: var(--gold);
-  margin-bottom: 10px;
-  padding-right: 24px;
 }
 
 .ai-modal-mix-line {
