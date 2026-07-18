@@ -9250,6 +9250,15 @@ async def index() -> HTMLResponse:
             "__AI_ENABLED__",
             "true" if os.getenv("AI_ENABLED", "false").strip().lower() == "true" else "false",
         )
+        # docs/AI/CODER_SPEC_ROLE_GATE_2026-07-18.md Part 1 — same seam, same
+        # os.getenv-direct reasoning: an unsubstituted __AI_ALL_USERS__ is a bare
+        # identifier that throws and breaks LL_CONFIG on every environment, so
+        # this MUST land in the same commit as the index.html placeholder. Default
+        # FALSE; true only on the dev/preview Cloud Run services, never prod.
+        html = html.replace(
+            "__AI_ALL_USERS__",
+            "true" if os.getenv("AI_ALL_USERS", "false").strip().lower() == "true" else "false",
+        )
         _INDEX_HTML_CACHE = html
     return HTMLResponse(_INDEX_HTML_CACHE)
 

@@ -21,7 +21,7 @@ from pydantic import BaseModel
 
 from api.auth import get_current_user, require_csrf
 from api.config import get_session_conn, release_session_conn
-from api.value_drafts.config import VALUE_DRAFTS_ENABLED
+from api.value_drafts.config import AI_ALL_USERS, VALUE_DRAFTS_ENABLED
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +66,16 @@ class DraftTelemetryRequest(BaseModel):
     lens_version: Optional[str] = None
 
 
+# docs/AI/CODER_SPEC_ROLE_GATE_2026-07-18.md Part 2 — owner/dev always allowed;
+# everyone else only when AI_ALL_USERS is true (dev/preview only, prod false).
+# Defined locally (not imported from api.ai.config) so a broken/deleted api/ai/
+# package can never take this router down at mount time.
+def _ai_mode_allowed(role: str) -> bool:
+    if role in ("owner", "developer"):
+        return True
+    return AI_ALL_USERS   # module-LOCAL env flag, TRUE only on dev/preview
+
+
 def _resolve_comp_ids(keys: list[str]) -> dict[str, int]:
     if not keys:
         return {}
@@ -90,8 +100,9 @@ async def draft_telemetry(
     require_csrf(req)
 
     role = str(user.get("role") or "").strip().lower()
-    if role not in ("owner", "developer"):
-        # Server-side, independent of the frontend gate.
+    if not _ai_mode_allowed(role):
+        # Server-side, independent of the frontend gate. AI_ALL_USERS opens this
+        # to helpers on dev/preview only; prod stays owner/dev-only.
         raise HTTPException(status_code=403, detail="Value drafts are not enabled for this role")
 
     if not VALUE_DRAFTS_ENABLED:

@@ -49,7 +49,7 @@
 
     let state = "idle";        // idle | loading | error | done
     let lastResponse = null;   // full API response from the last successful run
-    let seenIsAdmin = null;
+    let seenCanUseAi = null;
     let seenAreaId = undefined;
     let modalEl = null;
     let modalKeydownHandler = null;
@@ -84,7 +84,7 @@
 
     function renderSidebar() {
       const c = ctx();
-      if (!c || !c.isAdmin) {
+      if (!c || !c.canUseAi) {
         mount.innerHTML = "";
         return;
       }
@@ -141,7 +141,7 @@
       // outside the drawn area, so runRead() left the row idle on purpose --
       // see the early return in runRead()). We still do NOT show a "Read
       // comps" button or auto-read here (KK: entering AI mode is the trigger,
-      // and an ambient Vertex call on every admin area-load is forbidden by
+      // and an ambient Vertex call on every area-load is forbidden by
       // design) -- but §2.0 (Fable) requires the facts-only scorecard to stay
       // reachable even when no read has ever run, so "see brief" is shown.
       mount.innerHTML =
@@ -159,7 +159,7 @@
     async function runRead() {
       if (state === "loading") return;   // button is disabled while in flight, but guard anyway
       const c = ctx();
-      if (!c || !c.isAdmin) {
+      if (!c || !c.canUseAi) {
         state = "idle";
         renderSidebar();
         return;
@@ -436,7 +436,7 @@
     // read/exclusion-reason/dropped-tags/raw-JSON blocks that depend on it.
     function openModal() {
       const c = ctx();
-      if (!c || !c.isAdmin) return;   // sidebar already gates this; guard anyway since idle/error now expose the button directly
+      if (!c || !c.canUseAi) return;   // sidebar already gates this; guard anyway since idle/error now expose the button directly
       closeModal();
 
       const subject = c.subject || null;
@@ -555,12 +555,12 @@
     // is how this fully decoupled file notices those transitions.
     function tick() {
       const c = ctx();
-      const isAdmin = !!(c && c.isAdmin);
+      const canUseAi = !!(c && c.canUseAi);
       const areaId = c ? c.areaId : null;
-      if (isAdmin === seenIsAdmin && areaId === seenAreaId) return;
+      if (canUseAi === seenCanUseAi && areaId === seenAreaId) return;
 
       const areaChanged = areaId !== seenAreaId;
-      seenIsAdmin = isAdmin;
+      seenCanUseAi = canUseAi;
       seenAreaId = areaId;
 
       if (areaChanged) {
@@ -577,13 +577,14 @@
     // in every VA's and the client's browser -- on prod, where AI_ENABLED is off
     // and the feature does not exist. "Flag off => byte-identical" is a hard
     // guarantee, and this client never clears his cache.
-    // Admins keep the poll (they need it to notice area switches). Everyone else
-    // gets ~30s of grace for auth to resolve, then the timer is torn down.
+    // Anyone who may use AI mode keeps the poll (they need it to notice area
+    // switches). Everyone else gets ~30s of grace for auth to resolve, then
+    // the timer is torn down.
     let ticks = 0;
     tick();
     const pollId = setInterval(() => {
       tick();
-      if (!seenIsAdmin && ++ticks >= 30) clearInterval(pollId);   // auth resolved, not an admin -> done
+      if (!seenCanUseAi && ++ticks >= 30) clearInterval(pollId);   // auth resolved, may not use AI -> done
     }, 1000);
   } catch (err) {
     try { console.error("[ai-card] init failed (non-fatal):", err); } catch { /* ignore */ }

@@ -9063,16 +9063,18 @@ function _isdDisplayName(isdKey) {
   return i === -1 ? s : s.slice(i + 1);
 }
 
-// Task C §C.2 -- the count line. AI mode + owner/developer only. Describes
-// EXACTLY the comp set the list/map are showing (same `comps` array
-// applyPropelioClientFilters just rendered) -- never a different count than
-// what's on screen. Never a silent zero: when the subject itself lacks a
-// subdivision (garbage parse) or an ISD, says so plainly instead of
-// printing "0 of N" as if the fact were simply absent from every comp.
+// Task C §C.2 -- the count line. AI mode + whoever may use AI mode
+// (_canUseAiMode -- owner/dev always, everyone else only when dev/preview's
+// AI_ALL_USERS flag is on). Describes EXACTLY the comp set the list/map are
+// showing (same `comps` array applyPropelioClientFilters just rendered) --
+// never a different count than what's on screen. Never a silent zero: when
+// the subject itself lacks a subdivision (garbage parse) or an ISD, says so
+// plainly instead of printing "0 of N" as if the fact were simply absent
+// from every comp.
 function _renderAiFactCountLine(comps) {
   const el = document.getElementById("ai-fact-count-line");
   if (!el) return;
-  if (!_aiModeOn || !_isAdmin()) {
+  if (!_aiModeOn || !_canUseAiMode()) {
     el.classList.add("hidden");
     el.textContent = "";
     return;
@@ -9159,12 +9161,13 @@ function _sortPropelioComps(comps, mode) {
 }
 
 // Task C §C.1 — badges, shown ONLY when true. Never "different X": absence
-// is the signal, and it keeps the row quiet. AI mode + owner/developer only
-// -- power_user never sees these (AI mode itself is inaccessible to them,
-// so _aiModeOn can never be true in their session, but the _isAdmin() check
-// here is explicit rather than relying on that alone).
+// is the signal, and it keeps the row quiet. AI mode + whoever may use AI
+// mode (_canUseAiMode) -- a role/session that can't reach AI mode never sees
+// these (AI mode itself is inaccessible to them, so _aiModeOn can never be
+// true in their session, but the _canUseAiMode() check here is explicit
+// rather than relying on that alone).
 function _compFactsBadgesHtml(comp) {
-  if (!_aiModeOn || !_isAdmin()) return "";
+  if (!_aiModeOn || !_canUseAiMode()) return "";
   const facts = _compFacts(comp);
   const badges = [];
   if (facts.same_subdivision === true) badges.push("Same subdivision");
@@ -14501,6 +14504,21 @@ let _authDropdownOpen = false;  // tracks whether the username dropdown is expan
 const _currentRole    = () => (_currentUser?.role || "").toLowerCase();
 const _isPowerUserOrAbove = () => ["power_user", "owner", "developer"].includes(_currentRole());
 const _isAdmin        = () => ["owner", "developer"].includes(_currentRole());
+// AI mode's audience is BROADER than _isAdmin (which also gates Manage Users
+// + shared-area rename — do not conflate). On dev/preview the client wants
+// every signed-in user to reach the AI lens; prod stays owner/dev. The env
+// split rides the SAME flag the button already reads (window.LL_CONFIG).
+const _canUseAiMode = () => {
+  if (_isAdmin()) return true;                          // owner/dev always
+  if (!_currentRole()) return false;                    // must be SIGNED IN — client's ask is
+                                                        // "all signed-in users," and without this
+                                                        // the flag branch would return true for a
+                                                        // signed-out visitor (ai-card.js:582-587's
+                                                        // "never an admin" poll teardown would then
+                                                        // never fire). _isAdmin() was false when
+                                                        // signed out; preserve that.
+  return Boolean(window.LL_CONFIG && window.LL_CONFIG.aiAllUsers);  // dev/preview flag
+};
 const _canDownloadCsv = () => _currentRole() !== "user";
 const _canEditAnyArea = () => _currentRole() === "developer";
 
@@ -14539,7 +14557,7 @@ window.__aiGetVisibleCompContext = () => ({
         county: (_lastSubjectProps.source_county || null),   // same field _compFacts reads -- badges and scorecard must never disagree
       }
     : null,
-  isAdmin: _isAdmin(),
+  canUseAi: _canUseAiMode(),
   headers: authHeaders(),
 });
 
@@ -14655,7 +14673,7 @@ window.__valueDraftsGetContext = () => {
   const nbvView = __valueDraftsViewComps("nbv");
   return {
     areaId: _currentLoadedAreaId,
-    isAdmin: _isAdmin(),
+    canUseAi: _canUseAiMode(),
     headers: authHeaders(),
     // §3, docs/AI/CODER_SPEC_AIMODE_FIX_2026-07-14.md — nothing in the record
     // distinguishes a number signed under the AI lens from one signed under
@@ -15993,7 +16011,7 @@ function _renderViewToggle() {
 function _renderAiBar() {
   const block = document.getElementById("ai-bar-block");
   if (!block) return;
-  const show = Boolean(window.LL_CONFIG && window.LL_CONFIG.aiEnabled) && _isAdmin() && Boolean(_currentLoadedAreaId);
+  const show = Boolean(window.LL_CONFIG && window.LL_CONFIG.aiEnabled) && _canUseAiMode() && Boolean(_currentLoadedAreaId);
   block.classList.toggle("hidden", !show);
   const toggle = document.getElementById("ai-mode-toggle");
   if (toggle) {

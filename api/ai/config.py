@@ -1,6 +1,12 @@
 import os
 
 AI_ENABLED     = os.getenv("AI_ENABLED", "false").strip().lower() == "true"
+# Coder spec docs/AI/CODER_SPEC_ROLE_GATE_2026-07-18.md Part 2 — opens AI mode's
+# role gate to every signed-in user. Default FALSE; set true only on dev/preview
+# Cloud Run services, never prod. Read independently in api/value_drafts/config.py
+# too — NO cross-module import (a broken/deleted api/ai/ package must not be able
+# to take value_drafts down at mount time).
+AI_ALL_USERS   = os.getenv("AI_ALL_USERS", "false").strip().lower() == "true"
 AI_GCP_PROJECT = os.getenv("AI_GCP_PROJECT", "lot-ledger")   # NOT korvall — see spec §5
 AI_LOCATION    = os.getenv("AI_LOCATION", "us-central1")
 AI_MODEL       = os.getenv("AI_MODEL", "gemini-2.5-flash-lite")

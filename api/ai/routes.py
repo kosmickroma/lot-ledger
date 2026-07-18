@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from api.ai.config import (
+    AI_ALL_USERS,
     AI_ENABLED,
     AI_MAX_COMPS,
     AI_MODEL,
@@ -64,6 +65,14 @@ def _cache_put_many(results: dict[int, dict[str, Any]]) -> None:
                 _cache.popitem(last=False)
 
 
+# docs/AI/CODER_SPEC_ROLE_GATE_2026-07-18.md Part 2 — owner/dev always allowed;
+# everyone else only when AI_ALL_USERS is true (dev/preview only, prod false).
+def _ai_mode_allowed(role: str) -> bool:
+    if role in ("owner", "developer"):
+        return True
+    return AI_ALL_USERS   # module-LOCAL env flag, TRUE only on dev/preview
+
+
 @router.post("/read-comps")
 async def read_comps(
     payload: ReadCompsRequest,
@@ -75,8 +84,9 @@ async def read_comps(
     require_csrf(req)
 
     role = str(user.get("role") or "").strip().lower()
-    if role not in ("owner", "developer"):
-        # Server-side, independent of the frontend gate — VAs never reach the model.
+    if not _ai_mode_allowed(role):
+        # Server-side, independent of the frontend gate — VAs never reach the model
+        # unless AI_ALL_USERS is on (dev/preview only; prod stays owner/dev-only).
         raise HTTPException(status_code=403, detail="AI features are not enabled for this role")
 
     if not AI_ENABLED:

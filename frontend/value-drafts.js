@@ -293,7 +293,7 @@
     function sendTelemetry(payload) {
       try {
         const c = ctx();
-        if (!c || !c.isAdmin || !c.areaId) return;
+        if (!c || !c.canUseAi || !c.areaId) return;
         void fetch("/api/value-drafts/telemetry", {
           method: "POST",
           headers: { "Content-Type": "application/json", ...(c.headers || {}) },
@@ -632,7 +632,7 @@
     function tick(force) {
       const c = ctx();
       lastCtx = c;
-      if (!c || !c.isAdmin || !c.areaId) {
+      if (!c || !c.canUseAi || !c.areaId) {
         FIELDS.forEach(removeChip);
         const bar = document.getElementById("vd-accept-bar");
         if (bar) bar.remove();
