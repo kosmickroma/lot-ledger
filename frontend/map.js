@@ -8845,16 +8845,47 @@ function _compPropertyTypeBucket(comp) {
       }
     }
   }
-  // Propelio nests the MLS classification under `extra`; the top-level
-  // property_category / property_type fields are not populated in the
-  // current API shape (verified empirically against propelio_cache, 2026-05-19).
-  // Defensive: fall back to top-level in case the shape ever changes.
+  // docs/AI/CODER_SPEC_VACANT_ROUTING_2026-07-19 (tune-up Change A) — CORRECTED
+  // 2026-07-19: `property_type` is NOT sparse. Verified against propelio_cache
+  // (6,969 "Land" rows alone) that it's populated on essentially every comp at
+  // predicate time; the "not populated in the current API shape" claim below
+  // was stale (from the 2026-05-19 note) and is fixed here. Propelio nests the
+  // MLS classification under `extra`; still read top-level as a defensive
+  // fallback in case the shape ever changes for a given payload.
   const extra = (comp && typeof comp.extra === "object" && comp.extra) || {};
   const cat = String(extra.property_category || comp?.property_category || "").trim();
   if (cat && PROPELIO_CATEGORY_TO_BUCKET[cat]) return PROPELIO_CATEGORY_TO_BUCKET[cat];
   const t = String(extra.property_type || comp?.property_type || "").trim();
   if (t && PROPELIO_TYPE_FALLBACK[t]) return PROPELIO_TYPE_FALLBACK[t];
   return null;
+}
+
+// docs/AI/CODER_SPEC_VACANT_ROUTING_2026-07-19 (tune-up Change A) — dedicated
+// vacancy check for the ARV routing fork ONLY. ⛔ Do NOT reuse this anywhere
+// else and do NOT fold it into _compPropertyTypeBucket — flipping that
+// resolver to Propelio-first globally would break the off_market/active
+// split (map.js:8838-8843, the on_redfin derivation depends on a CAD single-
+// family match winning first) and re-bucket CAD-confirmed duplexes,
+// regressing B12. This function is PROPELIO-FIRST (the opposite priority
+// order from _compPropertyTypeBucket, which is CAD-first) because CAD
+// vacancy lags reality — a lot CAD calls vacant may already have a house —
+// while a CURRENT MLS listing tagged Land is the fresher signal:
+//   - Propelio says Land/UnimprovedLand -> vacant, full stop.
+//   - Propelio says anything ELSE non-blank (e.g. "Residential") -> NOT
+//     vacant, even if CAD disagrees -- the stale-CAD exclusion KK wants: a
+//     comp the MLS currently lists as a house must never route into the
+//     vacant ARV pool just because CAD classification hasn't caught up.
+//   - Propelio says nothing at all (both fields blank) -> fall back to CAD
+//     via _compPropertyTypeBucket (the wider, already-reviewed CAD ∪
+//     Propelio resolver), so a comp with no MLS land/non-land signal still
+//     resolves via whatever _compPropertyTypeBucket can determine.
+function _compIsVacantForRouting(comp) {
+  const extra = (comp && typeof comp.extra === "object" && comp.extra) || {};
+  const cat = String(extra.property_category || comp?.property_category || "").trim();
+  const t = String(extra.property_type || comp?.property_type || "").trim();
+  if (cat === "UnimprovedLand" || t === "Land") return true;
+  if (cat || t) return false;   // Propelio present, non-land -> trust it over CAD
+  return _compPropertyTypeBucket(comp) === "vacant";   // Propelio absent -> CAD fallback
 }
 
 // Resolve a Propelio comp's tax appraised value via its matched CAD
@@ -9023,18 +9054,25 @@ function compPassesPropelioFilters(comp, filters, view = _activeView) {
   if (bucket === "single_family" && filters.parcelTypeOffMarket   === false) return false;
   if (bucket === null            && filters.parcelTypeOffMarket   === false) return false;
 
-  // docs/AI/CODER_SPEC_VACANT_ROUTING_2026-07-19 — when the SUBJECT is a
-  // vacant lot, the ARV tab matches ONLY vacant comps (never a house
-  // fallback — a vacant lot valued off houses is a wrong number). NBV is
-  // untouched: for a vacant lot, NBV IS the new-build value, exactly what
-  // the NBV view already pulls. Predicate-internal (not filter-state) so
-  // this writes NOTHING to propelioFilterState/captureFilterState/the
-  // saved area/SSE — `view` defaults to `_activeView` so every caller except
-  // __valueDraftsViewComps (which passes its own per-view) gets the correct
-  // fork for free, and map + draft pool share this one predicate, so a
-  // vacant subject's ARV map and ARV draft pool agree by construction
-  // (WYSIWYG). Reuses `bucket`, already computed above — no extra call.
-  if (view === "arv" && _subjectIsVacant() && bucket !== "vacant") return false;
+  // docs/AI/CODER_SPEC_VACANT_ROUTING_2026-07-19 (tune-up 2026-07-19,
+  // Change B) — when the SUBJECT is a vacant lot AND AI mode is on, the ARV
+  // tab matches ONLY vacant comps (never a house fallback — a vacant lot
+  // valued off houses is a wrong number). NBV is untouched: for a vacant
+  // lot, NBV IS the new-build value, exactly what the NBV view already
+  // pulls. ⛔ AI-MODE-GATED (`_aiModeOn`) — the governing principle (KK):
+  // AI mode IS the automation container; non-AI mode is the team's
+  // untouched OLD manual flow and must NOT auto-restrict anything. This
+  // reverses the originally-shipped "applies in any mode" behavior.
+  // Predicate-internal (not filter-state) so this writes NOTHING to
+  // propelioFilterState/captureFilterState/the saved area/SSE — `view`
+  // defaults to `_activeView` so every caller except __valueDraftsViewComps
+  // (which passes its own per-view) gets the correct fork for free, and map
+  // + draft pool share this one predicate, so a vacant subject's ARV map
+  // and ARV draft pool agree by construction (WYSIWYG). Uses the DEDICATED
+  // `_compIsVacantForRouting(comp)` (tune-up Change A), NOT the `bucket`
+  // computed above — Propelio-first vacancy, deliberately a different
+  // (wider, fresher) signal than the CAD-first parcelType* bucket gates.
+  if (_aiModeOn && view === "arv" && _subjectIsVacant() && !_compIsVacantForRouting(comp)) return false;
 
   // docs/AI/CODER_SPEC_MULTI_NEIGHBORHOOD_2026-07-18 Part 4 — OR set via a
   // precomputed normalized Set, O(1) per comp regardless of set size. Empty
@@ -9293,19 +9331,25 @@ function _renderAiFactCountLine(comps) {
   el.classList.remove("hidden");
 }
 
-// docs/AI/CODER_SPEC_VACANT_ROUTING_2026-07-19 — always-on routing cue (the
-// WYSIWYG hidden-state fix). When the vacant-lot fork is silently narrowing
-// the ARV map to vacant comps only, the parcel-type checkboxes still show
-// house buckets as "on" -- without this line the first reaction to a
-// working feature is "where did my comps go?" Mirrors
-// _renderAiFactCountLine's DOM show/hide pattern but deliberately NOT
-// AI-mode-gated -- the vacant-lot routing applies in any mode, so the cue
-// must too. Absent on NBV / non-vacant subjects: the same double guard
-// (`view === "arv"` AND `_subjectIsVacant()`) the predicate fork itself uses.
+// docs/AI/CODER_SPEC_VACANT_ROUTING_2026-07-19 (tune-up 2026-07-19, Change B)
+// — routing cue (the WYSIWYG hidden-state fix). When the vacant-lot fork is
+// silently narrowing the ARV map to vacant comps only, the parcel-type
+// checkboxes still show house buckets as "on" -- without this line the
+// first reaction to a working feature is "where did my comps go?" Mirrors
+// _renderAiFactCountLine's DOM show/hide pattern. ⛔ AI-MODE-GATED
+// (`_aiModeOn`) — REVERSED from the original ship: the cue used to be
+// deliberately NOT AI-mode-gated ("the vacant-lot routing applies in any
+// mode"). Per the tune-up's governing principle (KK), AI mode IS the
+// automation container and non-AI mode must show nothing extra, so the cue
+// is now gated exactly like the fork it describes: hidden whenever AI mode
+// is off, even on a vacant subject's ARV tab, matching the predicate no
+// longer restricting anything in that state. Absent on NBV / non-vacant
+// subjects too: the same triple guard (`_aiModeOn` AND `view === "arv"`
+// AND `_subjectIsVacant()`) the predicate fork itself uses.
 function _renderVacantRoutingCue(comps) {
   const el = document.getElementById("vacant-routing-cue");
   if (!el) return;
-  if (_activeView !== "arv" || !_subjectIsVacant()) {
+  if (!_aiModeOn || _activeView !== "arv" || !_subjectIsVacant()) {
     el.classList.add("hidden");
     el.textContent = "";
     return;

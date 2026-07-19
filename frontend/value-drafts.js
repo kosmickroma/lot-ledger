@@ -138,18 +138,24 @@
 
     // --- Draft math (spec §1, §3) ------------------------------------------
 
-    // docs/AI/CODER_SPEC_VACANT_ROUTING_2026-07-19 — the safety rule: a
-    // vacant subject's ARV draft must NEVER silently read as the generic
-    // "Keep comps to draft a value" / "N visible comps, all excluded from
-    // the math" when the REAL reason the pool is empty is that map.js's
-    // vacant-only fork (compPassesPropelioFilters) left nothing to compute
-    // from -- house comps are never a valid ARV basis for a vacant lot, so
-    // this must read as a labeled-empty state, not a bare blank number.
-    // Distinguishes the fixable toggle-off sub-case (the Vacant parcel-type
-    // filter is OFF, hiding the fork's own comps) from the genuine
-    // no-comps-in-range case. Not AI-mode-gated -- the routing applies in
-    // any mode, so both ARV compute paths call this at every empty-result
-    // return point (allComps.length===0 AND the "all excluded" branches).
+    // docs/AI/CODER_SPEC_VACANT_ROUTING_2026-07-19 (tune-up 2026-07-19,
+    // Change B) — the safety rule: a vacant subject's ARV draft must NEVER
+    // silently read as the generic "Keep comps to draft a value" / "N
+    // visible comps, all excluded from the math" when the REAL reason the
+    // pool is empty is that map.js's vacant-only fork
+    // (compPassesPropelioFilters) left nothing to compute from -- house
+    // comps are never a valid ARV basis for a vacant lot, so this must read
+    // as a labeled-empty state, not a bare blank number. Distinguishes the
+    // fixable toggle-off sub-case (the Vacant parcel-type filter is OFF,
+    // hiding the fork's own comps) from the genuine no-comps-in-range case.
+    // ⛔ AI-MODE-GATED — REVERSED from the original ship ("not AI-mode-
+    // gated, the routing applies in any mode"). Per the tune-up's governing
+    // principle (KK), AI mode IS the automation container; the map.js fork
+    // this label describes is itself AI-mode-gated now, so this helper is
+    // ONLY ever called from computeArvDraftAiMode (which only ever runs
+    // when AI mode is on) -- the gate is structural, not a boolean check
+    // inside this function. computeArvDraftKeptMedian (AI mode OFF) no
+    // longer calls this at all.
     function vacantEmptyLabel(subjectVacancy, parcelTypeVacant) {
       if (subjectVacancy !== "vacant") return null;
       return parcelTypeVacant === false
@@ -205,10 +211,16 @@
 
     // AI mode OFF — unchanged (median of kept, falling back to the visible pool).
     // Value drafts run independent of AI mode; this path is untouched byte-for-byte.
-    function computeArvDraftKeptMedian(allComps, subjectVacancy, parcelTypeVacant) {
+    // docs/AI/CODER_SPEC_VACANT_ROUTING_2026-07-19 (tune-up Change B) — no
+    // subjectVacancy/parcelTypeVacant params here (reverted from the original
+    // ship): this function ONLY ever runs when AI mode is off (see the
+    // computeArvDraft dispatcher below), and the vacant-routing labeled-empty
+    // override is AI-mode-only now, so it structurally cannot fire in this
+    // path — no redundant boolean check needed, "untouched byte-for-byte" is
+    // literally true again.
+    function computeArvDraftKeptMedian(allComps) {
       if (allComps.length === 0) {
-        const vLabel = vacantEmptyLabel(subjectVacancy, parcelTypeVacant);
-        return { value: null, label: vLabel || "Keep comps to draft a value", basis: "none", mathComps: [], excludedComps: [], keptCount: 0, poolCount: 0 };
+        return { value: null, label: "Keep comps to draft a value", basis: "none", mathComps: [], excludedComps: [], keptCount: 0, poolCount: 0 };
       }
       const kept = allComps.filter((c) => c.user_rating === "good");
       if (kept.length === 1) {
@@ -228,10 +240,9 @@
       const mathComps = basisComps.filter(isMathEligible);
       const excludedComps = basisComps.filter((c) => !isMathEligible(c));
       if (mathComps.length === 0) {
-        const vLabel = vacantEmptyLabel(subjectVacancy, parcelTypeVacant);
         return {
           value: null,
-          label: vLabel || `${basisComps.length} ${basis === "kept" ? "kept" : "visible"} comp${basisComps.length === 1 ? "" : "s"}, all excluded from the math`,
+          label: `${basisComps.length} ${basis === "kept" ? "kept" : "visible"} comp${basisComps.length === 1 ? "" : "s"}, all excluded from the math`,
           basis, mathComps: [], excludedComps, keptCount: kept.length, poolCount: basisComps.length,
         };
       }
@@ -254,15 +265,17 @@
     // Entry point — branches on AI-mode state from the seam (spec Part 2).
     // `aiMode` is passed in by tick() from __valueDraftsGetContext()'s `aiMode`
     // field, the same flag the commit telemetry already records.
-    // docs/AI/CODER_SPEC_VACANT_ROUTING_2026-07-19 — subjectVacancy/
-    // parcelTypeVacant thread through to BOTH branches (not AI-mode-gated;
-    // the vacant-routing safety rule applies in any mode) for the labeled-
-    // empty override inside each. NBV is untouched -- computeNbvDraft never
-    // receives these.
+    // docs/AI/CODER_SPEC_VACANT_ROUTING_2026-07-19 (tune-up Change B) —
+    // subjectVacancy/parcelTypeVacant thread through to the AI-mode branch
+    // ONLY, for the labeled-empty override inside computeArvDraftAiMode.
+    // computeArvDraftKeptMedian (AI mode off) doesn't take them at all
+    // anymore -- this IS the AI-mode gate for the vacant-routing safety
+    // rule, mirroring how this same ternary already gates the top-3-vs-
+    // median calc. NBV is untouched -- computeNbvDraft never receives these.
     function computeArvDraft(allComps, aiMode, subjectVacancy, parcelTypeVacant) {
       return aiMode
         ? computeArvDraftAiMode(allComps, subjectVacancy, parcelTypeVacant)
-        : computeArvDraftKeptMedian(allComps, subjectVacancy, parcelTypeVacant);
+        : computeArvDraftKeptMedian(allComps);
     }
 
     function computeNbvDraft(allComps) {
