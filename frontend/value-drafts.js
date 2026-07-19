@@ -138,6 +138,25 @@
 
     // --- Draft math (spec §1, §3) ------------------------------------------
 
+    // docs/AI/CODER_SPEC_VACANT_ROUTING_2026-07-19 — the safety rule: a
+    // vacant subject's ARV draft must NEVER silently read as the generic
+    // "Keep comps to draft a value" / "N visible comps, all excluded from
+    // the math" when the REAL reason the pool is empty is that map.js's
+    // vacant-only fork (compPassesPropelioFilters) left nothing to compute
+    // from -- house comps are never a valid ARV basis for a vacant lot, so
+    // this must read as a labeled-empty state, not a bare blank number.
+    // Distinguishes the fixable toggle-off sub-case (the Vacant parcel-type
+    // filter is OFF, hiding the fork's own comps) from the genuine
+    // no-comps-in-range case. Not AI-mode-gated -- the routing applies in
+    // any mode, so both ARV compute paths call this at every empty-result
+    // return point (allComps.length===0 AND the "all excluded" branches).
+    function vacantEmptyLabel(subjectVacancy, parcelTypeVacant) {
+      if (subjectVacancy !== "vacant") return null;
+      return parcelTypeVacant === false
+        ? "Vacant comps hidden — turn on the Vacant filter"
+        : "No vacant-lot comps found";
+    }
+
     // AI mode ON — Tier 1 "the number" spec (docs/AI/CODER_SPEC_TIER1_NUMBER_2026-07-17.md
     // Part 2). Client's locked answer: ARV = median of the top 3 BY PRICE of the
     // VISIBLE (filtered) comps — literal "visible," not "kept." `allComps` here is
@@ -148,16 +167,18 @@
     // that still steers this number.
     //
     // ⛔ No MEDIAN_MIN_KEPT gate on this path — one comp is a valid ("thin") answer.
-    function computeArvDraftAiMode(allComps) {
+    function computeArvDraftAiMode(allComps, subjectVacancy, parcelTypeVacant) {
       if (allComps.length === 0) {
-        return { value: null, label: "Keep comps to draft a value", basis: "none", mathComps: [], excludedComps: [], keptCount: 0, poolCount: 0 };
+        const vLabel = vacantEmptyLabel(subjectVacancy, parcelTypeVacant);
+        return { value: null, label: vLabel || "Keep comps to draft a value", basis: "none", mathComps: [], excludedComps: [], keptCount: 0, poolCount: 0 };
       }
       const excludedComps = allComps.filter((c) => c.user_rating === "bad" || !isMathEligible(c));
       const pool = allComps.filter((c) => c.user_rating !== "bad" && isMathEligible(c));
       if (pool.length === 0) {
+        const vLabel = vacantEmptyLabel(subjectVacancy, parcelTypeVacant);
         return {
           value: null,
-          label: `${allComps.length} visible comp${allComps.length === 1 ? "" : "s"}, all excluded from the math`,
+          label: vLabel || `${allComps.length} visible comp${allComps.length === 1 ? "" : "s"}, all excluded from the math`,
           basis: "top3", mathComps: [], excludedComps, keptCount: 0, poolCount: 0,
         };
       }
@@ -184,9 +205,10 @@
 
     // AI mode OFF — unchanged (median of kept, falling back to the visible pool).
     // Value drafts run independent of AI mode; this path is untouched byte-for-byte.
-    function computeArvDraftKeptMedian(allComps) {
+    function computeArvDraftKeptMedian(allComps, subjectVacancy, parcelTypeVacant) {
       if (allComps.length === 0) {
-        return { value: null, label: "Keep comps to draft a value", basis: "none", mathComps: [], excludedComps: [], keptCount: 0, poolCount: 0 };
+        const vLabel = vacantEmptyLabel(subjectVacancy, parcelTypeVacant);
+        return { value: null, label: vLabel || "Keep comps to draft a value", basis: "none", mathComps: [], excludedComps: [], keptCount: 0, poolCount: 0 };
       }
       const kept = allComps.filter((c) => c.user_rating === "good");
       if (kept.length === 1) {
@@ -206,9 +228,10 @@
       const mathComps = basisComps.filter(isMathEligible);
       const excludedComps = basisComps.filter((c) => !isMathEligible(c));
       if (mathComps.length === 0) {
+        const vLabel = vacantEmptyLabel(subjectVacancy, parcelTypeVacant);
         return {
           value: null,
-          label: `${basisComps.length} ${basis === "kept" ? "kept" : "visible"} comp${basisComps.length === 1 ? "" : "s"}, all excluded from the math`,
+          label: vLabel || `${basisComps.length} ${basis === "kept" ? "kept" : "visible"} comp${basisComps.length === 1 ? "" : "s"}, all excluded from the math`,
           basis, mathComps: [], excludedComps, keptCount: kept.length, poolCount: basisComps.length,
         };
       }
@@ -231,8 +254,15 @@
     // Entry point — branches on AI-mode state from the seam (spec Part 2).
     // `aiMode` is passed in by tick() from __valueDraftsGetContext()'s `aiMode`
     // field, the same flag the commit telemetry already records.
-    function computeArvDraft(allComps, aiMode) {
-      return aiMode ? computeArvDraftAiMode(allComps) : computeArvDraftKeptMedian(allComps);
+    // docs/AI/CODER_SPEC_VACANT_ROUTING_2026-07-19 — subjectVacancy/
+    // parcelTypeVacant thread through to BOTH branches (not AI-mode-gated;
+    // the vacant-routing safety rule applies in any mode) for the labeled-
+    // empty override inside each. NBV is untouched -- computeNbvDraft never
+    // receives these.
+    function computeArvDraft(allComps, aiMode, subjectVacancy, parcelTypeVacant) {
+      return aiMode
+        ? computeArvDraftAiMode(allComps, subjectVacancy, parcelTypeVacant)
+        : computeArvDraftKeptMedian(allComps, subjectVacancy, parcelTypeVacant);
     }
 
     function computeNbvDraft(allComps) {
@@ -790,7 +820,14 @@
         // screen would show, active view or not. This function itself has no
         // view awareness and needs none -- it only ever sees the comp list it's
         // handed.
-        const draft = fieldKey === "arv" ? computeArvDraft(view.comps, Boolean(c && c.aiMode)) : computeNbvDraft(view.comps);
+        // docs/AI/CODER_SPEC_VACANT_ROUTING_2026-07-19 — parcelTypeVacant
+        // read from THIS view's own filterState (view.filterState, the
+        // resolved per-view propelio blob __valueDraftsViewComps built),
+        // never a single global -- ARV/NBV/never-visited views can each
+        // have their own toggle state.
+        const draft = fieldKey === "arv"
+          ? computeArvDraft(view.comps, Boolean(c && c.aiMode), c.subjectVacancy, view.filterState && view.filterState.parcelTypeVacant)
+          : computeNbvDraft(view.comps);
         fs.draft = draft;
         fs.ratings = newMap;
         fs.keys = newKeys;

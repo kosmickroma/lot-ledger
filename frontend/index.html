@@ -109,6 +109,14 @@
                re-renders (applyPropelioClientFilters), never a separate
                poll. Hidden by default; empty text also renders nothing. -->
           <div id="ai-fact-count-line" class="ai-fact-count-line hidden"></div>
+          <!-- docs/AI/CODER_SPEC_VACANT_ROUTING_2026-07-19 -- always-on
+               routing cue, rendered by map.js's _renderVacantRoutingCue,
+               called wherever the comp list itself re-renders
+               (applyPropelioClientFilters), same pattern as the fact count
+               line above but NOT AI-mode-gated (the vacant-lot routing
+               applies in any mode). Hidden by default; empty text also
+               renders nothing. -->
+          <div id="vacant-routing-cue" class="ai-fact-count-line hidden"></div>
         </div>
       </div>
       <div id="sidebar-results" class="sidebar-section hidden">

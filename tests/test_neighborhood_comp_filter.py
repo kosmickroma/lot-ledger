@@ -172,16 +172,20 @@ def test_neighborhood_gate_returns_false_on_mismatch() -> None:
 
 def test_compPassesPropelioFilters_dropped_the_dead_third_param() -> None:
     """Part 4 (Copilot #6): the old optional _nbhdNorm 3rd param and its
-    single hot-path call site are dead code once the Set replaces it."""
+    single hot-path call site were dead code once the Set replaced it.
+    docs/AI/CODER_SPEC_VACANT_ROUTING_2026-07-19 later added a NEW, live 3rd
+    param (`view`, for the vacant-lot routing fork) -- this now confirms
+    THAT signature, not "no 3rd param at all"; the dead _nbhdNorm call site
+    must still be gone."""
     src = _src()
     m = re.search(r"function compPassesPropelioFilters\(([^)]*)\)", src)
     assert m, "compPassesPropelioFilters signature not found"
-    assert m.group(1).strip() == "comp, filters", (
-        f"compPassesPropelioFilters must take exactly (comp, filters), "
+    assert m.group(1).strip() == "comp, filters, view = _activeView", (
+        f"compPassesPropelioFilters must take exactly (comp, filters, view = _activeView), "
         f"got ({m.group(1).strip()})"
     )
     assert "compPassesPropelioFilters(c, propelioFilterState, _nbhdNorm)" not in src, (
-        "the dead 3rd-arg call site must be gone"
+        "the dead 3rd-arg call site (_nbhdNorm) must be gone"
     )
 
 

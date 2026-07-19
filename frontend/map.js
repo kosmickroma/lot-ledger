@@ -8910,7 +8910,17 @@ function _nbhdNormSetFor(filters) {
   return _nbhdNormSet;
 }
 
-function compPassesPropelioFilters(comp, filters) {
+// docs/AI/CODER_SPEC_VACANT_ROUTING_2026-07-19 — tiny boolean helper mirroring
+// the subjectVacancy tri-state's EXACT semantics (map.js:~14944, the rehab
+// work's seam field): only an explicit prop_type === "vacant" triggers. A
+// null _lastSubjectProps (no subject loaded, subject-goes-null sites, or the
+// async resolve window) is UNKNOWN, never vacant — never restrict the comp
+// pool on an unknown subject.
+function _subjectIsVacant() {
+  return Boolean(_lastSubjectProps && _lastSubjectProps.prop_type === "vacant");
+}
+
+function compPassesPropelioFilters(comp, filters, view = _activeView) {
   const status = String(comp?.status || "").toLowerCase();
   // Status checkbox filters
   if (status === "sold" && !filters.statusSold) return false;
@@ -9013,6 +9023,19 @@ function compPassesPropelioFilters(comp, filters) {
   if (bucket === "single_family" && filters.parcelTypeOffMarket   === false) return false;
   if (bucket === null            && filters.parcelTypeOffMarket   === false) return false;
 
+  // docs/AI/CODER_SPEC_VACANT_ROUTING_2026-07-19 — when the SUBJECT is a
+  // vacant lot, the ARV tab matches ONLY vacant comps (never a house
+  // fallback — a vacant lot valued off houses is a wrong number). NBV is
+  // untouched: for a vacant lot, NBV IS the new-build value, exactly what
+  // the NBV view already pulls. Predicate-internal (not filter-state) so
+  // this writes NOTHING to propelioFilterState/captureFilterState/the
+  // saved area/SSE — `view` defaults to `_activeView` so every caller except
+  // __valueDraftsViewComps (which passes its own per-view) gets the correct
+  // fork for free, and map + draft pool share this one predicate, so a
+  // vacant subject's ARV map and ARV draft pool agree by construction
+  // (WYSIWYG). Reuses `bucket`, already computed above — no extra call.
+  if (view === "arv" && _subjectIsVacant() && bucket !== "vacant") return false;
+
   // docs/AI/CODER_SPEC_MULTI_NEIGHBORHOOD_2026-07-18 Part 4 — OR set via a
   // precomputed normalized Set, O(1) per comp regardless of set size. Empty
   // set ⇒ no gate (= today's null). Null/blank comp neighborhood drops out
@@ -9076,6 +9099,7 @@ function applyPropelioClientFilters() {
     if (countEl) countEl.textContent = "";
     renderPropelioCompList([]);
     _renderAiFactCountLine([]);
+    _renderVacantRoutingCue([]);
     _renderGoodCompsSection();  // hides section when no comp cache
     return;
   }
@@ -9135,6 +9159,11 @@ function applyPropelioClientFilters() {
     : undefined;
   renderPropelioCompList(visibleInList, emptyMsg);
   _renderAiFactCountLine(visibleInList);
+  // docs/AI/CODER_SPEC_VACANT_ROUTING_2026-07-19 -- the MAP's count
+  // (visibleOnMap, before the AI-only fact-filter post-pass), since the
+  // routing cue is about what the vacant-lot fork itself produced, not a
+  // separate AI-mode narrowing.
+  _renderVacantRoutingCue(visibleOnMap);
   // Update the card-head count chip — reflects the toggles too (§7: the
   // primary comp-count must be honest about what's actually on screen).
   const countEl = document.getElementById("propelio-filter-count");
@@ -9261,6 +9290,28 @@ function _renderAiFactCountLine(comps) {
   }
 
   el.textContent = `${isdClause} · ${subdivisionClause}.`;
+  el.classList.remove("hidden");
+}
+
+// docs/AI/CODER_SPEC_VACANT_ROUTING_2026-07-19 — always-on routing cue (the
+// WYSIWYG hidden-state fix). When the vacant-lot fork is silently narrowing
+// the ARV map to vacant comps only, the parcel-type checkboxes still show
+// house buckets as "on" -- without this line the first reaction to a
+// working feature is "where did my comps go?" Mirrors
+// _renderAiFactCountLine's DOM show/hide pattern but deliberately NOT
+// AI-mode-gated -- the vacant-lot routing applies in any mode, so the cue
+// must too. Absent on NBV / non-vacant subjects: the same double guard
+// (`view === "arv"` AND `_subjectIsVacant()`) the predicate fork itself uses.
+function _renderVacantRoutingCue(comps) {
+  const el = document.getElementById("vacant-routing-cue");
+  if (!el) return;
+  if (_activeView !== "arv" || !_subjectIsVacant()) {
+    el.classList.add("hidden");
+    el.textContent = "";
+    return;
+  }
+  const n = Array.isArray(comps) ? comps.length : 0;
+  el.textContent = `Vacant subject — ARV comps: vacant lots only (${n}).`;
   el.classList.remove("hidden");
 }
 
@@ -14851,7 +14902,6 @@ function __valueDraftsViewComps(view) {
   if (_aiModeOn && (view === "arv" || view === "nbv") && _aiOverlay[view]) {
     fstate = { ...fstate, ..._aiOverlay[view] };
   }
-  const nbhdNorm = normalizeNbhd(fstate.neighborhood);
   // Tier 1 fact-filter toggles (§3.2, 2026-07-15 coder spec) — this function
   // calls compPassesPropelioFilters directly, bypassing applyPropelioClientFilters
   // entirely (that's the whole reason it exists — draft math without a real
@@ -14860,7 +14910,16 @@ function __valueDraftsViewComps(view) {
   // memorializes, one lens later. _applyFactFilters runs on the FULL comp
   // objects (cad_subdivision/isd/parcel_county) before the .map() below
   // strips them down to the draft's slim shape.
-  const comps = _applyFactFilters(all.filter((c) => c && compPassesPropelioFilters(c, fstate, nbhdNorm)))
+  // docs/AI/CODER_SPEC_VACANT_ROUTING_2026-07-19 — the 3rd arg used to be
+  // the old _nbhdNorm precompute, dead since Track B's internal Set
+  // memoization (map.js:~8905) made it a no-op. `view` takes that slot: the
+  // ONLY caller of compPassesPropelioFilters that needs a per-view fork
+  // rather than the `_activeView` default, since this function computes
+  // BOTH views' comps regardless of which one is on screen (the "BOTH
+  // views draft unconditionally" comment above) — so the vacant-routing
+  // fork must be told which view's pool it's building, not assume the
+  // active one.
+  const comps = _applyFactFilters(all.filter((c) => c && compPassesPropelioFilters(c, fstate, view)))
     .map((c) => ({
       comp_address_key: c.comp_address_key,
       address: c.address,
