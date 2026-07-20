@@ -82,6 +82,10 @@ def assign(lat: float, lng: float) -> dict[str, dict[str, Any] | None]:
                     "name": z["campus_name"],
                     "rating": rating_info.get("grade"),
                     "score": rating_info.get("score"),
+                    # Two TEA sub-domains for the card ("Test scores" /
+                    # "Student progress"); each {grade, score} or None.
+                    "achievement": rating_info.get("achievement"),
+                    "growth": rating_info.get("growth"),
                     "rating_year": data["year"],
                     "boundary_vintage": bundle["vintage"],
                 }

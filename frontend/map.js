@@ -14877,29 +14877,63 @@ async function _populateSchoolPilot(container) {
       _schoolPilotCache.set(key, data);
     }
     const LEVEL_LABEL = { elementary: "ELEMENTARY", middle: "MIDDLE", high: "HIGH" };
-    const cells = ["elementary", "middle", "high"].map((lvl) => {
-      const s = data[lvl];
-      if (!s) return "";   // absent level -> omit the cell (never a fake one, no fabrication)
-      const hasChip = !!s.rating && s.score != null;
-      const chip = hasChip
-        ? `<span class="sch-chip sch-${s.rating.toLowerCase()}"><span class="num">${_propelioEscape(String(s.score))}</span><span class="g">${_propelioEscape(s.rating)}</span></span>`
-        : "";   // unrated -- name only, never a filled/empty badge
-      // Zillow stack: level label -> bold school name -> filled rating badge.
-      return `<div class="school-pilot-cell">` +
-             `<div class="lvl">${LEVEL_LABEL[lvl]}</div>` +
-             `<div class="nm">${_propelioEscape(_schoolPilotShortName(s.name))}</div>` +
-             `${chip}` +
-             `</div>`;
-    });
-    if (!cells.some(Boolean)) return;   // total miss -- render nothing (§6.4)
+    const levels = ["elementary", "middle", "high"];
+    if (!levels.some((lvl) => data[lvl])) return;   // total miss -- render nothing (§6.4)
+
+    // Two density modes from ONE component (Fable spec): the wide white panel
+    // (up to ~820px) gets full cards w/ sub-scores; the narrow ~300px Leaflet
+    // map popup gets compact pills (sub-scores can't fit legibly). Decide by
+    // measured width; default to full when unmeasurable (panel is the common
+    // surface). Threshold 520px.
+    const cw = container.getBoundingClientRect().width || (container.parentElement
+      ? container.parentElement.getBoundingClientRect().width : 0);
+    const compact = cw > 0 && cw < 520;
+
+    const scoreClass = (g) => `sch-${String(g).toLowerCase()}`;
+    const plate = (s) => `<span class="sp-plate ${scoreClass(s.rating)}">` +
+      `<span class="num">${_propelioEscape(String(s.score))}</span>` +
+      `<span class="g">${_propelioEscape(s.rating)}</span></span>`;
+    const subRow = (label, sub) => {
+      if (!sub || !sub.grade || sub.score == null) return "";   // omit; never fabricate
+      return `<div class="sp-subrow"><span class="sl">${label}</span>` +
+        `<span class="sv ${scoreClass(sub.grade)}">${_propelioEscape(String(sub.score))} · ${_propelioEscape(sub.grade)}</span></div>`;
+    };
+
+    let inner;
+    if (compact) {
+      // Compact: 3 stacked rows, one pill each, no sub-scores.
+      inner = `<div class="school-pilot-grid sp-compact">` + levels.map((lvl) => {
+        const s = data[lvl];
+        if (!s) return "";
+        const rated = !!s.rating && s.score != null;
+        const pill = rated ? `<span class="sp-pill ${scoreClass(s.rating)}">${_propelioEscape(String(s.score))} · ${_propelioEscape(s.rating)}</span>`
+                           : `<span class="sp-unrated">Not TEA-rated</span>`;
+        return `<div class="sp-crow"><span class="lvl">${LEVEL_LABEL[lvl].slice(0, 4)}</span>` +
+               `<span class="nm">${_propelioEscape(_schoolPilotShortName(s.name))}</span>${pill}</div>`;
+      }).join("") + `</div>`;
+    } else {
+      // Full: 3 bordered cards, name -> score plate -> sub-rows.
+      inner = `<div class="school-pilot-grid">` + levels.map((lvl) => {
+        const s = data[lvl];
+        if (!s) return `<div class="school-pilot-cell sp-empty"></div>`;   // keep the row's 3-up shape
+        const rated = !!s.rating && s.score != null;
+        const badge = rated
+          ? `<div class="sp-badge">${plate(s)}<span class="sp-badge-lbl">TEA Overall</span></div>` +
+            `<div class="sp-subs">${subRow("Test scores", s.achievement)}${subRow("Student progress", s.growth)}</div>`
+          : `<div class="sp-notrated">Not TEA-rated</div>`;   // true statement, not a fake score
+        return `<div class="school-pilot-cell">` +
+               `<div class="lvl">${LEVEL_LABEL[lvl]}</div>` +
+               `<div class="nm">${_propelioEscape(_schoolPilotShortName(s.name))}</div>` +
+               `${badge}</div>`;
+      }).join("") + `</div>`;
+    }
+
     container.innerHTML = `<div class="school-pilot-block">` +
       `<div class="school-pilot-head">` +
-      `<span class="ttl">Schools</span>` +
-      `<span class="src">Source: TEA <span class="info" tabindex="0" ` +
-      `title="Zoned schools from Dallas ISD 2025-26 attendance boundaries · rating = TEA 2025 Overall Score (0–100) + A–F">ⓘ</span></span>` +
-      `</div>` +
-      `<div class="school-pilot-grid">${cells.join("")}</div>` +
-      `</div>`;
+      `<span class="ttl">Zoned schools</span>` +
+      `<span class="src">Source: TEA · 2025-26 attendance zones <span class="info" tabindex="0" ` +
+      `title="Zoned elementary/middle/high from Dallas ISD 2025-26 attendance boundaries. Rating = TEA 2025 Overall Score (0–100) + A–F. Test scores = TEA Student Achievement · Student progress = TEA Academic Growth.">ⓘ</span></span>` +
+      `</div>${inner}</div>`;
 
     // §6.5 disagreement telemetry -- console-only (no persistence today,
     // matching Part 4's "brief-only is the default" framing: a cheap data-

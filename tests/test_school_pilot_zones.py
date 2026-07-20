@@ -65,6 +65,7 @@ def test_assign_returns_matched_campus_and_grade_inside_zone(fixture_zones) -> N
     result = assign(32.805, -96.805)
     assert result["elementary"] == {
         "name": "Fixture Elementary", "rating": "B", "score": None,
+        "achievement": None, "growth": None,
         "rating_year": 2025, "boundary_vintage": "2025-26",
     }
     assert result["middle"]["name"] == "Fixture Middle"

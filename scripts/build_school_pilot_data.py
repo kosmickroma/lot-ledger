@@ -207,11 +207,25 @@ def load_tea_ratings() -> dict[str, dict[str, Any]]:
         school_type = row[6]
         overall_rating = row[13]
         overall_score = row[14]
+        # Two sub-domains shown on the card (spec: "Test scores" = Student
+        # Achievement [15/16], "Student progress" = Academic Growth [19/20]).
+        # Honest English labels for TEA domains, NOT GreatSchools nameplates.
+        ach_grade, ach_score = row[15], row[16]
+        grow_grade, grow_score = row[19], row[20]
         if district_number != DISD_DISTRICT_NUMBER or not campus_number:
             continue
+
+        def _g(v):
+            return v if v in ("A", "B", "C", "D", "F") else None
+
+        def _s(v):
+            return v if isinstance(v, int) else None
+
         out[str(campus_number)] = {
-            "grade": overall_rating if overall_rating in ("A", "B", "C", "D", "F") else None,
-            "score": overall_score if isinstance(overall_score, int) else None,
+            "grade": _g(overall_rating),
+            "score": _s(overall_score),
+            "achievement": {"grade": _g(ach_grade), "score": _s(ach_score)},
+            "growth": {"grade": _g(grow_grade), "score": _s(grow_score)},
             "name": campus_name,
             "type": school_type,
         }
@@ -312,7 +326,12 @@ def main() -> int:
         return 0
 
     ratings_out = {
-        tid: {"grade": info["grade"], "score": info["score"]}
+        tid: {
+            "grade": info["grade"],
+            "score": info["score"],
+            "achievement": info["achievement"],
+            "growth": info["growth"],
+        }
         for tid, info in tea_ratings.items() if info["grade"]
     }
     (OUT_DIR / "ratings.json").write_text(json.dumps({
