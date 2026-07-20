@@ -3878,24 +3878,30 @@ body.is-not-power-user .power-user-only {
    .school-pilot-rows is the empty placeholder container before populate();
    .school-pilot-block replaces its contents once populated. Chips are the
    only saturated color in the section -- never gold (reserved for AI). */
-.school-pilot-block { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--panel-border); }
-.school-pilot-head  { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; }
-.school-pilot-head .ttl { font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-muted); font-weight: 600; }
-.school-pilot-head .src { font-size: 9px; color: var(--text-soft); }
-.school-pilot-head .src .info { cursor: help; margin-left: 1px; }
-.school-pilot-head .src .info:focus-visible { outline: 1px solid var(--text-soft); outline-offset: 1px; }
-.school-pilot-grid  { display: flex; gap: 8px; }
-.school-pilot-cell  { flex: 1; min-width: 0; min-height: 44px; }   /* min-height so a missing chip leaves quiet space, not a jagged row */
-.school-pilot-cell .lvl { font-size: 9px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-soft); margin-bottom: 3px; }
-.school-pilot-cell .nm  { font-size: 12px; color: var(--text-main); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.sch-chip { display: inline-block; border-radius: 999px; padding: 1px 8px; font-size: 13px; font-weight: 700; line-height: 1.5; white-space: nowrap; margin-bottom: 3px; }
-.sch-chip .g { font-size: 11px; font-weight: 600; }   /* letter smaller than number -> number is hero */
-/* bands -- mirror .ai-fact-badge alpha construction; NEVER gold (reserved for AI) */
-.sch-a { color:#5fe3a1; border:1px solid rgba(95,227,161,.45);  background:rgba(95,227,161,.15); }
-.sch-b { color:#b8dd6a; border:1px solid rgba(184,221,106,.45); background:rgba(184,221,106,.15); }
-.sch-c { color:#f0a44b; border:1px solid rgba(240,164,75,.45);  background:rgba(240,164,75,.15); }
-.sch-d { color:#ef7d4d; border:1px solid rgba(239,125,77,.45);  background:rgba(239,125,77,.15); }
-.sch-f { color:#ee6a6a; border:1px solid rgba(238,106,106,.45); background:rgba(238,106,106,.15); }
+/* Designed FOR the WHITE parcel popup/panel (matches .parcel-panel-* palette:
+   teal #0f8a99 section head, #e2e8f0 hairline, dark #1e293b text) -- NOT the
+   dark sidebar. Zillow-style: bold dark school name + solid filled rating
+   badge (number hero). A/B anchored in LotLedger green -> amber -> red so a
+   weak school still reads at a glance. */
+.school-pilot-block { margin-top: 8px; padding-top: 12px; border-top: 1px solid #e2e8f0; }
+.school-pilot-head  { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 12px; }
+.school-pilot-head .ttl { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: #0f8a99; font-weight: 700; }
+.school-pilot-head .src { font-size: 11px; color: #94a3b8; }
+.school-pilot-head .src .info { cursor: help; margin-left: 1px; border-bottom: 1px dotted #cbd5e1; }
+.school-pilot-head .src .info:focus-visible { outline: 1px solid #94a3b8; outline-offset: 1px; }
+.school-pilot-grid  { display: flex; gap: 14px; }
+.school-pilot-cell  { flex: 1; min-width: 0; min-height: 56px; }   /* min-height so a missing badge leaves quiet space, not a jagged row */
+.school-pilot-cell .lvl { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: #94a3b8; margin-bottom: 5px; }
+.school-pilot-cell .nm  { font-size: 14px; font-weight: 600; color: #1e293b; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 8px; }
+.sch-chip { display: inline-flex; align-items: baseline; gap: 5px; border-radius: 999px; padding: 3px 11px; color: #fff; line-height: 1.4; white-space: nowrap; }
+.sch-chip .num { font-size: 15px; font-weight: 800; }
+.sch-chip .g   { font-size: 12px; font-weight: 700; opacity: .92; }   /* letter secondary to the number hero */
+/* solid, readable-on-white; A/B in LotLedger green -> amber -> red. NEVER gold (reserved for AI). */
+.sch-a { background:#14663f; }
+.sch-b { background:#2f8f5a; }
+.sch-c { background:#c08a1e; }
+.sch-d { background:#cf6a2a; }
+.sch-f { background:#c23b3b; }
 
 .propelio-popup-agent-block {
   margin-top: 10px;

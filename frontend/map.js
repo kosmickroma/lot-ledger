@@ -14882,19 +14882,20 @@ async function _populateSchoolPilot(container) {
       if (!s) return "";   // absent level -> omit the cell (never a fake one, no fabrication)
       const hasChip = !!s.rating && s.score != null;
       const chip = hasChip
-        ? `<span class="sch-chip sch-${s.rating.toLowerCase()}"><span class="g">${_propelioEscape(s.rating)}</span> · ${_propelioEscape(String(s.score))}</span>`
-        : "";   // unrated -- name only, never a gray/empty pill
+        ? `<span class="sch-chip sch-${s.rating.toLowerCase()}"><span class="num">${_propelioEscape(String(s.score))}</span><span class="g">${_propelioEscape(s.rating)}</span></span>`
+        : "";   // unrated -- name only, never a filled/empty badge
+      // Zillow stack: level label -> bold school name -> filled rating badge.
       return `<div class="school-pilot-cell">` +
              `<div class="lvl">${LEVEL_LABEL[lvl]}</div>` +
-             `${chip}` +
              `<div class="nm">${_propelioEscape(_schoolPilotShortName(s.name))}</div>` +
+             `${chip}` +
              `</div>`;
     });
     if (!cells.some(Boolean)) return;   // total miss -- render nothing (§6.4)
     container.innerHTML = `<div class="school-pilot-block">` +
       `<div class="school-pilot-head">` +
       `<span class="ttl">Schools</span>` +
-      `<span class="src">TEA <span class="info" tabindex="0" ` +
+      `<span class="src">Source: TEA <span class="info" tabindex="0" ` +
       `title="Zoned schools from Dallas ISD 2025-26 attendance boundaries · rating = TEA 2025 Overall Score (0–100) + A–F">ⓘ</span></span>` +
       `</div>` +
       `<div class="school-pilot-grid">${cells.join("")}</div>` +
