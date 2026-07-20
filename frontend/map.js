@@ -14851,6 +14851,16 @@ function _schoolPilotMlsNamesNear(container) {
   return out;
 }
 
+// Zillow-inspired-but-native restyle -- strip common suffix noise so a long
+// TEA/DISD campus name still fits a narrow grid cell (keep it short like
+// Zillow: "Wilson", not "Woodrow Wilson High School").
+function _schoolPilotShortName(name) {
+  return String(name || "")
+    .replace(/\s+(elementary|middle|high)\s+school$/i, "")
+    .replace(/\s+school$/i, "")
+    .trim();
+}
+
 async function _populateSchoolPilot(container) {
   if (!_schoolPilotEnabled() || !container || container.dataset.loaded === "1") return;
   container.dataset.loaded = "1";   // single-flight -- never re-fetch the same container
@@ -14866,18 +14876,29 @@ async function _populateSchoolPilot(container) {
       data = await r.json();
       _schoolPilotCache.set(key, data);
     }
-    const LEVEL_LABEL = { elementary: "Elementary", middle: "Middle", high: "High" };
-    const rows = ["elementary", "middle", "high"].map((lvl) => {
+    const LEVEL_LABEL = { elementary: "ELEMENTARY", middle: "MIDDLE", high: "HIGH" };
+    const cells = ["elementary", "middle", "high"].map((lvl) => {
       const s = data[lvl];
-      if (!s) return "";   // absent level -> omit the row (never "N/A" as if assigned)
-      const rating = s.rating ? ` — ${s.rating}` : "";
-      return `<div class="school-pilot-row"><span class="lvl">${LEVEL_LABEL[lvl]}</span> ${_propelioEscape(s.name)}${rating} ` +
-             `<span class="src">(TEA ${s.rating_year} · ${s.boundary_vintage} boundary)</span></div>`;
-    }).join("");
-    if (!rows) return;   // total miss -- render nothing (§6.4)
-    const vintage = (data.elementary || data.middle || data.high)?.boundary_vintage || "";
-    const teaYear = (data.elementary || data.middle || data.high)?.rating_year || "";
-    container.innerHTML = `<div class="school-pilot-block">Zoned schools (${_propelioEscape(vintage)} · TEA ${_propelioEscape(String(teaYear))})${rows}</div>`;
+      if (!s) return "";   // absent level -> omit the cell (never a fake one, no fabrication)
+      const hasChip = !!s.rating && s.score != null;
+      const chip = hasChip
+        ? `<span class="sch-chip sch-${s.rating.toLowerCase()}"><span class="g">${_propelioEscape(s.rating)}</span> · ${_propelioEscape(String(s.score))}</span>`
+        : "";   // unrated -- name only, never a gray/empty pill
+      return `<div class="school-pilot-cell">` +
+             `<div class="lvl">${LEVEL_LABEL[lvl]}</div>` +
+             `${chip}` +
+             `<div class="nm">${_propelioEscape(_schoolPilotShortName(s.name))}</div>` +
+             `</div>`;
+    });
+    if (!cells.some(Boolean)) return;   // total miss -- render nothing (§6.4)
+    container.innerHTML = `<div class="school-pilot-block">` +
+      `<div class="school-pilot-head">` +
+      `<span class="ttl">Schools</span>` +
+      `<span class="src">TEA <span class="info" tabindex="0" ` +
+      `title="Zoned schools from Dallas ISD 2025-26 attendance boundaries · rating = TEA 2025 Overall Score (0–100) + A–F">ⓘ</span></span>` +
+      `</div>` +
+      `<div class="school-pilot-grid">${cells.join("")}</div>` +
+      `</div>`;
 
     // §6.5 disagreement telemetry -- console-only (no persistence today,
     // matching Part 4's "brief-only is the default" framing: a cheap data-

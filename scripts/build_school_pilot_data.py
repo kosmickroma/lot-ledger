@@ -191,8 +191,9 @@ def fetch_all_features(service_name: str) -> list[dict[str, Any]]:
 
 def load_tea_ratings() -> dict[str, dict[str, Any]]:
     """Download the TEA 2025 statewide summary XLSX, filter to Dallas ISD
-    (district 057905), return {tea_campus_id: {"grade": ..., "name": ...,
-    "type": TEA School Type}}."""
+    (district 057905), return {tea_campus_id: {"grade": ..., "score": ...,
+    "name": ..., "type": TEA School Type}}. `score` is the Overall Score
+    (column [14], 0-100 int) or None when TEA didn't publish one."""
     import openpyxl
 
     resp = requests.get(TEA_SUMMARY_URL, timeout=REQUEST_TIMEOUT_S * 2)
@@ -205,10 +206,12 @@ def load_tea_ratings() -> dict[str, dict[str, Any]]:
         district_number, _district, campus_number, campus_name, *_rest = row
         school_type = row[6]
         overall_rating = row[13]
+        overall_score = row[14]
         if district_number != DISD_DISTRICT_NUMBER or not campus_number:
             continue
         out[str(campus_number)] = {
             "grade": overall_rating if overall_rating in ("A", "B", "C", "D", "F") else None,
+            "score": overall_score if isinstance(overall_score, int) else None,
             "name": campus_name,
             "type": school_type,
         }
@@ -308,7 +311,10 @@ def main() -> int:
         print(f"[school-pilot-build] TEA ratings fetch failed, skipping: {exc}", file=sys.stderr)
         return 0
 
-    ratings_out = {tid: {"grade": info["grade"]} for tid, info in tea_ratings.items() if info["grade"]}
+    ratings_out = {
+        tid: {"grade": info["grade"], "score": info["score"]}
+        for tid, info in tea_ratings.items() if info["grade"]
+    }
     (OUT_DIR / "ratings.json").write_text(json.dumps({
         "meta": {"tea_year": TEA_YEAR, "district": DISD_DISTRICT_NUMBER},
         "ratings": ratings_out,

@@ -67,9 +67,9 @@ def load_zones() -> dict[str, Any]:
 
 def assign(lat: float, lng: float) -> dict[str, dict[str, Any] | None]:
     """For each level, the first zone whose polygon contains (lat,lng) ->
-    {name, rating, rating_year, boundary_vintage}; None where no zone
+    {name, rating, score, rating_year, boundary_vintage}; None where no zone
     contains it (no fallback, no guess — spec §6.4/§6.7: a miss renders
-    nothing)."""
+    nothing). `score` (TEA 0-100 Overall Score) is None when unrated."""
     data = load_zones()
     out: dict[str, dict[str, Any] | None] = {}
     for level in _LEVELS:
@@ -77,10 +77,11 @@ def assign(lat: float, lng: float) -> dict[str, dict[str, Any] | None]:
         hit = None
         for z in bundle["zones"]:
             if point_in_parts(lng, lat, z["parts"]):
-                rating = (data["ratings"].get(z.get("tea_campus_id")) or {}).get("grade")
+                rating_info = data["ratings"].get(z.get("tea_campus_id")) or {}
                 hit = {
                     "name": z["campus_name"],
-                    "rating": rating,
+                    "rating": rating_info.get("grade"),
+                    "score": rating_info.get("score"),
                     "rating_year": data["year"],
                     "boundary_vintage": bundle["vintage"],
                 }
