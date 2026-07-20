@@ -3874,6 +3874,42 @@ body.is-not-power-user .power-user-only {
   color: #0f8a99;
 }
 
+/* docs/AI/SCHOOL_RATINGS_PILOT_SPEC_2026-07-20.md §6.5 -- the "Zoned schools"
+   block, additive and visually distinct from .propelio-popup-schools (the
+   MLS-listed block) above: a different accent (amber, matching the app's
+   gold/amber accent elsewhere) so the two read as separate sources, not one
+   merged list. .school-pilot-rows is the empty placeholder container before
+   populate(); .school-pilot-block replaces its contents once populated. */
+.school-pilot-block {
+  margin-top: 8px;
+  padding: 6px 8px;
+  border: 1px solid rgba(201, 162, 79, 0.35);
+  border-radius: 7px;
+  background: rgba(201, 162, 79, 0.08);
+  font-size: 11px;
+  font-weight: 600;
+  color: #92600a;
+}
+
+.school-pilot-row {
+  margin-top: 3px;
+  font-weight: 400;
+  color: #334155;
+}
+
+.school-pilot-row .lvl {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: #92600a;
+  margin-right: 4px;
+}
+
+.school-pilot-row .src {
+  color: #94a3b8;
+  font-size: 10px;
+}
+
 .propelio-popup-agent-block {
   margin-top: 10px;
   padding: 8px 10px;

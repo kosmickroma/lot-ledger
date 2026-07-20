@@ -79,6 +79,43 @@ const ARV_NBV_EXPORT_ENABLED = Boolean(
   (() => { try { return localStorage.getItem("ll_arv_nbv_export") === "1"; } catch (_e) { return false; } })()
 );
 
+// docs/AI/SCHOOL_RATINGS_PILOT_SPEC_2026-07-20.md §5.3 / Plan Task 4 — School
+// Ratings (Dallas ISD pilot) flag. Ships OFF via LL_CONFIG. Per-browser
+// override for preview testing without committing the flag on:
+//   - URL param  ?school_pilot=1   (one-off, current load)
+//   - localStorage ll_school_pilot="1"  (sticky for this browser)
+// A function (not a top-level const like the two flags above) so a
+// mid-session localStorage flip takes effect on the next call without a
+// reload — this flag gates a lot of small per-popup checks, not one
+// script-load-time branch. Committed default stays false.
+function _schoolPilotEnabled() {
+  return Boolean(
+    (window.LL_CONFIG && window.LL_CONFIG.schoolPilot) ||
+    /[?&]school_pilot=1\b/.test(window.location.search) ||
+    (() => { try { return localStorage.getItem("ll_school_pilot") === "1"; } catch (_e) { return false; } })()
+  );
+}
+
+// docs/AI/SCHOOL_RATINGS_PILOT_SPEC_2026-07-20.md §5.3 — shared empty, id-
+// tagged placeholder consumed by BOTH makePopupHtml AND
+// _buildParcelDetailPanelHtml (mirrors the existing shared "Load Area"
+// section pattern, map.js:~859). ⚠️ MUST return "" (empty string) off-flag,
+// NEVER a bare `return` — it is interpolated as
+// `${_schoolPilotRowsPlaceholder(p)}`, so `undefined` would inject the
+// literal text "undefined" into the popup/panel and make flag-off byte-
+// *different* from today (the worst kind of regression for this feature).
+// Populated later (never here) by _populateSchoolPilot, on popupopen /
+// after the panel renders — never eagerly, never on the hot path (§3.6:
+// never in _resolveTargetParcelFeatureProps, the batch render path, or any
+// tile-render path).
+function _schoolPilotRowsPlaceholder(p) {
+  if (!_schoolPilotEnabled()) return "";                 // ⚠️ empty string, NEVER bare return
+  const lat = (p && (p.lat ?? p.latitude));
+  const lng = (p && (p.lng ?? p.longitude));
+  if (lat == null || lng == null) return "";
+  return `<div class="school-pilot-rows" data-lat="${lat}" data-lng="${lng}"></div>`;
+}
+
 function _formatAppVersionForDisplay(raw) {
   // Pill is white-space:nowrap and shares the sidebar header row with the
   // user dropdown. Long preview APP_VERSION (e.g. "0.28-feat-foo-bar-pre")
@@ -11966,6 +12003,7 @@ function _buildParcelDetailPanelHtml(p, matchedComp) {
             ${mlsHtml}
           </section>
         </div>
+        ${_schoolPilotRowsPlaceholder(p)}
         <section class="parcel-panel-agents">
           ${compDetails
             ? _buildPanelAgentBlockHtml("Listing Agent", compDetails.listingAgent, "No listing agent details available.")
@@ -12047,6 +12085,13 @@ function openParcelDetailPanel(parcelProps, opts = {}) {
   panel.setAttribute("aria-hidden", "false");
   const body = panel.querySelector(".parcel-panel-body");
   if (body) body.scrollTop = 0;
+
+  // docs/AI/SCHOOL_RATINGS_PILOT_SPEC_2026-07-20.md §5.3 — the sidebar panel
+  // does NOT fire popupopen (browse tile-clicks open this, not a Leaflet
+  // popup), so it needs its own explicit populate call after the panel's
+  // HTML lands in the DOM. No-op (immediate return) when the flag is off or
+  // no placeholder was injected.
+  panel.querySelectorAll(".school-pilot-rows").forEach(_populateSchoolPilot);
 
   panel.querySelector(".parcel-panel-close")?.addEventListener("click", closeParcelDetailPanel);
   _wireParcelInteractiveUi(panel, { close: closeParcelDetailPanel });
@@ -12251,6 +12296,7 @@ function makePopupHtml(p) {
           ${soldCompRows}
         </table>
         ${propelioSectionHtml}
+        ${_schoolPilotRowsPlaceholder(p)}
         ${ratingButtonsHtml}
         ${_buildSubjectPropertyLoadAreaHtml(p)}
         ${p.account_num ? `<div style="margin-top:8px;display:flex;gap:6px;align-items:center;justify-content:flex-end;font-size:11px;padding-top:6px;border-top:1px solid #e2e8f0;">
@@ -14774,6 +14820,89 @@ function _wireParcelInteractiveUi(root, options = {}) {
     });
   }
 }
+
+// docs/AI/SCHOOL_RATINGS_PILOT_SPEC_2026-07-20.md §5.3 — populate + the two
+// triggers (popupopen listener here; the post-panel-render call is in
+// openParcelDetailPanel). Additive-only, own listener (not folded into the
+// existing popupopen handler above) so this feature's wiring stays isolated
+// and easy to audit/revert independently of the parcel-interactive-ui wiring.
+const _schoolPilotCache = new Map();   // rounded "lat,lng" -> assign() result, session-lived
+
+// §6.5 — read the ALREADY-RENDERED MLS ES/MS/HS spans (the SAME
+// .propelio-popup-school markup both makePopupHtml's propelioSectionHtml
+// and _buildParcelDetailPanelHtml's schoolsHtml already emit, untouched by
+// this feature) purely by DOM query, rather than changing
+// _schoolPilotRowsPlaceholder's signature to carry MLS data through. Purely
+// read-only -- the MLS block itself is never written to. Returns
+// {elementary, middle, high} MLS name strings, null per level when that
+// MLS field wasn't rendered (no matched comp, or that level absent).
+function _schoolPilotMlsNamesNear(container) {
+  const root = container.closest(".popup, .parcel-panel-body") || document;
+  const labelToLevel = { ES: "elementary", MS: "middle", HS: "high" };
+  const out = { elementary: null, middle: null, high: null };
+  root.querySelectorAll(".propelio-popup-school").forEach((el) => {
+    const labelEl = el.querySelector(".label");
+    const label = labelEl ? labelEl.textContent.trim() : "";
+    const level = labelToLevel[label];
+    if (!level) return;
+    const name = el.textContent.replace(label, "").trim();
+    if (name) out[level] = name;
+  });
+  return out;
+}
+
+async function _populateSchoolPilot(container) {
+  if (!_schoolPilotEnabled() || !container || container.dataset.loaded === "1") return;
+  container.dataset.loaded = "1";   // single-flight -- never re-fetch the same container
+  const lat = container.dataset.lat;
+  const lng = container.dataset.lng;
+  if (lat == null || lng == null) return;
+  const key = `${(+lat).toFixed(5)},${(+lng).toFixed(5)}`;
+  try {
+    let data = _schoolPilotCache.get(key);
+    if (!data) {
+      const r = await fetch(`/api/school-pilot/assign?lat=${lat}&lng=${lng}`);
+      if (!r.ok) return;   // miss/error -- render nothing, never a fallback guess
+      data = await r.json();
+      _schoolPilotCache.set(key, data);
+    }
+    const LEVEL_LABEL = { elementary: "Elementary", middle: "Middle", high: "High" };
+    const rows = ["elementary", "middle", "high"].map((lvl) => {
+      const s = data[lvl];
+      if (!s) return "";   // absent level -> omit the row (never "N/A" as if assigned)
+      const rating = s.rating ? ` — ${s.rating}` : "";
+      return `<div class="school-pilot-row"><span class="lvl">${LEVEL_LABEL[lvl]}</span> ${_propelioEscape(s.name)}${rating} ` +
+             `<span class="src">(TEA ${s.rating_year} · ${s.boundary_vintage} boundary)</span></div>`;
+    }).join("");
+    if (!rows) return;   // total miss -- render nothing (§6.4)
+    const vintage = (data.elementary || data.middle || data.high)?.boundary_vintage || "";
+    const teaYear = (data.elementary || data.middle || data.high)?.rating_year || "";
+    container.innerHTML = `<div class="school-pilot-block">Zoned schools (${_propelioEscape(vintage)} · TEA ${_propelioEscape(String(teaYear))})${rows}</div>`;
+
+    // §6.5 disagreement telemetry -- console-only (no persistence today,
+    // matching Part 4's "brief-only is the default" framing: a cheap data-
+    // quality + magnet/choice-divergence signal, not a new logging system).
+    // Best-effort and wrapped separately from the render above, so a DOM-
+    // query quirk here can never affect the rows that already rendered.
+    try {
+      const mlsNames = _schoolPilotMlsNamesNear(container);
+      const norm = (s) => String(s || "").trim().replace(/\s+/g, " ").toLowerCase();
+      ["elementary", "middle", "high"].forEach((lvl) => {
+        const zoned = data[lvl]?.name;
+        const mls = mlsNames[lvl];
+        if (zoned && mls && norm(zoned) !== norm(mls)) {
+          console.debug(`[school-pilot] ${lvl} disagreement — zoned: "${zoned}" vs MLS-listed: "${mls}"`);
+        }
+      });
+    } catch (_e) { /* telemetry is best-effort; never surfaces to the user */ }
+  } catch (_e) { /* miss/error -- render nothing, never fabricate (§3.7) */ }
+}
+
+map.on("popupopen", (e) => {
+  const root = e.popup?.getElement?.();
+  if (!root) return;
+  root.querySelectorAll?.(".school-pilot-rows").forEach(_populateSchoolPilot);
+});
 
 // Wire up parcel action links for any remaining popup paths.
 map.on("popupopen", (e) => {

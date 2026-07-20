@@ -9264,6 +9264,16 @@ async def index() -> HTMLResponse:
             "__AI_ALL_USERS__",
             "true" if os.getenv("AI_ALL_USERS", "false").strip().lower() == "true" else "false",
         )
+        # docs/AI/SCHOOL_RATINGS_PILOT_SPEC_2026-07-20.md §5.3 / Plan Task 4 —
+        # same seam, same os.getenv-direct reasoning: an unsubstituted
+        # __SCHOOL_PILOT__ is a bare identifier that throws and breaks
+        # LL_CONFIG on every environment, so this MUST land in the same
+        # commit as the index.html placeholder. Default FALSE; true only on
+        # preview during the soak (never dev/prod — spec §8).
+        html = html.replace(
+            "__SCHOOL_PILOT__",
+            "true" if os.getenv("SCHOOL_PILOT", "false").strip().lower() == "true" else "false",
+        )
         _INDEX_HTML_CACHE = html
     return HTMLResponse(_INDEX_HTML_CACHE)
 
@@ -9287,5 +9297,19 @@ if os.getenv("VALUE_DRAFTS_ENABLED", "false").strip().lower() == "true":
     from api.value_drafts.routes import router as value_drafts_router
 
     app.include_router(value_drafts_router)
+
+# School Ratings (Dallas ISD pilot) module seam — same reasoning as the AI /
+# value-drafts seams above: read the env var directly, never import
+# api.school_pilot at module top, so the package can be broken/deleted
+# without affecting app startup. No SQL of its own (in-memory point-in-
+# polygon only); the shared get_current_user dependency is the only DB
+# touch, identical to every other endpoint. Must stay ABOVE the StaticFiles
+# catch-all mount or /api/school-pilot/* 404s.
+# docs/AI/SCHOOL_RATINGS_PILOT_SPEC_2026-07-20.md §5.2, §8 — OFF (unset) on
+# dev/prod; only ever set true on preview during the soak.
+if os.getenv("SCHOOL_PILOT", "false").strip().lower() == "true":
+    from api.school_pilot.routes import router as school_pilot_router
+
+    app.include_router(school_pilot_router)
 
 app.mount("/", StaticFiles(directory=FRONTEND_DIR), name="frontend")

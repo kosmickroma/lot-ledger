@@ -71,3 +71,9 @@ Thumbs.db
 service-account*.json
 gcp-key*.json
 cors.json
+# School-ratings pilot test fixtures (small synthetic zone/rating JSON, no
+# credentials, no real DISD data) — 2026-07-20. The REAL baked data lives in
+# data/school_pilot/ (excluded via the data/ rule above) and is never
+# committed; these are hand-authored test-only fixtures the *.json rule
+# above would otherwise silently drop.
+!tests/fixtures/school_pilot/*.json

@@ -1,0 +1,8 @@
+{
+  "meta": {"level": "elementary", "source_url": "fixture", "retrieved": "2026-07-20",
+            "boundary_vintage": "2025-26", "crs": "EPSG:4326"},
+  "zones": [
+    {"campus_name": "Fixture Elementary", "tea_campus_id": "057905999", "local_id": 999,
+     "parts": [[[[-96.81, 32.79], [-96.81, 32.81], [-96.79, 32.81], [-96.79, 32.79], [-96.81, 32.79]]]]}
+  ]
+}
