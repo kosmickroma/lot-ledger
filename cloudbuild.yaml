@@ -5,6 +5,20 @@ steps:
       - '-c'
       - 'gcloud auth configure-docker us-central1-docker.pkg.dev --quiet'
 
+  # School-ratings pilot: pull the baked DISD zones + TEA ratings from GCS into
+  # the build context so COPY . . bakes them into the image (zones.py reads
+  # /app/data/school_pilot). The data is gitignored (never in the repo), so a
+  # GitHub-triggered build has no other source for it. NON-FATAL: a bucket/
+  # network hiccup logs and skips -> zones.py tolerates missing files and the
+  # feature ships dark, never failing an unrelated dev deploy.
+  # Refresh the data: re-run scripts/build_school_pilot_data.py locally, then
+  # gsutil cp data/school_pilot/*.json gs://lot-ledger-tiles/school_pilot/.
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: bash
+    args:
+      - '-c'
+      - 'mkdir -p data/school_pilot && gsutil -m cp gs://lot-ledger-tiles/school_pilot/*.json data/school_pilot/ || echo "SCHOOL_PILOT data pull failed (non-fatal) — feature ships dark this build"'
+
   - name: 'gcr.io/cloud-builders/docker'
     args:
       - build
@@ -39,7 +53,7 @@ steps:
       - '--min-instances=1'
       - '--max-instances=5'
       - '--no-cpu-throttling'
-      - '--update-env-vars=DEEP_PULL_EXPERIMENT=true,PHASE_2_CACHE_READ=true,BUILD_ID=$BUILD_ID,APP_VERSION=${_APP_VERSION}'
+      - '--update-env-vars=DEEP_PULL_EXPERIMENT=true,PHASE_2_CACHE_READ=true,BUILD_ID=$BUILD_ID,APP_VERSION=${_APP_VERSION},SCHOOL_PILOT=true'
       - '--quiet'
 
 substitutions:
