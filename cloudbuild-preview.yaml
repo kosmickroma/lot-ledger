@@ -51,7 +51,7 @@ steps:
       - '--min-instances=1'
       - '--max-instances=5'
       - '--no-cpu-throttling'
-      - '--update-env-vars=DEEP_PULL_EXPERIMENT=true,PHASE_2_CACHE_READ=true,BUILD_ID=$BUILD_ID,APP_VERSION=${_APP_VERSION}'
+      - '--update-env-vars=DEEP_PULL_EXPERIMENT=true,PHASE_2_CACHE_READ=true,BUILD_ID=$BUILD_ID,APP_VERSION=${_APP_VERSION},SCHOOL_PILOT=true'
       - '--quiet'
 
 substitutions:

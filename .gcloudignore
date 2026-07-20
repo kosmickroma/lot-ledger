@@ -31,7 +31,13 @@ __pycache__/
 Thumbs.db
 
 # Data files — regenerated from DB / GCS, not needed at runtime
-data/
+data/*
+# ...except the school-ratings pilot's baked DISD zones + TEA ratings, which
+# MUST ship inside the image (zones.py reads /app/data/school_pilot). Small
+# (~3.5MB), gitignored (never in the repo), uploaded only into the build
+# context. docs/AI/SCHOOL_RATINGS_PILOT_SPEC_2026-07-20.md §8.
+!data/school_pilot/
+!data/school_pilot/**
 assets/
 ingest/
 *.pmtiles
