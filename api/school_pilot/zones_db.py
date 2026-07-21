@@ -19,18 +19,21 @@
 # business state -- see this module's own docstring on _ERROR_RESULT).
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from api.config import get_conn, release_conn
-from scripts.school_zones_registry import dallas_isd_name_to_tea_id
+# ⚠️ Static, first-party runtime data — NEVER import from scripts/ here (docs/
+# + scripts/ are dockerignored; a scripts import 500s every request in the
+# deployed container -- packaging bug 2026-07-21). See api/school_pilot/districts.py.
+from api.school_pilot.districts import (
+    DALLAS_ISD_NAME_TO_TEA_ID,
+    OPEN_ENROLLMENT_DISTRICT_TEA_IDS,
+)
+
+logger = logging.getLogger(__name__)
 
 _LEVELS = ("elementary", "middle", "high")
-
-# §6 case 3 -- districts with NO zones by design (court-ordered open
-# enrollment). Spec names Garland ISD as the example; no exhaustive list is
-# given in the spec, so this starts as the one confirmed entry. Flagged in
-# the build report as a judgment call pending the team's actual roster.
-OPEN_ENROLLMENT_DISTRICT_TEA_IDS = {"057909"}  # GARLAND ISD
 
 
 def _district_status_result() -> dict[str, Any]:
@@ -58,7 +61,7 @@ def _resolve_district_tea_id_from_isd(isd: str | None) -> str | None:
     cad_key, raw = isd.split(":", 1)
     if cad_key != "dcad":
         return None
-    return dallas_isd_name_to_tea_id().get(raw.strip().upper())
+    return DALLAS_ISD_NAME_TO_TEA_ID.get(raw.strip().upper())
 
 
 def _district_display_name(isd: str | None) -> str | None:
@@ -155,6 +158,11 @@ def assign_db(lat: float, lng: float, isd: str | None = None) -> dict[str, Any]:
                 out["district_name"] = _district_display_name(isd)
         return out
     except Exception:
+        # Log, don't just swallow. A swallowed error and an honest empty
+        # state were visually identical for a whole debugging session
+        # (2026-07-21) -- the response contract stays (never fabricate), but
+        # the silence goes.
+        logger.exception("school_pilot.assign_db failed lat=%s lng=%s isd=%s", lat, lng, isd)
         return _ERROR_RESULT()
     finally:
         # Read-only (SELECT-only) -- rollback just discards the implicit
