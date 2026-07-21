@@ -113,7 +113,12 @@ function _schoolPilotRowsPlaceholder(p) {
   const lat = (p && (p.lat ?? p.latitude));
   const lng = (p && (p.lng ?? p.longitude));
   if (lat == null || lng == null) return "";
-  return `<div class="school-pilot-rows" data-lat="${lat}" data-lng="${lng}"></div>`;
+  // docs/AI/SCHOOL_ZONES_DB_BUILD_SPEC_2026-07-21.md §6 -- carries the
+  // parcel's CAD isd string through to _populateSchoolPilot so the DB path
+  // can name a known-but-not-yet-ingested district ("not loaded yet").
+  // Static mode (the only mode live today) ignores this attribute entirely.
+  const isd = p && p.isd != null ? String(p.isd) : "";
+  return `<div class="school-pilot-rows" data-lat="${lat}" data-lng="${lng}" data-isd="${_propelioEscape(isd)}"></div>`;
 }
 
 function _formatAppVersionForDisplay(raw) {
@@ -14861,21 +14866,58 @@ function _schoolPilotShortName(name) {
     .trim();
 }
 
+// docs/AI/SCHOOL_ZONES_DB_BUILD_SPEC_2026-07-21.md §6 -- the district-level
+// honest-state block for the two non-"ingested" statuses. Additive-only:
+// only ever invoked when the response carries a district_status key (the
+// DB path); the static path's response never has that key, so its
+// behavior below is completely untouched by this helper.
+function _schoolPilotStatusBlockHtml(status, districtName) {
+  const label = districtName ? _propelioEscape(districtName) : "this district";
+  const note = status === "open_enrollment"
+    ? "Open enrollment — no zoned schools"
+    : `Zoned schools for ${label} not loaded yet`;
+  return `<div class="school-pilot-block sp-status-note">` +
+    `<div class="school-pilot-head"><span class="ttl">Zoned schools</span></div>` +
+    `<div class="sp-note">${note}</div>` +
+    `</div>`;
+}
+
 async function _populateSchoolPilot(container) {
   if (!_schoolPilotEnabled() || !container || container.dataset.loaded === "1") return;
   container.dataset.loaded = "1";   // single-flight -- never re-fetch the same container
   const lat = container.dataset.lat;
   const lng = container.dataset.lng;
   if (lat == null || lng == null) return;
-  const key = `${(+lat).toFixed(5)},${(+lng).toFixed(5)}`;
+  const isd = container.dataset.isd || "";
+  const key = `${(+lat).toFixed(5)},${(+lng).toFixed(5)},${isd}`;
   try {
     let data = _schoolPilotCache.get(key);
     if (!data) {
-      const r = await fetch(`/api/school-pilot/assign?lat=${lat}&lng=${lng}`);
+      const url = `/api/school-pilot/assign?lat=${lat}&lng=${lng}` +
+        (isd ? `&isd=${encodeURIComponent(isd)}` : "");
+      const r = await fetch(url);
       if (!r.ok) return;   // miss/error -- render nothing, never a fallback guess
       data = await r.json();
       _schoolPilotCache.set(key, data);
     }
+
+    // §6 -- district_status is present only on DB-sourced responses (the
+    // static path's shape is untouched). null/absent -> render nothing,
+    // same as the pilot's original miss behavior; the 3 real values get
+    // their own honest per-district state.
+    const hasDistrictStatus = Object.prototype.hasOwnProperty.call(data, "district_status");
+    if (hasDistrictStatus) {
+      if (data.district_status == null) return;   // backend error/timeout -- never fabricate
+      if (data.district_status === "not_loaded" || data.district_status === "open_enrollment") {
+        container.innerHTML = _schoolPilotStatusBlockHtml(data.district_status, data.district_name);
+        return;
+      }
+      // "ingested" falls through to the normal card rendering below --
+      // per-level nulls are already omitted there (§6 case 4: a level that
+      // didn't resolve inside an ingested district is just left out, never
+      // downgraded to a district-wide "not loaded yet").
+    }
+
     const LEVEL_LABEL = { elementary: "ELEMENTARY", middle: "MIDDLE", high: "HIGH" };
     const levels = ["elementary", "middle", "high"];
     if (!levels.some((lvl) => data[lvl])) return;   // total miss -- render nothing (§6.4)

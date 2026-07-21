@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <Placemark>
+      <name>Shaw Elementary</name>
+      <Polygon>
+        <outerBoundaryIs>
+          <LinearRing>
+            <coordinates>
+              -96.60,32.76,0 -96.60,32.77,0 -96.59,32.77,0 -96.59,32.76,0 -96.60,32.76,0
+            </coordinates>
+          </LinearRing>
+        </outerBoundaryIs>
+      </Polygon>
+    </Placemark>
+    <Placemark>
+      <name>Just A Label</name>
+      <Point>
+        <coordinates>-96.61,32.76,0</coordinates>
+      </Point>
+    </Placemark>
+    <Placemark>
+      <name>Ligon Elementary</name>
+      <Polygon>
+        <outerBoundaryIs>
+          <LinearRing>
+            <coordinates>
+              -96.62,32.76,0 -96.62,32.77,0 -96.61,32.77,0 -96.61,32.76,0 -96.62,32.76,0
+            </coordinates>
+          </LinearRing>
+        </outerBoundaryIs>
+        <innerBoundaryIs>
+          <LinearRing>
+            <coordinates>
+              -96.618,32.762,0 -96.618,32.764,0 -96.616,32.764,0 -96.616,32.762,0 -96.618,32.762,0
+            </coordinates>
+          </LinearRing>
+        </innerBoundaryIs>
+      </Polygon>
+    </Placemark>
+  </Document>
+</kml>

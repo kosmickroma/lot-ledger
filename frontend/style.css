@@ -3933,6 +3933,10 @@ body.is-not-power-user .power-user-only {
 .sp-pill.sch-a { background:#14663f; } .sp-pill.sch-b { background:#2f8f5a; }
 .sp-pill.sch-c { background:#b45309; } .sp-pill.sch-d { background:#c2410c; } .sp-pill.sch-f { background:#b91c1c; }
 
+/* docs/AI/SCHOOL_ZONES_DB_BUILD_SPEC_2026-07-21.md §6 -- district-level
+   honest-state note ("not loaded yet" / "open enrollment"), DB path only. */
+.sp-status-note .sp-note { font-size: 11px; color: #64748b; padding: 2px 0; }
+
 .propelio-popup-agent-block {
   margin-top: 10px;
   padding: 8px 10px;
