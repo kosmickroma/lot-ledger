@@ -16,6 +16,7 @@ from scripts.school_zones_adapters import (
     adapter_district_boundary,
     adapter_mymaps_kml,
     adapter_pilot_snapshot,
+    all_tea_ratings_to_ingest_shape,
     parse_kml_placemarks,
     pilot_ratings_to_ingest_shape,
 )
@@ -155,3 +156,23 @@ def test_pilot_ratings_to_ingest_shape_converts_grade_to_letter() -> None:
 def test_pilot_ratings_to_ingest_shape_covers_all_fixture_campuses() -> None:
     _year, ratings = pilot_ratings_to_ingest_shape(PILOT_FIXTURES / "ratings.json")
     assert set(ratings.keys()) == {"057905101", "057905100", "057905022"}
+
+
+# --- Part A: all-Texas ratings loader ----------------------------------------
+
+def test_all_tea_ratings_to_ingest_shape_passes_through_unchanged() -> None:
+    # Unlike pilot_ratings_to_ingest_shape (grade -> letter conversion),
+    # this file is already in ingest_ratings' shape -- no conversion.
+    year, ratings = all_tea_ratings_to_ingest_shape(FIXTURES / "all_tx_ratings_sample.json")
+    assert year == 2025
+    assert ratings["057905101"] == {
+        "letter": "B", "score": 85,
+        "achievement": {"grade": "B", "score": 80}, "growth": {"grade": "D", "score": 67},
+    }
+
+
+def test_all_tea_ratings_to_ingest_shape_covers_multiple_districts() -> None:
+    # The whole point of Part A: campuses from DIFFERENT districts
+    # (057905 = DISD, 057912 = Irving, 220905 = Fort Worth) in one file.
+    _year, ratings = all_tea_ratings_to_ingest_shape(FIXTURES / "all_tx_ratings_sample.json")
+    assert set(ratings.keys()) == {"057905101", "057912101", "220905001"}

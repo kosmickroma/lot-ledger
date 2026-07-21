@@ -315,3 +315,15 @@ def pilot_ratings_to_ingest_shape(pilot_ratings_path: Path) -> tuple[int, dict[s
             "growth": info.get("growth"),
         }
     return year, out
+
+
+def all_tea_ratings_to_ingest_shape(all_tx_ratings_path: Path) -> tuple[int, dict[str, dict[str, Any]]]:
+    """data/school_pilot/ratings_all_tx.json (scripts/build_school_pilot_
+    data.py::load_all_tea_ratings's snapshot, Part A of the multi-district
+    ratings foundation) is ALREADY in ingest_ratings()'s expected shape
+    (letter/score/achievement/growth) -- no key conversion needed, unlike
+    pilot_ratings_to_ingest_shape(). This thin wrapper still exists (rather
+    than reading the file inline in ingest_school_zones.py) so the file's
+    shape contract lives in one place, same as the pilot loader."""
+    doc = json.loads(all_tx_ratings_path.read_text())
+    return doc["meta"]["tea_year"], doc.get("ratings", {})

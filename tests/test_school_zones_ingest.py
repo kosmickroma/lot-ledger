@@ -288,3 +288,40 @@ def test_pilot_ratings_cli_flag_exists() -> None:
     src = _read()
     assert '"--pilot-ratings"' in src
     assert "pilot_ratings_to_ingest_shape(" in src
+
+
+# --- Part A: --all-tea-ratings CLI flag --------------------------------------
+
+def test_all_tea_ratings_cli_flag_exists() -> None:
+    src = _read()
+    assert '"--all-tea-ratings"' in src
+    assert "all_tea_ratings_to_ingest_shape(" in src
+
+
+# --- Part B: crosswalk config wiring -----------------------------------------
+
+def test_config_can_request_crosswalk_resolution() -> None:
+    src = _read()
+    assert '"resolve_crosswalk"' in src
+    assert "resolve_district_crosswalk(" in src
+    assert "print_crosswalk_table(" in src
+
+
+def test_crosswalk_resolution_is_opt_in_via_config_only() -> None:
+    # Default (no "resolve_crosswalk" key) leaves campus_tea_id exactly as
+    # the adapter resolved it (or None) -- must not run unconditionally.
+    src = _read()
+    fn_start = src.index("def _load_rows_from_config")
+    fn_end = src.index("\ndef ", fn_start + 1)
+    body = src[fn_start:fn_end]
+    assert 'if config.get("resolve_crosswalk")' in body
+
+
+def test_crosswalk_runs_after_adapter_dispatch_before_validate_rows() -> None:
+    src = _read()
+    fn_start = src.index("def _load_rows_from_config")
+    fn_end = src.index("\ndef ", fn_start + 1)
+    body = src[fn_start:fn_end]
+    crosswalk_idx = body.index("resolve_district_crosswalk(")
+    validate_idx = body.index("return validate_rows(raw)")
+    assert crosswalk_idx < validate_idx

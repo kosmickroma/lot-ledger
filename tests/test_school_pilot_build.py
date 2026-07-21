@@ -180,10 +180,75 @@ def test_expected_tea_header_covers_every_index_load_tea_ratings_reads() -> None
 
 
 def test_load_tea_ratings_checks_header_before_reading_any_data_row() -> None:
-    # Source-level guarantee: the assert call must precede the data-row
-    # loop inside load_tea_ratings(), not follow it.
+    # Source-level guarantee: load_tea_ratings gets its worksheet via
+    # _open_tea_workbook_sheet(), which itself calls assert_tea_header_
+    # matches() before returning -- so the guard always precedes
+    # load_tea_ratings' own data-row loop, transitively.
     import inspect
 
-    from scripts.build_school_pilot_data import load_tea_ratings
-    src = inspect.getsource(load_tea_ratings)
-    assert src.index("assert_tea_header_matches(") < src.index("for row in ws.iter_rows(min_row=2")
+    from scripts.build_school_pilot_data import _open_tea_workbook_sheet, load_tea_ratings
+    load_src = inspect.getsource(load_tea_ratings)
+    assert "_open_tea_workbook_sheet()" in load_src
+    assert load_src.index("_open_tea_workbook_sheet()") < load_src.index("for row in ws.iter_rows(min_row=2")
+
+    open_src = inspect.getsource(_open_tea_workbook_sheet)
+    assert "assert_tea_header_matches(" in open_src
+
+
+# --- Part A (multi-district ratings foundation) -- load_all_tea_ratings -----
+# load_all_tea_ratings() does a live network fetch (same as load_tea_ratings
+# always has -- "Network / IO, not unit-tested directly" per this module's
+# own section comment) -- covered here via pure-function + source-inspection
+# guarantees, not a live call.
+
+def test_normalize_tea_grade_accepts_only_af_letters() -> None:
+    from scripts.build_school_pilot_data import _normalize_tea_grade
+    assert _normalize_tea_grade("B") == "B"
+    assert _normalize_tea_grade("Not Rated") is None
+    assert _normalize_tea_grade(None) is None
+
+
+def test_normalize_tea_score_accepts_only_int() -> None:
+    from scripts.build_school_pilot_data import _normalize_tea_score
+    assert _normalize_tea_score(85) == 85
+    assert _normalize_tea_score("85") is None  # openpyxl can hand back text for a suppressed cell
+    assert _normalize_tea_score(None) is None
+
+
+def test_load_tea_ratings_and_load_all_tea_ratings_share_the_header_guard() -> None:
+    # Both callers must go through the SAME fetch+drift-check helper --
+    # never a second, un-guarded copy of the fetch/parse logic.
+    import inspect
+    from scripts.build_school_pilot_data import load_all_tea_ratings, load_tea_ratings
+    assert "_open_tea_workbook_sheet()" in inspect.getsource(load_tea_ratings)
+    assert "_open_tea_workbook_sheet()" in inspect.getsource(load_all_tea_ratings)
+
+
+def test_load_all_tea_ratings_never_filters_by_district() -> None:
+    # The whole point of Part A: every district's campuses, not just DISD.
+    import inspect
+    from scripts.build_school_pilot_data import load_all_tea_ratings
+    src = inspect.getsource(load_all_tea_ratings)
+    assert "DISD_DISTRICT_NUMBER" not in src
+    assert "district_number !=" not in src
+
+
+def test_load_all_tea_ratings_output_shape_matches_ingest_ratings_directly() -> None:
+    # Unlike load_tea_ratings' "grade" key (pilot-specific, converted later
+    # by pilot_ratings_to_ingest_shape), load_all_tea_ratings must emit
+    # "letter" directly for the overall rating -- ingest_ratings' actual DB-
+    # column key, no conversion step needed for this path. ("grade" still
+    # legitimately appears inside the nested achievement/growth sub-dicts.)
+    import inspect
+    from scripts.build_school_pilot_data import load_all_tea_ratings
+    src = inspect.getsource(load_all_tea_ratings)
+    assert '"letter": _normalize_tea_grade(overall_rating)' in src
+    assert '"grade": _normalize_tea_grade(overall_rating)' not in src
+
+
+def test_build_main_has_an_opt_in_all_tx_ratings_flag() -> None:
+    import inspect
+    from scripts.build_school_pilot_data import main
+    src = inspect.getsource(main)
+    assert '"--all-tx-ratings"' in src
+    assert "ratings_all_tx.json" in src

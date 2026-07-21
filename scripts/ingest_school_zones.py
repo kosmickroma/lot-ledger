@@ -56,7 +56,12 @@ from scripts.school_zones_adapters import (  # noqa: E402
     adapter_district_boundary,
     adapter_mymaps_kml,
     adapter_pilot_snapshot,
+    all_tea_ratings_to_ingest_shape,
     pilot_ratings_to_ingest_shape,
+)
+from scripts.school_zones_crosswalk import (  # noqa: E402
+    print_crosswalk_table,
+    resolve_district_crosswalk,
 )
 from scripts.school_zones_registry import expected_counts_for_district  # noqa: E402
 
@@ -310,6 +315,18 @@ def _load_rows_from_config(config: dict[str, Any], snapshot_dir: Path) -> list[d
         raw = adapter_pilot_snapshot(pilot_dir, district_tea_id, district_name)
     else:
         raise IngestAbort(f"unknown source_kind {kind!r}")
+
+    if config.get("resolve_crosswalk"):
+        # Part B (multi-district ratings foundation) -- opt-in only; the
+        # default with no "resolve_crosswalk" key is unchanged: whatever
+        # campus_tea_id the adapter itself resolved (or None).
+        campus_index_path = Path(config["campus_index_path"])
+        if not campus_index_path.is_absolute():
+            campus_index_path = ROOT_DIR / campus_index_path
+        campus_index_doc = json.loads(campus_index_path.read_text())
+        raw = resolve_district_crosswalk(raw, district_tea_id, campus_index_doc["campuses"])
+        print_crosswalk_table(district_tea_id, raw)
+
     return validate_rows(raw)
 
 
@@ -319,11 +336,12 @@ def main() -> int:
     parser.add_argument("--ratings", help="Path to a ratings.json snapshot (campus_tea_id -> {letter,score,achievement,growth})")
     parser.add_argument("--rating-year", type=int, help="Required with --ratings")
     parser.add_argument("--pilot-ratings", help="Path to the pilot's own data/school_pilot/ratings.json (Gap 4 -- grade/score/achievement/growth shape, rating_year read from its own meta)")
+    parser.add_argument("--all-tea-ratings", help="Path to data/school_pilot/ratings_all_tx.json (Part A -- every TX campus, all districts; letter/score/achievement/growth shape already, rating_year read from its own meta)")
     parser.add_argument("--force", action="store_true", help="Bypass the <50%%-of-existing-rows tripwire (§3a #4)")
     args = parser.parse_args()
 
-    if not args.config and not args.ratings and not args.pilot_ratings:
-        print("[ingest_school_zones] ERROR: pass --config (zones), --ratings, and/or --pilot-ratings", file=sys.stderr)
+    if not args.config and not args.ratings and not args.pilot_ratings and not args.all_tea_ratings:
+        print("[ingest_school_zones] ERROR: pass --config (zones), --ratings, --pilot-ratings, and/or --all-tea-ratings", file=sys.stderr)
         return 1
 
     # Schema migration needs CREATE TABLE/INDEX privilege the restricted
@@ -363,6 +381,11 @@ def main() -> int:
             year, ratings = pilot_ratings_to_ingest_shape(Path(args.pilot_ratings))
             count = ingest_ratings(conn, year, ratings)
             print(f"[ingest_school_zones] pilot ratings: {count} campus rows loaded for {year}")
+
+        if args.all_tea_ratings:
+            year, ratings = all_tea_ratings_to_ingest_shape(Path(args.all_tea_ratings))
+            count = ingest_ratings(conn, year, ratings)
+            print(f"[ingest_school_zones] all-TX ratings: {count} campus rows loaded for {year}")
 
         return 0
     except Exception as exc:

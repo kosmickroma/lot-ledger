@@ -1,0 +1,8 @@
+{
+  "meta": {"tea_year": 2025},
+  "ratings": {
+    "057905101": {"letter": "B", "score": 85, "achievement": {"grade": "B", "score": 80}, "growth": {"grade": "D", "score": 67}},
+    "057912101": {"letter": "A", "score": 92, "achievement": null, "growth": null},
+    "220905001": {"letter": "C", "score": 71, "achievement": {"grade": "C", "score": 70}, "growth": {"grade": "B", "score": 84}}
+  }
+}

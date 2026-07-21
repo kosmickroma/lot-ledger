@@ -241,11 +241,19 @@ def fetch_all_features(service_name: str) -> list[dict[str, Any]]:
     return features
 
 
-def load_tea_ratings() -> dict[str, dict[str, Any]]:
-    """Download the TEA 2025 statewide summary XLSX, filter to Dallas ISD
-    (district 057905), return {tea_campus_id: {"grade": ..., "score": ...,
-    "name": ..., "type": TEA School Type}}. `score` is the Overall Score
-    (column [14], 0-100 int) or None when TEA didn't publish one."""
+def _normalize_tea_grade(v: Any) -> str | None:
+    return v if v in ("A", "B", "C", "D", "F") else None
+
+
+def _normalize_tea_score(v: Any) -> int | None:
+    return v if isinstance(v, int) else None
+
+
+def _open_tea_workbook_sheet():
+    """Shared fetch+open+header-drift-check, used by both load_tea_ratings
+    (Dallas-only, this pilot's original build) and load_all_tea_ratings
+    (all ~9k TX campuses, Part A of the multi-district ratings foundation)
+    -- one XLSX layout, one drift guard, never duplicated per caller."""
     import openpyxl
 
     resp = requests.get(TEA_SUMMARY_URL, timeout=REQUEST_TIMEOUT_S * 2)
@@ -256,6 +264,15 @@ def load_tea_ratings() -> dict[str, dict[str, Any]]:
 
     header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True))
     assert_tea_header_matches(header_row)  # Safeguard 1 -- refuse before reading any data row
+    return ws
+
+
+def load_tea_ratings() -> dict[str, dict[str, Any]]:
+    """Download the TEA 2025 statewide summary XLSX, filter to Dallas ISD
+    (district 057905), return {tea_campus_id: {"grade": ..., "score": ...,
+    "name": ..., "type": TEA School Type}}. `score` is the Overall Score
+    (column [14], 0-100 int) or None when TEA didn't publish one."""
+    ws = _open_tea_workbook_sheet()
 
     out: dict[str, dict[str, Any]] = {}
     for row in ws.iter_rows(min_row=2, values_only=True):
@@ -271,19 +288,73 @@ def load_tea_ratings() -> dict[str, dict[str, Any]]:
         if district_number != DISD_DISTRICT_NUMBER or not campus_number:
             continue
 
-        def _g(v):
-            return v if v in ("A", "B", "C", "D", "F") else None
-
-        def _s(v):
-            return v if isinstance(v, int) else None
-
         out[str(campus_number)] = {
-            "grade": _g(overall_rating),
-            "score": _s(overall_score),
-            "achievement": {"grade": _g(ach_grade), "score": _s(ach_score)},
-            "growth": {"grade": _g(grow_grade), "score": _s(grow_score)},
+            "grade": _normalize_tea_grade(overall_rating),
+            "score": _normalize_tea_score(overall_score),
+            "achievement": {"grade": _normalize_tea_grade(ach_grade), "score": _normalize_tea_score(ach_score)},
+            "growth": {"grade": _normalize_tea_grade(grow_grade), "score": _normalize_tea_score(grow_score)},
             "name": campus_name,
             "type": school_type,
+        }
+    return out
+
+
+def load_all_tea_ratings() -> dict[str, dict[str, Any]]:
+    """docs/AI/SCHOOL_ZONES_DB_BUILD_SPEC_2026-07-21.md "multi-district
+    ratings foundation" Part A -- every Texas campus (all ~9k rows, every
+    district), NOT filtered to Dallas ISD. Shape matches scripts/
+    ingest_school_zones.py::ingest_ratings's expected input directly --
+    {campus_tea_id: {letter, score, achievement, growth}} -- so the
+    caller can hand this straight to ingest_ratings() with no conversion
+    step (unlike the pilot's ratings.json, which uses "grade" and needs
+    pilot_ratings_to_ingest_shape()).
+
+    Goal: school_campus_ratings ends up holding every TX campus's rating,
+    so adding any future district becomes a zone-side crosswalk exercise
+    only (Part B) -- never a new ratings fetch."""
+    ws = _open_tea_workbook_sheet()
+
+    out: dict[str, dict[str, Any]] = {}
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        _district_number, _district, campus_number, _campus_name, *_rest = row
+        overall_rating = row[13]
+        overall_score = row[14]
+        ach_grade, ach_score = row[15], row[16]
+        grow_grade, grow_score = row[19], row[20]
+        if not campus_number:
+            continue
+
+        out[str(campus_number)] = {
+            "letter": _normalize_tea_grade(overall_rating),
+            "score": _normalize_tea_score(overall_score),
+            "achievement": {"grade": _normalize_tea_grade(ach_grade), "score": _normalize_tea_score(ach_score)},
+            "growth": {"grade": _normalize_tea_grade(grow_grade), "score": _normalize_tea_score(grow_score)},
+        }
+    return out
+
+
+def load_all_tea_campus_index() -> dict[str, dict[str, Any]]:
+    """{campus_tea_id: {"name": ..., "type": TEA School Type, "district_number":
+    ...}} for every TX campus, all districts. Companion to load_all_tea_
+    ratings() -- that function's output shape (letter/score/achievement/
+    growth) is exactly what school_campus_ratings needs and carries no
+    name/type/district; THIS is what scripts/school_zones_crosswalk.py
+    needs to scope Tier 1/Tier 2 matching to (district, TEA School Type).
+    Two functions, two independent fetches of the same XLSX -- accepted
+    tradeoff (a manual, infrequent operator script, not a hot path) rather
+    than restructuring load_all_tea_ratings' already-tested shape."""
+    ws = _open_tea_workbook_sheet()
+
+    out: dict[str, dict[str, Any]] = {}
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        district_number, _district, campus_number, campus_name, *_rest = row
+        school_type = row[6]
+        if not campus_number:
+            continue
+        out[str(campus_number)] = {
+            "name": campus_name,
+            "type": school_type,
+            "district_number": district_number,
         }
     return out
 
@@ -370,6 +441,17 @@ def build_level(level: str, tea_ratings: dict[str, dict[str, Any]]) -> tuple[dic
 
 
 def main() -> int:
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--all-tx-ratings", action="store_true",
+        help="Also write data/school_pilot/ratings_all_tx.json -- every TX "
+             "campus's rating, all districts (Part A of the multi-district "
+             "ratings foundation). Additive; the existing DISD-only build "
+             "below is unchanged either way.",
+    )
+    args = parser.parse_args()
+
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
     # §8: non-fatal at build time -- a data-source outage must never fail an
@@ -412,6 +494,32 @@ def main() -> int:
     overall_rate = (total_matched / total_zones * 100) if total_zones else 0.0
     print(f"[school-pilot-build] total: {total_zones} zones, crosswalk match rate {overall_rate:.1f}%")
     print(f"[school-pilot-build] wrote files to {OUT_DIR}")
+
+    if args.all_tx_ratings:
+        try:
+            all_ratings = load_all_tea_ratings()
+        except Exception as exc:  # noqa: BLE001 -- non-fatal per §8
+            print(f"[school-pilot-build] all-TX ratings fetch failed, skipping: {exc}", file=sys.stderr)
+        else:
+            out_path = OUT_DIR / "ratings_all_tx.json"
+            out_path.write_text(json.dumps({
+                "meta": {"tea_year": TEA_YEAR},
+                "ratings": all_ratings,
+            }, indent=None))
+            print(f"[school-pilot-build] all-TX ratings: {len(all_ratings)} campuses written to {out_path}")
+
+        try:
+            campus_index = load_all_tea_campus_index()
+        except Exception as exc:  # noqa: BLE001 -- non-fatal per §8
+            print(f"[school-pilot-build] all-TX campus index fetch failed, skipping: {exc}", file=sys.stderr)
+        else:
+            index_path = OUT_DIR / "campus_index_all_tx.json"
+            index_path.write_text(json.dumps({
+                "meta": {"tea_year": TEA_YEAR},
+                "campuses": campus_index,
+            }, indent=None))
+            print(f"[school-pilot-build] all-TX campus index: {len(campus_index)} campuses written to {index_path}")
+
     return 0
 
 

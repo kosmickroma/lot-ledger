@@ -64,3 +64,29 @@ def test_real_registry_file_parses_without_raising() -> None:
     # have it. Either way must never raise; an absent file degrades to {}.
     reg = load_registry()
     assert isinstance(reg, dict)
+
+
+def test_part_c_batch_districts_have_real_expected_counts() -> None:
+    # docs/AI/SCHOOL_ZONES_DB_BUILD_SPEC_2026-07-21.md "multi-district
+    # ratings foundation" Part C -- Irving/Mesquite/DeSoto/Sunnyvale must
+    # be armed with real (not blank) registry counts before their first
+    # ingest, since the <50%-of-existing tripwire is inert on a first
+    # load (nothing exists yet to compare against) -- the registry floor
+    # is the ONLY quantitative guard for a brand-new district. Skipped
+    # (not failed) when the gitignored registry file is absent from this
+    # environment, same tolerance as every other real-file test here.
+    expected = {
+        "057912": {"elementary": 21, "middle": 8, "high": 6},      # IRVING
+        "057914": {"elementary": 34, "middle": 10, "high": 7},     # MESQUITE
+        "057906": {"elementary": 7, "middle": 2, "high": 1},       # DESOTO -- verified 2026-07-22:
+                                                                    # TEA's 2nd "H"-bucketed campus is a
+                                                                    # DAEP (no normal attendance zone),
+                                                                    # not a 2nd high school.
+        "057919": {"elementary": 2, "middle": 1, "high": 1},       # SUNNYVALE
+    }
+    reg = load_registry()
+    if not reg:
+        import pytest
+        pytest.skip("registry file absent in this environment (gitignored)")
+    for tea_id, counts in expected.items():
+        assert expected_counts_for_district(tea_id) == counts, f"{tea_id} registry counts drifted from verified TEA data"
