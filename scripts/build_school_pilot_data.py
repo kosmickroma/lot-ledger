@@ -61,6 +61,58 @@ TEA_TYPE_BY_LEVEL = {
     "high": "High School",
 }
 
+# docs/AI/SCHOOL_ZONES_DB_BUILD_SPEC_2026-07-21.md "recurring-cadence
+# safeguards" Safeguard 1 -- TEA reshuffles this XLSX's columns most years.
+# load_tea_ratings() reads every one of these positions by bare integer
+# index; a silent reshuffle would read the WRONG column into "score"/
+# "rating" without erroring (worse than no rating -- a confidently wrong
+# one). Verified against the live 2025-26 file's actual header row (cells
+# contain embedded newlines, e.g. "District\nNumber" -- normalized via
+# whitespace-collapse before comparison, not stripped from this map).
+EXPECTED_TEA_HEADER: dict[int, str] = {
+    0: "District Number",
+    2: "Campus Number",
+    6: "School Type",
+    13: "Overall Rating",
+    14: "Overall Score",
+    15: "Student Achievement Rating",
+    16: "Student Achievement Score",
+    19: "Academic Growth Rating",
+    20: "Academic Growth Score",
+}
+
+
+class TeaSchemaDriftError(Exception):
+    """Raised when the TEA XLSX's header no longer matches
+    EXPECTED_TEA_HEADER at the position load_tea_ratings() reads by index.
+    Never caught silently -- a drifted column must stop the build, not
+    write a silently-wrong score under the old column name's assumption."""
+
+
+def _normalize_header_cell(value: Any) -> str:
+    # TEA's header cells wrap onto multiple lines within one cell
+    # ("District\nNumber") -- collapse all whitespace before comparing so
+    # a formatting-only change (a different wrap point) isn't mistaken for
+    # a real column reshuffle.
+    return " ".join(str(value or "").split())
+
+
+def assert_tea_header_matches(header_row: tuple[Any, ...] | list[Any]) -> None:
+    """Pure check, no network/openpyxl dependency -- called by
+    load_tea_ratings() on the real header row it reads, and unit-tested
+    directly against a plain deliberately-reshuffled tuple."""
+    for idx, expected in EXPECTED_TEA_HEADER.items():
+        actual = _normalize_header_cell(header_row[idx]) if idx < len(header_row) else None
+        if actual != expected:
+            raise TeaSchemaDriftError(
+                f"TEA XLSX column drift at index {idx}: expected {expected!r}, got {actual!r}. "
+                "Refusing to read data rows -- a silent column shift would write "
+                "wrong grades/scores under the old assumption. Update "
+                "EXPECTED_TEA_HEADER and every row[<index>] read in "
+                "load_tea_ratings() together after confirming the new layout, "
+                "not just one or the other."
+            )
+
 OUT_DIR = Path(__file__).resolve().parent.parent / "data" / "school_pilot"
 
 REQUEST_TIMEOUT_S = 30
@@ -201,6 +253,10 @@ def load_tea_ratings() -> dict[str, dict[str, Any]]:
     from io import BytesIO
     wb = openpyxl.load_workbook(BytesIO(resp.content), read_only=True, data_only=True)
     ws = wb[TEA_SHEET]
+
+    header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True))
+    assert_tea_header_matches(header_row)  # Safeguard 1 -- refuse before reading any data row
+
     out: dict[str, dict[str, Any]] = {}
     for row in ws.iter_rows(min_row=2, values_only=True):
         district_number, _district, campus_number, campus_name, *_rest = row

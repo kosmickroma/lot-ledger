@@ -7,8 +7,12 @@ crosswalk are all pure functions tested in isolation.
 from __future__ import annotations
 
 import pyproj
+import pytest
 
 from scripts.build_school_pilot_data import (
+    EXPECTED_TEA_HEADER,
+    TeaSchemaDriftError,
+    assert_tea_header_matches,
     derive_tea_campus_id,
     is_already_wgs84,
     match_campus_to_tea,
@@ -110,3 +114,76 @@ def test_match_campus_does_not_conflate_adams_and_adamson() -> None:
         "W H ADAMSON H S": "057905002",
     }
     assert match_campus_to_tea("Adams", None, idx) == "057905001"
+
+
+# --- Safeguard 1 (docs/AI/SCHOOL_ZONES_DB_BUILD_SPEC_2026-07-21.md
+# "recurring-cadence safeguards") -- TEA schema-drift assert ------------------
+
+def _valid_header(overrides: dict[int, str] | None = None) -> tuple:
+    # Cells wrap across lines in the real file (e.g. "District\nNumber") --
+    # verified against the live 2025-26 XLSX's actual header row.
+    row = [None] * 25
+    row[0] = "District\nNumber"
+    row[2] = "Campus\nNumber"
+    row[6] = "School\nType"
+    row[13] = "Overall\nRating"
+    row[14] = "Overall\nScore"
+    row[15] = "Student\nAchievement\nRating"
+    row[16] = "Student\nAchievement\nScore"
+    row[19] = "Academic\nGrowth\nRating"
+    row[20] = "Academic\nGrowth\nScore"
+    for idx, val in (overrides or {}).items():
+        row[idx] = val
+    return tuple(row)
+
+
+def test_assert_tea_header_matches_passes_on_the_real_layout() -> None:
+    assert_tea_header_matches(_valid_header())  # must not raise
+
+
+def test_assert_tea_header_matches_refuses_on_swapped_columns() -> None:
+    # The exact scenario this safeguard exists for: TEA swaps two adjacent
+    # columns (Overall Rating <-> Overall Score) in a future year's file.
+    reshuffled = _valid_header({13: "Overall\nScore", 14: "Overall\nRating"})
+    with pytest.raises(TeaSchemaDriftError, match="index 13"):
+        assert_tea_header_matches(reshuffled)
+
+
+def test_assert_tea_header_matches_refuses_on_a_renamed_column() -> None:
+    reshuffled = _valid_header({6: "Campus Category"})
+    with pytest.raises(TeaSchemaDriftError, match="index 6"):
+        assert_tea_header_matches(reshuffled)
+
+
+def test_assert_tea_header_matches_error_names_both_expected_and_actual() -> None:
+    reshuffled = _valid_header({14: "Something Else"})
+    with pytest.raises(TeaSchemaDriftError, match=r"expected 'Overall Score', got 'Something Else'"):
+        assert_tea_header_matches(reshuffled)
+
+
+def test_assert_tea_header_matches_refuses_on_missing_trailing_column() -> None:
+    # A shorter header row (fewer columns than expected) must refuse, not
+    # index out of range or silently skip the check.
+    short_row = _valid_header()[:18]
+    with pytest.raises(TeaSchemaDriftError, match="index 19"):
+        assert_tea_header_matches(short_row)
+
+
+def test_assert_tea_header_matches_is_whitespace_insensitive() -> None:
+    # A different wrap point for the SAME words is not a real drift.
+    reworded = _valid_header({0: "District Number", 6: "  School   Type  "})
+    assert_tea_header_matches(reworded)  # must not raise
+
+
+def test_expected_tea_header_covers_every_index_load_tea_ratings_reads() -> None:
+    assert set(EXPECTED_TEA_HEADER.keys()) == {0, 2, 6, 13, 14, 15, 16, 19, 20}
+
+
+def test_load_tea_ratings_checks_header_before_reading_any_data_row() -> None:
+    # Source-level guarantee: the assert call must precede the data-row
+    # loop inside load_tea_ratings(), not follow it.
+    import inspect
+
+    from scripts.build_school_pilot_data import load_tea_ratings
+    src = inspect.getsource(load_tea_ratings)
+    assert src.index("assert_tea_header_matches(") < src.index("for row in ws.iter_rows(min_row=2")
