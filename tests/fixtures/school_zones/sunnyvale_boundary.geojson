@@ -1,0 +1,8 @@
+{
+  "type": "Feature",
+  "properties": {"NAME": "Sunnyvale ISD"},
+  "geometry": {
+    "type": "Polygon",
+    "coordinates": [[[-96.55, 32.60], [-96.55, 32.63], [-96.52, 32.63], [-96.52, 32.60], [-96.55, 32.60]]]
+  }
+}

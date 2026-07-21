@@ -20,7 +20,7 @@ campus-level zone:
         "geom": {...GeoJSON Polygon/MultiPolygon dict, WGS84...},
         "boundary_vintage": str | None,
         "source_url": str | None,
-        "source_kind": "arcgis" | "kml" | "district_boundary",
+        "source_kind": "arcgis" | "kml" | "district_boundary" | "pilot_snapshot",
         "retrieved_at": date,
     }
 
@@ -242,3 +242,76 @@ def adapter_district_boundary(
             "retrieved_at": date.today(),
         })
     return rows
+
+
+# --- Adapter 4: the pilot's own baked snapshot (DISD, pinned re-ingest) -----
+#
+# docs/AI/SCHOOL_ZONES_DB_BUILD_SPEC_2026-07-21.md "Gap 4" -- the equivalence
+# check (scripts/verify_school_zones_equivalence.py) must compare the DB
+# path against the EXACT data the live static path serves today, not a
+# fresh FeatureServer pull that may have drifted since the pilot's 2026-07-20
+# build. data/school_pilot/{elementary,middle,high,ratings}.json are those
+# exact baked files (scripts/build_school_pilot_data.py's output, already
+# loaded by api/school_pilot/zones.py at runtime) -- this adapter reads them
+# as a pinned, repeatable, snapshot-sourced re-ingest of DISD, through the
+# SAME scoped-delete ingest path and guards as every other adapter (no
+# bypass: run_guards' zero-feature/50%/registry checks all still apply).
+
+def adapter_pilot_snapshot(
+    pilot_data_dir: Path,
+    district_tea_id: str,
+    district_name: str | None,
+) -> list[dict[str, Any]]:
+    """Reads data/school_pilot/{elementary,middle,high}.json (the pilot
+    build's own output). Each zone's "parts" (list of polygons; each
+    polygon = list of rings, ring[0]=outer) IS already a GeoJSON
+    MultiPolygon's `coordinates` array verbatim -- scripts/
+    build_school_pilot_data.py normalized it to WGS84 at build time, so no
+    reprojection happens here (validate_rows()'s is_already_wgs84 check
+    downstream is a no-op confirmation, not a transform)."""
+    rows: list[dict[str, Any]] = []
+    for level in _LEVELS:
+        path = pilot_data_dir / f"{level}.json"
+        doc = json.loads(path.read_text())
+        vintage = doc["meta"].get("boundary_vintage")
+        source_url = doc["meta"].get("source_url")
+        for zone in doc.get("zones", []):
+            campus_name = zone.get("campus_name")
+            parts = zone.get("parts")
+            if not campus_name or not parts:
+                continue
+            rows.append({
+                "level": level,
+                "district_tea_id": district_tea_id,
+                "district_name": district_name,
+                "campus_tea_id": zone.get("tea_campus_id"),
+                "campus_name": campus_name,
+                "geom": {"type": "MultiPolygon", "coordinates": parts},
+                "boundary_vintage": vintage,
+                "source_url": source_url,
+                "source_kind": "pilot_snapshot",
+                "retrieved_at": date.today(),
+            })
+    return rows
+
+
+def pilot_ratings_to_ingest_shape(pilot_ratings_path: Path) -> tuple[int, dict[str, dict[str, Any]]]:
+    """data/school_pilot/ratings.json uses the pilot's own key name "grade"
+    (see api/school_pilot/zones.py's assign()); scripts/ingest_school_zones.
+    py's generic ingest_ratings() expects "letter" (the DB column name) --
+    this is the one explicit conversion point between the two, so the
+    generic ratings-ingest contract stays clean for future non-pilot
+    sources. Returns (rating_year, {campus_tea_id: {letter, score,
+    achievement, growth}}) -- rating_year comes from the file's own meta,
+    never a hand-typed --rating-year that could drift from the data."""
+    doc = json.loads(pilot_ratings_path.read_text())
+    year = doc["meta"]["tea_year"]
+    out = {}
+    for campus_tea_id, info in doc.get("ratings", {}).items():
+        out[campus_tea_id] = {
+            "letter": info.get("grade"),
+            "score": info.get("score"),
+            "achievement": info.get("achievement"),
+            "growth": info.get("growth"),
+        }
+    return year, out

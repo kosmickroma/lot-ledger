@@ -34,11 +34,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from collections import Counter
 from pathlib import Path
 from typing import Any
 
+import psycopg2
 import pyproj
 from psycopg2.extras import execute_values
 
@@ -53,6 +55,8 @@ from scripts.school_zones_adapters import (  # noqa: E402
     adapter_arcgis_geojson,
     adapter_district_boundary,
     adapter_mymaps_kml,
+    adapter_pilot_snapshot,
+    pilot_ratings_to_ingest_shape,
 )
 from scripts.school_zones_registry import expected_counts_for_district  # noqa: E402
 
@@ -73,6 +77,31 @@ REGISTRY_MISMATCH_HIGH = 2.0
 
 class IngestAbort(Exception):
     """Raised by a guard that must stop the run BEFORE any DB write."""
+
+
+def _get_ingest_conn() -> "psycopg2.extensions.connection":
+    """Gap 2 (docs/AI/SCHOOL_ZONES_DB_BUILD_SPEC_2026-07-21.md, safety
+    re-review) -- the restricted school_zones_ingest role (scripts/
+    grant_school_zones_role.sql) exists but was unused: ingest connected via
+    api.config.get_conn(), the full-write app user, making the role's
+    protection theater. All DATA WRITES (scoped delete + insert, ratings
+    upsert) now connect via this dedicated DSN instead -- a distinct
+    connection from the schema-migration step, which still needs get_conn()
+    (the restricted role has no CREATE TABLE/INDEX privilege; it owns
+    nothing, per §8's "cannot write anything else").
+    SCHOOL_INGEST_DSN is an env var only -- gitignored, never a literal in
+    this public repo. A missing/empty value is a hard, clear failure, not a
+    silent fallback to the app-user pool."""
+    dsn = os.getenv("SCHOOL_INGEST_DSN", "").strip()
+    if not dsn:
+        raise RuntimeError(
+            "SCHOOL_INGEST_DSN is not set. Data writes must connect as the "
+            "restricted school_zones_ingest role (scripts/grant_school_zones_role.sql), "
+            "never the shared app-user pool (api.config.get_conn). Set "
+            "SCHOOL_INGEST_DSN to that role's connection string and retry -- "
+            "this script will not silently fall back to a more privileged connection."
+        )
+    return psycopg2.connect(dsn)
 
 
 def _reproject_coords(coords: Any, transformer: "pyproj.Transformer") -> Any:
@@ -271,6 +300,14 @@ def _load_rows_from_config(config: dict[str, Any], snapshot_dir: Path) -> list[d
             snapshot_dir, config["boundary_file"], config["campuses"],
             district_tea_id, district_name, vintage, config.get("source_url"),
         )
+    elif kind == "pilot_snapshot":
+        # Gap 4 -- pilot_data_dir may be given relative to the repo root
+        # (e.g. "data/school_pilot", the fixed, known location -- not a
+        # per-district snapshot folder like the other 3 adapters use).
+        pilot_dir = Path(config["pilot_data_dir"])
+        if not pilot_dir.is_absolute():
+            pilot_dir = ROOT_DIR / pilot_dir
+        raw = adapter_pilot_snapshot(pilot_dir, district_tea_id, district_name)
     else:
         raise IngestAbort(f"unknown source_kind {kind!r}")
     return validate_rows(raw)
@@ -281,18 +318,28 @@ def main() -> int:
     parser.add_argument("--config", help="Path to a district's config.json under ingest/schools/<date>/<district>/")
     parser.add_argument("--ratings", help="Path to a ratings.json snapshot (campus_tea_id -> {letter,score,achievement,growth})")
     parser.add_argument("--rating-year", type=int, help="Required with --ratings")
+    parser.add_argument("--pilot-ratings", help="Path to the pilot's own data/school_pilot/ratings.json (Gap 4 -- grade/score/achievement/growth shape, rating_year read from its own meta)")
     parser.add_argument("--force", action="store_true", help="Bypass the <50%%-of-existing-rows tripwire (§3a #4)")
     args = parser.parse_args()
 
-    if not args.config and not args.ratings:
-        print("[ingest_school_zones] ERROR: pass --config (zones) and/or --ratings", file=sys.stderr)
+    if not args.config and not args.ratings and not args.pilot_ratings:
+        print("[ingest_school_zones] ERROR: pass --config (zones), --ratings, and/or --pilot-ratings", file=sys.stderr)
         return 1
 
-    conn = get_conn()
+    # Schema migration needs CREATE TABLE/INDEX privilege the restricted
+    # role deliberately does NOT have (§8 -- it owns nothing); this is the
+    # only step that still uses the shared app-user pool.
+    admin_conn = get_conn()
     try:
         print("[ingest_school_zones] ensuring schema ...")
-        ensure_schema_and_indexes(conn)
+        ensure_schema_and_indexes(admin_conn)
+    finally:
+        release_conn(admin_conn)
 
+    # Every DATA WRITE below connects as the restricted school_zones_ingest
+    # role (Gap 2) -- a distinct connection from the admin one above.
+    conn = _get_ingest_conn()
+    try:
         if args.config:
             config_path = Path(args.config).resolve()
             config = json.loads(config_path.read_text())
@@ -312,13 +359,18 @@ def main() -> int:
             count = ingest_ratings(conn, args.rating_year, ratings)
             print(f"[ingest_school_zones] ratings: {count} campus rows loaded for {args.rating_year}")
 
+        if args.pilot_ratings:
+            year, ratings = pilot_ratings_to_ingest_shape(Path(args.pilot_ratings))
+            count = ingest_ratings(conn, year, ratings)
+            print(f"[ingest_school_zones] pilot ratings: {count} campus rows loaded for {year}")
+
         return 0
     except Exception as exc:
         conn.rollback()
         print(f"[ingest_school_zones] FAILED: {exc}", file=sys.stderr)
         raise
     finally:
-        release_conn(conn)
+        conn.close()
 
 
 if __name__ == "__main__":

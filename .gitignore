@@ -77,3 +77,12 @@ cors.json
 # committed; these are hand-authored test-only fixtures the *.json rule
 # above would otherwise silently drop.
 !tests/fixtures/school_pilot/*.json
+# School-zones DB-build test fixtures (small synthetic geojson/kml/json/md,
+# no credentials, no real district data) — 2026-07-21. The *.geojson rule
+# above and the *.json rule above would otherwise silently drop these too
+# (caught via `git add --dry-run` before committing, same class of gap as
+# the school_pilot rule above).
+!tests/fixtures/school_zones/**/*.json
+!tests/fixtures/school_zones/**/*.geojson
+!tests/fixtures/school_zones/**/*.kml
+!tests/fixtures/school_zones/**/*.md

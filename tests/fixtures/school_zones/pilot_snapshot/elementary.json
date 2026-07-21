@@ -1,0 +1,7 @@
+{
+  "meta": {"level": "elementary", "source_url": "https://example.test/elementary", "retrieved": "2026-07-20", "boundary_vintage": "2025-26", "crs": "EPSG:4326"},
+  "zones": [
+    {"campus_name": "Bowie Elementary School", "tea_campus_id": "057905101", "local_id": 101,
+     "parts": [[[[-96.82, 32.75], [-96.82, 32.76], [-96.81, 32.76], [-96.81, 32.75], [-96.82, 32.75]]]]}
+  ]
+}

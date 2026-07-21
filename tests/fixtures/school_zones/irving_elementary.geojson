@@ -1,0 +1,29 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {"CAMPUS_NAME": "Bowie Elementary", "CAMPUS_ID": "057912101"},
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[-96.95, 32.85], [-96.95, 32.86], [-96.94, 32.86], [-96.94, 32.85], [-96.95, 32.85]]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {"CAMPUS_NAME": "Lively Elementary"},
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[-96.96, 32.85], [-96.96, 32.86], [-96.95, 32.86], [-96.95, 32.85], [-96.96, 32.85]]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {"CAMPUS_NAME": null},
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[-96.97, 32.85], [-96.97, 32.86], [-96.96, 32.86], [-96.96, 32.85], [-96.97, 32.85]]]
+      }
+    }
+  ]
+}

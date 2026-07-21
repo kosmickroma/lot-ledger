@@ -1,0 +1,7 @@
+{
+  "meta": {"level": "middle", "source_url": "https://example.test/middle", "retrieved": "2026-07-20", "boundary_vintage": "2025-26", "crs": "EPSG:4326"},
+  "zones": [
+    {"campus_name": "Zan Wesley Holmes Jr Middle", "tea_campus_id": "057905100", "local_id": 100,
+     "parts": [[[[-96.87, 32.70], [-96.87, 32.72], [-96.85, 32.72], [-96.85, 32.70], [-96.87, 32.70]]]]}
+  ]
+}

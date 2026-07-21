@@ -1,6 +1,7 @@
-"""Tests for scripts/school_zones_adapters.py -- the 3 source adapters
-(ArcGIS REST GeoJSON, Google MyMaps KML, single-campus->district-boundary).
-See docs/AI/SCHOOL_ZONES_DB_BUILD_SPEC_2026-07-21.md §4.
+"""Tests for scripts/school_zones_adapters.py -- the 4 source adapters
+(ArcGIS REST GeoJSON, Google MyMaps KML, single-campus->district-boundary,
+pilot-snapshot). See docs/AI/SCHOOL_ZONES_DB_BUILD_SPEC_2026-07-21.md §4
+and "Gap 4."
 
 Pure file-parsing, no network -- every adapter reads only from
 tests/fixtures/school_zones/, mirroring how the adapters themselves read
@@ -14,10 +15,13 @@ from scripts.school_zones_adapters import (
     adapter_arcgis_geojson,
     adapter_district_boundary,
     adapter_mymaps_kml,
+    adapter_pilot_snapshot,
     parse_kml_placemarks,
+    pilot_ratings_to_ingest_shape,
 )
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "school_zones"
+PILOT_FIXTURES = FIXTURES / "pilot_snapshot"
 
 
 def test_arcgis_adapter_normalizes_rows() -> None:
@@ -112,3 +116,42 @@ def test_district_boundary_adapter_replicates_geometry_per_level() -> None:
     assert {r["level"] for r in rows} == {"elementary", "middle", "high"}
     assert all(r["geom"] == rows[0]["geom"] for r in rows)  # same district polygon at every level
     assert all(r["source_kind"] == "district_boundary" for r in rows)
+
+
+# --- Adapter 4: pilot snapshot (Gap 4) ---------------------------------------
+
+def test_pilot_snapshot_adapter_reads_all_3_levels() -> None:
+    rows = adapter_pilot_snapshot(PILOT_FIXTURES, district_tea_id="057905", district_name="DALLAS ISD")
+    assert {r["level"] for r in rows} == {"elementary", "middle", "high"}
+    assert len(rows) == 3  # one zone per level in the fixture
+
+
+def test_pilot_snapshot_adapter_converts_parts_to_multipolygon_geojson() -> None:
+    rows = adapter_pilot_snapshot(PILOT_FIXTURES, district_tea_id="057905", district_name="DALLAS ISD")
+    elem = next(r for r in rows if r["level"] == "elementary")
+    assert elem["geom"]["type"] == "MultiPolygon"
+    # "parts" (list of polygons, each = list of rings) IS coordinates verbatim
+    assert elem["geom"]["coordinates"][0][0][0] == [-96.82, 32.75]
+
+
+def test_pilot_snapshot_adapter_preserves_tea_campus_id_and_vintage() -> None:
+    rows = adapter_pilot_snapshot(PILOT_FIXTURES, district_tea_id="057905", district_name="DALLAS ISD")
+    elem = next(r for r in rows if r["level"] == "elementary")
+    assert elem["campus_tea_id"] == "057905101"
+    assert elem["boundary_vintage"] == "2025-26"
+    assert elem["source_kind"] == "pilot_snapshot"
+    assert elem["district_tea_id"] == "057905"
+
+
+def test_pilot_ratings_to_ingest_shape_converts_grade_to_letter() -> None:
+    year, ratings = pilot_ratings_to_ingest_shape(PILOT_FIXTURES / "ratings.json")
+    assert year == 2025
+    assert ratings["057905101"]["letter"] == "B"   # pilot's "grade" key -> ingest's "letter" key
+    assert ratings["057905101"]["score"] == 85
+    assert ratings["057905101"]["achievement"] == {"grade": "B", "score": 80}
+    assert ratings["057905101"]["growth"] == {"grade": "D", "score": 67}
+
+
+def test_pilot_ratings_to_ingest_shape_covers_all_fixture_campuses() -> None:
+    _year, ratings = pilot_ratings_to_ingest_shape(PILOT_FIXTURES / "ratings.json")
+    assert set(ratings.keys()) == {"057905101", "057905100", "057905022"}

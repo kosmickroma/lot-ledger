@@ -219,3 +219,72 @@ def test_scoped_delete_and_insert_share_one_transaction() -> None:
 def test_force_flag_exists_on_cli() -> None:
     src = _read()
     assert '"--force"' in src
+
+
+# --- Gap 2: ingest connects as the restricted role, not the app user --------
+
+def test_get_ingest_conn_raises_clearly_when_dsn_unset(monkeypatch) -> None:
+    from scripts.ingest_school_zones import _get_ingest_conn
+
+    monkeypatch.delenv("SCHOOL_INGEST_DSN", raising=False)
+    with pytest.raises(RuntimeError, match="SCHOOL_INGEST_DSN"):
+        _get_ingest_conn()
+
+
+def test_get_ingest_conn_never_silently_falls_back_to_get_conn() -> None:
+    # Source-level guarantee: _get_ingest_conn's only DB-connect CALL is
+    # psycopg2.connect(dsn) -- never api.config.get_conn(), which would be
+    # exactly the "protection is theater" regression Gap 2 fixes. The
+    # function's own docstring mentions get_conn() by name (explaining WHY
+    # the fix exists), so this checks the executable body only, after the
+    # closing docstring quotes.
+    src = _read()
+    fn_start = src.index("def _get_ingest_conn")
+    fn_end = src.index("\ndef ", fn_start + 1)
+    full_body = src[fn_start:fn_end]
+    code_body = full_body.split('"""', 2)[-1]  # drop the def line + docstring
+    assert "psycopg2.connect(dsn)" in code_body
+    assert "get_conn()" not in code_body
+
+
+def test_main_uses_get_conn_only_for_schema_not_for_data_writes() -> None:
+    # Schema migration needs CREATE TABLE/INDEX privilege the restricted
+    # role doesn't have; every data-write call (ingest_district,
+    # ingest_ratings) must run on the _get_ingest_conn() connection instead.
+    src = _read()
+    fn_start = src.index("def main")
+    body = src[fn_start:]
+    admin_idx = body.index("admin_conn = get_conn()")
+    ingest_conn_idx = body.index("conn = _get_ingest_conn()")
+    assert admin_idx < ingest_conn_idx
+    ensure_schema_idx = body.index("ensure_schema_and_indexes(admin_conn)")
+    assert admin_idx < ensure_schema_idx < ingest_conn_idx
+    # Data-write calls happen on `conn` (the restricted-role connection),
+    # after the admin connection has already been released.
+    ingest_district_idx = body.index("ingest_district(conn,")
+    ingest_ratings_idx = body.index("ingest_ratings(conn,")
+    assert ingest_conn_idx < ingest_district_idx
+    assert ingest_conn_idx < ingest_ratings_idx
+
+
+def test_dsn_env_var_name_never_hardcoded_as_a_literal_connection_string() -> None:
+    # §8 -- this is a public repo; SCHOOL_INGEST_DSN must only ever be read
+    # via os.getenv, never assigned a literal postgres:// value.
+    src = _read()
+    assert 'os.getenv("SCHOOL_INGEST_DSN"' in src
+    assert "postgresql://" not in src
+    assert "postgres://" not in src
+
+
+# --- Gap 4: pilot-snapshot source_kind wiring --------------------------------
+
+def test_pilot_snapshot_source_kind_wired_into_config_loader() -> None:
+    src = _read()
+    assert '"pilot_snapshot"' in src
+    assert "adapter_pilot_snapshot(" in src
+
+
+def test_pilot_ratings_cli_flag_exists() -> None:
+    src = _read()
+    assert '"--pilot-ratings"' in src
+    assert "pilot_ratings_to_ingest_shape(" in src

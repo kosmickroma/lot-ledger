@@ -1,0 +1,7 @@
+{
+  "meta": {"level": "high", "source_url": "https://example.test/high", "retrieved": "2026-07-20", "boundary_vintage": "2025-26", "crs": "EPSG:4326"},
+  "zones": [
+    {"campus_name": "Woodrow Wilson High School", "tea_campus_id": "057905022", "local_id": 22,
+     "parts": [[[[-96.76, 32.80], [-96.76, 32.82], [-96.74, 32.82], [-96.74, 32.80], [-96.76, 32.80]]]]}
+  ]
+}
