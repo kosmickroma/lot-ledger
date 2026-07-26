@@ -1267,6 +1267,68 @@ function _setOriginatorTargetLabel(addr) {
   if (cardRow) cardRow.classList.remove("hidden");
 }
 
+// Subject Property row → zoom to parcel (2026-07-25). Clicking the top
+// active-item slot's Subject Property row moves the map to that parcel:
+// fits the lot when the toolbar ZOOM toggle is on (getClickMode() ===
+// "jump"), or pans only if off-screen when it's off ("stay") — never
+// changing zoom in stay mode. See _zoomToSubjectProperty below.
+let _subjectZoomInFlight = false;
+
+function _subjectPropertyBoundsFor(identity) {
+  // Tier 1: rendered outline layer (only populated at zoom >= 14).
+  // Tier 2: geometry cache (often holds the polygon even when no outline
+  // layer is currently rendered — this is what makes "fit the lot" work
+  // from zoomed-out views). Returns a valid L.LatLngBounds or null; never
+  // throws.
+  const key = _subjectPropertyKey(identity?.county, identity?.account);
+  if (!key) return null;
+
+  const layer = _subjectPropertyOutlineLayers.get(key);
+  if (layer && typeof layer.getBounds === "function") {
+    try {
+      const b = layer.getBounds();
+      if (b && b.isValid()) return b;
+    } catch (_) { /* fall through to tier 2 */ }
+  }
+
+  const geom = _subjectPropertyGeometryCache.get(key);
+  if (geom) {
+    try {
+      const b = L.geoJSON(geom).getBounds();
+      if (b && b.isValid()) return b;
+    } catch (_) { /* fall through to null (centroid tier, in caller) */ }
+  }
+
+  return null;
+}
+
+async function _zoomToSubjectProperty() {
+  if (_subjectZoomInFlight) return;              // double-click guard
+  const staged = _currentTargetParcel;
+  if (!staged) return;                            // no subject staged → inert
+  const identity = { county: staged.county, account: staged.account };
+  _subjectZoomInFlight = true;
+  try {
+    const target = await _ensureCurrentTargetParcelCoords();
+    // Subject moved on while we were resolving — do not stomp the map.
+    if (!target || !_sameParcelIdentity(_currentTargetParcel, identity)) return;
+
+    const bounds = _subjectPropertyBoundsFor(identity);
+    const center = bounds ? bounds.getCenter() : L.latLng(target.lat, target.lng);
+
+    const mode = (typeof getClickMode === "function" ? getClickMode() : "stay");
+    if (mode === "jump") {
+      if (bounds) map.fitBounds(bounds, { padding: [40, 40], maxZoom: 18 });
+      else map.flyTo(center, 17, { duration: 0.35 });
+    } else if (!isPointInViewport(center)) {
+      if (bounds) map.fitBounds(bounds, { padding: [40, 40], maxZoom: map.getZoom() });
+      else map.panTo(center);
+    }
+  } finally {
+    _subjectZoomInFlight = false;
+  }
+}
+
 async function _resolveTargetParcelFeatureProps(county, account) {
   // Returns the parcel's feature.properties dict (or null). Two-tier:
   //   1) Cache-first against lastAnalysisGeojson — when the target is
@@ -10430,6 +10492,22 @@ function initOACToggleSync() {
   _updateOACButtonState();
 }
 
+// Subject Property row → zoom to parcel (2026-07-25). Attaches the click
+// wiring exactly once at startup — do not attach this listener inside
+// _setOriginatorTargetLabel, which runs on every label refresh and would
+// stack duplicate listeners (firing N flyTos per click).
+function initSubjectPropertyRowZoom() {
+  const row = document.getElementById("active-item-target-row");
+  if (!row) return;
+  row.addEventListener("click", () => { _zoomToSubjectProperty(); });
+  row.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " " || e.key === "Spacebar") {
+      e.preventDefault();                          // Space must not scroll the page
+      _zoomToSubjectProperty();
+    }
+  });
+}
+
 function getPolygonDrawHandler() {
   return drawControl?._toolbars?.draw?._modes?.polygon?.handler || null;
 }
@@ -10454,6 +10532,7 @@ sidebarToggleBtn.addEventListener("click", () => {
 initSidebarCollapsibles();
 initClickModeToggle();
 initOACToggleSync();
+initSubjectPropertyRowZoom();
 
 (function _initSavedListSearchInputs() {
   const areasInput = document.getElementById("saved-areas-search");

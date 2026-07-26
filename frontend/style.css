@@ -993,6 +993,23 @@ body.is-not-power-user .power-user-only {
   vertical-align: baseline;
 }
 
+/* Subject Property row → zoom to parcel (2026-07-25). Color/opacity only —
+   #active-item-slot must never reflow on hover/focus, so no padding,
+   margin, size, border, transform, or animation here. Focus uses
+   `outline`, which does not affect layout. */
+.active-item-target-row.is-clickable {
+  cursor: pointer;
+}
+
+.active-item-target-row.is-clickable:hover .active-item-target-name {
+  color: rgba(255, 255, 255, 0.95);
+}
+
+.active-item-target-row.is-clickable:focus-visible {
+  outline: 2px solid var(--gold);
+  outline-offset: 1px;
+}
+
 .active-item-type {
   display: block;
   font-size: 10px;
