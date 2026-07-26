@@ -1986,6 +1986,7 @@ _FILTER_FIELD_BASE_KEYS: frozenset[str] = frozenset({
     # every change; keep both allowlisted long-term, not a temporary shim.
     "propelio.neighborhood",
     "propelio.neighborhoods",
+    "propelio.zips",
     "propelio.parcelTypeMultifamily", "propelio.parcelTypeDuplexes",
     "propelio.parcelTypeCommercial",  "propelio.parcelTypeVacant",
     "propelio.parcelTypeExempt",      "propelio.parcelTypeOffMarket",

@@ -44,6 +44,7 @@ _EXPECTED_KEYS = frozenset({
     "propelio.sortMode",
     "propelio.neighborhood",
     "propelio.neighborhoods",
+    "propelio.zips",
     "propelio.parcelTypeMultifamily", "propelio.parcelTypeDuplexes",
     "propelio.parcelTypeCommercial",  "propelio.parcelTypeVacant",
     "propelio.parcelTypeExempt",      "propelio.parcelTypeOffMarket",
@@ -77,12 +78,12 @@ def test_filter_field_keys_no_unknown():
 
 def test_filter_field_keys_count_matches_spec():
     actual = getattr(api_main, "_FILTER_FIELD_KEYS")
-    # 54 base keys × 3 (ARV flat + _views.nbv.* + _views.export.*) = 162.
+    # 55 base keys × 3 (ARV flat + _views.nbv.* + _views.export.*) = 165.
     # The 54 base keys are: 9 checkboxes + 8 numeric + 5 sold + 8 comp +
     # 24 propelio (including 6 parcelType* mirrors added Sprint 2 and the
     # propelio.neighborhoods multi-neighborhood dual-write key, 2026-07-18).
-    assert len(actual) == 162, (
-        f"Expected 162 keys (54 base × 3 views); constant has {len(actual)}."
+    assert len(actual) == 165, (
+        f"Expected 165 keys (55 base × 3 views); constant has {len(actual)}."
     )
 
 

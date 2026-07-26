@@ -1978,6 +1978,8 @@ function applyPropelioFilterStateToUI(persisted) {
   // re-derive below, which reads propelioNbhds to build its dual-write.
   propelioNbhds = coerceNbhds(persisted);
   _renderNbhdChip();
+  propelioZips = coerceZips(persisted);
+  _renderZipChip();
   propelioFilterState = readPropelioFiltersFromUI();
 }
 
@@ -2185,6 +2187,14 @@ function _applyFilterFieldToUI(fieldKey, value) {
     propelioFilterState.neighborhood = propelioNbhds.length ? propelioNbhds[0] : null;
     propelioFilterState.neighborhoods = [...propelioNbhds];
     _renderNbhdChip();
+    try { applyPropelioClientFilters(); } catch (_) {}
+    return;
+  }
+  if (_effectiveKey === "propelio.zips") {
+    // Born-as-array key: no dual-write legacy pair to reconcile.
+    propelioZips = coerceZips({ zips: value });
+    propelioFilterState.zips = [...propelioZips];
+    _renderZipChip();
     try { applyPropelioClientFilters(); } catch (_) {}
     return;
   }
@@ -8239,6 +8249,7 @@ const DEFAULT_PROPELIO_FILTERS = {
   // `neighborhoods: []` here means every view-seed snapshot built from
   // DEFAULT_PROPELIO_FILTERS (map.js:~15103) carries the key too.
   neighborhoods: [],
+  zips: [],
 };
 let propelioFilterState = { ...DEFAULT_PROPELIO_FILTERS };
 
@@ -8293,6 +8304,25 @@ function coerceNbhds(propelio) {
   // ⛔ blank guard: a junk "" would false-positive every neighborhood-less
   // comp into the OR set (normalizeNbhd(null) === "").
   return sortDedupe(out.filter((x) => normalizeNbhd(x) !== ""));
+}
+
+// ── Zip-code comp filter (OR set) — clones the multi-neighborhood pattern.
+// No legacy single-value key to reconcile (born as an array), so coercion is
+// a plain sanitize: 5-digit strings, deduped, sorted.
+let propelioZips = [];
+function normalizeZip(v) { return String(v == null ? "" : v).replace(/\D/g, "").slice(0, 5); }
+function coerceZips(propelio) {
+  const arr = Array.isArray(propelio?.zips) ? propelio.zips : [];
+  return Array.from(new Set(arr.map(normalizeZip).filter((z) => /^\d{5}$/.test(z)))).sort();
+}
+let _zipSetFilters = null;
+let _zipSet = null;
+function _zipSetFor(filters) {
+  if (filters !== _zipSetFilters) {
+    _zipSetFilters = filters;
+    _zipSet = new Set((filters.zips || []).map(normalizeZip));
+  }
+  return _zipSet;
 }
 
 // Option-list cache: rebuilt once per comp-load (reference-equality guard),
@@ -8352,6 +8382,7 @@ function readPropelioFiltersFromUI() {
     // echo-clobber fix). Old cached bundles read only the single key.
     neighborhood: propelioNbhds.length ? propelioNbhds[0] : null,
     neighborhoods: [...propelioNbhds],
+    zips: [...propelioZips],
     // Property Type Filter toggles — read from the parcel-side filterState
     // so the same toggles gate both parcels and comps.
     parcelTypeMultifamily: filterState.multifamily,
@@ -8564,6 +8595,9 @@ function compPassesPropelioFilters(comp, filters) {
   if (filters.neighborhoods && filters.neighborhoods.length) {
     if (!_nbhdNormSetFor(filters).has(normalizeNbhd(comp?.neighborhood))) return false;
   }
+  if (filters.zips && filters.zips.length) {
+    if (!_zipSetFor(filters).has(normalizeZip(comp?.extra?.zip))) return false;
+  }
 
   return true;
 }
@@ -8592,6 +8626,7 @@ function applyPropelioClientFilters() {
   // options lagged one apply cycle behind toggles like OAC.
   propelioFilterState = readPropelioFiltersFromUI();
   _buildNbhdOptionsCache();
+  _buildZipOptionsCache();
   const all = window._propelioLast.comps;
   // Map view: render every passing comp (good/unrated AND bad — bad gets
   // the `.bad-comp` class for visual de-emphasis but stays on the map).
@@ -9257,6 +9292,8 @@ function resetPropelioFilters() {
   // "Reset" would leave the OR set silently active.
   propelioNbhds = [];
   _renderNbhdChip();
+  propelioZips = [];
+  _renderZipChip();
   applyPropelioClientFilters();
 }
 
@@ -9415,6 +9452,93 @@ function _clearNbhdFilter(display) {
   _filterSaveQueueSave();
 }
 
+// ── Zip filter UI — clone of the neighborhood chip/typeahead suite. Reuses
+// the nbhd-* CSS classes (identical look); its own ids/state/data-attrs.
+let _zipOptionsCache = null;
+let _zipOptionsCacheRef = null;
+let _zipOptionsCacheSig = null;
+function _buildZipOptionsCache() {
+  const comps = window._propelioLast?.comps;
+  if (!Array.isArray(comps) || comps.length === 0) {
+    _zipOptionsCache = []; _zipOptionsCacheRef = null; _zipOptionsCacheSig = null;
+    return;
+  }
+  // Options mirror the VISIBLE set minus the zip filter itself (same rule as
+  // neighborhoods) so already-picked zips can be re-inspected and others added.
+  const filtersNoZip = { ...propelioFilterState, zips: [] };
+  const polySig = Array.isArray(lastPolygon) && lastPolygon.length
+    ? lastPolygon.length + ":" + JSON.stringify(lastPolygon[0]) + JSON.stringify(lastPolygon[lastPolygon.length - 1])
+    : "0";
+  const sig = JSON.stringify(filtersNoZip) + "|" + polySig;
+  if (comps === _zipOptionsCacheRef && sig === _zipOptionsCacheSig) return;
+  _zipOptionsCacheRef = comps;
+  _zipOptionsCacheSig = sig;
+  const counts = new Map();
+  for (const c of comps) {
+    if (!compPassesPropelioFilters(c, filtersNoZip)) continue;
+    const z = normalizeZip(c?.extra?.zip);
+    if (!/^\d{5}$/.test(z)) continue;
+    counts.set(z, (counts.get(z) || 0) + 1);
+  }
+  _zipOptionsCache = Array.from(counts, ([display, count]) => ({ display, count }))
+    .sort((a, b) => a.display.localeCompare(b.display));
+}
+
+function _renderZipChip() {
+  const chipEl = document.getElementById("prop-zip-chip");
+  const searchEl = document.getElementById("prop-zip-search");
+  if (!chipEl) return;
+  if (!propelioZips.length) {
+    chipEl.hidden = true;
+    chipEl.innerHTML = "";
+    if (searchEl) searchEl.hidden = false;
+    return;
+  }
+  chipEl.innerHTML = propelioZips
+    .map((z) => (
+      `<span class="nbhd-chip-item">` +
+      `<span class="nbhd-chip-label">${_propelioEscape(z)}</span>` +
+      `<span class="nbhd-chip-x" data-zip="${_propelioEscape(z)}" role="button" ` +
+      `aria-label="Remove ${_propelioEscape(z)}" tabindex="0">✕</span>` +
+      `</span>`
+    ))
+    .join("");
+  chipEl.hidden = false;
+  if (searchEl) { searchEl.value = ""; searchEl.hidden = false; }
+}
+
+function _renderZipOptions(query) {
+  const optionsEl = document.getElementById("prop-zip-options");
+  if (!optionsEl) return;
+  const q = normalizeZip(query);
+  if (!q) { optionsEl.hidden = true; optionsEl.innerHTML = ""; return; }
+  _buildZipOptionsCache();
+  const matches = (_zipOptionsCache || []).filter((o) => o.display.startsWith(q));
+  if (!matches.length) { optionsEl.hidden = true; optionsEl.innerHTML = ""; return; }
+  optionsEl.innerHTML = matches
+    .map((o) => `<div class="nbhd-option" data-display="${_propelioEscape(o.display)}">${_propelioEscape(o.display)} (${o.count})</div>`)
+    .join("");
+  optionsEl.hidden = false;
+}
+
+function _selectZipOption(display) {
+  const z = normalizeZip(display);
+  if (/^\d{5}$/.test(z) && !propelioZips.includes(z)) {
+    propelioZips = [...propelioZips, z].sort();
+  }
+  _renderZipChip();
+  applyPropelioClientFiltersDebounced();
+  _filterSaveQueueSave();
+}
+
+function _clearZipFilter(display) {
+  const z = normalizeZip(display);
+  propelioZips = propelioZips.filter((x) => x !== z);
+  _renderZipChip();
+  applyPropelioClientFiltersDebounced();
+  _filterSaveQueueSave();
+}
+
 // Deep Pull sidebar button state. Declared BEFORE the IIFE below so that
 // _ensureStickyPropelioButton() can be safely called from inside the IIFE
 // (without hitting a TDZ ReferenceError as the original J3 init did).
@@ -9534,6 +9658,54 @@ let propelioStickyBtn = null;
       if (xEl && (ev.key === "Enter" || ev.key === " ")) {
         ev.preventDefault();
         _clearNbhdFilter(xEl.dataset.nbhd || "");
+      }
+    });
+  }
+
+  // Zip filter typeahead + chips (clone of the neighborhood wiring above).
+  const zipSearchEl = document.getElementById("prop-zip-search");
+  if (zipSearchEl) {
+    zipSearchEl.addEventListener("input", () => {
+      _renderZipOptions(zipSearchEl.value.trim());
+    });
+    zipSearchEl.addEventListener("keydown", (ev) => {
+      // Type a full zip and hit Enter — selects it even with the dropdown open.
+      if (ev.key === "Enter") {
+        const z = normalizeZip(zipSearchEl.value);
+        if (/^\d{5}$/.test(z)) {
+          ev.preventDefault();
+          _selectZipOption(z);
+          const optEl = document.getElementById("prop-zip-options");
+          if (optEl) { optEl.hidden = true; optEl.innerHTML = ""; }
+        }
+      }
+    });
+    zipSearchEl.addEventListener("blur", () => {
+      setTimeout(() => {
+        const optEl = document.getElementById("prop-zip-options");
+        if (optEl) { optEl.hidden = true; optEl.innerHTML = ""; }
+      }, 200);
+    });
+  }
+  const zipOptionsEl = document.getElementById("prop-zip-options");
+  if (zipOptionsEl) {
+    zipOptionsEl.addEventListener("click", (ev) => {
+      const opt = ev.target.closest(".nbhd-option");
+      if (!opt) return;
+      _selectZipOption(opt.dataset.display || "");
+    });
+  }
+  const zipChipEl = document.getElementById("prop-zip-chip");
+  if (zipChipEl) {
+    zipChipEl.addEventListener("click", (ev) => {
+      const xEl = ev.target.closest(".nbhd-chip-x");
+      if (xEl) _clearZipFilter(xEl.dataset.zip || "");
+    });
+    zipChipEl.addEventListener("keydown", (ev) => {
+      const xEl = ev.target.closest(".nbhd-chip-x");
+      if (xEl && (ev.key === "Enter" || ev.key === " ")) {
+        ev.preventDefault();
+        _clearZipFilter(xEl.dataset.zip || "");
       }
     });
   }
