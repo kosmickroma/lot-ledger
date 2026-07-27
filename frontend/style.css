@@ -2270,7 +2270,10 @@ body.is-not-power-user .power-user-only {
 
 .saved-area-row-active .saved-area-row-secondary-actions {
   display: flex;
-  max-height: 60px;
+  /* Raised from 60px alongside the flex-wrap above: if the button row ever
+     does wrap to a second line, 60px would clip it. Only affects the
+     revealed state; the collapsed state stays max-height: 0. */
+  max-height: 96px;
   opacity: 1;
 }
 
@@ -2284,7 +2287,14 @@ body.is-not-power-user .power-user-only {
   display: flex;
   gap: 6px;
   padding: 4px 0 2px;
-  margin-left: 30px; /* match title's effective indent (24 + 6 main-flex gap) */
+  /* 2026-07-26: was 30px. A shared row can now show three buttons (Make my
+     copy + Rename + Remove-from-list), which overflowed the 320px sidebar and
+     got clipped by the parent's overflow:hidden. Tightened the indent and let
+     the row wrap as a safety net so nothing is ever cut off, whatever the
+     font metrics. Still visually aligned under the title. */
+  margin-left: 24px;
+  flex-wrap: wrap;
+  row-gap: 4px;
 }
 
 /* Gold Share button — matches #btn-download primary action styling */
@@ -2331,6 +2341,16 @@ body.is-not-power-user .power-user-only {
 .saved-area-action-btn:hover {
   color: var(--text-main);
   background: rgba(255, 255, 255, 0.07);
+}
+
+/* "Remove from my list" (leave a shared area) — icon-only so three buttons fit
+   in the 320px sidebar. Deliberately NOT styled with .delete's red: this action
+   is non-destructive (it drops only your own membership; the owner keeps the
+   area and every number in it), and red would imply otherwise. The title /
+   aria-label carry the meaning, and the confirm dialog spells it out. */
+.saved-area-leave-btn {
+  padding: 4px 7px;
+  font-size: 13px;
 }
 
 .saved-area-action-btn.delete {

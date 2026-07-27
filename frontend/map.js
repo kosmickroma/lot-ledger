@@ -6125,7 +6125,7 @@ function _renderList(sectionId, listId, items, options = {}) {
           <div class="saved-area-secondary-btns">
             ${canForkRow ? `<button type="button" class="saved-area-action-btn" data-action="fork" data-share-id="${_esc(area.share_id)}" title="Make my own copy">📋 Make my copy</button>` : ""}
             ${canRenameRow ? `<button type="button" class="saved-area-action-btn rename" data-action="rename" title="Rename">✎ Rename</button>` : ""}
-            ${canLeaveRow ? `<button type="button" class="saved-area-action-btn" data-action="leave" title="Remove from my list">🚫 Remove from my list</button>` : ""}
+            ${canLeaveRow ? `<button type="button" class="saved-area-action-btn saved-area-leave-btn" data-action="leave" title="Remove from my list" aria-label="Remove from my list">🗑</button>` : ""}
           </div>
         </div>
       </div>`;
