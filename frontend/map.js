@@ -4595,19 +4595,25 @@ async function deleteSavedArea(item) {
     });
     _savedAreasCache = _savedAreasCache.filter((a) => a.id !== item.id);
     if (_currentLoadedAreaId === item.id) {
-      _clearOriginatorStar();
-      _setCurrentTargetParcel(null);
-      _currentLoadedAreaId = null;
-      _syncTabTitle();
-      _storedValueOnAreaChange(null);
-      void _filterSaveOnAreaChange(null);
-      // R2 fix (2026-07-26, docs/lot-ledger/SPEC_leave_shared_area_2026-07-26.md
-      // §5.4): deleting the currently-loaded area never reset #active-item-slot,
-      // so it kept showing the dead area's name and the rename pencil stayed
-      // visible. Must be the LAST statement in this block so the rename-visibility
-      // derive inside clearActiveItem() observes _currentLoadedAreaId === null.
-      // Does not hide or animate the slot — it stays always-visible, text reset
-      // to "Workspace" / "—" (hard project rule).
+      // KK report 2026-07-26: after deleting the loaded area its drawn shape,
+      // parcels and comps stayed on the map until you hit Clear. Root cause:
+      // this block hand-rolled a teardown that had drifted behind
+      // clearDrawResults() — it reset the bookkeeping (star, target, tab title,
+      // stored values, filter state) but never cleared a single layer, so the
+      // whole render outlived the workspace it belonged to. Every path that
+      // REPLACES the workspace already calls clearDrawResults()
+      // (restoreSavedArea, restoreNamedSession, the Clear button); only the
+      // path that DESTROYS it did not.
+      //
+      // clearDrawResults() is a strict superset of what used to be here — it
+      // wipes drawLayer/parcel/propelio/sold/badge/outreach layers AND does the
+      // same bookkeeping, including _currentLoadedAreaId = null and
+      // _closeSseStream(). So this is now exactly what the Clear button runs.
+      //
+      // R2 (spec §5.4): clearActiveItem() must stay LAST so the rename-visibility
+      // derive inside it observes _currentLoadedAreaId === null. It resets the
+      // slot's text only — never hides or animates #active-item-slot (hard rule).
+      clearDrawResults();
       clearActiveItem();
     }
     // Refetch subject_properties so the deleted area's originator drops
@@ -4638,17 +4644,16 @@ async function leaveSavedArea(item, { skipConfirm = false } = {}) {
   });
   _savedAreasCache = _savedAreasCache.filter((a) => a.id !== item.id);
   if (_currentLoadedAreaId === item.id) {
-    _clearOriginatorStar();
-    _setCurrentTargetParcel(null);
-    _currentLoadedAreaId = null;
-    _syncTabTitle();
-    _storedValueOnAreaChange(null);
-    void _filterSaveOnAreaChange(null);
-    // S2 (Fable critique 2026-07-26): SSE streams are membership-gated at
-    // CONNECT time only. Without this the leaver's EventSource on
-    // /api/areas/{id}/events keeps running after they've left, and the
-    // no-backoff reconnect at :2557 will keep re-probing it. Existing helper.
-    _closeSseStream();
+    // Same canonical teardown as deleteSavedArea (see the note there): the
+    // workspace is gone from THIS user's view, so the map must not keep
+    // rendering its shape, parcels and comps.
+    //
+    // S2 (Fable critique 2026-07-26) is still satisfied — clearDrawResults()
+    // calls _closeSseStream() itself. SSE streams are membership-gated at
+    // CONNECT time only, so without that close the leaver's EventSource on
+    // /api/areas/{id}/events would keep running and the no-backoff reconnect
+    // would keep re-probing a stream they no longer belong to.
+    clearDrawResults();
     clearActiveItem();
   }
   // Mandatory, not optional: the client never clears his browser cache, so the
@@ -6103,10 +6108,12 @@ function _renderList(sectionId, listId, items, options = {}) {
     const isOwnerRow = (area.role || "owner") === "owner";
     const canRenameRow = (isOwnerRow || _isAdmin()) && canRename;
     const canForkRow = !isOwnerRow && canShare;
-    // 2026-07-26: app-role admins may remove an area SHARED to them from their own
-    // list. Server drops only their saved_area_members row — the creator keeps
-    // everything. Never shown on rows they created (those use Delete).
-    const canLeaveRow = !isOwnerRow && _isAdmin();
+    // 2026-07-26: "Remove from my list" is deliberately NOT a per-row button.
+    // Area rows have never had a per-row Delete — removal is select-mode +
+    // the bulk toolbar — so a per-row control here would be the only one of
+    // its kind, and it overflowed the 320px sidebar. Leaving a shared area
+    // goes through the same bulk path, which routes editor rows to
+    // leaveSavedArea(). See _handleBulkDelete().
     const nameId = `name-${listKey}-${area.id}`;
     const typeLabel = _typeLabel(area.type);
 
@@ -6125,7 +6132,6 @@ function _renderList(sectionId, listId, items, options = {}) {
           <div class="saved-area-secondary-btns">
             ${canForkRow ? `<button type="button" class="saved-area-action-btn" data-action="fork" data-share-id="${_esc(area.share_id)}" title="Make my own copy">📋 Make my copy</button>` : ""}
             ${canRenameRow ? `<button type="button" class="saved-area-action-btn rename" data-action="rename" title="Rename">✎ Rename</button>` : ""}
-            ${canLeaveRow ? `<button type="button" class="saved-area-action-btn saved-area-leave-btn" data-action="leave" title="Remove from my list" aria-label="Remove from my list">🗑</button>` : ""}
           </div>
         </div>
       </div>`;
@@ -6221,11 +6227,6 @@ function _renderList(sectionId, listId, items, options = {}) {
       if (actionEl?.dataset.action === "rename") {
         e.stopPropagation();
         await _renameSavedItemInline(area, row);
-        return;
-      }
-      if (actionEl?.dataset.action === "leave") {
-        e.stopPropagation();
-        await leaveSavedArea(area);
         return;
       }
       if (!_navigationGuardForActiveDeepPull("switch workspaces")) {
