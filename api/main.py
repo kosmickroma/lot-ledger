@@ -8187,6 +8187,85 @@ async def delete_saved_area(area_id: str, user: dict[str, Any] = Depends(get_cur
     return {"ok": True, "deleted": int(deleted)}
 
 
+@app.delete("/api/areas/{area_id}/membership")
+async def leave_saved_area(
+    area_id: str,
+    req: Request,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Remove ONLY the caller's own membership row — the area, its parcels,
+    ratings and stored values are untouched for every other member.
+
+    Deliberately additive: DELETE /api/areas/{area_id} is not modified.
+    Scoped to per-area role 'editor' because the lazy backfill in
+    _user_area_role() would re-create an 'owner' row on the creator's next
+    request, making the area reappear — so creators use the existing
+    hard-delete path instead.
+    """
+    require_csrf(req)
+
+    app_role = str(user.get("role") or "").strip().lower()
+    if app_role not in ("owner", "developer"):
+        raise HTTPException(status_code=403, detail="Not allowed")
+
+    # S1 (Fable critique 2026-07-26) — creator hard-guard, defense in depth.
+    # The `role != 'editor'` check below already covers every path that exists
+    # TODAY (join_saved_area_via_share_id explicitly no-ops for the creator at
+    # api/main.py:7863, so a creator cannot acquire an 'editor' row via their own
+    # share link). But if a membership row ever reaches role='editor' for the
+    # creator out-of-band — manual DB edit, or a future promotion/demotion path —
+    # Leave would delete it and _user_area_role's backfill would resurrect it as
+    # 'owner' on the next request, so the area would silently REAPPEAR in his
+    # list. Checking creator-ship at the source makes that impossible and makes
+    # the error message below true in every possible world.
+    conn_guard = get_session_conn()
+    try:
+        with conn_guard.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM saved_areas WHERE area_id = %s AND user_id = %s LIMIT 1",
+                (area_id, int(user["id"])),
+            )
+            is_creator = cur.fetchone() is not None
+    finally:
+        release_session_conn(conn_guard)
+    if is_creator:
+        raise HTTPException(
+            status_code=403,
+            detail="You created this area — delete it instead of removing it.",
+        )
+
+    role = _user_area_role(area_id, int(user["id"]))
+    if role is None:
+        raise HTTPException(status_code=404, detail="Saved area not found")
+    if role != "editor":
+        raise HTTPException(
+            status_code=403,
+            detail="You created this area — delete it instead of removing it.",
+        )
+
+    conn = get_session_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                DELETE FROM saved_area_members
+                WHERE area_id = %s AND user_id = %s AND role = 'editor'
+                """,
+                (area_id, int(user["id"])),
+            )
+            removed = cur.rowcount or 0
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        release_session_conn(conn)
+
+    if not removed:
+        raise HTTPException(status_code=404, detail="Saved area not found")
+    return {"ok": True, "left": int(removed)}
+
+
 @app.get("/api/parcels")
 async def list_saved_parcels(user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
     uid = int(user["id"])

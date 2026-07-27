@@ -197,3 +197,73 @@ def test_parcels_post_bonded_copy_membership_check():
         "(Copilot B-2 blocking catch). Replace owner-only SELECT with "
         "membership-aware helper call."
     )
+
+
+# ─── Leave shared area (2026-07-26) ──────────────────────────────────────
+# Per docs/lot-ledger/SPEC_leave_shared_area_2026-07-26.md §7. This is a new,
+# additive endpoint — DELETE /api/areas/{area_id}/membership — that removes
+# only the caller's own saved_area_members row. It must never touch
+# DELETE /api/areas/{area_id} (delete_saved_area, tested above) or its
+# "Only the owner can delete" 403 message.
+
+
+def test_leave_saved_area_shape_and_guards():
+    src = inspect.getsource(api_main)
+    fn_src = _extract_fn_source(src, "leave_saved_area")
+    assert fn_src, "leave_saved_area handler not found"
+    assert "require_csrf" in fn_src, (
+        "DELETE /api/areas/{id}/membership must call require_csrf (spec §4)."
+    )
+    assert 'app_role not in ("owner", "developer")' in fn_src, (
+        "leave_saved_area must gate on app-role owner/developer only (spec §4)."
+    )
+    # S1 (Fable critique): creator hard-guard, defense in depth against the
+    # lazy backfill resurrecting the area as 'owner' after a Leave.
+    assert "FROM saved_areas WHERE area_id = %s AND user_id = %s" in fn_src, (
+        "leave_saved_area must carry the S1 creator hard-guard SELECT "
+        "(spec §4 S1) before allowing a Leave."
+    )
+    assert 'role != "editor"' in fn_src, (
+        "leave_saved_area must reject non-editor roles — a creator's own "
+        "area must never be leaveable (spec §4)."
+    )
+    assert "DELETE FROM saved_area_members" in fn_src, (
+        "leave_saved_area's DELETE must target saved_area_members, not "
+        "saved_areas (spec §4 — this endpoint is purely additive)."
+    )
+    assert "DELETE FROM saved_areas" not in fn_src, (
+        "leave_saved_area must NEVER issue DELETE FROM saved_areas — that is "
+        "the hard-delete cascade this feature deliberately does not touch."
+    )
+
+
+def test_leave_saved_area_csrf_before_authorization():
+    """N3 (Fable critique): require_csrf must run before the app-role gate,
+    not just be present somewhere, so a future refactor can't leave the CSRF
+    check behind the authorization gates."""
+    src = inspect.getsource(api_main)
+    fn_src = _extract_fn_source(src, "leave_saved_area")
+    assert fn_src, "leave_saved_area handler not found"
+    csrf_idx = fn_src.index("require_csrf")
+    role_gate_idx = fn_src.index('app_role not in')
+    assert csrf_idx < role_gate_idx, (
+        f"require_csrf@{csrf_idx} must precede the app_role gate@{role_gate_idx}."
+    )
+
+
+def test_delete_from_saved_areas_does_not_grow_a_third_site():
+    """Cheap tripwire (spec §7, adjusted): the spec assumed `DELETE FROM
+    saved_areas` appears exactly once (in delete_saved_area). That's stale —
+    it's already 2 on this branch's base, pre-existing and unrelated to this
+    feature: delete_saved_area's own-area delete, plus the admin account-purge
+    cascade (delete_user, ~api/main.py:3021, `WHERE user_id = %s` — wipes a
+    deleted user's own areas). Baseline kept at 2; the guard is that
+    leave_saved_area must not add a third."""
+    src = inspect.getsource(api_main)
+    assert src.count("DELETE FROM saved_areas") == 2, (
+        "DELETE FROM saved_areas count changed from the known baseline of 2 "
+        "(delete_saved_area + admin delete_user cascade). If this is "
+        "leave_saved_area growing a new hard-delete path, that violates the "
+        "spec's core non-goal — Leave must only ever "
+        "DELETE FROM saved_area_members."
+    )
