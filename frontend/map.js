@@ -4595,12 +4595,26 @@ async function deleteSavedArea(item) {
     });
     _savedAreasCache = _savedAreasCache.filter((a) => a.id !== item.id);
     if (_currentLoadedAreaId === item.id) {
-      _clearOriginatorStar();
-      _setCurrentTargetParcel(null);
-      _currentLoadedAreaId = null;
-      _syncTabTitle();
-      _storedValueOnAreaChange(null);
-      void _filterSaveOnAreaChange(null);
+      // KK report 2026-07-26: after deleting the loaded area its drawn shape,
+      // parcels and comps stayed on the map until you hit Clear. Root cause:
+      // this block hand-rolled a teardown that had drifted behind
+      // clearDrawResults() — it reset the bookkeeping (star, target, tab title,
+      // stored values, filter state) but never cleared a single layer, so the
+      // whole render outlived the workspace it belonged to. Every path that
+      // REPLACES the workspace already calls clearDrawResults()
+      // (restoreSavedArea, restoreNamedSession, the Clear button); only the
+      // path that DESTROYS it did not.
+      //
+      // clearDrawResults() is a strict superset of what used to be here — it
+      // wipes drawLayer/parcel/propelio/sold/badge/outreach layers AND does the
+      // same bookkeeping, including _currentLoadedAreaId = null and
+      // _closeSseStream(). So this is now exactly what the Clear button runs.
+      //
+      // R2 (spec §5.4): clearActiveItem() must stay LAST so the rename-visibility
+      // derive inside it observes _currentLoadedAreaId === null. It resets the
+      // slot's text only — never hides or animates #active-item-slot (hard rule).
+      clearDrawResults();
+      clearActiveItem();
     }
     // Refetch subject_properties so the deleted area's originator drops
     // off the gold-outline / star layer (if it was the only area for that
@@ -4611,6 +4625,45 @@ async function deleteSavedArea(item) {
   }
   if (_selectedSavedItemId === item.id) _selectedSavedItemId = null;
   renderSavedAreasList();
+}
+
+async function leaveSavedArea(item, { skipConfirm = false } = {}) {
+  if (!item) return;
+  if (!skipConfirm) {
+    const ok = window.confirm(
+      `Remove "${item.name || "this area"}" from your list?\n\n` +
+      `The owner keeps their copy and all its numbers. ` +
+      `You can rejoin from the share link they sent you.`
+    );
+    if (!ok) return;
+  }
+  bumpUndoPillVersion();
+  await _apiJson(`/api/areas/${encodeURIComponent(item.id)}/membership`, {
+    method: "DELETE",
+    headers: { ...authHeaders() },
+  });
+  _savedAreasCache = _savedAreasCache.filter((a) => a.id !== item.id);
+  if (_currentLoadedAreaId === item.id) {
+    // Same canonical teardown as deleteSavedArea (see the note there): the
+    // workspace is gone from THIS user's view, so the map must not keep
+    // rendering its shape, parcels and comps.
+    //
+    // S2 (Fable critique 2026-07-26) is still satisfied — clearDrawResults()
+    // calls _closeSseStream() itself. SSE streams are membership-gated at
+    // CONNECT time only, so without that close the leaver's EventSource on
+    // /api/areas/{id}/events would keep running and the no-backoff reconnect
+    // would keep re-probing a stream they no longer belong to.
+    clearDrawResults();
+    clearActiveItem();
+  }
+  // Mandatory, not optional: the client never clears his browser cache, so the
+  // refetch is what guarantees the row cannot linger in _savedAreasCache.
+  await _reloadSavedResources().catch((err) =>
+    console.warn("[leaveSavedArea] post-leave resource reload failed:", err)
+  );
+  if (_selectedSavedItemId === item.id) _selectedSavedItemId = null;
+  renderSavedAreasList();
+  _showToast("Removed from your list. Rejoin any time from the share link.");
 }
 
 async function saveSearchLocation(name, lat, lng) {
@@ -6055,6 +6108,12 @@ function _renderList(sectionId, listId, items, options = {}) {
     const isOwnerRow = (area.role || "owner") === "owner";
     const canRenameRow = (isOwnerRow || _isAdmin()) && canRename;
     const canForkRow = !isOwnerRow && canShare;
+    // 2026-07-26: "Remove from my list" is deliberately NOT a per-row button.
+    // Area rows have never had a per-row Delete — removal is select-mode +
+    // the bulk toolbar — so a per-row control here would be the only one of
+    // its kind, and it overflowed the 320px sidebar. Leaving a shared area
+    // goes through the same bulk path, which routes editor rows to
+    // leaveSavedArea(). See _handleBulkDelete().
     const nameId = `name-${listKey}-${area.id}`;
     const typeLabel = _typeLabel(area.type);
 
@@ -6331,34 +6390,66 @@ async function _handleBulkDelete(listKey) {
   const sel = _listSelections[listKey];
   if (!sel || sel.selectedIds.size === 0) return;
   // Sprint 1 multi-user collab (spec §3.3, Copilot frontend audit): bulk-delete
-  // is owner-only. Pre-filter editor-row IDs so the user gets a clear toast
+  // is owner-only. Editor rows are pre-filtered so the user gets a clear toast
   // up-front instead of N silent per-row 403 rejections.
+  // 2026-07-26 (docs/lot-ledger/SPEC_leave_shared_area_2026-07-26.md §5.3):
+  // app-role admins now route shared (editor) rows to Leave instead of just
+  // skipping them, so a mixed selection doesn't hit the same "shared areas
+  // can't be deleted" wall the feature exists to remove. Non-admins still see
+  // every editor row folded into `skipped` — byte-identical to today.
   const ids = Array.from(sel.selectedIds);
   const all = [..._savedAreasCache, ..._savedParcelsCache];
   const items = ids.map(id => all.find(a => a.id === id)).filter(Boolean);
   const ownerItems = items.filter(it => (it.role || "owner") === "owner");
-  const skipped = items.length - ownerItems.length;
-  if (skipped > 0 && ownerItems.length === 0) {
+  const leaveItems = _isAdmin()
+    ? items.filter(it => (it.role || "owner") === "editor")
+    : [];
+  const skipped = items.length - ownerItems.length - leaveItems.length;
+  if (ownerItems.length === 0 && leaveItems.length === 0) {
     _showToast("Cannot delete: only the owner can delete shared areas.");
     return;
   }
-  const n = ownerItems.length;
   const noun = (listKey === 'saved-areas') ? 'saved area' : 'target';
-  const skippedSuffix = skipped > 0 ? ` (${skipped} shared, can't delete)` : '';
-  const ok = window.confirm(`Delete ${n} ${noun}${n > 1 ? 's' : ''}${skippedSuffix}? This cannot be undone.`);
+  const nOwn = ownerItems.length;
+  const nLeave = leaveItems.length;
+  // "permanent"/"cannot be undone" stays attached to the delete count only —
+  // deleting is irreversible, leaving is reversible via the share link.
+  let confirmMsg;
+  if (nLeave === 0) {
+    const skippedSuffix = skipped > 0 ? ` (${skipped} shared, can't delete)` : '';
+    confirmMsg = `Delete ${nOwn} ${noun}${nOwn > 1 ? 's' : ''}${skippedSuffix}? This cannot be undone.`;
+  } else if (nOwn === 0) {
+    const skippedSuffix = skipped > 0 ? ` (${skipped} shared, can't remove)` : '';
+    confirmMsg = `Remove ${nLeave} from your list${skippedSuffix}?`;
+  } else {
+    const skippedSuffix = skipped > 0 ? ` (${skipped} shared, can't remove)` : '';
+    confirmMsg = `Delete ${nOwn} ${noun}${nOwn > 1 ? 's' : ''} (permanent) and remove ${nLeave} from your list?${skippedSuffix}`;
+  }
+  const ok = window.confirm(confirmMsg);
   if (!ok) return;
-  // Bounded-concurrency pool of 4 workers — iterates ownerItems only
-  // so editor-role rows never hit the delete endpoint (would 403 anyway).
-  const queue = [...ownerItems];
-  let successCount = 0;
+  // Bounded-concurrency pool of 4 workers over one combined queue — dispatches
+  // each item to delete or leave by its own role, so editor-role rows never
+  // hit the hard-delete endpoint (would 403 anyway).
+  const queue = [
+    ...ownerItems.map(item => ({ item, kind: "delete" })),
+    ...leaveItems.map(item => ({ item, kind: "leave" })),
+  ];
+  let deletedCount = 0;
+  let leftCount = 0;
   const failed = [];
   const alreadyDeleted = [];
   const workers = Array.from({ length: Math.min(4, queue.length) }).map(async () => {
     while (queue.length) {
-      const item = queue.shift();
+      const { item, kind } = queue.shift();
       try {
-        await deleteSavedArea(item);
-        successCount++;
+        if (kind === "leave") {
+          // Bulk already confirmed once above — don't double-prompt per row.
+          await leaveSavedArea(item, { skipConfirm: true });
+          leftCount++;
+        } else {
+          await deleteSavedArea(item);
+          deletedCount++;
+        }
       } catch (err) {
         const status = err && (err.status || err?.response?.status);
         if (status === 404) alreadyDeleted.push(item.id);
@@ -6367,17 +6458,35 @@ async function _handleBulkDelete(listKey) {
     }
   });
   await Promise.allSettled(workers);
-  // Reset selection state — deleteSavedArea already mutated caches; re-render to sync UI.
+  // Reset selection state — deleteSavedArea/leaveSavedArea already mutated caches; re-render to sync UI.
   sel.selectedIds.clear();
   sel.lastAnchorId = null;
   try { renderSavedAreasList(); } catch (_) { /* tolerate */ }
   if (failed.length > 0) {
-    _showToast(`Deleted ${successCount}. ${failed.length} failed — check console.`, "error");
+    if (nLeave === 0) {
+      _showToast(`Deleted ${deletedCount}. ${failed.length} failed — check console.`, "error");
+    } else if (nOwn === 0) {
+      _showToast(`Removed ${leftCount} from your list. ${failed.length} failed — check console.`, "error");
+    } else {
+      _showToast(`Deleted ${deletedCount}. Removed ${leftCount} from your list. ${failed.length} failed — check console.`, "error");
+    }
     console.error("bulk delete failures", failed);
   } else if (alreadyDeleted.length > 0) {
-    _showToast(`Deleted ${successCount}. ${alreadyDeleted.length} were already removed.`);
+    if (nLeave === 0) {
+      _showToast(`Deleted ${deletedCount}. ${alreadyDeleted.length} were already removed.`);
+    } else if (nOwn === 0) {
+      _showToast(`Removed ${leftCount} from your list. ${alreadyDeleted.length} were already removed.`);
+    } else {
+      _showToast(`Deleted ${deletedCount}. Removed ${leftCount} from your list. ${alreadyDeleted.length} were already removed.`);
+    }
   } else {
-    _showToast(`Deleted ${successCount} ${noun}${successCount > 1 ? 's' : ''}.`);
+    if (nLeave === 0) {
+      _showToast(`Deleted ${deletedCount} ${noun}${deletedCount > 1 ? 's' : ''}.`);
+    } else if (nOwn === 0) {
+      _showToast(`Removed ${leftCount} from your list.`);
+    } else {
+      _showToast(`Deleted ${deletedCount}. Removed ${leftCount} from your list.`);
+    }
   }
 }
 
