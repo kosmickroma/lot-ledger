@@ -31,6 +31,7 @@ from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Literal, Optional
+import httpx
 from urllib.parse import parse_qs, quote_plus
 
 from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Path as FastAPIPath, Query, Request, Response, UploadFile
@@ -78,9 +79,18 @@ from api.sold import log_redfin_sold_row_count, query_active_listings, query_sol
 BASE_DIR = Path(__file__).resolve().parent.parent
 FRONTEND_DIR = BASE_DIR / "frontend"
 
+# Same-origin by default (2026-08-02, the "jessva VPN" fix): the browser used
+# to fetch tiles from storage.googleapis.com directly — a second, foreign
+# domain requiring Range/206, which VPNs and TLS-intercepting proxies break
+# (only symptom: the "Parcel data is temporarily unavailable" banner while the
+# rest of the app works). /tiles/parcels.pmtiles below proxies the bucket with
+# Range passthrough, so tiles ride the same origin the app already loads from.
+# NOTE: if the Cloud Run service has TILES_BASE_URL set in its env, it
+# overrides this default — update/clear it at deploy time.
+_TILES_UPSTREAM_URL = "https://storage.googleapis.com/lot-ledger-tiles/parcels.pmtiles"
 TILES_BASE_URL = os.environ.get(
     "TILES_BASE_URL",
-    "https://storage.googleapis.com/lot-ledger-tiles/parcels.pmtiles",
+    "/tiles/parcels.pmtiles",
 ).strip()
 _INDEX_HTML_CACHE: str | None = None
 
@@ -5026,6 +5036,45 @@ class DownloadFilterRequest(BaseModel):
     # parcel ratings. Frontend sends this in Chunk E; Chunk C defaults to
     # 'arv' = today's behavior.
     view: str = "arv"
+
+
+@app.get("/tiles/parcels.pmtiles")
+async def tiles_proxy(request: Request) -> StreamingResponse:
+    """Same-origin tileset proxy (jessva VPN fix, 2026-08-02).
+
+    Forwards the browser's Range header to GCS verbatim and streams the
+    response back with GCS's status (206/200) and byte-serving headers
+    intact — the pmtiles preflight (frontend/map.js ~684) and
+    protomaps-leaflet both just work through it. No auth: the tileset is
+    public data and the map loads before login-gated API calls.
+    """
+    headers = {}
+    rng = request.headers.get("range")
+    if rng:
+        headers["Range"] = rng
+    client = httpx.AsyncClient(timeout=30.0)
+    upstream = await client.send(
+        client.build_request("GET", _TILES_UPSTREAM_URL, headers=headers), stream=True
+    )
+    passthrough = {
+        k: v for k, v in upstream.headers.items()
+        if k.lower() in ("content-range", "content-length", "etag", "last-modified")
+    }
+    passthrough["Accept-Ranges"] = "bytes"
+    passthrough["Cache-Control"] = "public, max-age=3600"
+
+    async def body():
+        try:
+            async for chunk in upstream.aiter_bytes():
+                yield chunk
+        finally:
+            await upstream.aclose()
+            await client.aclose()
+
+    return StreamingResponse(
+        body(), status_code=upstream.status_code,
+        media_type="application/octet-stream", headers=passthrough,
+    )
 
 
 @app.get("/api/download/{job_id}")
