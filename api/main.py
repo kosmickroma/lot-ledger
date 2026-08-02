@@ -87,7 +87,14 @@ FRONTEND_DIR = BASE_DIR / "frontend"
 # Range passthrough, so tiles ride the same origin the app already loads from.
 # NOTE: if the Cloud Run service has TILES_BASE_URL set in its env, it
 # overrides this default — update/clear it at deploy time.
-_TILES_UPSTREAM_URL = "https://storage.googleapis.com/lot-ledger-tiles/parcels.pmtiles"
+# TILES_UPSTREAM_URL = which bucket the proxy pulls from (prod's own bucket on
+# the prod service, KK's on preview/dev). TILES_BASE_URL stays what the PAGE
+# uses — same-origin path by default; an absolute-URL override would bypass
+# the proxy entirely (legacy behavior, kept as an escape hatch).
+_TILES_UPSTREAM_URL = os.environ.get(
+    "TILES_UPSTREAM_URL",
+    "https://storage.googleapis.com/lot-ledger-tiles/parcels.pmtiles",
+).strip()
 TILES_BASE_URL = os.environ.get(
     "TILES_BASE_URL",
     "/tiles/parcels.pmtiles",
