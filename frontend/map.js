@@ -10606,14 +10606,19 @@ function initOACToggleSync() {
 // _setOriginatorTargetLabel, which runs on every label refresh and would
 // stack duplicate listeners (firing N flyTos per click).
 function initSubjectPropertyRowZoom() {
-  const row = document.getElementById("active-item-target-row");
-  if (!row) return;
-  row.addEventListener("click", () => { _zoomToSubjectProperty(); });
-  row.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" || e.key === " " || e.key === "Spacebar") {
-      e.preventDefault();                          // Space must not scroll the page
-      _zoomToSubjectProperty();
-    }
+  // Comps List block's Subject card added 2026-08-02 (client request): same
+  // subject by construction (_populateSubjectPropertyCard is called atomically
+  // from _refreshOriginatorTargetLabel), so both rows share one zoom handler.
+  ["active-item-target-row", "comps-block-target-row"].forEach((id) => {
+    const row = document.getElementById(id);
+    if (!row) return;
+    row.addEventListener("click", () => { _zoomToSubjectProperty(); });
+    row.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " " || e.key === "Spacebar") {
+        e.preventDefault();                        // Space must not scroll the page
+        _zoomToSubjectProperty();
+      }
+    });
   });
 }
 

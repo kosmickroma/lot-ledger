@@ -1000,6 +1000,15 @@ body.is-not-power-user .power-user-only {
 .active-item-target-row.is-clickable {
   cursor: pointer;
 }
+/* Comps List Subject card → same zoom affordance (2026-08-02). Color/cursor
+   only — no layout-affecting properties, same rule as the top slot row. */
+.comps-block-target-card.is-clickable {
+  cursor: pointer;
+}
+.comps-block-target-card.is-clickable:focus-visible {
+  outline: 2px solid #22d3ee;
+  outline-offset: 1px;
+}
 
 .active-item-target-row.is-clickable:hover .active-item-target-name {
   color: rgba(255, 255, 255, 0.95);
