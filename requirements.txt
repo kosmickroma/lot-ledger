@@ -15,3 +15,5 @@ itsdangerous>=2.2,<3.0
 passlib[argon2]>=1.7,<2.0
 # Required for FastAPI multipart/form-data parsing (outreach CSV upload, 2026-06-03).
 python-multipart>=0.0.9,<1.0
+# Header/directory parsing for the server-side tile endpoint (2026-08-05).
+pmtiles>=3.7,<4.0
