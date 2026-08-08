@@ -27,12 +27,15 @@ import subprocess
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Literal, Optional
 import httpx
 from urllib.parse import parse_qs, quote_plus
+
+from pmtiles.tile import Compression, deserialize_directory, deserialize_header, find_tile, zxy_to_tileid
 
 from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Path as FastAPIPath, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
@@ -5081,6 +5084,146 @@ async def tiles_proxy(request: Request) -> StreamingResponse:
     return StreamingResponse(
         body(), status_code=upstream.status_code,
         media_type="application/octet-stream", headers=passthrough,
+    )
+
+
+# --- Server-side tile endpoint (2026-08-05) ---------------------------------
+# GET /tiles/parcels/{z}/{x}/{y}.mvt — plain 200 GETs, no client Range requests.
+# The old /tiles/parcels.pmtiles proxy above STAYS untouched as the rollback
+# path (flip TILES_BASE_URL back to it at any stage, no code changes needed).
+#
+# Byte source is the same httpx-ranged-GCS access the old proxy uses
+# (_TILES_UPSTREAM_URL, same env from the ffeedee change — one config path).
+# Directory/tile lookup reuses the official pmtiles package's pure parsing
+# functions (deserialize_header/deserialize_directory/find_tile/zxy_to_tileid)
+# against an async byte source, since pmtiles.reader.Reader itself is
+# synchronous and can't await httpx.
+#
+# Verified against the live archive (docs/HANDBACK_TILE_ENDPOINT.md has the
+# run): tile_compression = GZIP. protomaps-leaflet's URL-template tile source
+# (unlike its .pmtiles archive source) never decompresses fetched bytes
+# itself — it hands the fetched ArrayBuffer straight to the MVT parser. So we
+# serve the archive's tile bytes unmodified with Content-Encoding: gzip;
+# fetch() decompresses transparently before protomaps-leaflet ever sees the
+# bytes, and we skip paying CPU to gunzip on every request.
+_TILE_HTTP_CLIENT: httpx.AsyncClient | None = None
+
+# LRU for archive header + directory chunks only — these are the hot path
+# (every tile lookup re-walks up to 4 directory levels) and are small/stable.
+# Tile data itself is NOT cached here: 48k+ tiles up to hundreds of KB each
+# would make an in-process cache either useless (too small to matter) or a
+# memory hazard; Cache-Control + the browser cache do that job instead.
+_TILE_DIR_CACHE_MAX = 512
+_tile_dir_cache: "OrderedDict[tuple[int, int], bytes]" = OrderedDict()
+_tile_dir_cache_lock = asyncio.Lock()
+
+
+def _get_tile_http_client() -> httpx.AsyncClient:
+    global _TILE_HTTP_CLIENT
+    if _TILE_HTTP_CLIENT is None:
+        _TILE_HTTP_CLIENT = httpx.AsyncClient(timeout=30.0)
+    return _TILE_HTTP_CLIENT
+
+
+@app.on_event("shutdown")
+async def _shutdown_tile_http_client() -> None:
+    global _TILE_HTTP_CLIENT
+    if _TILE_HTTP_CLIENT is not None:
+        await _TILE_HTTP_CLIENT.aclose()
+        _TILE_HTTP_CLIENT = None
+
+
+async def _archive_range_read(offset: int, length: int) -> bytes:
+    """Uncached ranged read against the archive. Used for tile data bytes."""
+    client = _get_tile_http_client()
+    resp = await client.get(
+        _TILES_UPSTREAM_URL,
+        headers={"Range": f"bytes={offset}-{offset + length - 1}"},
+    )
+    resp.raise_for_status()
+    return resp.content
+
+
+async def _archive_range_read_cached(offset: int, length: int) -> bytes:
+    """Ranged read against the archive with an LRU over header/directory
+    chunks. Concurrent misses on the same key may both fetch (no dedupe
+    lock around the network call) — acceptable: GCS range reads are cheap
+    and idempotent, and avoiding a held lock during the request keeps one
+    slow fetch from stalling unrelated tile lookups."""
+    key = (offset, length)
+    async with _tile_dir_cache_lock:
+        cached = _tile_dir_cache.get(key)
+        if cached is not None:
+            _tile_dir_cache.move_to_end(key)
+            return cached
+    data = await _archive_range_read(offset, length)
+    async with _tile_dir_cache_lock:
+        _tile_dir_cache[key] = data
+        _tile_dir_cache.move_to_end(key)
+        while len(_tile_dir_cache) > _TILE_DIR_CACHE_MAX:
+            _tile_dir_cache.popitem(last=False)
+    return data
+
+
+# tile_compression -> Content-Encoding. Verified against the live archive
+# (docs/HANDBACK_TILE_ENDPOINT.md): GZIP. Read from the header rather than
+# hardcoded so a re-export that changes compression fails loud (500) instead
+# of silently shipping bytes the browser can't decode.
+_COMPRESSION_TO_CONTENT_ENCODING: dict[Compression, str | None] = {
+    Compression.NONE: None,
+    Compression.GZIP: "gzip",
+    Compression.BROTLI: "br",
+}
+
+
+async def _pmtiles_lookup_tile(z: int, x: int, y: int) -> tuple[bytes | None, Compression]:
+    """Mirrors pmtiles.reader.Reader.get(), async, with the header/directory
+    reads routed through the LRU above and the final tile-data read direct."""
+    tile_id = zxy_to_tileid(z, x, y)
+    header_bytes = await _archive_range_read_cached(0, 127)
+    header = deserialize_header(header_bytes)
+    compression = header["tile_compression"]
+    dir_offset = header["root_offset"]
+    dir_length = header["root_length"]
+    for _ in range(4):  # max directory depth, matches the reference reader
+        dir_bytes = await _archive_range_read_cached(dir_offset, dir_length)
+        entries = deserialize_directory(dir_bytes)
+        result = find_tile(entries, tile_id)
+        if result is None:
+            return None, compression
+        if result.run_length == 0:
+            dir_offset = header["leaf_directory_offset"] + result.offset
+            dir_length = result.length
+            continue
+        tile_bytes = await _archive_range_read(
+            header["tile_data_offset"] + result.offset, result.length
+        )
+        return tile_bytes, compression
+    return None, compression
+
+
+@app.get("/tiles/parcels/{z}/{x}/{y}.mvt")
+async def tile_endpoint(z: int, x: int, y: int) -> Response:
+    try:
+        tile_bytes, compression = await _pmtiles_lookup_tile(z, x, y)
+    except (ValueError, OverflowError):
+        # x/y outside the zoom level's bounds — no such tile, not a server error.
+        return Response(status_code=204)
+    if tile_bytes is None:
+        return Response(status_code=204)
+    if compression not in _COMPRESSION_TO_CONTENT_ENCODING:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Unsupported tile compression in archive: {compression}",
+        )
+    headers = {"Cache-Control": "public, max-age=3600"}
+    content_encoding = _COMPRESSION_TO_CONTENT_ENCODING[compression]
+    if content_encoding:
+        headers["Content-Encoding"] = content_encoding
+    return Response(
+        content=tile_bytes,
+        media_type="application/vnd.mapbox-vector-tile",
+        headers=headers,
     )
 
 
