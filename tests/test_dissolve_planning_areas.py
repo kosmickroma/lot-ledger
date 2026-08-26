@@ -158,3 +158,60 @@ def test_no_exclusions_is_unchanged_behaviour() -> None:
     assert [f["properties"]["NAME"] for f in out["features"]] == ["A", "B"]
     assert out["properties"]["excluded_values"] == {}
     assert out["properties"]["excluded_feature_count"] == 0
+
+
+# --- --make-valid (Argyle GIBSON: one ring self-intersection) ---------------
+
+def _bowtie() -> dict:
+    # A self-intersecting "bowtie" ring: invalid, but make_valid recovers two
+    # triangles whose combined area equals what the ring encloses.
+    return {
+        "type": "Polygon",
+        "coordinates": [[[0, 0], [2, 2], [2, 0], [0, 2], [0, 0]]],
+    }
+
+
+def test_invalid_geometry_raises_by_default() -> None:
+    doc = {"type": "FeatureCollection", "features": [_feature("A", _bowtie())]}
+    with pytest.raises(ValueError, match="invalid geometry"):
+        dissolve_by_field(doc, "NAME")
+
+
+def test_invalid_geometry_error_names_the_defect_and_the_flag() -> None:
+    doc = {"type": "FeatureCollection", "features": [_feature("A", _bowtie())]}
+    with pytest.raises(ValueError, match="Self-intersection"):
+        dissolve_by_field(doc, "NAME")
+    with pytest.raises(ValueError, match="--make-valid"):
+        dissolve_by_field(doc, "NAME")
+
+
+def test_make_valid_repairs_and_reports_the_repair() -> None:
+    doc = {"type": "FeatureCollection", "features": [_feature("A", _bowtie())]}
+    out = dissolve_by_field(doc, "NAME", repair_invalid=True)
+    assert out["properties"]["output_feature_count"] == 1
+    assert out["properties"]["repaired_input_geometries"] == ["A"]
+    assert out["features"][0]["properties"]["NAME"] == "A"
+
+
+def test_valid_input_reports_no_repairs_even_with_the_flag_on() -> None:
+    doc = {
+        "type": "FeatureCollection",
+        "features": [_feature("A", _square(0, 0, 1, 1))],
+    }
+    out = dissolve_by_field(doc, "NAME", repair_invalid=True)
+    assert out["properties"]["repaired_input_geometries"] == []
+
+
+def test_repair_flag_does_not_change_valid_geometry_output() -> None:
+    doc = {
+        "type": "FeatureCollection",
+        "features": [
+            _feature("A", _square(0, 0, 1, 1)),
+            _feature("A", _square(1, 0, 2, 1)),
+            _feature("B", _square(5, 5, 6, 6)),
+        ],
+    }
+    plain = dissolve_by_field(doc, "NAME")
+    repaired = dissolve_by_field(doc, "NAME", repair_invalid=True)
+    assert plain["features"] == repaired["features"]
+    assert plain["properties"]["output_area"] == repaired["properties"]["output_area"]
