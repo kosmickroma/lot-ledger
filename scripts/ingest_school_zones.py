@@ -56,6 +56,7 @@ from scripts.school_zones_adapters import (  # noqa: E402
     adapter_district_boundary,
     adapter_mymaps_kml,
     adapter_pilot_snapshot,
+    adapter_shapefile,
     all_tea_ratings_to_ingest_shape,
     pilot_ratings_to_ingest_shape,
 )
@@ -300,6 +301,8 @@ def _load_rows_from_config(config: dict[str, Any], snapshot_dir: Path) -> list[d
         raw = adapter_arcgis_geojson(snapshot_dir, config["levels"], district_tea_id, district_name, vintage)
     elif kind == "kml":
         raw = adapter_mymaps_kml(snapshot_dir, config["levels"], district_tea_id, district_name, vintage)
+    elif kind == "shapefile":
+        raw = adapter_shapefile(snapshot_dir, config["levels"], district_tea_id, district_name, vintage)
     elif kind == "district_boundary":
         raw = adapter_district_boundary(
             snapshot_dir, config["boundary_file"], config["campuses"],
