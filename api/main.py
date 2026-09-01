@@ -38,7 +38,7 @@ from urllib.parse import parse_qs, quote_plus
 from pmtiles.tile import Compression, deserialize_directory, deserialize_header, find_tile, zxy_to_tileid
 
 from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Path as FastAPIPath, Query, Request, Response, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from psycopg2.errors import UniqueViolation
 from psycopg2.extras import Json, RealDictCursor, execute_values
@@ -246,6 +246,68 @@ def _run_schema_steps(cur: Any, steps: list[tuple[str, str]]) -> None:
 
 def _generate_share_id() -> str:
     return "area_" + "".join(secrets.choice(_SHARE_ID_ALPHABET) for _ in range(10))
+
+
+# ---------------------------------------------------------------------------
+# CRM LINKS REROUTE (KK 2026-09-01, owed to Michael)
+# ---------------------------------------------------------------------------
+# Michael's CRM holds saved-area share links minted HERE, of the shape
+#   https://<og-host>/?area=area_XXXXXXXXXX
+# His team's areas now live in markets (the og-2026-08 import), and
+# scripts/og-area-import/share-id-backfill-markets.js gives those imported
+# areas their ORIGINAL OG tokens for exactly this reason
+# (spec-area-sharing-2026-08-20.md chunk 3). So the old links can be made to
+# work: OG answers them with a redirect instead of its own app, carrying the
+# token across unchanged.
+#
+# TWO PROPERTIES THIS IS BUILT AROUND, both deliberate:
+#
+#   1. IT DOES NOT DEPEND ON THE BACKFILL HAVING RUN. We forward the token and
+#      never ask markets whether it resolves. Where the backfill has landed the
+#      user opens their area; where it has not, markets answers its own honest
+#      "Shared link not found - it may have been deleted" on a working map. A
+#      redirect that lands on an honest miss is still correct; assuming the
+#      backfill is complete would not be.
+#
+#   2. IT IS INERT UNTIL MARKETS_BASE_URL IS SET. Unset (the default) means OG
+#      serves OG exactly as it does today, so merging and deploying this changes
+#      nothing on its own — Fable turns the reroute on by setting the env var on
+#      the service, and off the same way. OG prod is sacred; this is the shape
+#      that lets it ship without a flag day.
+#
+# ⚠️ 302, NOT 301. A 301 is cached by the browser more or less forever, and this
+# client never clears cache — one bad deploy would strand a user's OG bookmark
+# on a dead route with no way back short of a manual cache wipe. 302 keeps the
+# decision reversible by changing the env var alone.
+_MARKETS_BASE_URL = os.environ.get("MARKETS_BASE_URL", "").strip()
+
+# The same literal markets/app/map.js uses to validate ?area= at boot, and the
+# same one this file already uses on the share-id path params (see the
+# /api/saved-areas/by-share-id routes). A token that fails markets' copy is
+# dropped there SILENTLY — no fetch, no toast, just the default map — so
+# redirecting anything this does not match would manufacture exactly the blank-
+# looking failure the reroute exists to avoid.
+_OG_SHARE_ID_RE = re.compile(r"^area_[A-Za-z0-9]{10}$")
+
+
+def _markets_share_redirect_url(area_param: str | None) -> str | None:
+    """The markets URL an OG share link should bounce to, or None to serve OG.
+
+    None on every uncertainty: the reroute is off, there is no ?area= at all
+    (the ordinary page load, which is most of the traffic), or the value is not
+    one of our tokens. Never bounce a user out of OG on something we do not
+    recognise.
+    """
+    base = (_MARKETS_BASE_URL or "").strip().rstrip("/")
+    if not base:
+        return None
+    token = area_param or ""
+    if not _OG_SHARE_ID_RE.match(token):
+        return None
+    # No quoting: the token is [A-Za-z0-9_] by construction, and it must reach
+    # markets byte for byte — the lookup is an exact, CASE-SENSITIVE string
+    # match, so a mangled token resolves to a different area or to none.
+    return f"{base}/?area={token}"
 
 
 def _backfill_saved_area_share_ids(cur: Any) -> None:
@@ -9415,7 +9477,15 @@ async def list_parcel_outreach_imports(
 
 
 @app.get("/", include_in_schema=False)
-async def index() -> HTMLResponse:
+async def index(request: Request) -> Response:
+    # CRM LINKS REROUTE: an OG share link is answered by markets, not by OG.
+    # Checked before the page is built so a redirected request never pays for
+    # the index render. Returns None for every request without a recognisable
+    # ?area=, which is the ordinary page load. See _markets_share_redirect_url.
+    redirect_to = _markets_share_redirect_url(request.query_params.get("area"))
+    if redirect_to:
+        return RedirectResponse(redirect_to, status_code=302)
+
     global _INDEX_HTML_CACHE
     if _INDEX_HTML_CACHE is None:
         html = (FRONTEND_DIR / "index.html").read_text()
