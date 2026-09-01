@@ -68,3 +68,4 @@ Thumbs.db
 service-account*.json
 gcp-key*.json
 cors.json
+.worktrees/
