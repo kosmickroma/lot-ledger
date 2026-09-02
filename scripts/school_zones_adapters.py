@@ -327,3 +327,125 @@ def all_tea_ratings_to_ingest_shape(all_tx_ratings_path: Path) -> tuple[int, dic
     shape contract lives in one place, same as the pilot loader."""
     doc = json.loads(all_tx_ratings_path.read_text())
     return doc["meta"]["tea_year"], doc.get("ratings", {})
+
+
+# --- Adapter 5: PIA-delivered ESRI shapefile (e.g. Azle, Community) ---------
+#
+# The first source kind that arrives as a *file the district emailed us*
+# rather than a service we query. A district's GIS staff export a shapefile
+# in whatever CRS their ArcMap project happens to use, so unlike the KML
+# adapter (KML is WGS84 by spec) and unlike the ArcGIS REST adapter (we ask
+# for outSR=4326), the CRS here is NOT knowable in advance -- it must be
+# read from the sidecar .prj, per file.
+#
+# ⚠️ Why this adapter reprojects itself instead of leaving it to
+# ingest_school_zones.normalize_geom_to_wgs84: that helper only knows ONE
+# non-WGS84 CRS (EPSG:3857), because every source before this one was
+# either already 4326 or Web Mercator. A shapefile in, say, NAD83 Texas
+# North Central State Plane (feet) would fail its is_already_wgs84
+# magnitude check and then be run through a 3857->4326 transform that is
+# simply the wrong transform -- silently landing the zones in the wrong
+# place rather than erroring. Reprojecting from the file's OWN declared CRS
+# here means the rows this adapter emits are always already WGS84, so that
+# downstream check is a no-op confirmation (same posture as
+# adapter_pilot_snapshot's).
+
+def _shapefile_crs(shp_path: Path) -> Any:
+    """The sidecar .prj's CRS, or None when the file carries no .prj.
+    A missing .prj is NOT assumed to mean WGS84 -- see _reproject_to_wgs84."""
+    import pyproj
+
+    prj_path = shp_path.with_suffix(".prj")
+    if not prj_path.exists():
+        return None
+    return pyproj.CRS.from_wkt(prj_path.read_text().strip())
+
+
+def _reproject_ring(coords: Any, transformer: Any) -> Any:
+    if coords and isinstance(coords[0], (int, float)):
+        lng, lat = transformer.transform(coords[0], coords[1])
+        return [lng, lat]
+    return [_reproject_ring(c, transformer) for c in coords]
+
+
+def _shapefile_geom_to_wgs84(geom: dict[str, Any], crs: Any) -> dict[str, Any]:
+    """Reproject a pyshp __geo_interface__ geometry into WGS84 using the
+    shapefile's own declared CRS. A geographic CRS (already lon/lat) is
+    passed through untouched; anything else is transformed via pyproj.
+
+    A shapefile with NO .prj raises rather than guessing: an unlabelled
+    file is exactly the case where assuming lon/lat would put a whole
+    district's zones somewhere in the Gulf of Mexico with no error."""
+    import pyproj
+
+    if crs is None:
+        raise ValueError(
+            "shapefile has no sidecar .prj -- its CRS is unknown. Refusing to "
+            "assume WGS84 (a projected file read as lon/lat lands the zones "
+            "nowhere near the district, silently). Obtain the .prj, or add an "
+            "explicit verified \"crs\" to this level's config."
+        )
+    if crs.is_geographic:
+        return geom
+    transformer = pyproj.Transformer.from_crs(crs, "EPSG:4326", always_xy=True)
+    return {"type": geom["type"], "coordinates": _reproject_ring(geom["coordinates"], transformer)}
+
+
+def adapter_shapefile(
+    snapshot_dir: Path,
+    level_config: dict[str, dict[str, Any]],
+    district_tea_id: str,
+    district_name: str | None,
+    boundary_vintage: str | None,
+) -> list[dict[str, Any]]:
+    """level_config: {level: {"file": "elem_plan_1.shp", "name_field":
+    "ELEM_PLAN1", "campus_id_field": ... (optional, omit if unverified),
+    "source_url": ...}}. The .shp's sibling .dbf/.shx/.prj must sit beside
+    it in the snapshot dir (pyshp reads them by stem, and the .prj is
+    mandatory -- see _shapefile_geom_to_wgs84).
+
+    `crs` may be set on a level to override the .prj with a verified EPSG
+    string; it exists for a file that ships no .prj at all, and using it
+    is a documented per-district decision, never a default.
+
+    `boundary_vintage` may also be set PER LEVEL, overriding the config's
+    district-wide value. A single district's levels are not always set in
+    the same year, and stamping one year across all of them is a factual
+    claim we'd be inventing: Community ISD stated its elementary and middle
+    zones were drawn for 2024-25 but that its single high-school zone "has
+    been set since the founding of the district." One vintage per district
+    would have labelled that high zone 2024-25 -- a date the district never
+    gave. Levels that omit it keep the district-wide value."""
+    import pyproj
+    import shapefile  # pyshp
+
+    rows: list[dict[str, Any]] = []
+    for level, cfg in level_config.items():
+        _validate_level(level)
+        path = snapshot_dir / cfg["file"]
+        crs = pyproj.CRS.from_user_input(cfg["crs"]) if cfg.get("crs") else _shapefile_crs(path)
+        name_field = cfg["name_field"]
+        id_field = cfg.get("campus_id_field")
+        reader = shapefile.Reader(str(path))
+        try:
+            for record in reader.iterShapeRecords():
+                props = record.record.as_dict()
+                campus_name = props.get(name_field)
+                geom = record.shape.__geo_interface__
+                if not campus_name or not _is_valid_geom(geom):
+                    continue
+                rows.append({
+                    "level": level,
+                    "district_tea_id": district_tea_id,
+                    "district_name": district_name,
+                    "campus_tea_id": str(props[id_field]) if id_field and props.get(id_field) else None,
+                    "campus_name": str(campus_name).strip(),
+                    "geom": _shapefile_geom_to_wgs84(geom, crs),
+                    "boundary_vintage": cfg.get("boundary_vintage", boundary_vintage),
+                    "source_url": cfg.get("source_url"),
+                    "source_kind": "shapefile",
+                    "retrieved_at": date.today(),
+                })
+        finally:
+            reader.close()
+    return rows
