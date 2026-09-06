@@ -578,6 +578,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"production_scraper --dry-run:")
         print(f"  profile        : {args.profile} (months={profile_cfg['months']}, "
               f"distances_mi={profile_cfg['distances_mi']})")
+        print(f"  pulls          : {profile_pulls(profile_cfg)}  (months, miles) per address")
         print(f"  list           : {list_path}")
         print(f"  list_sha256    : {list_sha}")
         print(f"  queue length   : {len(queue)}")
@@ -733,6 +734,7 @@ def _new_pass_dict(
         "profile_snapshot": {
             "months": int(profile_cfg["months"]),
             "distances_mi": list(profile_cfg["distances_mi"]),
+            "pulls": [[int(m), float(d)] for m, d in profile_pulls(profile_cfg)],
         },
         "list_path": list_path,
         "list_sha256": list_sha,
@@ -790,8 +792,7 @@ def _run_pass(*, state_dir: Path, state: dict, profile_cfg: dict, mock: bool) ->
     if not mock:
         client = _build_propelio_client()
 
-    months = int(profile_cfg["months"])
-    distances_mi: list[float] = list(profile_cfg["distances_mi"])
+    pulls: list[tuple[int, float]] = profile_pulls(profile_cfg)
 
     soft_stop_made_progress = False
     for idx, address in enumerate(pending, start=1):
@@ -813,8 +814,7 @@ def _run_pass(*, state_dir: Path, state: dict, profile_cfg: dict, mock: bool) ->
             outcome = run_address(
                 client=client,
                 address=address,
-                months=months,
-                distances_mi=distances_mi,
+                pulls=pulls,
                 mock=mock,
             )
         except _AuthBlockExit as exc:
@@ -923,8 +923,7 @@ def run_address(
     *,
     client,
     address: str,
-    months: int,
-    distances_mi: list[float],
+    pulls: list[tuple[int, float]],
     mock: bool,
 ) -> AddressOutcome:
     """Run one address: lead lookup → CMA setup → N × search_cma + merge.
@@ -934,7 +933,7 @@ def run_address(
     Returns an :class:`AddressOutcome` regardless of how the address ends.
     """
     if mock:
-        return _run_address_mock(address=address, distances_mi=distances_mi)
+        return _run_address_mock(address=address, distances_mi=[d for _, d in pulls])
 
     # Step 1: find_lead_id
     try:
@@ -966,7 +965,7 @@ def run_address(
         envelope, recovered = call_with_auth_retry(
             client, client.add_cma,
             lead_id, confirmation_key,
-            months=months, range_mi=distances_mi[0],
+            months=pulls[0][0], range_mi=pulls[0][1],
         )
         cma_id = _extract_cma_id(envelope)
         if recovered:
@@ -993,11 +992,11 @@ def run_address(
     comps_new_total = 0
     last_error: str | None = None
 
-    for pass_num, distance_mi in enumerate(distances_mi, start=1):
+    for pass_num, (months, distance_mi) in enumerate(pulls, start=1):
         if _SHOULD_STOP["flag"]:
             logger.warning(
                 "soft-stop honored mid-address before pass %d/%d",
-                pass_num, len(distances_mi),
+                pass_num, len(pulls),
             )
             break
         if pass_num > 1:
@@ -1024,7 +1023,7 @@ def run_address(
             last_error = _short_err(exc)
             logger.warning(
                 "pass %d/%d  %dmo / %smi  PROPELIO ERROR: %s",
-                pass_num, len(distances_mi), months, distance_mi, _short_err(exc),
+                pass_num, len(pulls), months, distance_mi, _short_err(exc),
             )
             if consecutive_errors >= 3:
                 logger.warning("3 consecutive errors — address-level skip")
@@ -1047,7 +1046,7 @@ def run_address(
             consecutive_errors = 0
             logger.info(
                 "pass %d/%d  %dmo / %smi  returned %d  new %d  addr_total %d",
-                pass_num, len(distances_mi), months, distance_mi,
+                pass_num, len(pulls), months, distance_mi,
                 returned, int(merge_result.get("inserted", 0) or 0), comps_new_total,
             )
         except Exception as exc:
@@ -1056,7 +1055,7 @@ def run_address(
             last_error = _short_err(exc)
             logger.warning(
                 "pass %d/%d  %dmo / %smi  DB/MERGE ERROR: %s",
-                pass_num, len(distances_mi), months, distance_mi, _short_err(exc),
+                pass_num, len(pulls), months, distance_mi, _short_err(exc),
             )
             if consecutive_errors >= 3:
                 logger.warning("3 consecutive errors — address-level skip")
@@ -1146,6 +1145,20 @@ def _merge_with_retry(comps: list[dict]) -> dict:
 # ---------------------------------------------------------------------------
 # Profile resolver  (spec §5)
 # ---------------------------------------------------------------------------
+
+def profile_pulls(profile_cfg: dict) -> list[tuple[int, float]]:
+    """The (months, miles) pairs one address is pulled at, in order.
+
+    A profile may spell them out as ``pulls`` (a catch-up sweep wants a short
+    window at a wide radius AND a long window at a tight one); otherwise it is
+    the classic ``months`` × ``distances_mi`` product the seed pass used. The
+    first pair is also what add_cma is set up with.
+    """
+    if profile_cfg.get("pulls"):
+        return [(int(m), float(d)) for m, d in profile_cfg["pulls"]]
+    months = int(profile_cfg["months"])
+    return [(months, float(d)) for d in profile_cfg["distances_mi"]]
+
 
 def resolve_profile(name: str) -> dict:
     """Look up a profile by name. Raises ``ValueError`` with the valid

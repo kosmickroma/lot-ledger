@@ -1,0 +1,15 @@
+# gap_fill_2026_09_06 — 12 addresses at the centre of the biggest 2-mile holes in the master list
+# (measured 9/06 against every parcel in the four counties; number = parcels in that hole).
+# Append to master_list.txt BEFORE launch if KK wants the holes closed. Not appended by default.
+6304 SCOTT CT, WATAUGA, TX            # 21,516  north Fort Worth / Watauga
+9647 WHITEHURST DR, DALLAS, TX        # 17,174  north Dallas (Lake Highlands / Richardson line)
+12143 CRESTLINE AVE, DALLAS, TX       # 16,898  north Dallas (Preston Hollow north)
+5960 WAITS AVE, FORT WORTH, TX        # 13,484  south-west Fort Worth
+4021 WHITEROCK TRL, GARLAND, TX       # 12,843  Garland
+3603 PUGET ST, DALLAS, TX             #  8,851  west Dallas
+12 HOME PLACE CT, DALWORTHINGTON GARDENS, TX  # 7,647  Arlington south
+1201 E BEAR CREEK RD, GLENN HEIGHTS, TX       # 7,310  Glenn Heights / Red Oak
+1145 S JOE WILSON RD, CEDAR HILL, TX          # 7,269  Cedar Hill west
+1509 MARTI DR, BURLESON, TX           #  5,919  south Tarrant / Burleson
+3 LA VILLITA BLVD, IRVING, TX         #  5,287  Las Colinas
+5420 STARLIGHT DR N, FORT WORTH, TX   #  4,379  west Fort Worth (Benbrook side)
