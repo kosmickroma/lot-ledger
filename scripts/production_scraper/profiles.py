@@ -14,6 +14,11 @@ PROFILES: dict[str, dict] = {
         "distances_mi": DISTANCES_MI,
         "description": "One-time deep-history seed pass (60-month window).",
     },
+    "refresh_6m": {
+        "months": 6,
+        "distances_mi": DISTANCES_MI,
+        "description": "Catch-up sweep after a gap (6-month window). Covers the June-September 2026 hole with overlap.",
+    },
     "monthly_1m": {
         "months": 1,
         "distances_mi": DISTANCES_MI,
