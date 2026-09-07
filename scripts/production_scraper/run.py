@@ -391,6 +391,52 @@ class AddressOutcome:
     last_error: str | None
 
 
+NETWORK_ERR_MARKERS = ("network error", "HTTPSConnectionPool", "Max retries", "Connection refused",
+                       "Name or service not known", "Temporary failure in name resolution",
+                       "Read timed out", "Connection reset", "RemoteDisconnected")
+NETWORK_WAIT_STEP_S = 60
+NETWORK_WAIT_MAX_S = 6 * 3600
+
+
+def _is_network_err(exc: BaseException) -> bool:
+    m = str(exc)
+    return any(k in m for k in NETWORK_ERR_MARKERS)
+
+
+def _online(client) -> bool:
+    """Can we reach Propelio at all? Any HTTP status is 'yes'; only a transport
+    failure is 'no'. The 2026-09-07 outage: the parcel-suggest GET swallows its
+    network error and returns no items, so a dead internet connection read as
+    'No parcel match' on 294 addresses in a row and the pass 'completed'."""
+    try:
+        import requests
+        sess = getattr(client, "session", None) or requests
+        sess.get(PROPELIO_API_BASE_FOR_PROBE, timeout=10)
+        return True
+    except Exception:
+        return False
+
+
+def wait_for_network(client, why: str) -> bool:
+    """Block until Propelio answers again. Logs every minute. Returns False only
+    after NETWORK_WAIT_MAX_S, at which point the caller gives up on the address."""
+    waited = 0
+    while waited < NETWORK_WAIT_MAX_S:
+        if _online(client):
+            if waited:
+                logger.warning("network is back after %d s — resuming", waited)
+            return True
+        if waited == 0:
+            logger.warning("NETWORK DOWN (%s) — waiting, checking every %d s, up to %d h",
+                           why, NETWORK_WAIT_STEP_S, NETWORK_WAIT_MAX_S // 3600)
+        time.sleep(NETWORK_WAIT_STEP_S)
+        waited += NETWORK_WAIT_STEP_S
+        if waited % 600 == 0:
+            logger.warning("still offline after %d min", waited // 60)
+    logger.error("network still down after %d h — giving up on this address", NETWORK_WAIT_MAX_S // 3600)
+    return False
+
+
 def _short_err(exc: BaseException) -> str:
     line = (str(exc).strip().splitlines()[0] if str(exc).strip() else "")[:240]
     return f"{type(exc).__name__} {line}".strip()
@@ -905,6 +951,12 @@ def _print_pass_summary(cur_pass: dict, addrs: dict) -> None:
 # Per-address Propelio orchestration
 # ---------------------------------------------------------------------------
 
+try:
+    from api.propelio.scraper import PROPELIO_API_BASE as PROPELIO_API_BASE_FOR_PROBE
+except Exception:  # pragma: no cover — smoke/mock runs without the scraper subsystem
+    PROPELIO_API_BASE_FOR_PROBE = "https://api.propelio.com"
+
+
 class _AuthBlockExit(Exception):
     """Raised inside run_address when 429 or unrecoverable 401/403
     propagates. The run-pass loop catches this and exits code 2."""
@@ -935,21 +987,29 @@ def run_address(
     if mock:
         return _run_address_mock(address=address, distances_mi=[d for _, d in pulls])
 
-    # Step 1: find_lead_id
-    try:
-        result, recovered = call_with_auth_retry(
-            client, client.find_lead_id, address,
-        )
-        lead_id, _subject_sqft, parcel_bundle = result
-        if recovered:
-            logger.info("recovered from auth 401/403 during find_lead_id; consecutive_errors reset")
-    except Exception as exc:
-        if is_429(exc):
-            raise _AuthBlockExit(f"429 during find_lead_id for {address}: {_short_err(exc)}")
-        if is_401_or_403(exc):
-            raise _AuthBlockExit(f"unrecoverable 401/403 during find_lead_id for {address}: {_short_err(exc)}")
-        logger.warning("lead lookup failed for %s: %s", address, _short_err(exc))
-        return AddressOutcome(
+    # Step 1: find_lead_id — with ONE retry after the network comes back, because
+    # a dead connection reads as "No parcel match" (2026-09-07: 294 addresses).
+    lead_id = None
+    parcel_bundle = None
+    for lookup_attempt in (0, 1):
+        try:
+            result, recovered = call_with_auth_retry(
+                client, client.find_lead_id, address,
+            )
+            lead_id, _subject_sqft, parcel_bundle = result
+            if recovered:
+                logger.info("recovered from auth 401/403 during find_lead_id; consecutive_errors reset")
+            break
+        except Exception as exc:
+            if is_429(exc):
+                raise _AuthBlockExit(f"429 during find_lead_id for {address}: {_short_err(exc)}")
+            if is_401_or_403(exc):
+                raise _AuthBlockExit(f"unrecoverable 401/403 during find_lead_id for {address}: {_short_err(exc)}")
+            if lookup_attempt == 0 and (_is_network_err(exc) or not _online(client)):
+                if wait_for_network(client, f"lead lookup for {address}"):
+                    continue
+            logger.warning("lead lookup failed for %s: %s", address, _short_err(exc))
+            return AddressOutcome(
             status="failed", filters_ok=0, filters_errored=0,
             comps_returned=0, comps_new=0,
             skip_reason="lead lookup failed", last_error=_short_err(exc),
@@ -1018,23 +1078,37 @@ def run_address(
                 raise _AuthBlockExit(f"429 on pass {pass_num} for {address}: {_short_err(exc)}")
             if is_401_or_403(exc):
                 raise _AuthBlockExit(f"unrecoverable 401/403 on pass {pass_num} for {address}: {_short_err(exc)}")
-            filters_errored += 1
-            consecutive_errors += 1
-            last_error = _short_err(exc)
-            logger.warning(
-                "pass %d/%d  %dmo / %smi  PROPELIO ERROR: %s",
-                pass_num, len(pulls), months, distance_mi, _short_err(exc),
-            )
-            if consecutive_errors >= 3:
-                logger.warning("3 consecutive errors — address-level skip")
-                return AddressOutcome(
-                    status="failed",
-                    filters_ok=filters_ok, filters_errored=filters_errored,
-                    comps_returned=comps_returned_total, comps_new=comps_new_total,
-                    skip_reason="3 consecutive DB+filter errors",
-                    last_error=last_error,
+            if _is_network_err(exc) and not getattr(exc, "_ll_retried", False):
+                if wait_for_network(client, f"pull {pass_num}/{len(pulls)} for {address}"):
+                    try:
+                        envelope, recovered = call_with_auth_retry(
+                            client, client.search_cma,
+                            lead_id, cma_id,
+                            months=months, range_mi=distance_mi,
+                        )
+                        exc = None
+                    except Exception as exc2:
+                        setattr(exc2, "_ll_retried", True)
+                        exc = exc2
+            if exc is not None:
+                filters_errored += 1
+                consecutive_errors += 1
+                last_error = _short_err(exc)
+                logger.warning(
+                    "pass %d/%d  %dmo / %smi  PROPELIO ERROR: %s",
+                    pass_num, len(pulls), months, distance_mi, _short_err(exc),
                 )
-            continue
+                if consecutive_errors >= 3:
+                    logger.warning("3 consecutive errors — address-level skip")
+                    return AddressOutcome(
+                        status="failed",
+                        filters_ok=filters_ok, filters_errored=filters_errored,
+                        comps_returned=comps_returned_total, comps_new=comps_new_total,
+                        skip_reason="3 consecutive DB+filter errors",
+                        last_error=last_error,
+                    )
+                continue
+            # exc is None: the post-outage retry succeeded — fall through to parse + merge.
 
         # --- Parse + parcel-match + merge (with DB retry) ---
         try:
