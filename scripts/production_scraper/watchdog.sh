@@ -16,8 +16,8 @@ while true; do
   if python3 -c "import json,sys; s=json.load(open('$STATE')); c=s.get('current_pass'); sys.exit(0 if (c is None or c.get('completed_at')) else 1)" 2>/dev/null; then
     say "pass complete — watchdog exits"; exit 0
   fi
-  pid=$(pgrep -f "python.*production_scraper/run.py" | head -1)
-  age=$(( $(date +%s) - $(stat -c %Y "$LOG" 2>/dev/null || echo 0) ))
+  pid=$(pgrep -f "^$PY -u scripts/production_scraper/run.py" | head -1)  # anchored on the interpreter path so a shell merely MENTIONING run.py never matches
+  age=$(( $(date +%s) - $(stat -L -c %Y "$LOG" 2>/dev/null || echo 0) ))  # -L: the log FILE, not the symlink (bug 9/06: symlink mtime = relaunch time → killed a healthy run every 12.5 min)
   if [ -z "$pid" ]; then
     say "no scraper process — relaunching"
     setsid nohup "$PY" -u scripts/production_scraper/run.py --profile "$PROFILE" >/dev/null 2>&1 </dev/null &
